@@ -183,33 +183,12 @@ public class IotDomainConfigurationCfnProvisioner implements CfnResourceProvisio
         if (resolved != null && resolved.isObject()) {
             resolved.fields().forEachRemaining(field -> {
                 if (!OUTSIDE_THE_REQUEST.contains(field.getKey()) && !field.getValue().isNull()) {
-                    request.set(decapitalize(field.getKey()), toApiShape(field.getValue()));
+                    request.set(CfnApiShapeConverter.lowerFirst(field.getKey()),
+                            CfnApiShapeConverter.convert(field.getValue(), CfnApiShapeConverter.OMIT_NULL_PROPERTIES));
                 }
             });
         }
         return request;
-    }
-
-    private static JsonNode toApiShape(JsonNode node) {
-        if (node.isObject()) {
-            ObjectNode out = JsonNodeFactory.instance.objectNode();
-            node.fields().forEachRemaining(field -> {
-                if (!field.getValue().isNull()) {
-                    out.set(decapitalize(field.getKey()), toApiShape(field.getValue()));
-                }
-            });
-            return out;
-        }
-        if (node.isArray()) {
-            ArrayNode out = JsonNodeFactory.instance.arrayNode();
-            node.forEach(item -> out.add(toApiShape(item)));
-            return out;
-        }
-        return node;
-    }
-
-    private static String decapitalize(String key) {
-        return key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
     }
 
     private static boolean sameCreateOnlyProperties(IotDomainConfiguration existing, JsonNode request) {

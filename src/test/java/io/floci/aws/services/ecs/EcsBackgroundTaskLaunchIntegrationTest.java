@@ -7,6 +7,7 @@ import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -31,7 +32,7 @@ import static org.mockito.Mockito.when;
  * so this runs in Quarkus, in Docker mode over a container manager that starts nothing for real.
  */
 @QuarkusTest
-@TestProfile(EcsBackgroundTaskStopIntegrationTest.DockerModeProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EcsBackgroundTaskLaunchIntegrationTest {
 
     private static final String REGION = "us-east-1";

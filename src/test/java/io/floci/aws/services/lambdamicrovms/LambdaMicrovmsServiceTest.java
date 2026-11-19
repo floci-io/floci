@@ -3,6 +3,7 @@ package io.floci.aws.services.lambdamicrovms;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.resource.ExplorerResource;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -89,6 +92,32 @@ class LambdaMicrovmsServiceTest {
         assertEquals(connector.arn, byType.get("lambda:network-connector").arn());
         assertEquals(Map.of("team", "net"), byType.get("lambda:network-connector").tags());
         assertEquals(0, service.getSupportedResourceTypes().size());
+    }
+
+    @Test
+    void storedTagsReadTheImageOrTheConnectorTheArnNamesInItsAccount() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        LambdaMicrovmsService service = new LambdaMicrovmsService(regionResolver, storageFactory);
+        service.initializeStorage();
+        LambdaMicrovmsService.MicrovmImage image = service.createImage(REGION, ACCOUNT_ID, "tagged-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1", "arn:aws:iam::000000000000:role/build",
+                "s3://artifacts/app.zip", null);
+        LambdaMicrovmsService.NetworkConnector connector = service.createConnector(REGION, ACCOUNT_ID, "egress",
+                List.of("subnet-00000000000000001"), List.of("sg-00000000000000001"),
+                "arn:aws:iam::000000000000:role/operator", "token", List.of("MicroVm"), "IPv4");
+        service.tagResource(REGION, image.imageArn, Map.of("team", "sandbox"));
+        service.tagResource(REGION, connector.arn, Map.of("team", "net"));
+
+        assertEquals(Map.of("team", "sandbox"), service.storedTags(image.imageArn));
+        assertEquals(Map.of("team", "net"), service.storedTags(connector.arn));
+        assertEquals(Map.of(), service.storedTags(connector.arn + ":1"));
+        assertEquals(Map.of(), service.storedTags(image.imageArn.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(image.imageArn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags("arn:aws:lambda:us-east-1:000000000000:microvm-image:missing"));
     }
 
     @Test

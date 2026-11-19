@@ -847,14 +847,14 @@ public class NativeDynamoDbJsonHandler {
             rejectMixedParameters(request, List.of("Expected", "ConditionalOperator"), List.of("ConditionExpression"));
             requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
             requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
             requireReadableValues(exprAttrValues, "");
             if (conditionExpression == null) {
                 requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
                 requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
             }
             requireNonEmptyExpression(conditionExpression, "ConditionExpression");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(request.get("Expected")), false);
             DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
@@ -1009,11 +1009,11 @@ public class NativeDynamoDbJsonHandler {
         requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, true);
         ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(
-                legacyValues(request.has("Expected") ? request.get("Expected") : null));
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(
+                legacyValues(request.has("Expected") ? request.get("Expected") : null), true);
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -1390,9 +1390,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(keyConditionExpr, "KeyConditionExpression");
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(keyConditions), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors first, then key-condition errors, then projection errors.
@@ -1548,7 +1548,8 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(scanFilter), false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -1633,7 +1634,7 @@ public class NativeDynamoDbJsonHandler {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
+                readCapacityUnits(result.readBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
         return Response.ok(response).build();
     }
 
@@ -3097,7 +3098,7 @@ public class NativeDynamoDbJsonHandler {
             addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
             throwValidationErrors(onFailureErrors);
             // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
             requireValidTransactExpressions(op, false);
         }
         if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
@@ -3728,6 +3729,11 @@ public class NativeDynamoDbJsonHandler {
         return consistentRead ? units * 2 : units;
     }
 
+    /** Each read DynamoDB charges on its own, such as each partition a scan page reads. */
+    static double readCapacityUnits(List<Long> reads, boolean consistentRead) {
+        return reads.stream().mapToDouble(bytes -> readCapacityUnits(bytes, consistentRead)).sum();
+    }
+
     /**
      * Write-side ConsumedCapacity with the per-index arms DynamoDB reports under
      * INDEXES. oldItem and newItem are the stored images around the write; the new
@@ -4283,10 +4289,15 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
-    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+    // DynamoDB drops the fraction of Limit and holds it to the int range.
+    private static Integer partiQLLimit(JsonNode request) {
         JsonNode limit = request.get("Limit");
-        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
-            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        return limit == null || limit.isNull() ? null : (int) limit.doubleValue();
+    }
+
+    private static void addLimitError(Integer limit, List<String> validationErrors) {
+        if (limit != null && limit < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", String.valueOf(limit), 1));
         }
     }
 
@@ -4332,7 +4343,8 @@ public class NativeDynamoDbJsonHandler {
         List<String> validationErrors = new ArrayList<>();
         addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
         addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
-        addLimitError(request, validationErrors);
+        Integer limit = partiQLLimit(request);
+        addLimitError(limit, validationErrors);
         addStatementError(request, "statement", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
         addParametersError(request, "parameters", validationErrors);
@@ -4341,7 +4353,7 @@ public class NativeDynamoDbJsonHandler {
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, parameters, region);
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
-                .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
+                .limit(limit)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
                 .returnValuesOnConditionCheckFailure(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE"))

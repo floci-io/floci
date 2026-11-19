@@ -16,7 +16,7 @@ public class Detector {
     private String serviceRole;
     private String createdAt;
     private String updatedAt;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private List<DetectorFeature> features;
     private OrganizationConfiguration organizationConfiguration;
 

@@ -20,8 +20,10 @@ MODEL = Path("account/2021-02-01")
 
 OPERATIONS = (
     "DeleteAlternateContact",
+    "GetAccountInformation",
     "GetAlternateContact",
     "GetContactInformation",
+    "PutAccountName",
     "PutAlternateContact",
     "PutContactInformation",
 )

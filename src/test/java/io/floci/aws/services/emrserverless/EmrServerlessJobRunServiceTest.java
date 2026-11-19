@@ -1,9 +1,11 @@
 package io.floci.aws.services.emrserverless;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -14,6 +16,7 @@ import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunRecord;
+import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.MonitoringConfiguration;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
@@ -25,8 +28,10 @@ import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -39,6 +44,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -99,6 +105,66 @@ class EmrServerlessJobRunServiceTest {
         request.setMode(mode);
         request.setExecutionTimeoutMinutes(executionTimeoutMinutes);
         return request;
+    }
+
+    @Test
+    void runsStartedWithinTheSameMillisecondListNewestFirst() {
+        EmrServerlessJobRunService service = new EmrServerlessJobRunService(store, applications, iamService,
+                new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, 0,
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        List<String> started = new ArrayList<>();
+        for (int run = 0; run < 12; run++) {
+            started.add(service.startJobRun(applicationId, request(null, null)).getJobRunId());
+        }
+
+        List<String> listed = service.listJobRuns(applicationId, null, null, null, null, null, null).items().stream()
+                .map(JobRunSummary::getId).toList();
+
+        assertEquals(started.reversed(), listed);
+    }
+
+    @Test
+    void aRetryIsTheOriginalRunWhereTheRunWouldHoldTheSameAndConflictsWhereItWouldNot() {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest first = request(null, 720L);
+        first.setTags(Map.of());
+        JobRun original = service.startJobRun(applicationId, first);
+        // The run holds the default timeout and no tags either way.
+        StartJobRunRequest retry = request(null, null);
+        retry.setClientToken(first.getClientToken());
+        // A mode, an empty-valued tag and a name the original's run does not hold.
+        StartJobRunRequest batch = request("BATCH", null);
+        batch.setClientToken(first.getClientToken());
+        StartJobRunRequest emptyTag = request(null, null);
+        emptyTag.setClientToken(first.getClientToken());
+        emptyTag.setTags(Map.of("team", ""));
+        StartJobRunRequest renamed = request(null, null);
+        renamed.setClientToken(first.getClientToken());
+        renamed.setName("another");
+
+        assertEquals(original.getJobRunId(), service.startJobRun(applicationId, retry).getJobRunId());
+        for (StartJobRunRequest conflicting : List.of(batch, emptyTag, renamed)) {
+            assertEquals("ConflictException", assertThrows(AwsException.class,
+                    () -> service.startJobRun(applicationId, conflicting)).getErrorCode());
+        }
+    }
+
+    @Test
+    void aNextTokenGivenBeforeRunsKeptASequenceIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        List<String> ids = new ArrayList<>();
+        for (int run = 0; run < 3; run++) {
+            ids.add(service.startJobRun(applicationId, request(null, null)).getJobRunId());
+        }
+        // A token of the listing's earlier cursors, the creation time and the id, under its earlier namespace.
+        String earlier = Pagination.paginate(ids, id -> id, 1, null,
+                String.join("|", "ListJobRuns", applicationId, "[]", "null", "null", "null"),
+                token -> new AwsException("ValidationException", "Invalid nextToken.", 400)).nextToken();
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.listJobRuns(applicationId, null, null, null, null, 1, earlier));
+
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test
@@ -224,6 +290,26 @@ class EmrServerlessJobRunServiceTest {
         AwsException conflict = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, request));
         assertEquals("ConflictException", conflict.getErrorCode());
         assertEquals(409, conflict.getHttpStatus());
+    }
+
+    @Test
+    void anAttemptStoredBeforeItsManagedStorageWasKeptTakesItFromItsRun() throws Exception {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest unmanaged = request("BATCH", null);
+        unmanaged.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("managedPersistenceMonitoringConfiguration", Map.of("enabled", false))));
+        String unmanagedRun = service.startJobRun(applicationId, unmanaged).getJobRunId();
+        String managedRun = service.startJobRun(applicationId, request("BATCH", null)).getJobRunId();
+
+        // As an earlier Floci stored them: each attempt's destinations without whether its logs were managed.
+        for (String jobRunId : List.of(unmanagedRun, managedRun)) {
+            ObjectNode stored = objectMapper.valueToTree(store.get(jobRunId).orElseThrow());
+            stored.get("driverLogs").forEach(logs -> ((ObjectNode) logs).remove("managedStorage"));
+            store.put(jobRunId, objectMapper.treeToValue(stored, JobRunRecord.class));
+        }
+
+        assertFalse(service.dashboard(applicationId, unmanagedRun, 1).logs().inManagedStorage());
+        assertTrue(service.dashboard(applicationId, managedRun, 1).logs().inManagedStorage());
     }
 
     @Test

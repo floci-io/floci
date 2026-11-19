@@ -27,6 +27,7 @@ import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_eks_shapes
+import regen_emr_containers_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
@@ -455,6 +456,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_rekognition_shapes,
     regen_athena_shapes,
     regen_cur_shapes,
+    regen_emr_containers_shapes,
     regen_lambda_microvm_shapes,
     regen_account_shapes,
 ])

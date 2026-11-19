@@ -1,6 +1,6 @@
 package io.floci.aws.services.lambda;
 
-import io.floci.aws.testing.LambdaCodeSourcesProfile;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
@@ -28,7 +28,7 @@ import static org.hamcrest.Matchers.hasSize;
  * such an ARN invalid outright.
  */
 @QuarkusTest
-@TestProfile(LambdaCodeSourcesProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class LambdaExternalLayerArnAcceptedIntegrationTest {
 
     private static final String POWERTOOLS_ARN =

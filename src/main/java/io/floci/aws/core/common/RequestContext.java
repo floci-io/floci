@@ -16,6 +16,12 @@ public class RequestContext {
     private String accessKeyId;
     private String sessionToken;
     private Boolean iamGovernanceBypass;
+    /**
+     * What this request's MFA members amounted to, or null until something asks. Held here because
+     * the enforcement filter and the STS operation both read it and a code is spent when it
+     * authenticates, so the two have to read one answer rather than each take their own.
+     */
+    private RequestMfaClaim mfaClaim;
 
     public String getAccountId() {
         return accountId;
@@ -68,6 +74,14 @@ public class RequestContext {
      * may bypass it, false when it overrides none, so no bypass permission was checked, and null when
      * IAM did not decide. S3Controller lets the operation bypass a lock only as far as this allows.
      */
+    public RequestMfaClaim getMfaClaim() {
+        return mfaClaim;
+    }
+
+    public void setMfaClaim(RequestMfaClaim mfaClaim) {
+        this.mfaClaim = mfaClaim;
+    }
+
     public Boolean getIamGovernanceBypass() {
         return iamGovernanceBypass;
     }

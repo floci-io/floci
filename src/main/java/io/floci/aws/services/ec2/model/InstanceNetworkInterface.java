@@ -21,6 +21,7 @@ public class InstanceNetworkInterface {
     private String privateDnsName;
     private boolean sourceDestCheck = true;
     private List<GroupIdentifier> groups = new ArrayList<>();
+    private List<String> ipv6Addresses = new ArrayList<>();
     private String attachmentId;
     private int deviceIndex;
     private String attachTime;
@@ -72,4 +73,7 @@ public class InstanceNetworkInterface {
 
     public boolean isDeleteOnTermination() { return deleteOnTermination; }
     public void setDeleteOnTermination(boolean deleteOnTermination) { this.deleteOnTermination = deleteOnTermination; }
+
+    public List<String> getIpv6Addresses() { return ipv6Addresses; }
+    public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
 }

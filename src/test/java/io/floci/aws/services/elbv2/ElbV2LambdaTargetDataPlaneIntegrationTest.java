@@ -1,7 +1,7 @@
 package io.floci.aws.services.elbv2;
 
 import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * disables that override to exercise the real listener.
  */
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2LambdaTargetDataPlaneIntegrationTest {
 

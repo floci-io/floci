@@ -1,9 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iot.IotService;
@@ -154,7 +151,8 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.hasNonNull("TopicRulePayload")) {
             throw new IllegalArgumentException("AWS::IoT::TopicRule requires TopicRulePayload");
         }
-        JsonNode payload = toApiShape(ctx.engine().resolveNode(props.get("TopicRulePayload")));
+        JsonNode payload = CfnApiShapeConverter.convert(ctx.engine().resolveNode(props.get("TopicRulePayload")),
+                CfnApiShapeConverter.OMIT_NULL_PROPERTIES);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         String region = ctx.region();
         if (ctx.reusesPriorEntity(name)) {
@@ -205,29 +203,6 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
                     attributes.put(field.getKey(), ctx.engine().resolve(field.getValue())));
         }
         return attributes;
-    }
-
-    /** Recursively renames the members of a resolved node to the API's camelCase, dropping nulls. */
-    private static JsonNode toApiShape(JsonNode node) {
-        if (node.isObject()) {
-            ObjectNode out = JsonNodeFactory.instance.objectNode();
-            node.fields().forEachRemaining(field -> {
-                if (!field.getValue().isNull()) {
-                    out.set(decapitalize(field.getKey()), toApiShape(field.getValue()));
-                }
-            });
-            return out;
-        }
-        if (node.isArray()) {
-            ArrayNode out = JsonNodeFactory.instance.arrayNode();
-            node.forEach(item -> out.add(toApiShape(item)));
-            return out;
-        }
-        return node;
-    }
-
-    private static String decapitalize(String key) {
-        return key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
     }
 
     /**

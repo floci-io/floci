@@ -17,7 +17,7 @@ public class OamLink {
     private String sourceAccountId;
     private List<String> resourceTypes = List.of();
     private Map<String, Object> linkConfiguration = new LinkedHashMap<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public OamLink() {}
 

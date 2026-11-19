@@ -95,6 +95,8 @@ floci:
         flush-interval-ms: 60000
       emrserverless:
         flush-interval-ms: 60000
+      emrcontainers:
+        flush-interval-ms: 60000
       lakeformation:
         flush-interval-ms: 60000
 
@@ -135,6 +137,7 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     resource-namespace: ""
+    pool-gauge-interval-seconds: 0  # no pool gauge lines in test output
 
   services:
     ssm:
@@ -210,6 +213,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+      shell-less-backend: false
     memorydb:
       enabled: true
       mock: false
@@ -255,6 +259,7 @@ floci:
       enabled: true
       mock: true
       port: 0
+      backend: docker
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -417,6 +422,8 @@ floci:
       mock: true
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: aws
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -539,6 +546,9 @@ floci:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
       runner-mode: immediate
+    emrcontainers:
+      enabled: true
+      job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
     ssoadmin:
       enabled: true
     ssooidc:

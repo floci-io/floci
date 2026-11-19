@@ -287,8 +287,8 @@ class BatchDockerRunnerTest {
         subnet.setSubnetId("subnet-a");
         subnet.setVpcId("vpc-1");
         when(ec2.describeSubnets("us-east-1", List.of("subnet-a"), Map.of())).thenReturn(List.of(subnet));
-        when(ec2.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("10.0.1.30"));
-        when(ec2.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-id", "10.0.1.30"))
+        when(ec2.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("10.0.1.30"));
+        when(ec2.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-id", "10.0.1.30"))
                 .thenReturn(Optional.of("10.0.1.30"));
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -327,10 +327,10 @@ class BatchDockerRunnerTest {
         assertEquals(0, result.exitCode());
         // The job's command is the entrypoint, so the container is on the VPC network before it starts.
         InOrder order = inOrder(ec2, lifecycleManager);
-        order.verify(ec2).attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-id", "10.0.1.30");
+        order.verify(ec2).attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-id", "10.0.1.30");
         order.verify(lifecycleManager).startCreated(eq("container-id"), any());
         assertTrue(heldWhileRunning.get(), "the job's address holds its subnet while it runs");
-        verify(ec2).releaseVpcPrivateIp("us-east-1", "subnet-a", "10.0.1.30");
+        verify(ec2).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "10.0.1.30");
         assertFalse(runner.hasSubnetDependency("us-east-1", "subnet-a"));
     }
 

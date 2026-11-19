@@ -22,6 +22,7 @@
 | `PutTargets` | Add targets to a rule |
 | `RemoveTargets` | Remove targets from a rule |
 | `ListTargetsByRule` | List targets for a rule |
+| `ListRuleNamesByTarget` | Find rule names whose targets contain an exact ARN, with bus selection and pagination |
 | `PutEvents` | Publish custom events to an event bus |
 | `TestEventPattern` | Test whether a sample event matches a given pattern (no targets fired) |
 | `ListTagsForResource` | - |
@@ -53,6 +54,34 @@
 `ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
 characters. Empty or overlong tokens return `ValidationException`; unrecognized
 cursors within those bounds return `InvalidToken`.
+
+## Find rules by target
+
+`ListRuleNamesByTarget` returns each matching rule name once when a target has the
+exact supplied `TargetArn`. Select an event bus by name or ARN; omitting
+`EventBusName` selects the default bus. The bus and rules belong to the caller's
+account, Region and partition. As with `ListRules`, Floci resolves a supplied bus
+ARN to its name in the caller's account and Region. A target ARN is a filter and can name a resource
+in another account or Region.
+
+`Limit` accepts 1 to 100 names and defaults to 100. Keep every other request
+argument unchanged when sending a returned `NextToken`. Floci sorts matching
+names lexically before pagination and binds its cursor to the caller scope and
+request arguments; AWS does not specify that ordering. Tokens have no timed
+expiry in Floci. Empty or overlong tokens fail validation, and invalid cursors
+return `InvalidToken`. An empty or final page has no `NextToken`.
+
+With IAM enforcement enabled, grant `events:ListRuleNamesByTarget` on `*`.
+This action has no resource type or resource-tag condition entitlement; a grant
+on an event bus ARN alone does not allow it. Existing global IAM conditions,
+permission boundaries and explicit denies still apply.
+
+The lookup reads existing bus, rule and target stores without writing rows or
+creating the logical default bus. Unprefixed legacy records are read in place
+only for the configured default account. Rules are checked against their stored
+key, bus, account and ARN. Explicit account records take precedence. Persisted legacy rule names
+remain discoverable even if they no longer pass creation-time validation. The lookup does not provide
+an atomic snapshot across concurrent rule and target updates.
 
 ## Numeric event patterns
 
@@ -440,3 +469,11 @@ refuses it. Across accounts the bus policy and the caller's identity policies bo
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
 - An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.
+
+### IAM resource tags
+
+With IAM enforcement enabled, event bus and rule operations that support
+`aws:ResourceTag` conditions read the exact target's stored tags. Tag changes take
+immediate effect. Request tags and another bus or rule's tags do not satisfy an
+existing-resource tag condition. The lookup validates the ARN's account, Region
+and partition before reading tags.

@@ -82,15 +82,15 @@ public final class VpcContainerLeases {
                         expectedVpcId, subnetId, vpcId);
                 return;
             }
-            Optional<String> address = ec2.allocateVpcPrivateIp(region, subnetId);
+            Optional<String> address = ec2.allocateVpcPrivateIp(accountId, region, subnetId);
             if (address.isEmpty()) {
                 return;
             }
             Optional<String> attached;
             try {
-                attached = ec2.attachContainerToVpc(region, vpcId, subnetId, containerId, address.get());
+                attached = ec2.attachContainerToVpc(accountId, region, vpcId, subnetId, containerId, address.get());
             } catch (RuntimeException e) {
-                ec2.releaseVpcPrivateIp(region, subnetId, address.get());
+                ec2.releaseVpcPrivateIp(accountId, region, subnetId, address.get());
                 throw e;
             }
             if (attached.isPresent()) {
@@ -99,7 +99,7 @@ public final class VpcContainerLeases {
                 joined.set(lease);
                 LOG.infov("{0} {1} joined VPC {2} at {3}", owner, name, vpcId, address.get());
             } else {
-                ec2.releaseVpcPrivateIp(region, subnetId, address.get());
+                ec2.releaseVpcPrivateIp(accountId, region, subnetId, address.get());
             }
         }));
         return Optional.ofNullable(joined.get());
@@ -128,7 +128,7 @@ public final class VpcContainerLeases {
             for (String address : addresses) {
                 Optional<Cidr4> host = address == null ? Optional.empty() : Cidr4.parse(address + "/32");
                 if (host.isPresent() && cidr.get().containsAddress(host.get().network())
-                        && ec2.reserveVpcPrivateIp(region, subnetId, address)) {
+                        && ec2.reserveVpcPrivateIp(accountId, region, subnetId, address)) {
                     Lease lease = new Lease(accountId, region, subnets.getFirst().getVpcId(), subnetId, address);
                     leases.put(containerId, lease);
                     LOG.infov("{0} {1} re-claimed its VPC address {2}", owner, name, address);
@@ -161,7 +161,7 @@ public final class VpcContainerLeases {
             // Gone, so its address is free.
             unconfirmed.remove(containerId);
             if (leases.remove(containerId, lease)) {
-                ec2.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
+                ec2.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
             }
         } catch (RuntimeException e) {
             unconfirmed.add(containerId);

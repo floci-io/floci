@@ -1,5 +1,6 @@
 package io.floci.aws.services.athena;
 
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageFactory;
@@ -66,7 +67,8 @@ class AthenaQueryScopeTest {
             return null;
         }).when(duckClient).execute(anyString(), any(), any(), any());
         AthenaService athena = new AthenaService(storageFactory, duckClient, glueService, mock(S3Service.class),
-                AthenaTestConfigs.realQueries(), vertx, ddlBuilder, regionResolver, mock(AthenaIcebergStatements.class));
+                AthenaTestConfigs.realQueries(), vertx, ddlBuilder, regionResolver, mock(AthenaIcebergStatements.class),
+                mock(IamEnforcementFilter.class));
         try {
             String expected = RequestScopes.callAs(account, REGION, () -> {
                 glueService.createDatabase(new Database(database));

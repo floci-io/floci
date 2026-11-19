@@ -10,6 +10,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -50,7 +51,7 @@ import static io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbValidat
 import static io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbValidation.validation;
 
 @ApplicationScoped
-public class TimestreamInfluxDbService implements Resettable {
+public class TimestreamInfluxDbService implements Resettable, StoredResourceArns {
 
     static final String ENGINE_V2 = "INFLUXDB_V2";
     static final String ENGINE_V3_CORE = "INFLUXDB_V3_CORE";
@@ -783,6 +784,44 @@ public class TimestreamInfluxDbService implements Resettable {
         Map<String, String> tags = tagsOf(arn);
         keys.forEach(tags::remove);
         saveTags(arn, tags);
+    }
+
+    @Override
+    public String namespace() {
+        return "timestream-influxdb";
+    }
+
+    /** A request names a resource by the id Timestream for InfluxDB minted, which its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the DB instance, DB cluster, parameter group or backup whose ARN is {@code arn}, in the request's
+     * account, where the handlers read: an ARN of another account names none. Read in place under the Region the ARN
+     * names and the resource's id, a resource stored before storage was account-aware included, and matched on the
+     * whole ARN. Tag calls run one at a time and give the resource a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        Matcher matcher = arn == null ? null : TimestreamInfluxDbValidation.ARN.matcher(arn);
+        if (matcher == null || !matcher.matches() || !matcher.group(2).equals(regionResolver.getAccountId())) {
+            return Map.of();
+        }
+        String account = matcher.group(2);
+        String storageKey = key(matcher.group(1), matcher.group(4));
+        Optional<Map<String, String>> tags = switch (matcher.group(3)) {
+            case "db-instance" -> AccountAwareStorageBackend.readInAccount(instances, account, storageKey)
+                    .filter(instance -> arn.equals(instance.getArn())).map(DbInstance::getTags);
+            case "db-cluster" -> AccountAwareStorageBackend.readInAccount(clusters, account, storageKey)
+                    .filter(cluster -> arn.equals(cluster.getArn())).map(DbCluster::getTags);
+            case "db-parameter-group" -> AccountAwareStorageBackend.readInAccount(parameterGroups, account, storageKey)
+                    .filter(group -> arn.equals(group.getArn())).map(DbParameterGroup::getTags);
+            default -> AccountAwareStorageBackend.readInAccount(backups, account, storageKey)
+                    .filter(backup -> arn.equals(backup.getArn())).map(DbBackup::getTags);
+        };
+        return new LinkedHashMap<>(tags.orElse(Map.of()));
     }
 
     /**

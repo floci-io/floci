@@ -9,6 +9,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.metrics.model.Alarm;
 import io.floci.aws.services.cloudwatch.metrics.model.AlarmHistoryItem;
+import io.floci.aws.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.floci.aws.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
@@ -16,9 +17,11 @@ import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -913,5 +916,51 @@ class CloudWatchMetricsServiceTest {
         assertEquals(1.0, store.scanForAccount("111111111111", k -> true).getFirst().getValue());
         assertEquals(1, store.scan(k -> true).size(), "the default partition holds only the ambient put");
         assertEquals(2.0, store.scan(k -> true).getFirst().getValue());
+    }
+
+    // M: MetricName, X: Metrics, C: neither (an EvaluationCriteria alarm); "-" is no interval
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {
+            "5, M, true, LOW", "9, M, true, LOW", "9, C, true, LOW", "-99999999999999999999, C, true, LOW",
+            "10, M, true, COMBINATION", "45, M, true, COMBINATION", "60, X, true, COMBINATION",
+            "3600, M, true, COMBINATION", "3601, M, true, HIGH", "99999999999999999999, M, true, HIGH",
+            "60, C, true, STORED", "3600, C, true, STORED", "-, M, true, STORED",
+            "60, M, false, NAME", "60, C, false, NAME", "-, M, false, NAME",
+            "5, M, false, NAME_LOW", "99999999999999999999, M, false, NAME_HIGH"})
+    void evaluationIntervalIsCheckedAfterTheNameThenItsRangeThenTheAlarmKind(String interval, String kind,
+            boolean named, String expected) {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName(named ? "a" : null);
+        if ("M".equals(kind)) {
+            alarm.setMetricName("Errors");
+        } else if ("X".equals(kind)) {
+            alarm.getMetrics().add(new AlarmMetricDataQuery("m1", "1 + 1", null, true, null, null, null));
+        }
+        BigInteger value = interval == null ? null : new BigInteger(interval);
+        if ("STORED".equals(expected)) {
+            service.putMetricAlarm(alarm, REGION, value);
+            assertEquals(1, service.describeAlarms(List.of("a"), null, REGION).size());
+            return;
+        }
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.putMetricAlarm(alarm, REGION, value));
+
+        String nameOnly = named ? null
+                : assertThrows(AwsException.class, () -> service.putMetricAlarm(alarm, REGION)).getMessage();
+        String bound = expected.endsWith("LOW") ? "greater than or equal to 10" : "less than or equal to 3600";
+        String range = "Value '" + interval + "' at 'evaluationInterval' failed to satisfy constraint: Member must "
+                + "have value " + bound;
+        switch (expected) {
+            case "COMBINATION" -> {
+                assertEquals("InvalidParameterCombination", refused.getErrorCode());
+                assertEquals("EvaluationInterval cannot be specified for alarms configured with MetricName or "
+                        + "Metrics.", refused.getMessage());
+            }
+            case "NAME" -> assertEquals(nameOnly, refused.getMessage());
+            case "LOW", "HIGH" -> assertEquals("1 validation error detected: " + range, refused.getMessage());
+            default -> assertEquals("2 validation errors detected: " + nameOnly.substring(nameOnly.indexOf(": ") + 2)
+                    + "; " + range, refused.getMessage());
+        }
+        assertTrue(service.describeAlarms(List.of("a"), null, REGION).isEmpty());
     }
 }

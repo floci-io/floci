@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Which delegation requests an identity owns, asked by the policy set rather than by a handler.
@@ -24,4 +25,16 @@ public interface DelegationRequestOwnership {
      * none, which is every caller who has claimed no request.
      */
     List<String> requestIdsOwnedBy(String accountId, String ownerArn);
+
+    /**
+     * The ARN the request {@code requestId} records as its owner, where {@code accountId} is the account that
+     * owns it; empty when no request carries that id, when the account owning it is another, and when it
+     * records no owner at all, which is every request until it is claimed.
+     *
+     * <p>Asked for by the condition key the Service Reference publishes on the delegation request type, which
+     * AWS describes as filtering "based on the AWS identity or principal that owns the delegation request". The
+     * lookup is of what the store holds under that id and nothing more: which requests an operation acts on is
+     * the generated table's to say.
+     */
+    Optional<String> ownerArnOf(String accountId, String requestId);
 }

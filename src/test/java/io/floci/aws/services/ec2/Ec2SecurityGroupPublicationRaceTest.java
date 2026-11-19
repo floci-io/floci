@@ -7,14 +7,17 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.NetworkInterface;
+import io.floci.aws.services.ec2.model.PublishedPortFamily;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.SecurityGroupRule;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.UserIdGroupPair;
+import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcEndpoint;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.IpPermissions;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -551,8 +554,7 @@ class Ec2SecurityGroupPublicationRaceTest {
         TestStores factory = new TestStores();
         EmulatorConfig config = mockConfig();
         Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
-        Ec2Service service = new Ec2Service(config, manager, mock(Ec2PortForwardManager.class),
-                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), factory.storage);
+        Ec2Service service = service(factory, config, manager);
         String region = "us-east-1";
         String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
         String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
@@ -562,12 +564,7 @@ class Ec2SecurityGroupPublicationRaceTest {
         Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
                 List.of(original), subnet, null, List.of(), null, null).getInstances().getFirst();
         instance.setState(InstanceState.running());
-        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
-        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
-        when(config.network()).thenReturn(network);
-        when(network.securityGroupEnforcement()).thenReturn(enforcement);
-        when(enforcement.enabled()).thenReturn(true);
-        when(config.services().ec2().mock()).thenReturn(false);
+        enableEnforcement(config);
         CountDownLatch applied = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicReference<Set<String>> firewall = new AtomicReference<>();
@@ -620,8 +617,7 @@ class Ec2SecurityGroupPublicationRaceTest {
         TestStores factory = new TestStores();
         EmulatorConfig config = mockConfig();
         Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
-        Ec2Service service = new Ec2Service(config, manager, mock(Ec2PortForwardManager.class),
-                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), factory.storage);
+        Ec2Service service = service(factory, config, manager);
         String region = "us-east-1";
         String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
         String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
@@ -631,12 +627,7 @@ class Ec2SecurityGroupPublicationRaceTest {
         Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
                 List.of(original), subnet, null, List.of(), null, null).getInstances().getFirst();
         instance.setState(InstanceState.running());
-        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
-        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
-        when(config.network()).thenReturn(network);
-        when(network.securityGroupEnforcement()).thenReturn(enforcement);
-        when(enforcement.enabled()).thenReturn(true);
-        when(config.services().ec2().mock()).thenReturn(false);
+        enableEnforcement(config);
         CountDownLatch updating = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         IllegalStateException failure = new IllegalStateException("Owned firewall failure");
@@ -668,13 +659,249 @@ class Ec2SecurityGroupPublicationRaceTest {
         }
     }
 
+    // Catches: ModifyNetworkInterfaceAttribute storing new groups without telling the interface's firewall, or
+    // telling it only after they are stored, so the enforced policy and the reported groups disagree.
+    @Test
+    void interfaceGroupChangeReachesTheFirewallBeforeItIsStored() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = service(factory, config, manager);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
+        String original = service.createSecurityGroup(region, "eni-original", "original", vpc).getGroupId();
+        String replacement = service.createSecurityGroup(region, "eni-replacement", "replacement", vpc).getGroupId();
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(original), subnet, null, List.of(), null, null).getInstances().getFirst();
+        String eni = instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
+        enableEnforcement(config);
+        AtomicReference<String> groupsWhenApplied = new AtomicReference<>();
+        doAnswer(invocation -> {
+            groupsWhenApplied.set(interfaceGroup(service, region, eni));
+            return null;
+        }).when(manager).updateSecurityGroups(eq(eni), eq(Set.of(replacement)), anyMap(), anyMap());
+
+        service.modifyNetworkInterfaceAttribute(region, eni,
+                new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null, null), false);
+
+        assertEquals(original, groupsWhenApplied.get(), "the firewall must hear of the change before it is stored");
+        assertEquals(replacement, interfaceGroup(service, region, eni));
+    }
+
+    // Catches: a firewall that refuses the change leaving the new groups stored, or their pending reference held,
+    // so the replacement group can never be deleted.
+    @Test
+    void aFirewallFailureLeavesTheInterfaceGroupsAsTheyWere() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = service(factory, config, manager);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
+        String original = service.createSecurityGroup(region, "eni-kept", "kept", vpc).getGroupId();
+        String replacement = service.createSecurityGroup(region, "eni-refused", "refused", vpc).getGroupId();
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(original), subnet, null, List.of(), null, null).getInstances().getFirst();
+        String eni = instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
+        enableEnforcement(config);
+        IllegalStateException failure = new IllegalStateException("Owned firewall failure");
+        doThrow(failure).when(manager).updateSecurityGroups(anyString(), anySet(), anyMap(), anyMap());
+
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> service.modifyNetworkInterfaceAttribute(
+                region, eni, new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null,
+                        null), false)));
+
+        assertEquals(original, interfaceGroup(service, region, eni));
+        service.deleteSecurityGroup(region, replacement);
+    }
+
+    // Catches: a group change on an instance's primary interface leaving the ports those groups publish as they
+    // were, where ModifyInstanceAttribute reconciles them; a secondary interface's groups publish nothing.
+    @Test
+    void onlyAPrimaryInterfaceGroupChangeReconcilesThePublishedPorts() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2PortForwardManager ports = mock(Ec2PortForwardManager.class);
+        Ec2Service service = service(factory, config, mock(Ec2ContainerManager.class), ports);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
+        String original = service.createSecurityGroup(region, "ports-original", "original", vpc).getGroupId();
+        String replacement = service.createSecurityGroup(region, "ports-replacement", "replacement", vpc).getGroupId();
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(original), subnet, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        instance.setDockerContainerId("container-ports");
+        String primary = instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
+        String secondary = service.createNetworkInterface(region, subnet, null, null, List.of(), List.of(original),
+                List.of()).getNetworkInterfaceId();
+        service.attachNetworkInterface(region, secondary, instance.getInstanceId(), 1);
+        when(config.services().ec2().mock()).thenReturn(false);
+        when(config.services().ec2().publishSecurityGroupPorts()).thenReturn(true);
+
+        service.modifyNetworkInterfaceAttribute(region, secondary,
+                new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null, null), false);
+        verify(ports, never()).reconcile(any(), any());
+
+        service.modifyNetworkInterfaceAttribute(region, primary,
+                new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null, null), false);
+        verify(ports).reconcile(argThat(reconciled -> instance.getInstanceId().equals(reconciled.getInstanceId())),
+                any());
+    }
+
+    // Catches: enforcement publishing a port only a narrower CIDR opens, judged on a host client address Docker may
+    // have replaced, or publishing none at all; each port admits the family whose world-open rule opens it.
+    @Test
+    void withEnforcementOnlyRulesOpenToEveryAddressPublishPorts() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2PortForwardManager ports = mock(Ec2PortForwardManager.class);
+        Ec2Service service = service(factory, config, mock(Ec2ContainerManager.class), ports);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
+        String group = service.createSecurityGroup(region, "world-open", "world-open", vpc).getGroupId();
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(group), subnet, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        instance.setDockerContainerId("container-world-open");
+        enableEnforcement(config);
+        when(config.services().ec2().publishSecurityGroupPorts()).thenReturn(true);
+        when(config.services().ec2().maxPublishedPortsPerInstance()).thenReturn(20);
+
+        service.authorizeSecurityGroupIngress(region, group, List.of(IpPermissions.tcp(80, "0.0.0.0/0"),
+                IpPermissions.tcp(8080, "10.0.0.0/8"), IpPermissions.tcp(443, "::/0")));
+
+        verify(ports).reconcile(argThat(reconciled -> instance.getInstanceId().equals(reconciled.getInstanceId())),
+                eq(new Ec2PortForwardManager.DesiredPorts(Map.of(80, PublishedPortFamily.IPV4,
+                        443, PublishedPortFamily.IPV6))));
+    }
+
+    /** A dual-stack subnet's interface, with enforcement on and the container manager a mock. */
+    private record Ipv6Fixture(Ec2Service service, Ec2ContainerManager manager, String region, String eni,
+                               String block) {
+        List<String> held() {
+            return service.describeNetworkInterfaces(region, List.of(eni), Map.of()).networkInterfaces().getFirst()
+                    .getIpv6Addresses();
+        }
+    }
+
+    private static Ipv6Fixture ipv6Fixture() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = service(factory, config, manager);
+        String region = "us-east-1";
+        Vpc vpc = service.createVpc(region, "10.0.0.0/16", false, true);
+        String block = vpc.getIpv6CidrBlockAssociationSet().getFirst().getIpv6CidrBlock();
+        String subnet = service.createSubnet(region, vpc.getVpcId(), "10.0.1.0/24", region + "a", null,
+                block.substring(0, block.indexOf('/')) + "/64").getSubnetId();
+        String eni = service.createNetworkInterface(region, subnet, null, null, List.of(), List.of(), List.of())
+                .getNetworkInterfaceId();
+        enableEnforcement(config);
+        return new Ipv6Fixture(service, manager, region, eni, block);
+    }
+
+    // Catches: an IPv6 address change never reaching the interface's firewall, so peers' rules naming an IPv6 range
+    // keep missing it; a call that changes nothing reaches it with nothing.
+    @Test
+    void ipv6AddressChangesReachTheInterfaceFirewall() {
+        Ipv6Fixture fixture = ipv6Fixture();
+
+        List<String> assigned = fixture.service().assignIpv6Addresses(fixture.region(), fixture.eni(), null, 1);
+        verify(fixture.manager()).updateIpv6Addresses(fixture.eni(), assigned);
+        String block = fixture.block();
+        fixture.service().unassignIpv6Addresses(fixture.region(), fixture.eni(),
+                List.of(block.substring(0, block.indexOf("::")) + "::ffff"));
+        fixture.service().unassignIpv6Addresses(fixture.region(), fixture.eni(), assigned);
+
+        verify(fixture.manager()).updateIpv6Addresses(fixture.eni(), List.of());
+        verify(fixture.manager(), times(2)).updateIpv6Addresses(anyString(), anyList());
+    }
+
+    // Catches: an assign the firewall refuses answering an error while its addresses stay assigned.
+    @Test
+    void anAssignTheFirewallRefusesLeavesNoAddress() {
+        Ipv6Fixture fixture = ipv6Fixture();
+        IllegalStateException failure = new IllegalStateException("Owned firewall failure");
+        doThrow(failure).when(fixture.manager()).updateIpv6Addresses(anyString(), anyList());
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> fixture.service().assignIpv6Addresses(fixture.region(), fixture.eni(), null, 1)));
+
+        assertEquals(List.of(), fixture.held());
+    }
+
+    // Catches: an unassign the firewall refuses answering an error while its addresses are gone from the store.
+    @Test
+    void anUnassignTheFirewallRefusesKeepsTheAddresses() {
+        Ipv6Fixture fixture = ipv6Fixture();
+        List<String> assigned = fixture.service().assignIpv6Addresses(fixture.region(), fixture.eni(), null, 1);
+        doThrow(new IllegalStateException("Owned firewall failure")).when(fixture.manager())
+                .updateIpv6Addresses(anyString(), anyList());
+
+        assertThrows(IllegalStateException.class,
+                () -> fixture.service().unassignIpv6Addresses(fixture.region(), fixture.eni(), assigned));
+
+        assertEquals(assigned, fixture.held());
+    }
+
+    // Catches: two IPv6 changes on one interface reaching the firewall in another order than they were stored, so
+    // the firewall keeps an older address list than the interface holds.
+    @Test
+    void ipv6ChangesOnOneInterfaceReachTheFirewallInOrder() throws Exception {
+        Ipv6Fixture fixture = ipv6Fixture();
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<List<String>> firewall = new AtomicReference<>();
+        doAnswer(invocation -> {
+            List<String> addresses = invocation.getArgument(1);
+            if (firewall.get() == null) {
+                publishing.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            }
+            firewall.set(List.copyOf(addresses));
+            return null;
+        }).when(fixture.manager()).updateIpv6Addresses(anyString(), anyList());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = executor.submit(() ->
+                    fixture.service().assignIpv6Addresses(fixture.region(), fixture.eni(), null, 1));
+            assertTrue(publishing.await(5, TimeUnit.SECONDS), "First publication must reach the firewall");
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<?> second = executor.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                fixture.service().assignIpv6Addresses(fixture.region(), fixture.eni(), null, 1);
+            });
+            awaitBlockedOrDone(secondThread, second);
+            boolean secondOvertook = second.isDone();
+            release.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+
+            assertFalse(secondOvertook, "A second change on the interface must wait through the first publication");
+            assertEquals(2, fixture.held().size());
+            assertEquals(fixture.held(), firewall.get());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    private static String interfaceGroup(Ec2Service service, String region, String eni) {
+        return service.describeNetworkInterfaces(region, List.of(eni), Map.of()).networkInterfaces().getFirst()
+                .getGroups().getFirst().getGroupId();
+    }
+
     @Test
     void concurrentFailedAssignmentsReleaseOnlyTheirOwnPendingReference() throws Exception {
         TestStores factory = new TestStores();
         EmulatorConfig config = mockConfig();
         Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
-        Ec2Service service = new Ec2Service(config, manager, mock(Ec2PortForwardManager.class),
-                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), factory.storage);
+        Ec2Service service = service(factory, config, manager);
         String region = "us-east-1";
         String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
         String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
@@ -683,12 +910,7 @@ class Ec2SecurityGroupPublicationRaceTest {
         List<Instance> instances = service.runInstances(region, "ami-test", "t3.micro", 2, 2, null,
                 List.of(original), subnet, null, List.of(), null, null).getInstances();
         instances.forEach(instance -> instance.setState(InstanceState.running()));
-        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
-        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
-        when(config.network()).thenReturn(network);
-        when(network.securityGroupEnforcement()).thenReturn(enforcement);
-        when(enforcement.enabled()).thenReturn(true);
-        when(config.services().ec2().mock()).thenReturn(false);
+        enableEnforcement(config);
         CountDownLatch firstEntered = new CountDownLatch(1);
         CountDownLatch secondEntered = new CountDownLatch(1);
         CountDownLatch firstRelease = new CountDownLatch(1);
@@ -880,8 +1102,26 @@ class Ec2SecurityGroupPublicationRaceTest {
     }
 
     private static Ec2Service service(TestStores factory) {
-        return new Ec2Service(mockConfig(), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+        return service(factory, mockConfig(), mock(Ec2ContainerManager.class));
+    }
+
+    private static Ec2Service service(TestStores factory, EmulatorConfig config, Ec2ContainerManager manager) {
+        return service(factory, config, manager, mock(Ec2PortForwardManager.class));
+    }
+
+    private static Ec2Service service(TestStores factory, EmulatorConfig config, Ec2ContainerManager manager,
+                                      Ec2PortForwardManager ports) {
+        return new Ec2Service(config, manager, ports,
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), factory.storage);
+    }
+
+    private static void enableEnforcement(EmulatorConfig config) {
+        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
+        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
+        when(config.network()).thenReturn(network);
+        when(network.securityGroupEnforcement()).thenReturn(enforcement);
+        when(enforcement.enabled()).thenReturn(true);
+        when(config.services().ec2().mock()).thenReturn(false);
     }
 
     private static EmulatorConfig mockConfig() {

@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -53,10 +54,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class FirehoseService implements ResourceProvider {
+public class FirehoseService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
+    /** The resource part of a delivery stream's ARN, before its name. */
+    private static final String STREAM_RESOURCE = "deliverystream/";
     private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
     private static final int DEFAULT_REDSHIFT_RETRY_SECONDS = 3600;
     // AWS retries a failed Redshift load every 5 minutes.
@@ -131,7 +134,8 @@ public class FirehoseService implements ResourceProvider {
     private final Map<String, Deque<PendingRedshiftCopy>> redshiftPending = new ConcurrentHashMap<>();
     // Tracks streams that currently have a drain task queued or running on redshiftDeliveryExecutor.
     private final Set<String> activeRedshiftDrains = ConcurrentHashMap.newKeySet();
-    // Serialises the read, version check, merge and write of a Redshift UpdateDestination per stream.
+    // Serialises per stream the read, version check, merge and write of a Redshift UpdateDestination, a delete, and
+    // the read and write of a tag call.
     private final Map<String, Object> redshiftUpdateLocks = new ConcurrentHashMap<>();
     private final Clock clock;
     private final long tickIntervalSeconds;
@@ -426,7 +430,7 @@ public class FirehoseService implements ResourceProvider {
             s3Config.canonicalizeProcessors();
         }
         String arn = AwsArnUtils.Arn.of("firehose", region, accountId,
-                "deliverystream/" + name).toString();
+                STREAM_RESOURCE + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
         // role -- DeliveryStartTimestamp exists only on the Description shape, which AWS
         // fills in at creation. Stamping it here, at creation time, is what makes the first
@@ -816,33 +820,85 @@ public class FirehoseService implements ResourceProvider {
         return view;
     }
 
+    /**
+     * Under the lock a delete and a Redshift update hold across their read and write, so a tag call neither writes
+     * back a stream deleted after it read it nor loses another tag call's change.
+     */
     public void tagDeliveryStream(String name, List<DeliveryStreamDescription.Tag> tagsToTag) {
-        DeliveryStreamDescription stream = describeDeliveryStream(name);
-        Map<String, String> tagMap = new LinkedHashMap<>();
-        for (DeliveryStreamDescription.Tag t : stream.getTags()) {
-            tagMap.put(t.getKey(), t.getValue());
+        String streamKey = scopedKey(name);
+        synchronized (redshiftUpdateLocks.computeIfAbsent(streamKey, k -> new Object())) {
+            DeliveryStreamDescription stream = describeDeliveryStream(streamKey, name);
+            Map<String, String> tagMap = new LinkedHashMap<>();
+            for (DeliveryStreamDescription.Tag t : stream.getTags()) {
+                tagMap.put(t.getKey(), t.getValue());
+            }
+            for (DeliveryStreamDescription.Tag t : tagsToTag) {
+                tagMap.put(t.getKey(), t.getValue());
+            }
+            List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
+            tagMap.forEach((k, v) -> newTags.add(new DeliveryStreamDescription.Tag(k, v)));
+            stream.setTags(newTags);
+            streamPut(streamKey, stream);
         }
-        for (DeliveryStreamDescription.Tag t : tagsToTag) {
-            tagMap.put(t.getKey(), t.getValue());
-        }
-        List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
-        tagMap.forEach((k, v) -> newTags.add(new DeliveryStreamDescription.Tag(k, v)));
-        stream.setTags(newTags);
-        streamPut(scopedKey(name), stream);
         LOG.infov("Tagged Firehose delivery stream {0}: {1}", name, tagsToTag);
     }
 
+    /** Under the same lock as {@link #tagDeliveryStream}. */
     public void untagDeliveryStream(String name, List<String> tagKeys) {
-        DeliveryStreamDescription stream = describeDeliveryStream(name);
-        List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
-        for (DeliveryStreamDescription.Tag t : stream.getTags()) {
-            if (!tagKeys.contains(t.getKey())) {
-                newTags.add(t);
+        String streamKey = scopedKey(name);
+        synchronized (redshiftUpdateLocks.computeIfAbsent(streamKey, k -> new Object())) {
+            DeliveryStreamDescription stream = describeDeliveryStream(streamKey, name);
+            List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
+            for (DeliveryStreamDescription.Tag t : stream.getTags()) {
+                if (!tagKeys.contains(t.getKey())) {
+                    newTags.add(t);
+                }
             }
+            stream.setTags(newTags);
+            streamPut(streamKey, stream);
         }
-        stream.setTags(newTags);
-        streamPut(scopedKey(name), stream);
         LOG.infov("Untagged Firehose delivery stream {0}: {1}", name, tagKeys);
+    }
+
+    @Override
+    public String namespace() {
+        return "firehose";
+    }
+
+    /** A request names a delivery stream by its name, which its ARN carries whole, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the delivery stream whose ARN is {@code arn}, in the request's account, where the handlers read: an
+     * ARN of another account names none. Read in place under the stream's key in the ARN's Region, or the account's
+     * key from before the key named the Region, as the handlers find it, and matched on the whole ARN. A tag call
+     * stores a new list, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "firehose")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String region = parsed.region();
+        if (!account.equals(regionResolver.getAccountId()) || !parsed.resource().startsWith(STREAM_RESOURCE)) {
+            return Map.of();
+        }
+        String name = parsed.resource().substring(STREAM_RESOURCE.length());
+        Map<String, String> tags = new LinkedHashMap<>();
+        streamStore.getForAccount(account, logicalKeyFromScopedKey(scopedKey(account, region, name)))
+                .or(() -> streamStore.getForAccount(account, name))
+                .filter(stream -> belongsTo(account, region, stream) && arn.equals(stream.getDeliveryStreamARN()))
+                .ifPresent(stream -> stream.getTags().forEach(tag -> {
+                    if (tag.getKey() != null && tag.getValue() != null) {
+                        tags.put(tag.getKey(), tag.getValue());
+                    }
+                }));
+        return tags;
     }
 
     public List<DeliveryStreamDescription.Tag> listTagsForDeliveryStream(String name, String exclusiveStartTagKey, Integer limit) {
@@ -1150,7 +1206,7 @@ public class FirehoseService implements ResourceProvider {
             // stream's Glue table would be missed and its objects would land in the wrong
             // partition. The sidecar follows the same context, so both sides stay together.
             RequestScopes.runAs(stream.getAccountId(),
-                    AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion()),
+                    regionResolver.regionOf(stream.getDeliveryStreamARN()),
                     () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
         }
     }
@@ -1358,8 +1414,7 @@ public class FirehoseService implements ResourceProvider {
         }
         Instant attemptStart = now;
         try {
-            String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
-                    regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(stream.getDeliveryStreamARN());
             redshiftDelivery.requireLoadAccess(stream.getAccountId(), stream.getDeliveryStreamARN(), redshift,
                     pending.bucket, pending.key);
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
@@ -1492,7 +1547,7 @@ public class FirehoseService implements ResourceProvider {
         S3Destination s3 = stream.s3Destination();
         boolean ownDestination = s3 != null && s3.bucketName() != null;
         String region = ownDestination
-                ? AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion())
+                ? regionResolver.regionOf(stream.getDeliveryStreamARN())
                 : regionResolver.getDefaultRegion();
         try {
             if (ownDestination) {

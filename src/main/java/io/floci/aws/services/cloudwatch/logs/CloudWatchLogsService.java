@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.BoundedMaps;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -33,7 +34,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -106,13 +106,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     /** Cached Logs Insights queries keyed by queryId, bounded with LRU-style eviction. */
     private static final int MAX_STORED_QUERIES = 100;
-    private final Map<String, QueryRecord> insightsQueries = Collections.synchronizedMap(
-            new LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, QueryRecord> eldest) {
-                    return size() > MAX_STORED_QUERIES;
-                }
-            });
+    private final Map<String, QueryRecord> insightsQueries = BoundedMaps.leastRecentlyUsed(MAX_STORED_QUERIES);
 
     @Inject
     public CloudWatchLogsService(StorageFactory storageFactory,

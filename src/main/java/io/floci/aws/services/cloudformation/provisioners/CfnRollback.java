@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * Rollback bookkeeping shared by every {@link CfnResourceProvisioner} and read by
@@ -100,6 +101,22 @@ public final class CfnRollback {
             "__FlociListenerCertificatesUpdateSnapshot";
 
     /**
+     * The ARNs of the inline subscriptions a displaced SNS topic carried, kept while a replacing update
+     * is in flight so a failed stack update can put them back. Written and spent by
+     * {@code SnsCfnProvisioner}; the revert skips {@code __Floci} keys, so the key stays on the
+     * resource until the update settles.
+     */
+    public static final String SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR = "__FlociSnsPriorInlineSubscriptions";
+
+    /**
+     * What an update that adopted an existing SNS topic changed on it: the topic ARN and region, the
+     * attributes it wrote with their prior values (null when absent) and the ARNs of the inline
+     * subscriptions it created, so a failed stack update can put the topic back. Written and spent
+     * by {@code SnsCfnProvisioner}.
+     */
+    public static final String SNS_ADOPTED_TOPIC_UPDATE_SNAPSHOT_ATTR = "__FlociSnsAdoptedTopicUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -153,6 +170,33 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+
+    /**
+     * The tags an EKS cluster carried before an in-place update changed them, so a failed stack
+     * update can put them back. Written and spent by {@code EksCfnProvisioner}.
+     */
+    public static final String EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR = "__FlociEksClusterUpdateSnapshot";
+
+    /**
+     * The tags an EKS nodegroup carried before an in-place update changed them, so a failed stack
+     * update can put them back. Written and spent by {@code EksCfnProvisioner}.
+     */
+    public static final String EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR = "__FlociEksNodegroupUpdateSnapshot";
+
+    /**
+     * The description, key policy, enabled state, rotation and tags a KMS key carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written and spent
+     * by {@code KmsCfnProvisioner}.
+     */
+    public static final String KMS_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociKmsKeyUpdateSnapshot";
+
+    /**
+     * The name, type, URI, identity source, cache TTL and Cognito pools an API Gateway authorizer
+     * carried before an in-place update changed them, or the authorizer an update created because the
+     * prior was gone, so a failed stack update can put them back or delete the created one. Written
+     * and spent by {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayAuthorizerUpdateSnapshot";
 
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
@@ -575,7 +619,8 @@ public final class CfnRollback {
      * Undoes an update {@link #recordCreatedByUpdate} recorded: deletes the created entity with
      * {@code deleteInRegion}, which takes its id and region, names the prior id again as the physical
      * id and in {@code idAttribute}, and spends the snapshot. Returns false, changing nothing, when
-     * the update did not create the entity.
+     * the update did not create the entity. A null {@code idAttribute} is for a type that publishes
+     * no attribute for its id: only the physical id names the prior entity again.
      */
     public static boolean undoCreatedByUpdate(StackResource resource, JsonNode snapshot, String snapshotAttr,
                                               String idAttribute, BiConsumer<String, String> deleteInRegion) {
@@ -588,8 +633,26 @@ public final class CfnRollback {
         deleteInRegion.accept(createdId, snapshot.path("region").asText());
         String priorId = snapshot.path("priorId").asText();
         resource.setPhysicalId(priorId);
-        resource.getAttributes().put(idAttribute, priorId);
+        if (idAttribute != null) {
+            resource.getAttributes().put(idAttribute, priorId);
+        }
         resource.getAttributes().remove(snapshotAttr);
         return true;
+    }
+
+    /**
+     * Drives a resource's tags to {@code desired} through its service's {@code untag} and {@code tag}:
+     * the one path an update and its rollback take. Only {@code managedKeys} absent from
+     * {@code desired} are removed, so a tag added outside the stack stays.
+     */
+    public static void reconcileTags(Collection<String> managedKeys, Map<String, String> desired,
+                                     Consumer<List<String>> untag, Consumer<Map<String, String>> tag) {
+        List<String> dropped = managedKeys.stream().filter(key -> !desired.containsKey(key)).toList();
+        if (!dropped.isEmpty()) {
+            untag.accept(dropped);
+        }
+        if (!desired.isEmpty()) {
+            tag.accept(desired);
+        }
     }
 }

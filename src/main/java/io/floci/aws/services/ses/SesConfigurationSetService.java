@@ -62,6 +62,8 @@ public class SesConfigurationSetService implements SesTaggable {
     private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
     private static final String INVALID_SNS_DESTINATION = "InvalidSNSDestination";
+    private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
+    private static final String DEFAULT_EVENT_BUS_RESOURCE = EVENT_BUS_RESOURCE_PREFIX + "default";
     private static final Pattern SNS_TOPIC_NAME = Pattern.compile("[A-Za-z0-9_-]{1,256}(\\.fifo)?");
     // The pattern SES declares for the stored value, quoted in the violation it answers on v2.
     private static final Pattern STORED_SNS_TOPIC_ARN = Pattern.compile(
@@ -751,9 +753,11 @@ public class SesConfigurationSetService implements SesTaggable {
                 + "> should have the form <arn:aws:sns:region:[account-id]:[topic-name]>", 400); // partition-literal: AWS's fixed wording
     }
 
-    // SES publishes email events only to the default EventBridge bus, so the
-    // EventBusArn member must name event-bus/default of the events service in the
-    // configuration set's account and region. All supported AWS partitions are accepted.
+    // SES publishes email events only to the default EventBridge bus of the configuration set's
+    // account and region. Probed 2026-11-18: each way the ARN can miss that has its own message.
+    // The probe broke one thing per call, so the order of the checks is Floci's. "Wrongly formatted"
+    // was seen for an SNS topic ARN only; the other shapes it answers here are Floci's reading. A
+    // missing or blank value never reached SES (the AWS CLI refuses it), so that message is Floci's.
     private static void validateEventBridgeDestination(
             EventBridgeDestination eventBridge, String accountId, String region) {
         String busArn = eventBridge.getEventBusArn();
@@ -765,22 +769,27 @@ public class SesConfigurationSetService implements SesTaggable {
         try {
             arn = AwsArnUtils.parse(busArn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn is not a valid ARN: " + busArn + ".", 400);
+            throw new AwsException("InvalidParameterValue", "Invalid event bus ARN provided.", 400);
         }
         if (!arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
                 || arn.region().isBlank()
                 || !arn.accountId().matches("[0-9]{12}")
                 || !"events".equals(arn.service())
-                || !"event-bus/default".equals(arn.resource())) {
+                || !arn.resource().startsWith(EVENT_BUS_RESOURCE_PREFIX)) {
             throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must be a valid default event bus ARN: "
-                            + busArn + ".", 400);
+                    "Invalid Event Bridge destination, event-bus ARN is wrongly formatted", 400);
         }
-        if (!arn.accountId().equals(accountId) || !arn.region().equals(region)) {
+        if (!arn.accountId().equals(accountId)) {
             throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must match the configuration set's account and Region: "
-                            + busArn + ".", 400);
+                    "Invalid Event Bridge destination, cross account is not supported.", 400);
+        }
+        if (!arn.region().equals(region)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid Event Bridge destination, must be in region <" + region + ">.", 400);
+        }
+        if (!DEFAULT_EVENT_BUS_RESOURCE.equals(arn.resource())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid Event Bridge destination, must be default bus.", 400);
         }
     }
 

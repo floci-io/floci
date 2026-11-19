@@ -7,7 +7,9 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackedMap;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.codebuild.model.Build;
 import io.floci.aws.services.codebuild.model.BuildPhase;
@@ -24,9 +26,11 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -43,6 +47,9 @@ public class CodeBuildService {
     private Map<String, Map<String, Project>> projects = new ConcurrentHashMap<>();
     // key: region -> arn -> report group
     private Map<String, Map<String, ReportGroup>> reportGroups = new ConcurrentHashMap<>();
+    /** The backends of {@link #projects} and {@link #reportGroups}, read in another account than the caller's. */
+    private StorageBackend<String, Map<String, Project>> projectStorage;
+    private StorageBackend<String, Map<String, ReportGroup>> reportGroupStorage;
     // key: region -> arn -> source credential (token is stored but never returned)
     private Map<String, Map<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
     // key: account:region -> buildId -> build (transient: builds are runtime state)
@@ -70,10 +77,12 @@ public class CodeBuildService {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.projects = storageBacked("codebuild-projects.json",
+        this.projectStorage = storageFactory.create("codebuild", "codebuild-projects.json",
                 new TypeReference<Map<String, Map<String, Project>>>() {});
-        this.reportGroups = storageBacked("codebuild-report-groups.json",
+        this.projects = new StorageBackedMap<>(projectStorage);
+        this.reportGroupStorage = storageFactory.create("codebuild", "codebuild-report-groups.json",
                 new TypeReference<Map<String, Map<String, ReportGroup>>>() {});
+        this.reportGroups = new StorageBackedMap<>(reportGroupStorage);
         this.sourceCredentials = storageBacked("codebuild-source-credentials.json",
                 new TypeReference<Map<String, Map<String, SourceCredential>>>() {});
         this.persistedBuildCounters = storageBacked("codebuild-build-counters.json",
@@ -104,6 +113,48 @@ public class CodeBuildService {
         if (regionResources != null) {
             resources.put(region, regionResources);
         }
+    }
+
+    /**
+     * The tags of the project or the report group stored under {@code arn} in the account and Region it names, read in
+     * place and matched on the whole ARN; empty for an ARN naming nothing stored.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "codebuild")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        List<Map<String, String>> tags = null;
+        if (resource.startsWith("project/")) {
+            tags = inRegion(projectStorage, projects, parsed.accountId(), parsed.region())
+                    .map(byName -> byName.get(resource.substring("project/".length())))
+                    .filter(project -> arn.equals(project.getArn()))
+                    .map(Project::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith("report-group/")) {
+            tags = inRegion(reportGroupStorage, reportGroups, parsed.accountId(), parsed.region())
+                    .map(byArn -> byArn.get(arn))
+                    .map(ReportGroup::getTags)
+                    .orElse(null);
+        }
+        Map<String, String> byKey = new LinkedHashMap<>();
+        if (tags != null) {
+            for (Map<String, ?> tag : tags) {
+                if (tag.get("key") instanceof String key && tag.get("value") instanceof String value) {
+                    byKey.put(key, value);
+                }
+            }
+        }
+        return byKey;
+    }
+
+    /** The resources stored for the Region in the account, read in place; from {@code local} without storage. */
+    private static <V> Optional<Map<String, V>> inRegion(StorageBackend<String, Map<String, V>> storage,
+                                                         Map<String, Map<String, V>> local, String account,
+                                                         String region) {
+        return storage == null ? Optional.ofNullable(local.get(region))
+                : AccountAwareStorageBackend.readInAccount(storage, account, region);
     }
 
     private Map<String, Project> projectsFor(String region) {

@@ -2,10 +2,13 @@ package io.floci.aws.services.globalaccelerator;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.globalaccelerator.model.Accelerator;
@@ -26,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -46,7 +50,7 @@ import java.util.regex.Pattern;
  * from the address ranges Global Accelerator advertises but route no traffic.
  */
 @ApplicationScoped
-public class GlobalAcceleratorService {
+public class GlobalAcceleratorService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(GlobalAcceleratorService.class);
     private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -414,7 +418,11 @@ public class GlobalAcceleratorService {
         return tags.get(resourceArn).orElseGet(LinkedHashMap::new);
     }
 
-    public void tagResource(String resourceArn, Map<String, String> newTags) {
+    /**
+     * Stores a new map holding the resource's tags and {@code newTags}. Tag calls run one at a time, so two of them
+     * never lose one's tags.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> newTags) {
         requireResourceExists(resourceArn);
         if (newTags == null || newTags.isEmpty()) {
             throw new AwsException("InvalidArgumentException", "Tags is required.", 400);
@@ -424,7 +432,8 @@ public class GlobalAcceleratorService {
         tags.put(resourceArn, existing);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    /** Stores a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         requireResourceExists(resourceArn);
         if (tagKeys == null || tagKeys.isEmpty()) {
             throw new AwsException("InvalidArgumentException", "TagKeys is required.", 400);
@@ -432,6 +441,41 @@ public class GlobalAcceleratorService {
         Map<String, String> existing = new LinkedHashMap<>(tags.get(resourceArn).orElseGet(LinkedHashMap::new));
         tagKeys.forEach(existing::remove);
         tags.put(resourceArn, existing);
+    }
+
+    @Override
+    public String namespace() {
+        return "globalaccelerator";
+    }
+
+    /** A request names an accelerator, a listener or an endpoint group by its ARN: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the accelerator, the listener or the endpoint group whose ARN is {@code arn}, in the request's
+     * account, where the tag handlers read: an ARN of another account names none. The resource is found in place under
+     * the ARN itself, which it and its tags are stored under, as the tag handlers find it, a resource stored before
+     * storage was account-aware included, so tags left for a resource since deleted read nothing. A cross-account
+     * attachment's ARN reads nothing, Floci holding none. Tag calls store a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "globalaccelerator")) {
+            return Map.of();
+        }
+        String account = regionResolver.getAccountId();
+        if (!AwsArnUtils.parse(arn).accountId().equals(account)) {
+            return Map.of();
+        }
+        StorageBackend<String, ?> resources = arn.contains(ENDPOINT_GROUP_SEGMENT) ? endpointGroups
+                : arn.contains(LISTENER_SEGMENT) ? listeners : accelerators;
+        if (AccountAwareStorageBackend.readInAccount(resources, account, arn).isEmpty()) {
+            return Map.of();
+        }
+        return new LinkedHashMap<>(AccountAwareStorageBackend.readInAccount(tags, account, arn).orElse(Map.of()));
     }
 
     private List<Listener> listenersOf(String acceleratorArn) {

@@ -5,8 +5,8 @@ import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -20,7 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
 @QuarkusTest
-@TestProfile(CloudFrontDisabledServingTest.CloudFrontDisabledProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class CloudFrontDisabledServingTest {
 
     @Inject
@@ -57,12 +57,5 @@ class CloudFrontDisabledServingTest {
                 .then().statusCode(400).body(containsString("ServiceNotAvailableException"));
         given().when().get("/_cloudfront/" + created.getId() + "/")
                 .then().statusCode(400).body(containsString("ServiceNotAvailableException"));
-    }
-
-    public static final class CloudFrontDisabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.cloudfront.enabled", "false");
-        }
     }
 }

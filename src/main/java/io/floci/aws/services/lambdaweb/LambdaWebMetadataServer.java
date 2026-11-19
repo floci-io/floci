@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambdaweb;
 
 import io.floci.aws.core.common.AvailabilityZoneIds;
+import io.floci.aws.core.common.Html;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -167,7 +168,7 @@ public class LambdaWebMetadataServer {
         }
         response.putHeader("Location", location).putHeader("Date", LambdaWebErrorPages.platformDate(Instant.now()));
         if (method == HttpMethod.GET) {
-            end(response, "<a href=\"" + htmlEscape(location) + "\">Temporary Redirect</a>.\n\n");
+            end(response, "<a href=\"" + Html.escape(location) + "\">Temporary Redirect</a>.\n\n");
         } else if (method == HttpMethod.HEAD) {
             response.end();
         } else {
@@ -188,10 +189,5 @@ public class LambdaWebMetadataServer {
     private static Future<Void> end(HttpServerResponse response, String body) {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         return response.putHeader("Content-Length", String.valueOf(bytes.length)).end(Buffer.buffer(bytes));
-    }
-
-    private static String htmlEscape(String value) {
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&#34;").replace("'", "&#39;");
     }
 }

@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-11-14",
+    "retrieved": "2026-11-17",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -11,9 +11,11 @@
     "AWS::EC2::Instance": "AWS::EC2::Instance",
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
+    "AWS::EKS::Cluster": "AWS::EKS::Cluster",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
-    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
+    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion",
+    "AWS::SES::ConfigurationSetEventDestination": "AWS::SES::ConfigurationSetEventDestination"
   },
   "shapes": {
     "AWS::AutoScaling::LaunchConfiguration": {
@@ -91,35 +93,40 @@
     "AWS::DSQL::Cluster": {
       "type": "structure",
       "members": {
-        "Status": "String",
-        "PolicyVersion": "String",
-        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
-        "KmsEncryptionKey": "String",
-        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
+        "DeletionProtectionEnabled": "Boolean",
+        "Tags": "AWS::DSQL::Cluster.Tags",
         "ResourceArn": "String",
         "Identifier": "String",
-        "VpcEndpointServiceName": "String",
-        "VpcEndpoint": "String",
-        "Endpoint": "String",
         "CreationTime": "String",
+        "Status": "String",
+        "VpcEndpointServiceName": "String",
+        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
+        "KmsEncryptionKey": "String",
+        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
+        "Endpoint": "String",
+        "VpcEndpoint": "String",
+        "PolicyVersion": "String",
         "PolicyDocument": "String",
-        "DeletionProtectionEnabled": "Boolean",
-        "Tags": "AWS::DSQL::Cluster.Tags"
+        "MetricGroups": "AWS::DSQL::Cluster.MetricGroups"
       }
     },
     "AWS::DSQL::Cluster.EncryptionDetails": {
       "type": "structure",
       "members": {
-        "EncryptionType": "String",
         "EncryptionStatus": "String",
+        "EncryptionType": "String",
         "KmsKeyArn": "String"
       }
+    },
+    "AWS::DSQL::Cluster.MetricGroups": {
+      "type": "list",
+      "member": "AWS::DSQL::Cluster/MetricGroup"
     },
     "AWS::DSQL::Cluster.MultiRegionProperties": {
       "type": "structure",
       "members": {
-        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters",
-        "WitnessRegion": "String"
+        "WitnessRegion": "String",
+        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters"
       }
     },
     "AWS::DSQL::Cluster.MultiRegionProperties.Clusters": {
@@ -130,11 +137,20 @@
       "type": "list",
       "member": "AWS::DSQL::Cluster/Tag"
     },
+    "AWS::DSQL::Cluster/MetricGroup": {
+      "type": "structure",
+      "members": {
+        "MetricGroup": "String"
+      },
+      "required": [
+        "MetricGroup"
+      ]
+    },
     "AWS::DSQL::Cluster/Tag": {
       "type": "structure",
       "members": {
-        "Value": "String",
-        "Key": "String"
+        "Key": "String",
+        "Value": "String"
       },
       "required": [
         "Key",
@@ -1531,6 +1547,369 @@
         "SourceContainer": "String"
       }
     },
+    "AWS::EKS::Cluster": {
+      "type": "structure",
+      "members": {
+        "EncryptionConfig": "AWS::EKS::Cluster.EncryptionConfig",
+        "KubernetesNetworkConfig": "AWS::EKS::Cluster/KubernetesNetworkConfig",
+        "Logging": "AWS::EKS::Cluster/Logging",
+        "Name": "String",
+        "Id": "String",
+        "ResourcesVpcConfig": "AWS::EKS::Cluster/ResourcesVpcConfig",
+        "OutpostConfig": "AWS::EKS::Cluster/OutpostConfig",
+        "AccessConfig": "AWS::EKS::Cluster/AccessConfig",
+        "UpgradePolicy": "AWS::EKS::Cluster/UpgradePolicy",
+        "RemoteNetworkConfig": "AWS::EKS::Cluster/RemoteNetworkConfig",
+        "ComputeConfig": "AWS::EKS::Cluster/ComputeConfig",
+        "StorageConfig": "AWS::EKS::Cluster/StorageConfig",
+        "RoleArn": "String",
+        "Version": "String",
+        "Force": "Boolean",
+        "RollbackConfig": "AWS::EKS::Cluster/RollbackConfig",
+        "Tags": "AWS::EKS::Cluster.Tags",
+        "Arn": "String",
+        "Endpoint": "String",
+        "CertificateAuthorityData": "String",
+        "ActiveCertificateAuthorityId": "String",
+        "CertificateAuthority": "AWS::EKS::Cluster/CertificateAuthority",
+        "ClusterSecurityGroupId": "String",
+        "EncryptionConfigKeyArn": "String",
+        "OpenIdConnectIssuerUrl": "String",
+        "BootstrapSelfManagedAddons": "Boolean",
+        "DeletionProtection": "Boolean",
+        "ZonalShiftConfig": "AWS::EKS::Cluster/ZonalShiftConfig",
+        "ControlPlaneScalingConfig": "AWS::EKS::Cluster/ControlPlaneScalingConfig",
+        "KubeApiServerConfig": "AWS::EKS::Cluster/KubeApiServerConfig",
+        "KubeSchedulerConfig": "AWS::EKS::Cluster/KubeSchedulerConfig",
+        "KubeControllerManagerConfig": "AWS::EKS::Cluster/KubeControllerManagerConfig"
+      },
+      "required": [
+        "RoleArn",
+        "ResourcesVpcConfig"
+      ]
+    },
+    "AWS::EKS::Cluster.EncryptionConfig": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/EncryptionConfig"
+    },
+    "AWS::EKS::Cluster.Tags": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/Tag"
+    },
+    "AWS::EKS::Cluster/AccessConfig": {
+      "type": "structure",
+      "members": {
+        "BootstrapClusterCreatorAdminPermissions": "Boolean",
+        "AuthenticationMode": "String"
+      }
+    },
+    "AWS::EKS::Cluster/ActiveCertificateAuthority": {
+      "type": "structure",
+      "members": {
+        "Id": "String",
+        "ActivatedBy": "String"
+      }
+    },
+    "AWS::EKS::Cluster/BlockStorage": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean"
+      }
+    },
+    "AWS::EKS::Cluster/CertificateAuthority": {
+      "type": "structure",
+      "members": {
+        "Data": "String",
+        "Active": "AWS::EKS::Cluster/ActiveCertificateAuthority"
+      }
+    },
+    "AWS::EKS::Cluster/ClusterLogging": {
+      "type": "structure",
+      "members": {
+        "EnabledTypes": "AWS::EKS::Cluster/EnabledTypes"
+      }
+    },
+    "AWS::EKS::Cluster/ComputeConfig": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "NodeRoleArn": "String",
+        "NodePools": "AWS::EKS::Cluster/ComputeConfig.NodePools"
+      }
+    },
+    "AWS::EKS::Cluster/ComputeConfig.NodePools": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/ControlPlanePlacement": {
+      "type": "structure",
+      "members": {
+        "GroupName": "String",
+        "SpreadLevel": "String"
+      }
+    },
+    "AWS::EKS::Cluster/ControlPlaneScalingConfig": {
+      "type": "structure",
+      "members": {
+        "Tier": "String"
+      }
+    },
+    "AWS::EKS::Cluster/ElasticLoadBalancing": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "GatewayApi": "AWS::EKS::Cluster/GatewayApi"
+      }
+    },
+    "AWS::EKS::Cluster/EnabledTypes": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/LoggingTypeConfig"
+    },
+    "AWS::EKS::Cluster/EncryptionConfig": {
+      "type": "structure",
+      "members": {
+        "Provider": "AWS::EKS::Cluster/Provider",
+        "Resources": "AWS::EKS::Cluster/EncryptionConfig.Resources"
+      }
+    },
+    "AWS::EKS::Cluster/EncryptionConfig.Resources": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/EtcdPlacement": {
+      "type": "structure",
+      "members": {
+        "SpreadLevel": "String"
+      }
+    },
+    "AWS::EKS::Cluster/GatewayApi": {
+      "type": "structure",
+      "members": {
+        "Crds": "AWS::EKS::Cluster/GatewayApiCrds"
+      },
+      "required": [
+        "Crds"
+      ]
+    },
+    "AWS::EKS::Cluster/GatewayApiCrds": {
+      "type": "structure",
+      "members": {
+        "Managed": "Boolean"
+      },
+      "required": [
+        "Managed"
+      ]
+    },
+    "AWS::EKS::Cluster/HorizontalPodAutoscalerControllerConfig": {
+      "type": "structure",
+      "members": {
+        "HorizontalPodAutoscalerSyncPeriod": "String"
+      }
+    },
+    "AWS::EKS::Cluster/KubeApiServerConfig": {
+      "type": "structure",
+      "members": {
+        "EventTtl": "String",
+        "ServiceNodePortRange": "AWS::EKS::Cluster/ServiceNodePortRange"
+      }
+    },
+    "AWS::EKS::Cluster/KubeControllerManagerConfig": {
+      "type": "structure",
+      "members": {
+        "PodGcControllerConfig": "AWS::EKS::Cluster/PodGcControllerConfig",
+        "HorizontalPodAutoscalerControllerConfig": "AWS::EKS::Cluster/HorizontalPodAutoscalerControllerConfig"
+      }
+    },
+    "AWS::EKS::Cluster/KubeSchedulerConfig": {
+      "type": "structure",
+      "members": {
+        "NodeResourcesFit": "AWS::EKS::Cluster/NodeResourcesFitConfig"
+      }
+    },
+    "AWS::EKS::Cluster/KubernetesNetworkConfig": {
+      "type": "structure",
+      "members": {
+        "ServiceIpv4Cidr": "String",
+        "ServiceIpv6Cidr": "String",
+        "IpFamily": "String",
+        "ElasticLoadBalancing": "AWS::EKS::Cluster/ElasticLoadBalancing"
+      }
+    },
+    "AWS::EKS::Cluster/Logging": {
+      "type": "structure",
+      "members": {
+        "ClusterLogging": "AWS::EKS::Cluster/ClusterLogging"
+      }
+    },
+    "AWS::EKS::Cluster/LoggingTypeConfig": {
+      "type": "structure",
+      "members": {
+        "Type": "String"
+      }
+    },
+    "AWS::EKS::Cluster/NodeResourcesFitConfig": {
+      "type": "structure",
+      "members": {
+        "ScoringStrategy": "AWS::EKS::Cluster/ScoringStrategy"
+      }
+    },
+    "AWS::EKS::Cluster/OutpostConfig": {
+      "type": "structure",
+      "members": {
+        "OutpostArns": "AWS::EKS::Cluster/OutpostConfig.OutpostArns",
+        "ControlPlaneInstanceType": "String",
+        "ControlPlanePlacement": "AWS::EKS::Cluster/ControlPlanePlacement",
+        "EtcdInstanceType": "String",
+        "EtcdPlacement": "AWS::EKS::Cluster/EtcdPlacement"
+      },
+      "required": [
+        "OutpostArns",
+        "ControlPlaneInstanceType"
+      ]
+    },
+    "AWS::EKS::Cluster/OutpostConfig.OutpostArns": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/PodGcControllerConfig": {
+      "type": "structure",
+      "members": {
+        "TerminatedPodGcThreshold": "Integer"
+      }
+    },
+    "AWS::EKS::Cluster/Provider": {
+      "type": "structure",
+      "members": {
+        "KeyArn": "String"
+      }
+    },
+    "AWS::EKS::Cluster/RemoteNetworkConfig": {
+      "type": "structure",
+      "members": {
+        "RemoteNodeNetworks": "AWS::EKS::Cluster/RemoteNodeNetworks",
+        "RemotePodNetworks": "AWS::EKS::Cluster/RemotePodNetworks"
+      }
+    },
+    "AWS::EKS::Cluster/RemoteNodeNetwork": {
+      "type": "structure",
+      "members": {
+        "Cidrs": "AWS::EKS::Cluster/RemoteNodeNetwork.Cidrs"
+      },
+      "required": [
+        "Cidrs"
+      ]
+    },
+    "AWS::EKS::Cluster/RemoteNodeNetwork.Cidrs": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/RemoteNodeNetworks": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/RemoteNodeNetwork"
+    },
+    "AWS::EKS::Cluster/RemotePodNetwork": {
+      "type": "structure",
+      "members": {
+        "Cidrs": "AWS::EKS::Cluster/RemotePodNetwork.Cidrs"
+      },
+      "required": [
+        "Cidrs"
+      ]
+    },
+    "AWS::EKS::Cluster/RemotePodNetwork.Cidrs": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/RemotePodNetworks": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/RemotePodNetwork"
+    },
+    "AWS::EKS::Cluster/ResourceWeight": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "Weight": "Integer"
+      }
+    },
+    "AWS::EKS::Cluster/ResourcesVpcConfig": {
+      "type": "structure",
+      "members": {
+        "EndpointPrivateAccess": "Boolean",
+        "EndpointPublicAccess": "Boolean",
+        "PublicAccessCidrs": "AWS::EKS::Cluster/ResourcesVpcConfig.PublicAccessCidrs",
+        "SecurityGroupIds": "AWS::EKS::Cluster/ResourcesVpcConfig.SecurityGroupIds",
+        "SubnetIds": "AWS::EKS::Cluster/ResourcesVpcConfig.SubnetIds",
+        "ControlPlaneEgressMode": "String"
+      },
+      "required": [
+        "SubnetIds"
+      ]
+    },
+    "AWS::EKS::Cluster/ResourcesVpcConfig.PublicAccessCidrs": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/ResourcesVpcConfig.SecurityGroupIds": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/ResourcesVpcConfig.SubnetIds": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EKS::Cluster/RollbackConfig": {
+      "type": "structure",
+      "members": {
+        "TimeoutMinutes": "Integer"
+      }
+    },
+    "AWS::EKS::Cluster/ScoringStrategy": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Resources": "AWS::EKS::Cluster/ScoringStrategy.Resources"
+      }
+    },
+    "AWS::EKS::Cluster/ScoringStrategy.Resources": {
+      "type": "list",
+      "member": "AWS::EKS::Cluster/ResourceWeight"
+    },
+    "AWS::EKS::Cluster/ServiceNodePortRange": {
+      "type": "structure",
+      "members": {
+        "MinPort": "Integer",
+        "MaxPort": "Integer"
+      }
+    },
+    "AWS::EKS::Cluster/StorageConfig": {
+      "type": "structure",
+      "members": {
+        "BlockStorage": "AWS::EKS::Cluster/BlockStorage"
+      }
+    },
+    "AWS::EKS::Cluster/Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EKS::Cluster/UpgradePolicy": {
+      "type": "structure",
+      "members": {
+        "SupportType": "String"
+      }
+    },
+    "AWS::EKS::Cluster/ZonalShiftConfig": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean"
+      }
+    },
     "AWS::Events::Rule": {
       "type": "structure",
       "members": {
@@ -2145,6 +2524,89 @@
       "required": [
         "S3Bucket",
         "S3Key"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination": {
+      "type": "structure",
+      "members": {
+        "Id": "String",
+        "ConfigurationSetName": "String",
+        "EventDestination": "AWS::SES::ConfigurationSetEventDestination/EventDestination"
+      },
+      "required": [
+        "ConfigurationSetName",
+        "EventDestination"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination": {
+      "type": "structure",
+      "members": {
+        "DimensionConfigurations": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations"
+      }
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations": {
+      "type": "list",
+      "member": "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration": {
+      "type": "structure",
+      "members": {
+        "DimensionValueSource": "String",
+        "DefaultDimensionValue": "String",
+        "DimensionName": "String"
+      },
+      "required": [
+        "DimensionValueSource",
+        "DefaultDimensionValue",
+        "DimensionName"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination": {
+      "type": "structure",
+      "members": {
+        "EventBusArn": "String"
+      },
+      "required": [
+        "EventBusArn"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "Enabled": "Boolean",
+        "MatchingEventTypes": "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes",
+        "CloudWatchDestination": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination",
+        "KinesisFirehoseDestination": "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination",
+        "SnsDestination": "AWS::SES::ConfigurationSetEventDestination/SnsDestination",
+        "EventBridgeDestination": "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination"
+      },
+      "required": [
+        "MatchingEventTypes"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination": {
+      "type": "structure",
+      "members": {
+        "IAMRoleARN": "String",
+        "DeliveryStreamARN": "String"
+      },
+      "required": [
+        "IAMRoleARN",
+        "DeliveryStreamARN"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/SnsDestination": {
+      "type": "structure",
+      "members": {
+        "TopicARN": "String"
+      },
+      "required": [
+        "TopicARN"
       ]
     },
     "Boolean": {

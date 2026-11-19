@@ -28,7 +28,7 @@ public class ContainerInstance {
     private List<Map<String, Object>> registeredResources;
     private List<Map<String, Object>> remainingResources;
     private List<Attribute> attributes = new ArrayList<>();
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public String getContainerInstanceArn() { return containerInstanceArn; }
     public void setContainerInstanceArn(String containerInstanceArn) { this.containerInstanceArn = containerInstanceArn; }

@@ -1,16 +1,13 @@
 package io.floci.aws.services.stepfunctions;
 
 import com.dashjoin.jsonata.Parser;
-import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
+
+import static io.floci.aws.services.stepfunctions.JsonataSymbolReader.read;
 
 /**
  * Parses a Step Functions JSONata expression once and reports either the message the parser refused
@@ -29,14 +26,8 @@ import java.util.Set;
  * {@code $map($states.input.a, function($x){ b })} does name {@code b} at the top level. Both
  * halves are measured against AWS in {@code JsonataTopLevelReferencesTest}.
  *
- * <p>{@link Parser#parse(String)} is public and returns a public {@link Parser.Symbol}, but every
- * field carrying the tree is package-private, and Quarkus loads application classes and dependency
- * jars with different class loaders, so sharing the package raises {@code IllegalAccessError}
- * instead. The fields are therefore read reflectively, and the cost is paid up front: all of them
- * are resolved once in the static initializer, so a {@code com.dashjoin:jsonata} upgrade that
- * renames or removes one fails loudly on the first call instead of quietly naming no reference.
+ * <p>Nonpublic parse-tree fields are read through {@link JsonataSymbolReader}.
  */
-@RegisterForReflection(targets = Parser.Symbol.class, fields = true)
 final class JsonataTopLevelReferences {
 
     /** The name AWS prints for {@code $}, the context item itself. */
@@ -52,10 +43,6 @@ final class JsonataTopLevelReferences {
      * and {@code Assign}, and only the caller knows whether the walk is there.
      */
     static final String STATES_ERROR_OUTPUT = "$states.errorOutput";
-
-    private static final Map<String, Field> TREE_FIELDS = resolveTreeFields(
-            "type", "value", "steps", "lhs", "rhs", "expression", "expressions",
-            "procedure", "arguments", "body", "condition", "then", "_else");
 
     private JsonataTopLevelReferences() {
     }
@@ -207,28 +194,4 @@ final class JsonataTopLevelReferences {
         return nodes == null || nodes.isEmpty() ? null : nodes.get(0);
     }
 
-    private static Object read(Parser.Symbol node, String field) {
-        try {
-            return Objects.requireNonNull(TREE_FIELDS.get(field), field).get(node);
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException(
-                    "com.dashjoin:jsonata no longer allows reading Parser.Symbol." + field, e);
-        }
-    }
-
-    private static Map<String, Field> resolveTreeFields(String... names) {
-        Map<String, Field> fields = new LinkedHashMap<>();
-        for (String name : names) {
-            try {
-                Field field = Parser.Symbol.class.getDeclaredField(name);
-                field.setAccessible(true);
-                fields.put(name, field);
-            } catch (NoSuchFieldException e) {
-                throw new IllegalStateException("com.dashjoin:jsonata no longer declares "
-                        + "Parser.Symbol." + name + ", so the top-level reference check has to be "
-                        + "rewritten against the new parse tree", e);
-            }
-        }
-        return Map.copyOf(fields);
-    }
 }

@@ -173,7 +173,7 @@ final class PaymentCryptographyKeyExchange {
             X509Certificate certificate = certificates.signCertificate(subject, subjectPublicKey,
                     issuer, issuerPrivateKey, List.of(), false, null, notBefore, notAfter);
             byte[] der = certificate.getEncoded();
-            return new Certificates.Minted(der, Certificates.toPem(der));
+            return new Certificates.Minted(der, Certificates.toPem("CERTIFICATE", der));
         } catch (IOException e) {
             throw new IllegalStateException("cannot mint a certificate", e);
         } catch (Exception e) {
@@ -668,12 +668,7 @@ final class PaymentCryptographyKeyExchange {
 
     /** The name the key factory knows the key's algorithm by. */
     private static String keyFactoryAlgorithm(PaymentCryptographyKey key) {
-        PaymentCryptographyKeyAlgorithm algorithm =
-                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
-        if (algorithm != null && algorithm.rsa) {
-            return "RSA";
-        }
-        return "EC";
+        return PaymentCryptographyService.isRsa(key) ? "RSA" : "EC";
     }
 
     /**
@@ -749,7 +744,7 @@ final class PaymentCryptographyKeyExchange {
     private static String certificatePem(String certText) {
         try {
             X509Certificate certificate = Certificates.parseCertificate(certText);
-            return Certificates.toPem(certificate.getEncoded());
+            return Certificates.toPem("CERTIFICATE", certificate.getEncoded());
         } catch (GeneralSecurityException | RuntimeException e) {
             throw validation("the public key certificate is not a certificate: " + e.getMessage());
         }
@@ -1131,7 +1126,8 @@ final class PaymentCryptographyKeyExchange {
 
     /** The import parameters of an issued token, as the answer carries them. */
     private static Map<String, Object> importParameters(Issued issued) {
-        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
+        String certificate64 = Certificates.pemBase64(
+                Certificates.toPem("CERTIFICATE", issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ImportToken", issued.token);
         out.put("WrappingKeyCertificate", certificate64);
@@ -1190,7 +1186,8 @@ final class PaymentCryptographyKeyExchange {
 
     /** The export parameters of an issued token, as the answer carries them. */
     private static Map<String, Object> exportParameters(Issued issued) {
-        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
+        String certificate64 = Certificates.pemBase64(
+                Certificates.toPem("CERTIFICATE", issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ExportToken", issued.token);
         out.put("SigningKeyCertificate", certificate64);

@@ -5,6 +5,8 @@ import org.junit.jupiter.params.provider.Arguments;
 import java.util.Locale;
 import java.util.stream.Stream;
 
+import static io.floci.aws.testing.EnforcementFixtures.statement;
+
 public final class AuthorizerPolicyFixtures {
 
     private AuthorizerPolicyFixtures() {}
@@ -80,10 +82,6 @@ public final class AuthorizerPolicyFixtures {
                         + conditionStatement("Allow", "StringEqualsIfExists", "aws:Unset", "\"x\"") + "]", 200),
                 Arguments.of("boolean condition value", "[" + allow + ","
                         + conditionStatement("Deny", "Bool", "aws:SecureTransport", "false") + "]", 403));
-    }
-
-    private static String statement(String effect, String action, String resource) {
-        return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private static String ipStatement(String effect, String operator, String addresses) {

@@ -107,8 +107,13 @@ jobs:
           test -s shard.txt
           echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: $(wc -l < shard.txt) classes"
 
+      # A nightly check (*NightlyIntegrationTest) never runs in the shards: Surefire leaves it out
+      # unless -Dnightly.checks.enabled=true (pom.xml), so its images are left to nightly-checks.yml
+      # and the prefetch is handed the shard's classes without it.
       - name: Prefetch this shard's Docker images (background)
-        run: .github/ci/prefetch-images.sh shard.txt || true
+        run: |
+          grep -v 'NightlyIntegrationTest$' shard.txt > prefetch.txt || true
+          .github/ci/prefetch-images.sh prefetch.txt || true
 
       - name: Compile
         run: ./mvnw test-compile -B

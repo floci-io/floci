@@ -172,6 +172,18 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresLogicalReplicationParameterStartsTheServerWithLogicalWal() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("rds.logical_replication", "1");
+        overrides.put("max_connections", "500");
+
+        assertEquals(List.of("-c", "wal_level=logical"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.POSTGRES, "postgres:16-alpine", overrides));
+        assertTrue(RdsContainerManager.engineParameterOptions(
+                DatabaseEngine.POSTGRES, Map.of("rds.logical_replication", "0")).isEmpty());
+    }
+
+    @Test
     void parameterGroupOverridesAreNotPassedToOtherEngines() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());
@@ -309,6 +321,14 @@ class RdsContainerManagerTest {
         assertTrue(sql.contains("pg_roles"));
         assertTrue(sql.contains("rolname = 'rds_iam'"));
         assertTrue(sql.contains("CREATE ROLE rds_iam"));
+    }
+
+    @Test
+    void postgresInitSqlCreatesRdsReplicationRoleWhenMissing() {
+        String sql = RdsContainerManager.postgresIamRoleInitSql();
+
+        assertTrue(sql.contains("rolname = 'rds_replication'"));
+        assertTrue(sql.contains("CREATE ROLE rds_replication"));
     }
 
     @Test
@@ -1536,6 +1556,15 @@ class RdsContainerManagerTest {
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
                 "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptCreatesThePredefinedRolesAfterReplayingTheDump() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        int roles = script.indexOf(RdsContainerManager.postgresIamRoleInitSql());
+        assertTrue(replay >= 0 && roles > replay, "Roles a dump lacks must be created after it is replayed");
     }
 
     @Test

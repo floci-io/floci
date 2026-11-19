@@ -24,7 +24,7 @@ public class Project {
     private Integer timeoutInMinutes;
     private Integer queuedTimeoutInMinutes;
     private String encryptionKey;
-    private List<Map<String, String>> tags;
+    private volatile List<Map<String, String>> tags;
     private Double created;
     private Double lastModified;
     private Map<String, Object> logsConfig;

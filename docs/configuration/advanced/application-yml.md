@@ -133,6 +133,7 @@ floci:
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
     max-connections: 1024                    # Docker client connection pool for short calls
     streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
+    pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -222,6 +223,8 @@ floci:
       proxy-base-port: 6379
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
+      shell-less-backend: false               # true = image has no shell or CLI: flags as container arguments, snapshots via SAVE over RESP + Docker archive API
+      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup (used with shell-less-backend)
 
     rds:
       enabled: true

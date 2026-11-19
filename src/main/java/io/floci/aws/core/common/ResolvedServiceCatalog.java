@@ -44,6 +44,7 @@ import io.floci.aws.services.dlm.DlmController;
 import io.floci.aws.services.dsql.DsqlController;
 import io.floci.aws.services.efs.EfsController;
 import io.floci.aws.services.eks.EksController;
+import io.floci.aws.services.emrcontainers.EmrContainersController;
 import io.floci.aws.services.emrserverless.EmrServerlessController;
 import io.floci.aws.services.fis.FisController;
 import io.floci.aws.services.glue.iceberg.GlueIcebergController;
@@ -288,6 +289,12 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("emr-serverless"), Set.of(),
                         Set.of(EmrServerlessController.class)),
+                descriptor("emr-containers", "emrcontainers", config.services().emrcontainers().enabled(), true,
+                        "emrcontainers", storageMode(config.storage().services().emrcontainers().mode(), config.storage().mode()),
+                        config.storage().services().emrcontainers().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("emr-containers"), Set.of(),
+                        Set.of(EmrContainersController.class)),
                 descriptor("wafv2", "wafv2", config.services().wafv2().enabled(), true,
                         "wafv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -657,7 +664,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("TransferService."), Set.of("transfer"), Set.of(), Set.of()),
                 descriptor("route53", "route53", config.services().route53().enabled(), true,
-                        "route53", config.storage().mode(), 5000L, null, ServiceProtocol.REST_XML,
+                        "route53", config.storage().mode(), 5000L, AwsNamespaces.ROUTE53, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("route53"), Set.of(), Set.of(Route53Controller.class)),
                 descriptor("textract", "textract", config.services().textract().enabled(), true,

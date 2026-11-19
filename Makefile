@@ -33,8 +33,12 @@
 # by tools/aws/regen_athena_shapes.py.
 # src/main/resources/aws/cur-request-shapes.json, the Cost and Usage Reports request constraints
 # for every operation, is generated from botocore's CUR model by tools/aws/regen_cur_shapes.py.
+# src/main/resources/aws/emr-containers-request-shapes.json, the EMR on EKS request constraints for
+# every operation, is generated from botocore's emr-containers model by
+# tools/aws/regen_emr_containers_shapes.py.
 # src/main/resources/aws/account-request-shapes.json, the Account Management request constraints of the
-# contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
+# contact and account information operations, is generated from botocore's Account model by
+# tools/aws/regen_account_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
@@ -295,6 +299,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_lambda_microvm_shapes.py
 	$(PYTHON) tools/aws/regen_athena_shapes.py
 	$(PYTHON) tools/aws/regen_cur_shapes.py
+	$(PYTHON) tools/aws/regen_emr_containers_shapes.py
 	$(PYTHON) tools/aws/regen_account_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py
@@ -404,6 +409,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	}
 	@$(PYTHON) tools/aws/regen_cur_shapes.py --check || { \
 		echo "error: CUR request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_emr_containers_shapes.py --check || { \
+		echo "error: EMR on EKS request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_account_shapes.py --check || { \
@@ -604,10 +613,11 @@ REQUEST_CONDITION_KEYS_PATHS := src/main/resources/aws/request-condition-keys.js
 	tools/aws/regen_request_condition_keys.py tools/aws/test_regen_request_condition_keys.py \
 	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
 DOCUMENTED_ROUTES_PATHS := src/main/resources/aws/rest-routes.json tools/aws/regen_rest_routes.py \
-	tools/aws/test_regen_rest_routes.py
+	tools/aws/test_regen_rest_routes.py tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
-	tools/aws/test_regen_iam_request_resources.py
+	tools/aws/test_regen_iam_request_resources.py tools/aws/sources/athena-glue-ddl-permissions.json \
+	tools/aws/fetch_athena_glue_ddl_permissions.py tools/aws/test_fetch_athena_glue_ddl_permissions.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's

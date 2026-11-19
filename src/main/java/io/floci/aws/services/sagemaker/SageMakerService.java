@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
@@ -23,6 +24,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -156,9 +158,19 @@ public class SageMakerService {
         if (nameContains != null && !nameContains.isBlank()) {
             models = models.stream().filter(m -> m.modelName.contains(nameContains)).toList();
         }
+        Instant createdAfter = AwsJsonTimestamp.epochSeconds(request, "CreationTimeAfter", "SerializationException");
+        if (createdAfter != null) {
+            models = models.stream().filter(m -> m.creationTime >= createdAfter.toEpochMilli()).toList();
+        }
+        Instant createdBefore = AwsJsonTimestamp.epochSeconds(request, "CreationTimeBefore", "SerializationException");
+        if (createdBefore != null) {
+            models = models.stream().filter(m -> m.creationTime < createdBefore.toEpochMilli()).toList();
+        }
+        String creationTimes = createdAfter == null && createdBefore == null ? ""
+                : createdAfter + "/" + createdBefore;
         return paginate(models, request, sortBy, sortOrder,
                 new CursorScope("ListModels", region,
-                        nameContains == null || nameContains.isBlank() ? "" : nameContains, ""),
+                        nameContains == null || nameContains.isBlank() ? "" : nameContains, "", creationTimes),
                 m -> modelCursor(m, sortBy, sortOrder),
                 m -> modelAnchor(m, sortBy), comparator, (m, n) -> {
             n.put("ModelName", m.modelName);
@@ -683,6 +695,7 @@ public class SageMakerService {
     private record SortOptions(String sortBy, String sortOrder) {
     }
 
+
     private static Comparator<ModelResource> modelComparator(String sortBy, String sortOrder) {
         Comparator<ModelResource> comparator = "Name".equals(sortBy)
                 ? Comparator.comparing(m -> m.modelName)
@@ -833,6 +846,7 @@ public class SageMakerService {
         token.put("sortOrder", cursor.sortOrder());
         token.put("nameContains", scope.nameContains());
         token.put("statusEquals", scope.statusEquals());
+        token.put("creationTimes", scope.creationTimes());
         token.put("value", cursor.value());
         token.put("name", cursor.name());
         return Base64Url.encode(token.toString());
@@ -851,6 +865,7 @@ public class SageMakerService {
                     || !sortOrder.equals(cursor.path("sortOrder").asText(null))
                     || !scope.nameContains().equals(cursor.path("nameContains").asText(null))
                     || !scope.statusEquals().equals(cursor.path("statusEquals").asText(null))
+                    || !scope.creationTimes().equals(cursor.path("creationTimes").asText(""))
                     || !cursor.path("value").isTextual()
                     || !cursor.path("name").isTextual()
                     || cursor.path("name").asText().isBlank()) {
@@ -865,7 +880,12 @@ public class SageMakerService {
     private record SortCursor(String sortBy, String sortOrder, String value, String name) {
     }
 
-    private record CursorScope(String operation, String region, String nameContains, String statusEquals) {
+    private record CursorScope(String operation, String region, String nameContains, String statusEquals,
+                               String creationTimes) {
+
+        CursorScope(String operation, String region, String nameContains, String statusEquals) {
+            this(operation, region, nameContains, statusEquals, "");
+        }
     }
 
     private <T> ObjectNode page(List<T> remaining, int max, BiConsumer<T, ObjectNode> render,

@@ -305,13 +305,30 @@ final class RequestResourceMembers {
     }
 
     /**
+     * A request an operation's service makes to another service as the caller to run a statement the operation's
+     * request carries: {@code action}, on each of {@code resources}, and only for a partitioned table when
+     * {@code partitioned} (the page vendored for Athena's DDL statements says a table without partitions needs no
+     * partition action).
+     */
+    record StatementRequest(String action, List<StatementResource> resources, boolean partitioned) {
+    }
+
+    /**
+     * A resource of a statement's request: of {@code type}, each variable of its format in {@code fill} taking what
+     * the statement names by that word ({@code database}, {@code table}), the others open.
+     */
+    record StatementResource(String type, Map<String, String> fill) {
+    }
+
+    /**
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
      * parent and the one a create whose action acts on no type, or on other types alone, makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
      * query, {@code ?name}, by the member's name. Each operation's {@code forwarded} requests are those its service
-     * makes to another as the caller.
+     * makes to another as the caller, and its {@code statements} those it makes as the caller to run each statement its
+     * request may carry.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
@@ -321,7 +338,7 @@ final class RequestResourceMembers {
                  Map<String, Map<String, List<String>>> resourceTagKeys,
                  Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
-                 Map<String, List<Forwarded>> forwarded) {
+                 Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements) {
     }
 
     private static final class Holder {
@@ -407,7 +424,9 @@ final class RequestResourceMembers {
                 }
                 type.getValue().forEach(key -> {
                     String prefix = key.asText("");
-                    if (!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/") || keys.contains(prefix)) {
+                    if ((!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/")
+                            && !prefix.equals(namespace.getKey() + ":" + type.getKey() + "-tag/"))
+                            || keys.contains(prefix)) {
                         throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
                     }
                     keys.add(prefix);
@@ -525,7 +544,57 @@ final class RequestResourceMembers {
                 Map.copyOf(resourceTagKeys), resourceKeys, namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
-                names(document.path("otherNamespaces")), Map.copyOf(forwarded));
+                names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats));
+    }
+
+    /**
+     * Each operation's statements and the requests each makes, refusing an action the file records no types for, a
+     * resource of a type it does not record for the action or with no format, and a variable its format does not have.
+     */
+    private static Map<String, Map<String, List<StatementRequest>>> statements(
+            JsonNode document, Map<String, Map<String, ArnFormat>> formats) {
+        JsonNode actions = document.path("statementActions");
+        Map<String, Map<String, List<StatementRequest>>> found = new LinkedHashMap<>();
+        document.path("statements").properties().forEach(operation -> {
+            Map<String, List<StatementRequest>> byStatement = new LinkedHashMap<>();
+            operation.getValue().properties().forEach(statement -> {
+                List<StatementRequest> requests = new ArrayList<>();
+                for (JsonNode request : statement.getValue()) {
+                    requests.add(statementRequest(operation.getKey() + " " + statement.getKey(), request, actions,
+                            formats));
+                }
+                byStatement.put(statement.getKey(), List.copyOf(requests));
+            });
+            found.put(operation.getKey(), Map.copyOf(byStatement));
+        });
+        return Map.copyOf(found);
+    }
+
+    private static StatementRequest statementRequest(String statement, JsonNode request, JsonNode actions,
+                                                     Map<String, Map<String, ArnFormat>> formats) {
+        String action = request.path("action").asText("");
+        Set<String> types = Set.copyOf(actions.path(action).valueStream().map(JsonNode::asText).toList());
+        Map<String, ArnFormat> namespaceFormats = formats.getOrDefault(
+                action.substring(0, Math.max(0, action.indexOf(':'))), Map.of());
+        List<StatementResource> resources = new ArrayList<>();
+        for (JsonNode resource : request.path("resources")) {
+            String type = resource.path("type").asText("");
+            ArnFormat format = namespaceFormats.get(type);
+            Map<String, String> fill = new LinkedHashMap<>();
+            resource.path("fill").properties()
+                    .forEach(variable -> fill.put(variable.getKey(), variable.getValue().asText("")));
+            if (!types.contains(type) || format == null || fill.entrySet().stream().anyMatch(entry ->
+                    entry.getValue().isEmpty() || !format.format().contains("${" + entry.getKey() + "}"))) {
+                throw new IllegalStateException(RESOURCE_NAME + " gives " + statement + " " + resource + " for "
+                        + action + ", no resource of a type the file records for the action");
+            }
+            resources.add(new StatementResource(type, Map.copyOf(fill)));
+        }
+        if (types.isEmpty() || resources.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " gives " + statement + " " + request
+                    + ", no recorded action on resources");
+        }
+        return new StatementRequest(action, List.copyOf(resources), request.path("partitioned").asBoolean(false));
     }
 
     /** Each resource type's member-named condition keys, by namespace, refusing a type or ARN type with no format. */

@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DeadlineCharSequence;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -77,9 +78,13 @@ import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
 
 @ApplicationScoped
-public class CodePipelineService {
+public class CodePipelineService implements StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(CodePipelineService.class);
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
+    /** What a custom action type's ARN resource starts with, its Owner/Category/Provider/Version following. */
+    private static final String ACTION_TYPE_RESOURCE = "actiontype:";
+    /** What a webhook's ARN resource starts with, its name following. */
+    private static final String WEBHOOK_RESOURCE = "webhook:";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
     private static final int MAX_ACTIVE_EXECUTIONS = 50;
     private static final long DEFAULT_WORKER_POLL_INTERVAL_MS = 100L;
@@ -1456,7 +1461,7 @@ public class CodePipelineService {
         ObjectNode item = mapper.createObjectNode();
         item.set("definition", webhook.deepCopy());
         item.put("url", "http://localhost:4566/codepipeline/webhooks/" + name);
-        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook:" + name).toString());
+        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, WEBHOOK_RESOURCE + name).toString());
         if (request.path("tags").isArray() && !request.path("tags").isEmpty()) {
             item.set("tags", request.path("tags").deepCopy());
         }
@@ -1540,11 +1545,77 @@ public class CodePipelineService {
         });
     }
 
+    @Override
+    public String namespace() {
+        return "codepipeline";
+    }
+
+    /** A request names a pipeline, a webhook or an action type by its name or its id, which its ARN carries whole. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the pipeline, the webhook or the custom action type whose ARN is {@code arn}, in the request's
+     * account, where the tag handlers read: an ARN of another account names none. Read in place under the Region the
+     * ARN names, a record stored before storage was account-aware included: a pipeline under its name and a webhook
+     * under its name, each matched on the whole ARN it recorded, and an action type under the key its ARN gives, as
+     * the tag handlers find it, the type recording no ARN of its own. A webhook's tags are the ones PutWebhook gave
+     * it. A stage's or an action's ARN reads nothing, Floci holding no tags of their own. Tags are replaced by a new
+     * map under the resource's lock, never changed in place, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "codepipeline")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = pipelineStore.accountId();
+        if (!parsed.accountId().equals(account)) {
+            return Map.of();
+        }
+        String resource = parsed.resource();
+        Map<String, String> tags;
+        if (resource.startsWith(ACTION_TYPE_RESOURCE)) {
+            tags = actionTypeKey(account, parsed.region(), arn)
+                    .flatMap(key -> AccountAwareStorageBackend.readInAccount(itemStore, account, key))
+                    .map(CodePipelineStoredItem::getTags)
+                    .orElse(Map.of());
+        } else if (resource.startsWith(WEBHOOK_RESOURCE)) {
+            tags = AccountAwareStorageBackend.readInAccount(itemStore, account,
+                            itemKey(parsed.region(), "webhook", resource.substring(WEBHOOK_RESOURCE.length())))
+                    .map(CodePipelineStoredItem::getData)
+                    .filter(data -> arn.equals(data.path("arn").asText(null)))
+                    .map(data -> webhookTags(data.path("tags")))
+                    .orElse(Map.of());
+        } else if (resource.indexOf('/') < 0) {
+            tags = AccountAwareStorageBackend.readInAccount(pipelineStore, account,
+                            pipelineKey(parsed.region(), resource))
+                    .filter(pipeline -> arn.equals(pipeline.getArn()))
+                    .map(CodePipelinePipeline::getTags)
+                    .orElse(Map.of());
+        } else {
+            tags = Map.of();
+        }
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
+        return copy;
+    }
+
+    /** The {@code key}/{@code value} pairs of the tags PutWebhook stored with a webhook. */
+    private static Map<String, String> webhookTags(JsonNode tags) {
+        Map<String, String> read = new LinkedHashMap<>();
+        tags.forEach(tag -> read.put(tag.path("key").asText(), tag.path("value").asText("")));
+        return read;
+    }
+
     private Optional<String> actionTypeKey(String account, String region, String arn) {
         return AwsArnUtils.parseIfArnIn(arn, "codepipeline", region)
-                .filter(parsed -> account.equals(parsed.accountId()) && parsed.resource().startsWith("actiontype:"))
+                .filter(parsed -> account.equals(parsed.accountId())
+                        && parsed.resource().startsWith(ACTION_TYPE_RESOURCE))
                 // The ARN names the type as Owner/Category/Provider/Version.
-                .map(parsed -> parsed.resource().substring("actiontype:".length()).split("/"))
+                .map(parsed -> parsed.resource().substring(ACTION_TYPE_RESOURCE.length()).split("/"))
                 .filter(id -> id.length == 4)
                 .map(id -> itemKey(region, "action", actionTypeId(id[1], id[0], id[2], id[3])));
     }

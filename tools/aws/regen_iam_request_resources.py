@@ -121,7 +121,8 @@ Beyond the members' names, botocore's shapes and documentation say what a member
   variable when it is the kind the variable is (a name, an id), and is found by the type's service otherwise
   (`find`: "The name of the stream processor" for its `${StreamprocessorId}`), the id open when it finds none;
   one whose documentation's head noun is an ARN ("The Amazon Resource Name (ARN) to which you want to add the tag")
-  holds an ARN, and so does one whose name ends in `ArnList`;
+  holds an ARN, as does a member documented with "This value is an Amazon Resource Name (ARN).",
+  and so does one whose name ends in `ArnList`;
 - a field of a top-level structure is a member too (`Budget.BudgetName`, `pipeline.name`, a bare field taking the
   structure's name), and so is a field of each element of a list or value of a map of structures named after a type
   (`PutEvents`' `Entries[].EventBusName`); a nested field named as an optional top-level member filling the same
@@ -174,7 +175,7 @@ resource its handler uses for a member left out (Athena's `primary` workgroup, E
 `default` cluster). No service says what an operation acts on.
 
 `MEASURED` holds what AWS checks where neither botocore nor the Service Reference says it, and nothing else. It
-and `FORWARDED` are the only parts of the file stated by hand, and an entry is admitted only with evidence from AWS
+is the only part of the file stated by hand, and an entry is admitted only with evidence from AWS
 itself (a policy probe against real AWS published in a Floci pull request, AWS's AccessDenied message recorded
 verbatim, or AWS's documentation saying it in so many words, quoted), for resource types the reference does not
 list for the action, giving what the rules do not already give, and linking to its evidence; the generator refuses
@@ -187,11 +188,21 @@ operation's type holds in the member named after the action's namespace and the 
 acts on (a Redshift snapshot's `KmsKeyId`: `kms` and `key/${KeyId}`), which the reader asks the type's service for
 and then the action's service to find, with `aws:ViaAWSService` and, where the Service Reference lists the
 namespace's `ViaService` key for the action, that key naming the operation's endpoint. Which operations do this,
-neither botocore nor the Service Reference says, so `FORWARDED` states it under `MEASURED`'s rules, its evidence
-cited and the action not one the reference lists for the operation, which a rule would read instead: a Redshift or
+neither botocore nor the Service Reference says, so `MEASURED` states it, its evidence cited and the action not
+one the reference lists for the operation, which a rule would read instead: a Redshift or
 Redshift Serverless restore asks KMS to decrypt with the snapshot's key. `forwardedActions` records what the
 reference gives each such action, the type it acts on, that type's ARN format and the `ViaService` key, which
 `--verify` checks against AWS.
+An operation whose request carries a statement its service runs against another service as the caller (Athena's
+`StartQueryExecution`, whose DDL statements Athena runs against the Glue Data Catalog with the caller's identity) is
+also checked, when its service runs the statement, as the requests that statement makes (`statements`). Neither
+botocore nor the Service Reference says which those are, so they come from a third source, granted for this one
+table and no other: the page of AWS's documentation that gives each statement's permissions, which its own script
+vendors as it stands (`STATEMENT_SOURCES`). Each action of a statement's example policy acts on each resource of the
+same policy statement whose type the Service Reference gives the action, the type whose format the example ARN
+matches, its variables filled from what the page says the example's names stand for (`database`, `table`) and
+open where the example has a wildcard. `statementActions` records the types the reference gives each such action,
+which `--verify` checks against AWS, as it checks the vendored page against the live one.
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -254,6 +265,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fetch_athena_glue_ddl_permissions
 from regen_iam_authorized_actions import authorized_actions_from, fetch_references
 from regen_iam_passed_roles import (
     NAMESPACE_RE,
@@ -275,9 +287,10 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudfront", "cloudfront-keyvaluestore", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "controlcatalog", "controltower", "cur",
-              "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
+              "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-containers",
+              "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
-              "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
+              "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
@@ -318,10 +331,19 @@ READ_IN_HAND_BUILT["logs:PutDestination"] = (
 #      rule, a botocore bump or a reference update makes redundant is taken out rather than kept.
 #   4. Cited. Its evidence names where the measurement is, with at least one https:// link to it.
 #
+# An entry may instead name another action AWS checks the caller for, as the request the operation's service makes
+# as the caller (`{"action", "of"}`), on what botocore's record of the operation's type `of` holds in the member
+# named after the action's namespace and the variable of the type the action acts on; everything else is read: the
+# type and ARN format the reference gives the action, that member, the operation's endpoint prefix, and the
+# namespace's `ViaService` key where the reference lists it for the action. Rules 1 and 4 hold for it as for any
+# entry; for 2, the reference does not list the action among the operation's authorized actions, and for 3, the
+# action acts on one resource type with an ARN format, `of` is a type the operation's action acts on, and botocore's
+# record of it has the member (`check_forwarded`, `forwarded_actions`, `forwarded_for`).
+#
 # The generator enforces 2 to 4 (`measured_resources`); review enforces 1. Never add an entry to make a check pass,
 # to keep Floci's existing behaviour, or because a handler acts on a resource: find what AWS does first, or leave the
 # operation to the rules. Floci services never state what an operation acts on either (`StoredResourceArns` only
-# looks up what a service holds), so this table and `FORWARDED` are the whole of the hand-stated part of the file.
+# looks up what a service holds), so this table is the whole of the hand-stated part of the file.
 # ---------------------------------------------------------------------------------------------------------------------
 _SEND_TASK_EVIDENCE = (
     "real AWS probes in https://github.com/floci-io/floci/pull/7277 (boto3 against us-east-1 on 2026-11-02, a fresh "
@@ -331,6 +353,18 @@ _SEND_TASK_EVIDENCE = (
     "<stateMachineArn>' (https://github.com/aws/aws-emulator/blob/main/issues/things-that-do-not-work/"
     "20261109T171600Z-stepfunctions-step-functions-the-accessdeniedexception-for-states-sendtasksuccess-names.md); "
     "the Service Reference lists no resource type for the action, and the token is resolved by the service (find)")
+_SNAPSHOT_KEY_EVIDENCE = (
+    "the Redshift Management Guide, 'Sharing a snapshot' "
+    "(https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-snapshot-share-snapshot.html): 'When you provide "
+    "access to an encrypted snapshot, Redshift requires that the AWS KMS customer managed key used to create the "
+    "snapshot is shared with the account or accounts performing the restore. If the key isn't shared, attempting to "
+    "restore the snapshot results in an access-denied error', the key policy naming the restoring account and "
+    "allowing 'the kms:Decrypt action'; and 'Authorizing use of an AWS KMS customer managed key with Amazon Redshift "
+    "(Provisioned) and Amazon Redshift Serverless' "
+    "(https://docs.aws.amazon.com/redshift/latest/mgmt/authorizing-kms-customer-managed-key.html): 'To create and use "
+    "an Amazon Redshift provisioned cluster or an Amazon Redshift Serverless resource that is encrypted with a "
+    "customer managed key, a user must have permission to call the following operations on the customer managed key', "
+    "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
 MEASURED: dict[str, tuple[list[dict], str]] = {
     "dynamodb:ListTables": (
         [{"type": "table", "fill": {}}],
@@ -344,41 +378,24 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
     **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]} for kind in ("activity", "statemachine")],
                                _SEND_TASK_EVIDENCE)
        for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
+    **{operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
+       for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")},
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
-# FORWARDED: what an operation's service asks another service to do as the caller, where neither botocore nor the
-# Service Reference says it.
+# STATEMENT_SOURCES: the statements an operation's request carries that its service runs against another service as
+# the caller, and the vendored page each one's permissions come from.
 #
-# Each entry names the action the service sends and `of`, the operation's resource type whose record holds the
-# resource that action acts on; everything else is read: the type and ARN format the reference gives the action, the
-# member of botocore's record of `of` named after the action's namespace and that format's variable, the operation's
-# endpoint prefix, and the namespace's `ViaService` key where the reference lists it for the action. An entry is
-# admitted only under `MEASURED`'s rule 1 (evidence from AWS) and when ALL of these hold, which the generator
-# enforces (`check_forwarded`, `forwarded_actions`, `forwarded_for`):
-#
-#   - Absent from the metadata. The reference does not list the action among the operation's authorized actions,
-#     which a rule would read instead.
-#   - Read. The action acts on one resource type with an ARN format, `of` is a type the operation's action acts on,
-#     and botocore's record of it has the member.
-#   - Cited. Its evidence names where AWS says it, with at least one https:// link to it.
+# This is the file's one source besides botocore and the Service Reference, granted for Athena's DDL statements alone:
+# it is not a place for any other table. Its file is written by its own script from AWS's documentation, unchanged
+# (tools/aws/fetch_athena_glue_ddl_permissions.py, with a prompt beside the file for rebuilding it when the page's
+# layout changes), and the generator only reads it (`statement_requests`): nothing about a statement is stated here.
 # ---------------------------------------------------------------------------------------------------------------------
-_SNAPSHOT_KEY_EVIDENCE = (
-    "the Redshift Management Guide, 'Sharing a snapshot' "
-    "(https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-snapshot-share-snapshot.html): 'When you provide "
-    "access to an encrypted snapshot, Redshift requires that the AWS KMS customer managed key used to create the "
-    "snapshot is shared with the account or accounts performing the restore. If the key isn't shared, attempting to "
-    "restore the snapshot results in an access-denied error', the key policy naming the restoring account and "
-    "allowing 'the kms:Decrypt action'; and 'Authorizing use of an AWS KMS customer managed key with Amazon Redshift "
-    "(Provisioned) and Amazon Redshift Serverless' "
-    "(https://docs.aws.amazon.com/redshift/latest/mgmt/authorizing-kms-customer-managed-key.html): 'To create and use "
-    "an Amazon Redshift provisioned cluster or an Amazon Redshift Serverless resource that is encrypted with a "
-    "customer managed key, a user must have permission to call the following operations on the customer managed key', "
-    "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
-FORWARDED: dict[str, tuple[list[dict], str]] = {
-    operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
-    for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")
+STATEMENT_SOURCES: dict[str, Path] = {
+    "athena:StartQueryExecution": REPO_ROOT / "tools/aws/sources/athena-glue-ddl-permissions.json",
 }
+# What a row's sentence says when its policy names partition actions a table without partitions does not need.
+UNPARTITIONED_RE = re.compile(r"does not have partitions, do not include partition actions", re.I)
 
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
@@ -430,7 +447,6 @@ NOT_COVERED: dict[str, str] = {
     "mq": _REST,
     "network-firewall": _LATER,
     "organizations": _LATER,
-    "rds": _LATER,
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
@@ -572,9 +588,18 @@ def resource_tag_keys(documents: list[dict], formats: dict[str, dict[str, str]])
         namespace = document["Name"]
         if namespace not in formats:
             continue
-        types = {resource["Name"]: sorted({match.group("prefix") for match in map(
-                 RESOURCE_TAG_KEY_RE.fullmatch, resource.get("ConditionKeys", [])) if match})
-                 for resource in document.get("Resources", []) if resource["Name"] in formats[namespace]}
+        types = {}
+        for resource in document.get("Resources", []):
+            kind = resource["Name"]
+            if kind not in formats[namespace]:
+                continue
+            keys = resource.get("ConditionKeys", [])
+            prefixes = {match.group("prefix") for match in map(RESOURCE_TAG_KEY_RE.fullmatch, keys) if match}
+            # RDS spells its resource-specific keys as the namespace and resource type, e.g. rds:pg-tag/${TagKey}.
+            typed_prefix = f"{namespace}:{kind}-tag/"
+            if typed_prefix + "${TagKey}" in keys or typed_prefix + "tag-key" in keys:
+                prefixes.add(typed_prefix)
+            types[kind] = sorted(prefixes)
         types = {kind: keys for kind, keys in types.items() if keys}
         if types:
             result[namespace] = dict(sorted(types.items()))
@@ -763,7 +788,7 @@ def doc_head(lead: str) -> tuple[str, str | None]:
     of trail, event data store, dashboard, or channel arns" before "whose tags will be listed")."""
     rest = re.sub(r" (?:of|for)$", "", re.split(r" (?:to|from|whose|that|which|in which|with|associated) ", lead,
                                                maxsplit=1)[0])
-    match = re.match(r"^(.*?)(?: (?:of|for) (?:the |a |an )?(.*))?$", rest)
+    match = re.match(r"^(.*?)(?: (?:of|for|identifying) (?:the |a |an )?(.*))?$", rest)
     head, of = match.group(1).strip(), (match.group(2) or None)
     if re.search(r"(?:^|\s)list$", head) and of:
         return f"{head} of {of}", None
@@ -839,6 +864,9 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                 element = model["shapes"][item_shape["member"]["shape"]] if item_shape["type"] == "list" else item_shape
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
                                         "lead": _lead(item.get("documentation") or item_shape.get("documentation")),
+                                        "arnValue": bool(re.search(
+                                            r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
+                                            _lead_text(item.get("documentation") or item_shape.get("documentation")))),
                                         "pattern": element.get("pattern") or ""})
     return found
 
@@ -919,8 +947,13 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
     kinds = [kind for kind in types if kind in formats]
     resources = [dict(resource) for resource in resources]
     held = {resource["arn"] for resource in resources if "arn" in resource}
+    documented_arns = set()
     for path, fact in sorted(facts.items()):
         if fact["nested"] or fact["path"] in held or not kinds or re.search(r"arn(s|list)?$", path, re.IGNORECASE):
+            continue
+        if fact["arnValue"]:
+            resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            documented_arns.add(fact["path"])
             continue
         head, of = doc_head(fact["lead"])
         if re.search(r"(?:arns?|amazon resource names? \(arns?\))$", head) \
@@ -929,6 +962,11 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                 or (of is not None and any(doc_names("the name of the " + part.strip(), kind, formats)
                                            for part in re.split(r",| or ", of) for kind in kinds))):
             resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            if " identifying " in fact["lead"]:
+                documented_arns.add(fact["path"])
+    # A member documented as an ARN cannot also fill a name variable of that same target.
+    resources = [resource for resource in resources if not resource.get("fill")
+                 or not set(resource["fill"].values()) <= documented_arns]
     services = {formats[kind].split(":")[2] for kind in kinds}
     def foreign(path: str) -> bool:
         fact = facts.get(path.removesuffix("[]"))
@@ -967,13 +1005,26 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         opened = current is not None and current.get("fill") == {} and "made" not in current
         fill = dict(current["fill"]) if current else {}
         unfilled = [v for v in variables if v not in fill]
+        # An optional id and name documented as mutually exclusive selectors name the same stored resource.
+        # Keep the id path, and resolve the name only when that id is absent (EC2 launch templates).
+        if not creating and len(variables) == 1 and not unfilled and kind_of(variables[0]) == "id":
+            selector = fill[variables[0]]
+            optional = optional_members(models, name)
+            names = [path for path, fact in facts.items()
+                     if path in optional and not fact["nested"] and not fact["path"].endswith("[]")
+                     and doc_kind(fact["lead"]) == "name" and doc_names(fact["lead"], kind, formats)
+                     and "either" in (_member_documentation(models, name, path) or "").lower()
+                     and "but not both" in (_member_documentation(models, name, path) or "").lower()]
+            if selector in optional and len(names) == 1:
+                resources.append({"type": kind, "fill": {}, "find": names, "when": {selector: [None]}})
         if len(unfilled) != 1:
             continue
         variable = unfilled[0]
         kind_stem = stem(kind)
         candidates = []
         for path, fact in sorted(facts.items()):
-            if path in used or re.search(r"arns?$", path, re.IGNORECASE):
+            if path in used or re.search(r"arns?$", path, re.IGNORECASE) \
+                    or any(resource.get("through") == fact["path"] for resource in resources):
                 continue
             field = path.split(".")[-1]
             effective = stem(path.split(".")[0] if fact["nested"] and field.lower() in BARE else field)
@@ -984,11 +1035,17 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                     candidates.append(("fill", fact["path"]))
             elif doc_names(fact["lead"], kind, formats):
                 said = doc_kind(fact["lead"]) or kind_of(field)
+                # "Identifier" can mean a name; an explicitly named member cannot fill a generated id.
+                if kind_of(field) == "name" and re.search(r"\bidentifiers?$", doc_head(fact["lead"])[0]):
+                    said = "name"
                 if (compatible(said, variable) or (kind_of(variable) == "identifier" and not creating)) \
                         and not (creating and not kind_of(variable)) \
                         and not (creating and said != kind_of(variable) and kind_of(variable) != "identifier"):
                     candidates.append(("fill", fact["path"]))
                 elif len(variables) == 1 and not fact["path"].endswith("[]"):
+                    # A create asking for "A name for" its new resource does not select an existing id.
+                    if creating and made == stem(kind) and fact["lead"].startswith("a name for "):
+                        continue
                     candidates.append(("find", fact["path"]))
             elif aliased != effective and related(aliased, kind_stem) and compatible(field, variable):
                 candidates.append(("fill", fact["path"]))
@@ -1716,7 +1773,15 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         in_slot = slot.group(1) if slot else None
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
-            choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
+            # Reserve a member naming a more qualified variable for that type. A cluster parameter group
+            # cannot also fill the instance parameter group's shorter ParameterGroupName variable.
+            qualified = {v for other in types if other != kind for v in VARIABLE_RE.findall(formats.get(other, ""))
+                         if stem(variable) and v not in KNOWN_VARIABLES and stem(v) != stem(variable)
+                         and stem(v).endswith(stem(variable))}
+            eligible = {m: p for m, p in names.items() if m not in fill.values()
+                        and not ("." not in p and not p.endswith("[]")
+                                 and any(stem(m).endswith(stem(v)) and compatible(m, v) for v in qualified))}
+            choice = _filling(variable, kind_stem, len(variables), eligible,
                               bare=bare, aliased=aliased, word_stem=word_stem,
                               shapes=shapes if not held else None)
             if choice is not None:
@@ -1756,7 +1821,8 @@ ACCOUNT_SLOT_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:\$\{(\w+)}:")
 def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
     """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
     to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
-    with an ARN format's leading resource word, related to the operation's name past its verb. A member that may hold
+    with an ARN format's leading resource word, related to the operation's name past its verb, or with its sole
+    resource variable named after that operation's subject (`db:${DbInstanceName}`). A member that may hold
     an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
     `EventBusArn`) names a resource the create does not make."""
     name = operation.split(":", 1)[1]
@@ -1766,7 +1832,10 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
 
     def is_created(kind: str) -> bool:
         word = RESOURCE_PART_RE.match(formats.get(kind, ""))
-        return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
+                     if variable not in KNOWN_VARIABLES]
+        return (related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+                or len(variables) == 1 and stem(variables[0]) == created)
 
     def makes(resource: dict) -> bool:
         return all(is_created(kind) for kind in _kinds(resource))
@@ -2155,7 +2224,7 @@ def ec2_query_members(operation: str, models: dict[str, dict], named: set[str]) 
 
 def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict],
               known: dict[str, str] | None = None, forwarded: dict[str, dict] | None = None) -> dict:
-    """What the file says for one operation, `forwarded` being what the file records of each action `FORWARDED`
+    """What the file says for one operation, `forwarded` being what the file records of each action a `MEASURED` entry
     names."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
@@ -2171,7 +2240,9 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     resources = by_client(operation, models, lambda read: read_resources(operation, types, formats, read), formats)
     resources = with_documented_creation(resources, operation, types, formats, models)
     resources = with_made(resources, operation, formats)
-    if operation in MEASURED:
+    uses = MEASURED.get(operation, (None, ""))[0]
+    # An entry naming only another action AWS checks gives the operation no resources of its own.
+    if uses is not None and not (uses and all("action" in use for use in uses)):
         resources = measured_resources(operation, types, formats, resources)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
     creates = creates_for(operation, types, formats, members)
@@ -2190,7 +2261,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                if member in named}
     if located:
         entry["located"] = located
-    if operation in FORWARDED:
+    if operation in measured_actions():
         entry["forwarded"] = forwarded_for(operation, types, models, forwarded or {})
     return entry
 
@@ -2199,7 +2270,8 @@ def measured_resources(operation: str, types: list[str], formats: dict[str, str]
     """The resources `MEASURED` gives the operation, refused unless its admission rules hold: its evidence links to
     the measurement, the Service Reference lists none of its types for the action, each has an ARN format, and the
     rules, which gave `derived`, do not already give them."""
-    resources, evidence = MEASURED[operation]
+    resources = [resource for resource in MEASURED[operation][0] if "action" not in resource]
+    evidence = MEASURED[operation][1]
     kinds = {kind for resource in resources for kind in _kinds(resource)}
     if "https://" not in evidence:
         raise ValueError(f"MEASURED gives {operation} with no link to the measurement of AWS it rests on")
@@ -2215,22 +2287,29 @@ def measured_resources(operation: str, types: list[str], formats: dict[str, str]
     return resources
 
 
+def measured_actions() -> dict[str, tuple[list[dict], str]]:
+    """The `MEASURED` entries naming another action AWS checks the caller for, by operation, with their evidence."""
+    return {operation: ([use for use in uses if "action" in use], evidence)
+            for operation, (uses, evidence) in MEASURED.items() if any("action" in use for use in uses)}
+
+
 def forwarded_actions(documents: list[dict]) -> dict[str, dict]:
-    """For each action `FORWARDED` names, what the Service Reference gives it: the one resource type it acts on, that
-    type's ARN format, and its namespace's `ViaService` condition key where the reference lists that for the action."""
+    """For each action a `MEASURED` entry names, what the Service Reference gives it: the one resource type it acts
+    on, that type's ARN format, and its namespace's `ViaService` condition key where the reference lists that for the
+    action."""
     by_name = {document["Name"]: document for document in documents}
     found: dict[str, dict] = {}
-    for action in sorted({use["action"] for uses, _ in FORWARDED.values() for use in uses}):
+    for action in sorted({use["action"] for uses, _ in measured_actions().values() for use in uses}):
         namespace, name = action.split(":", 1)
         document = by_name.get(namespace, {})
         listed = next((entry for entry in document.get("Actions", []) if entry["Name"] == name), None)
         if listed is None:
-            raise ValueError(f"FORWARDED names {action}, which the Service Reference does not list")
+            raise ValueError(f"MEASURED names {action}, which the Service Reference does not list")
         kinds = [resource["Name"] for resource in listed.get("Resources") or []]
         formats = arn_formats([document], {namespace}).get(namespace, {})
         if len(kinds) != 1 or kinds[0] not in formats \
                 or len(set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES) != 1:
-            raise ValueError(f"FORWARDED names {action}, which acts on {kinds}, not one resource type whose ARN format "
+            raise ValueError(f"MEASURED names {action}, which acts on {kinds}, not one resource type whose ARN format "
                              f"has one variable of its own")
         entry = {"type": kinds[0], "format": formats[kinds[0]]}
         if f"{namespace}:ViaService" in (listed.get("ActionConditionKeys") or []):
@@ -2247,14 +2326,15 @@ def authorized_by(documents: list[dict]) -> dict[str, set[str]]:
 
 
 def check_forwarded(authorized: dict[str, set[str]]) -> None:
-    """`FORWARDED`'s rules that do not need botocore: each entry links to its evidence, and names no action the
+    """The rules for a `MEASURED` entry naming another action that do not need botocore: it links to its evidence,
+    and names no action the
     Service Reference lists for its operation, which a rule would read instead."""
-    for operation, (uses, evidence) in sorted(FORWARDED.items()):
+    for operation, (uses, evidence) in sorted(measured_actions().items()):
         if "https://" not in evidence:
-            raise ValueError(f"FORWARDED gives {operation} with no link to the evidence of AWS it rests on")
+            raise ValueError(f"MEASURED gives {operation} with no link to the evidence of AWS it rests on")
         listed = sorted({use["action"] for use in uses} & authorized.get(operation, set()))
         if listed:
-            raise ValueError(f"FORWARDED gives {operation} {listed}, which the Service Reference lists for it: "
+            raise ValueError(f"MEASURED gives {operation} {listed}, which the Service Reference lists for it: "
                              f"a rule reads those, so take it out")
 
 
@@ -2272,29 +2352,120 @@ def record_member(models: dict[str, dict], kind: str, word: str) -> str | None:
 
 
 def forwarded_for(operation: str, types: list[str], models: dict[str, dict], actions: dict[str, dict]) -> list[dict]:
-    """What the operation's service asks another to do as the caller (`FORWARDED`): each action, on the resource
+    """What the operation's service asks another to do as the caller (`MEASURED`): each action, on the resource
     botocore's record of `of` holds in the member named after the action's namespace and the variable of the format
     of the type it acts on (`kms` and `${KeyId}`, a snapshot's `KmsKeyId`), sent from the operation's endpoint prefix."""
-    uses, _ = FORWARDED[operation]
+    uses, _ = measured_actions()[operation]
     prefixes = {model.get("metadata", {}).get("endpointPrefix") for model in models.values()}
     if len(prefixes) != 1 or None in prefixes:
-        raise ValueError(f"FORWARDED gives {operation}, whose clients have no one endpoint prefix")
+        raise ValueError(f"MEASURED gives {operation}, whose clients have no one endpoint prefix")
     endpoint = next(iter(prefixes))
     found = []
     for use in uses:
         action = actions.get(use["action"])
         if action is None:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']}, for which the file records no type")
+            raise ValueError(f"MEASURED gives {operation} {use['action']}, for which the file records no type")
         if use["of"] not in types:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']} on what a {use['of']} holds, no type its "
+            raise ValueError(f"MEASURED gives {operation} {use['action']} on what a {use['of']} holds, no type its "
                              f"action acts on")
         variable = next(iter(set(VARIABLE_RE.findall(action["format"])) - KNOWN_VARIABLES))
         member = record_member(models, use["of"], namespace_of(use["action"]) + variable)
         if member is None:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']} on what a {use['of']} holds, which "
+            raise ValueError(f"MEASURED gives {operation} {use['action']} on what a {use['of']} holds, which "
                              f"botocore's record of it has no {namespace_of(use['action'])}{variable} member for")
         found.append({"action": use["action"], "of": use["of"], "member": member, "endpoint": endpoint})
     return found
+
+
+def load_statement_sources() -> dict[str, dict]:
+    """Each operation's vendored statement source (`STATEMENT_SOURCES`)."""
+    return {operation: json.loads(path.read_text(encoding="utf-8")) for operation, path in STATEMENT_SOURCES.items()}
+
+
+def source_actions(sources: dict[str, dict]) -> list[str]:
+    """Every action the statement sources' policies name."""
+    return sorted({action for source in sources.values() for row in source["statements"].values()
+                   for statement in row["policy"] for action in statement["Action"]})
+
+
+def statement_actions(documents: list[dict], sources: dict[str, dict]) -> dict[str, list[str]]:
+    """For each action the statement sources name, the resource types the Service Reference gives it."""
+    by_name = {document["Name"]: document for document in documents}
+    found: dict[str, list[str]] = {}
+    for action in source_actions(sources):
+        namespace, name = action.split(":", 1)
+        listed = next((entry for entry in by_name.get(namespace, {}).get("Actions", []) if entry["Name"] == name),
+                      None)
+        if listed is None:
+            raise ValueError(f"a statement source names {action}, which the Service Reference does not list")
+        found[action] = sorted(resource["Name"] for resource in listed.get("Resources") or [])
+    return found
+
+
+def example_type(arn: str, formats: dict[str, str], statement: str) -> tuple[str, dict[str, str]]:
+    """The one resource type whose ARN format an example ARN matches, and the value it gives each variable of its own."""
+    matches = []
+    for kind, arn_format in formats.items():
+        variables = VARIABLE_RE.findall(arn_format)
+        pieces = VARIABLE_RE.split(arn_format)[::2]
+        match = re.fullmatch("([^:/]+)".join(re.escape(piece) for piece in pieces), arn)
+        if match:
+            matches.append((kind, {variable: match.group(index + 1) for index, variable in enumerate(variables)
+                                   if variable not in KNOWN_VARIABLES}))
+    if len(matches) != 1:
+        raise ValueError(f"the policy the page gives {statement} names {arn}, which is "
+                         f"{'no' if not matches else 'more than one'} resource type's ARN format")
+    return matches[0]
+
+
+def statement_requests(source: dict, actions: dict[str, list[str]],
+                       formats: dict[str, dict[str, str]]) -> dict[str, list[dict]]:
+    """The requests each statement of a vendored source makes: each action of its example policy, on each resource of
+    the same policy statement of a type the Service Reference gives the action (`actions`), as the type whose format
+    the example ARN matches, its variables filled from what the page says the example's names stand for and open
+    where the example has a wildcard. An action whose name says it is a partition action is marked `partitioned` in a
+    statement whose sentence says a table without partitions does not need those."""
+    examples = source["examples"]
+    found: dict[str, list[dict]] = {}
+    for statement, row in source["statements"].items():
+        unpartitioned = UNPARTITIONED_RE.search(row["text"]) is not None
+        requests: dict[str, list[dict]] = {}
+        for policy_statement in row["policy"]:
+            for action in policy_statement["Action"]:
+                namespace = namespace_of(action)
+                resources = requests.setdefault(action, [])
+                for arn in policy_statement["Resource"]:
+                    kind, values = example_type(arn, formats.get(namespace, {}), statement)
+                    if kind not in actions[action]:
+                        continue
+                    fill = {}
+                    for variable, value in values.items():
+                        if value == "*":
+                            continue
+                        if value not in examples:
+                            raise ValueError(f"the policy the page gives {statement} names {arn}, whose {value} the "
+                                             f"page does not say stands for anything")
+                        fill[variable] = examples[value]
+                    resource = {"type": kind, "fill": dict(sorted(fill.items()))}
+                    if resource not in resources:
+                        resources.append(resource)
+        entries = []
+        for action, resources in requests.items():
+            if not resources:
+                raise ValueError(f"the policy the page gives {statement} grants {action} on no resource of a type "
+                                 f"the Service Reference gives it")
+            entry = {"action": action, "resources": resources}
+            if unpartitioned and "Partition" in action.split(":", 1)[1]:
+                entry["partitioned"] = True
+            entries.append(entry)
+        found[statement] = entries
+    return found
+
+
+def statements_for(sources: dict[str, dict], actions: dict[str, list[str]],
+                   formats: dict[str, dict[str, str]]) -> dict[str, dict[str, list[dict]]]:
+    """Each operation's statements and the requests each makes (`statements`)."""
+    return {operation: statement_requests(source, actions, formats) for operation, source in sorted(sources.items())}
 
 
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
@@ -2317,6 +2488,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_find_scope(resources, models, name, formats)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
     resources = with_integer_members(resources, formats, models, name)
     resources = with_minted_names(operation, resources, formats, models)
@@ -2848,6 +3020,41 @@ def with_found(resources: list[dict], types: list[str], formats: dict[str, str],
     return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
 
 
+def with_find_scope(resources: list[dict], models: dict[str, dict], operation: str,
+                    formats: dict[str, str]) -> list[dict]:
+    """A found name is scoped by a request member its record says is associated with that resource."""
+    members = request_members(models, operation)
+    found = []
+    for resource in resources:
+        if "find" not in resource:
+            found.append(resource)
+            continue
+        scope = set()
+        for model in models.values():
+            for shape_name, shape in model["shapes"].items():
+                fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+                if not stem(shape_name).endswith(stem(resource["type"])) \
+                        or any(stem(member) == stem(shape_name) for member in resource["find"]) \
+                        or not all(member in fields for member in resource["find"]):
+                    continue
+                for member, spec in fields.items():
+                    associated = re.search(r"\bassociated with (?:this|the) (.+)$", _lead(spec.get("documentation")))
+                    if member in members and member not in resource["find"] and associated \
+                            and stem(member) and stem(shape_name).startswith(stem(member)) \
+                            and stem(shape_name) != stem(member) \
+                            and doc_names("the name of the " + associated.group(1), resource["type"], formats):
+                        scope.add(member)
+        scoped = dict(resource, find=sorted(scope) + resource["find"])
+        if scope and len(resource["find"]) == 1 and resource["find"][0] in optional_members(models, operation):
+            absent = {resource["find"][0]: [None]}
+            found.append(dict(scoped, unless=absent))
+            # With no child name, the handler uses its default child of the explicitly named parent.
+            found.append(dict(resource, find=sorted(scope), when=absent))
+        else:
+            found.append(scoped)
+    return found
+
+
 def requested_members(models: dict[str, dict]) -> set[str]:
     """Every top-level member of every request of the clients given."""
     return {member for model in models.values() for spec in model["operations"].values() if "input" in spec
@@ -2916,6 +3123,15 @@ def through_members(models: dict[str, dict], formats: dict[str, str]) -> dict[st
                          for known, kind in stems.items() if related(stem(field), known)}
                 if kinds:
                     found.setdefault(member, set()).update(kinds)
+            source = fields.get("SourceArn")
+            if source is not None:
+                head, of = doc_head(_lead(source.get("documentation")))
+                if of and re.search(r"(?:arn|amazon resource name \(arn\))$", head):
+                    kinds = {kind for kind in formats for phrase in re.split(r",| or ", of)
+                             if doc_names("the name of the " + phrase.strip(), kind, formats)}
+                    for member in fields:
+                        if kinds and kind_of(member) == "identifier" and stem(member) == stem(shape_name):
+                            found.setdefault(member, set()).update(kinds)
     for member, kinds in documented_through(models, formats).items():
         found.setdefault(member, set()).update(kinds)
     return {member: sorted(kinds) for member, kinds in sorted(found.items())}
@@ -2996,6 +3212,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     suffixes = minted_suffixes(formats, namespaces, data)
     check_forwarded(authorized_by(documents))
     forwarded = forwarded_actions(documents)
+    sources = load_statement_sources()
+    statement_types = statement_actions(documents, sources)
     operations = {}
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(namespaces[namespace])),
                                                  load_examples(data, set(namespaces[namespace])))
@@ -3028,6 +3246,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         "mintedSuffixes": suffixes,
         "integerVariables": integer_variables(operations, namespaces, data),
         "forwardedActions": forwarded,
+        "statementActions": statement_types,
+        "statements": statements_for(sources, statement_types, formats),
         "operations": operations,
     }
 
@@ -3180,8 +3400,6 @@ def _check_overrides(covered: dict[str, dict]) -> None:
               if operation not in covered]
     stale += [f"MEASURED gives {operation}, which READ_IN_HAND_BUILT reads by the rules" for operation in MEASURED
               if operation in READ_IN_HAND_BUILT]
-    stale += [f"FORWARDED gives {operation}, which the file does not read" for operation in FORWARDED
-              if operation not in covered]
     stale += [f"READ_IN_HAND_BUILT names {operation}, outside HAND_BUILT" for operation in READ_IN_HAND_BUILT
               if namespace_of(operation) not in HAND_BUILT]
     for left, right in (("NAMESPACES", "HAND_BUILT"), ("NAMESPACES", "NOT_COVERED"), ("HAND_BUILT", "NOT_COVERED")):
@@ -3195,7 +3413,8 @@ def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
     for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
-                "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions"):
+                "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions",
+                "statementActions", "statements"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
     operations = list(document["operations"].items())
@@ -3256,7 +3475,8 @@ def validate(document: dict) -> list[str]:
     if not isinstance(tag_keys, dict) or any(
             not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
                 or not isinstance(keys, list) or not all(isinstance(key, str) for key in keys) or keys != sorted(set(keys))
-                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key) for key in keys)
+                or any(not isinstance(key, str) or (not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key)
+                    and key != f"{namespace}:{kind}-tag/") for key in keys)
                 for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
         problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
     resource_keys_document = document.get("resourceKeys", {})
@@ -3311,6 +3531,7 @@ def validate(document: dict) -> list[str]:
         problems.append("forwardedActions is not each forwarded action's type, its ARN format of one variable and its "
                         "namespace's ViaService key")
         recorded_actions = {}
+    problems += _statement_problems(document.get("statementActions"), document.get("statements"), operations, formats)
     for operation, entry in operations.items():
         namespace = namespace_of(operation)
         if not OPERATION_RE.match(operation) or namespace not in namespaces:
@@ -3484,6 +3705,47 @@ def _read_as_one(path: object, fill: dict) -> bool:
     return bool(FILL_PATH_RE.match(path)) and not path.endswith("[]")
 
 
+def _statement_problems(actions: object, statements: object, operations: dict,
+                        formats: dict[str, dict[str, str]]) -> list[str]:
+    """Whether `statementActions` gives each action resource types and `statements` gives each operation's statements
+    as requests of those actions on resources of those types, each variable filled from a word or left open."""
+    actions = {} if actions is None else actions
+    statements = {} if statements is None else statements
+    if not isinstance(actions, dict) or not all(
+            isinstance(action, str) and OPERATION_RE.match(action) and isinstance(types, list) and types == sorted(types)
+            and all(isinstance(kind, str) for kind in types) for action, types in actions.items()):
+        return ["statementActions is not each statement action's resource types"]
+    if not isinstance(statements, dict):
+        return ["statements is not each operation's statements"]
+    problems = []
+    for operation, by_statement in statements.items():
+        if operation not in operations or not isinstance(by_statement, dict) or not by_statement:
+            problems.append(f"statements gives {operation!r}, no operation of the file, or no statement of it")
+            continue
+        for statement, requests in by_statement.items():
+            if not isinstance(requests, list) or not requests or not all(
+                    _statement_request_ok(request, actions, formats) for request in requests):
+                problems.append(f"statements gives {operation} {statement!r} something other than requests of "
+                                f"statementActions on resources of the types they act on")
+    return problems
+
+
+def _statement_request_ok(request: object, actions: dict, formats: dict[str, dict[str, str]]) -> bool:
+    if not isinstance(request, dict) or not {"action", "resources"} <= set(request) <= {"action", "resources",
+                                                                                     "partitioned"}:
+        return False
+    if request["action"] not in actions or request.get("partitioned", True) is not True:
+        return False
+    namespace = namespace_of(request["action"])
+    return isinstance(request["resources"], list) and bool(request["resources"]) and all(
+        isinstance(resource, dict) and set(resource) == {"type", "fill"}
+        and resource["type"] in actions[request["action"]] and resource["type"] in formats.get(namespace, {})
+        and isinstance(resource["fill"], dict) and all(
+            variable in set(VARIABLE_RE.findall(formats[namespace][resource["type"]])) - KNOWN_VARIABLES
+            and isinstance(word, str) and word for variable, word in resource["fill"].items())
+        for resource in request["resources"])
+
+
 def _created_problems(operation: str, created: object, types: set[str], formats: dict[str, str]) -> list[str]:
     if not isinstance(created, dict) or set(created) != {"type", "parent", "arn"} or not isinstance(created["arn"], str) \
             or not PATH_RE.match(created["arn"]):
@@ -3512,10 +3774,23 @@ def derive(document: dict, data: Path) -> list[str]:
     if document.get("mintedSuffixes") != suffixes:
         problems.append(f"the file gives {json.dumps(document.get('mintedSuffixes'))} a minted suffix, botocore's "
                         f"documentation gives {json.dumps(suffixes)}")
-    named = sorted({use["action"] for uses, _ in FORWARDED.values() for use in uses})
+    named = sorted({use["action"] for uses, _ in measured_actions().values() for use in uses})
     if sorted(document["forwardedActions"]) != named:
-        problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, FORWARDED "
+        problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, MEASURED "
                         f"names {named}")
+    sources = load_statement_sources()
+    if sorted(document["statementActions"]) != source_actions(sources):
+        problems.append(f"the file records {sorted(document['statementActions'])} as statement actions, the "
+                        f"statement sources name {source_actions(sources)}")
+    else:
+        try:
+            statements = statements_for(sources, document["statementActions"], document["arnFormats"])
+        except ValueError as e:
+            problems.append(str(e))
+        else:
+            if document["statements"] != statements:
+                problems.append(f"the file's statements differ from what its sources give: expected "
+                                f"{json.dumps(statements)}")
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(document["namespaces"][namespace])),
                                                  load_examples(data, set(document["namespaces"][namespace])))
                 for namespace in ID_TARGETS if namespace in document["namespaces"]}
@@ -3545,7 +3820,29 @@ def verify_forwarded(vendored: dict, documents: list[dict]) -> list[str]:
     for operation, entry in vendored["operations"].items():
         listed = sorted({use["action"] for use in entry.get("forwarded", [])} & authorized.get(operation, set()))
         if listed:
-            untrue.append(f"AWS now lists {listed} for {operation}: a rule reads those, so FORWARDED should not give them")
+            untrue.append(f"AWS now lists {listed} for {operation}: a rule reads those, so MEASURED should not "
+                          f"give them")
+    return untrue
+
+
+def verify_statements(vendored: dict, documents: list[dict]) -> list[str]:
+    """What the file records of statement actions and AWS no longer gives, and a vendored page AWS has changed."""
+    sources = load_statement_sources()
+    try:
+        actual = statement_actions(documents, sources)
+    except ValueError as e:
+        return [str(e)]
+    untrue = [f"AWS gives {action} the resource types {actual.get(action)}, not {types}"
+              for action, types in vendored.get("statementActions", {}).items() if actual.get(action) != types]
+    for operation, source in sorted(sources.items()):
+        try:
+            changed = fetch_athena_glue_ddl_permissions.stale(source, fetch_athena_glue_ddl_permissions.fetch_url(
+                source["_source"]["page"]))
+        except (OSError, ValueError) as e:
+            raise OSError(f"could not read {source['_source']['page']} ({e})") from e
+        if changed:
+            untrue.append(f"{source['_source']['page']} no longer gives what {STATEMENT_SOURCES[operation].name} "
+                          f"holds for {operation}: run {source['_source']['fetcher']}")
     return untrue
 
 
@@ -3624,6 +3921,11 @@ def main(argv: list[str] | None = None) -> int:
                                                              document["namespaces"]):
             untrue.append("resourceKeys differ from AWS Service Reference and botocore")
         untrue += verify_forwarded(document, documents)
+        try:
+            untrue += verify_statements(document, documents)
+        except OSError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         if untrue:

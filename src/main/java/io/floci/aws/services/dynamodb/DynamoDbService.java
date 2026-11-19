@@ -80,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -89,7 +90,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -138,6 +141,9 @@ public class DynamoDbService {
     private final Object capacityLock = new Object();
     // Held from a resource policy revision check until the policy it allowed is stored.
     private final Object resourcePolicyLock = new Object();
+    // Held while a table's tags are copied, changed and put in place of the map it held, which is never changed. The
+    // copy is put one entry at a time, as the map always was, so ListTagsOfResource keeps the order it listed.
+    private final Object tagLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -1614,6 +1620,7 @@ public class DynamoDbService {
         if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
+        List<JsonNode> partition = new ArrayList<>();
 
         if (keyConditions != null) {
             String partitionKeyValue = extractComparisonValue(keyConditions.get(pkName));
@@ -1621,6 +1628,7 @@ public class DynamoDbService {
                 boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
                         && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
                 if (!partitionKeyMatches) continue;
+                partition.add(item);
                 if (skName != null && keyConditions.has(skName)) {
                     JsonNode skCondition = keyConditions.get(skName);
                     if (matchesKeyCondition(item.get(skName), skCondition)) {
@@ -1632,7 +1640,7 @@ public class DynamoDbService {
             }
         } else if (keyConditionExpression != null) {
             results = queryWithExpression(items, accessPath, partitionKeyValuePlaceholder,
-                    keyConditionExpression, expressionAttrValues, exprAttrNames);
+                    keyConditionExpression, expressionAttrValues, exprAttrNames, partition);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
@@ -1646,8 +1654,8 @@ public class DynamoDbService {
         }
 
         // Order by the full (possibly composite) sort key, comparing each attribute in key-schema
-        // order (floci-io/floci#1675), then, on an index, by the table key, which is what
-        // tells apart items whose index keys tie.
+        // order (floci-io/floci#1675). On an index, items whose index keys tie follow the hash of
+        // their table key, and the table key itself settles a tie of that hash.
         List<String> orderKeyNames = new ArrayList<>(sortKeyNames);
         if (accessPath.isIndex()) {
             orderKeyNames.add(table.getPartitionKeyName());
@@ -1655,7 +1663,11 @@ public class DynamoDbService {
                 orderKeyNames.add(table.getSortKeyName());
             }
         }
-        Comparator<JsonNode> keyOrder = (a, b) -> compareKeyAttributes(a, b, orderKeyNames);
+        Comparator<JsonNode> sortKeyOrder = (a, b) -> compareKeyAttributes(a, b, sortKeyNames);
+        Comparator<JsonNode> keyOrder = accessPath.isIndex()
+                ? sortKeyOrder.thenComparing(DynamoDbKeyHash.indexTieOrder(table, accessPath))
+                        .thenComparing((a, b) -> compareKeyAttributes(a, b, orderKeyNames))
+                : sortKeyOrder;
         int direction = Boolean.FALSE.equals(scanIndexForward) ? -1 : 1;
         if (!orderKeyNames.isEmpty()) {
             results = new ArrayList<>(results);
@@ -1677,15 +1689,12 @@ public class DynamoDbService {
         // The size check comes first for each item — per the Query API reference,
         // "if the processed dataset size exceeds 1 MB before DynamoDB reaches this
         // limit, it stops the operation", so an item that would cross the 1 MB cap
-        // is not read and does not count toward Limit. DynamoDB does not look ahead
-        // either way: a read that stops at a boundary always returns a
-        // LastEvaluatedKey, even when the boundary happens to be the last item of
-        // the result set ("the absence of LastEvaluatedKey is the only way to know
-        // that you have reached the end of the result set").
+        // is not read and does not count toward Limit.
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int accSize = 0;
         long billedBytes = 0;
         int included = -1; // index one past the last included item; -1 = no boundary hit
+        boolean stoppedByLimit = false;
         for (int i = 0; i < evaluatedItems.size(); i++) {
             int sz = readItemSize(evaluatedItems.get(i), accessPath, table);
             if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
@@ -1696,11 +1705,19 @@ public class DynamoDbService {
             billedBytes += billedReadSize(evaluatedItems.get(i), accessPath, table, sz);
             if (limit != null && limit > 0 && i + 1 >= limit) {
                 included = i + 1; // the Limit cap stops the read AFTER this item
+                stoppedByLimit = true;
                 break;
             }
         }
         if (included > 0) {
-            lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(included - 1), pkName, sortKeyNames, indexName != null);
+            JsonNode last = evaluatedItems.get(included - 1);
+            boolean rangeEnded = stoppedByLimit && included == evaluatedItems.size()
+                    && endsKeyRange(partition, accessPath, last, (a, b) -> direction * keyOrder.compare(a, b),
+                            () -> keyRangeInclusiveEnd(accessPath, keyConditions, keyConditionExpression,
+                                    exprAttrNames, expressionAttrValues, direction > 0));
+            if (!rangeEnded) {
+                lastEvaluatedKey = buildKeyNode(table, last, pkName, sortKeyNames, indexName != null);
+            }
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, included));
         }
 
@@ -1754,9 +1771,14 @@ public class DynamoDbService {
         TableDefinition table = requireActiveTable(storageKey);
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
+        int partitions = DynamoDbKeyHash.partitionCount(table);
+        boolean segmented = segment != null && totalSegments != null && totalSegments > 1;
 
         ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
-        if (items == null) return new ScanResult(List.of(), 0, 0, null, List.of());
+        if (items == null) {
+            return new ScanResult(List.of(), 0, segmented ? List.of(0L) : Collections.nCopies(partitions, 0L),
+                    null, List.of());
+        }
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
         // Use tailMap for O(log n) pagination instead of O(n) linear search.
@@ -1773,6 +1795,13 @@ public class DynamoDbService {
             lekPkName = accessPath.partitionKeyName();
             lekSkName = accessPath.sortKeyName();
         }
+        String indexPkName = lekPkName;
+        String indexSkName = lekSkName;
+        Predicate<JsonNode> inIndex = item -> !indexScan || (hasNonNullAttribute(item, indexPkName)
+                && (indexSkName == null || hasNonNullAttribute(item, indexSkName)));
+        ToIntFunction<JsonNode> partitionOf = DynamoDbKeyHash.partitionLocator(
+                accessPath.isGlobalSecondaryIndex() ? accessPath.partitionKeyNames() : List.of(pkName), partitions);
+        Map<Integer, Long> bytesByPartition = new TreeMap<>();
 
         Collection<JsonNode> source = exclusiveStartKey != null
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
@@ -1793,11 +1822,10 @@ public class DynamoDbService {
             // itself, and base-table items missing any index key attribute do not
             // exist in the index — they are never read, never counted, and can
             // never anchor a cursor.
-            if (indexScan && !(hasNonNullAttribute(item, lekPkName)
-                    && (lekSkName == null || hasNonNullAttribute(item, lekSkName)))) {
+            if (!inIndex.test(item)) {
                 continue;
             }
-            if (segment != null && totalSegments != null && totalSegments > 1) {
+            if (segmented) {
                 JsonNode pkAttr = item.get(lekPkName);
                 if (computeSegment(pkAttr, totalSegments) != segment) {
                     continue;
@@ -1818,7 +1846,11 @@ public class DynamoDbService {
                 break;
             }
             accSize += sz;
-            billedBytes += billedReadSize(item, accessPath, table, sz);
+            long billed = billedReadSize(item, accessPath, table, sz);
+            billedBytes += billed;
+            if (!segmented) {
+                bytesByPartition.merge(partitionOf.applyAsInt(item), billed, Long::sum);
+            }
             totalScanned++;
             scannedItems.add(item);
             lastScanned = item;
@@ -1844,7 +1876,38 @@ public class DynamoDbService {
 
         LOG.tracev("Scan on {0}: returned={1} scanned={2}",
                 canonicalTableName, results.size(), totalScanned);
-        return new ScanResult(results, totalScanned, billedBytes, lastEvaluatedKey, scannedItems);
+        List<Long> readBytes = segmented ? List.of(billedBytes)
+                : partitionReads(items.values(), inIndex, partitionOf, partitions, bytesByPartition,
+                        lastEvaluatedKey == null, totalScanned == 0 ? exclusiveStartKey : null);
+        return new ScanResult(results, totalScanned, readBytes, lastEvaluatedKey, scannedItems);
+    }
+
+    // DynamoDB charges a scan page for each partition it reads, at least one 4 KB block each. The
+    // page that ends the scan also reads each partition that holds nothing, and when it finds no
+    // item left it still reads the partition it resumed in.
+    private static List<Long> partitionReads(Collection<JsonNode> allItems, Predicate<JsonNode> inIndex,
+                                             ToIntFunction<JsonNode> partitionOf, int partitions,
+                                             Map<Integer, Long> bytesByPartition, boolean endsScan,
+                                             JsonNode resumedFrom) {
+        Set<Integer> read = new TreeSet<>(bytesByPartition.keySet());
+        if (endsScan) {
+            Set<Integer> holding = new HashSet<>();
+            for (Iterator<JsonNode> each = allItems.iterator(); each.hasNext() && holding.size() < partitions; ) {
+                JsonNode item = each.next();
+                if (inIndex.test(item)) {
+                    holding.add(partitionOf.applyAsInt(item));
+                }
+            }
+            for (int partition = 0; partition < partitions; partition++) {
+                if (!holding.contains(partition)) {
+                    read.add(partition);
+                }
+            }
+            if (resumedFrom != null) {
+                read.add(partitionOf.applyAsInt(resumedFrom));
+            }
+        }
+        return read.stream().map(partition -> bytesByPartition.getOrDefault(partition, 0L)).toList();
     }
 
     // A read served by a KEYS_ONLY or INCLUDE index is sized on the projection the
@@ -3420,24 +3483,46 @@ public class DynamoDbService {
     // --- Tag Operations ---
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() == null) {
-            table.setTags(new HashMap<>());
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            Map<String, String> updated = new HashMap<>();
+            if (table.getTags() != null) {
+                table.getTags().forEach(updated::put);
+            }
+            tags.forEach(updated::put);
+            table.setTags(updated);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
         }
-        table.getTags().putAll(tags);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
         LOG.debugv("Tagged resource: {0}", resourceArn);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() != null) {
-            for (String key : tagKeys) {
-                table.getTags().remove(key);
+    /**
+     * Puts CreateTable's tags on the table it has just stored, under the lock TagResource takes, keeping a tag a
+     * TagResource already put on it in the meantime, as that came later.
+     */
+    void putCreationTags(TableDefinition table, Map<String, String> tags) {
+        synchronized (tagLock) {
+            Map<String, String> created = new HashMap<>();
+            tags.forEach(created::put);
+            if (table.getTags() != null) {
+                table.getTags().forEach(created::put);
             }
-            String storageKey = regionKey(region, table.getTableName());
-            tableStore.put(storageKey, table);
+            table.setTags(created);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getTags() != null) {
+                Map<String, String> updated = new HashMap<>();
+                table.getTags().forEach(updated::put);
+                tagKeys.forEach(updated::remove);
+                table.setTags(updated);
+                String storageKey = regionKey(region, table.getTableName());
+                tableStore.put(storageKey, table);
+            }
         }
         LOG.debugv("Untagged resource: {0}", resourceArn);
     }
@@ -3445,6 +3530,33 @@ public class DynamoDbService {
     public Map<String, String> listTagsOfResource(String resourceArn, String region) {
         TableDefinition table = findTableByArn(resourceArn, region);
         return table.getTags() != null ? table.getTags() : Map.of();
+    }
+
+    /**
+     * The tags of the table {@code arn} names, or of the table whose index it names, as an index inherits its table's
+     * tags: the table stored under the ARN's name in the account and Region it names, a pre-multi-account one of the
+     * default account read in place, matched on the whole ARN and, for an index, holding it. Empty for any other ARN,
+     * a stream's included, whose tags are its own and which Floci holds none of.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "dynamodb")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        boolean index = parts.length == 4 && "index".equals(parts[2]);
+        if (!"table".equals(parts[0]) || parts.length != 2 && !index) {
+            return Map.of();
+        }
+        TableDefinition table = AccountAwareStorageBackend.readInAccount(tableStore, parsed.accountId(),
+                regionKey(parsed.region(), parts[1])).orElse(null);
+        if (table == null || table.getTableArn() == null
+                || !arn.equals(index ? table.getTableArn() + "/index/" + parts[3] : table.getTableArn())
+                || index && !table.holdsIndex(parts[3])) {
+            return Map.of();
+        }
+        Map<String, String> tags = table.getTags();
+        return tags == null ? Map.of() : tags;
     }
 
     /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
@@ -5045,12 +5157,56 @@ public class DynamoDbService {
         return items.subMap(encodedPk + "#", true, encodedPk + "$", false).values();
     }
 
+    // A read that stops at Limit on its last match leaves out LastEvaluatedKey when the partition
+    // holds another item past it, which the key condition then excludes. A table read also leaves
+    // it out on the condition's inclusive bound, as no other item can share that key.
+    private static boolean endsKeyRange(List<JsonNode> partition, DynamoDbAccessPath accessPath, JsonNode last,
+                                        Comparator<JsonNode> readOrder, Supplier<JsonNode> inclusiveEnd) {
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        Set<String> keyAttributes = accessPath.keyAttributeNames();
+        for (JsonNode item : partition) {
+            if (compareKeyAttributes(item, last, partitionKeys) == 0
+                    && keyAttributes.stream().allMatch(key -> hasNonNullAttribute(item, key))
+                    && readOrder.compare(item, last) > 0) {
+                return true;
+            }
+        }
+        JsonNode end = inclusiveEnd.get();
+        return end != null && ExpressionEvaluator.compareAttributeValues(last.get(accessPath.sortKeyName()), end) == 0;
+    }
+
+    private static JsonNode keyRangeInclusiveEnd(DynamoDbAccessPath accessPath, JsonNode keyConditions,
+                                                 String keyConditionExpression, JsonNode exprAttrNames,
+                                                 JsonNode exprAttrValues, boolean forward) {
+        String sortKey = accessPath.sortKeyName();
+        if (accessPath.isIndex() || sortKey == null) {
+            return null;
+        }
+        if (keyConditions == null) {
+            return keyConditionExpression == null ? null : DynamoDbAccessPathValidator.keyConditionInclusiveEnd(
+                    keyConditionExpression, exprAttrNames, exprAttrValues, sortKey, forward);
+        }
+        JsonNode condition = keyConditions.get(sortKey);
+        JsonNode values = condition == null ? null : condition.get("AttributeValueList");
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        return switch (condition.path("ComparisonOperator").asText("EQ")) {
+            case "EQ" -> values.get(0);
+            case "LE" -> forward ? values.get(0) : null;
+            case "GE" -> forward ? null : values.get(0);
+            case "BETWEEN" -> values.get(forward ? 1 : 0);
+            default -> null;
+        };
+    }
+
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
                                                 DynamoDbAccessPath accessPath,
                                                 String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
-                                                JsonNode exprAttrNames) {
+                                                JsonNode exprAttrNames,
+                                                List<JsonNode> partition) {
         List<JsonNode> results = new ArrayList<>();
         String partitionKeyName = accessPath.partitionKeyName();
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
@@ -5063,6 +5219,7 @@ public class DynamoDbService {
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
+            partition.add(item);
             if (keyCondition == null) {
                 keyCondition = ExpressionEvaluator.parse(expression);
             }
@@ -5119,9 +5276,10 @@ public class DynamoDbService {
 
     public record TransactGetResult(List<JsonNode> items, Map<String, DynamoDbWriteCapacity.Cost> capacity) {}
 
-    // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
-    // Query or Scan on what it read, not on what survived the filter or projection.
-    public record ScanResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey,
+    // scannedBytes and readBytes carry the pre-filter size of the read items: DynamoDB bills a
+    // Query or Scan on what it read, not on what survived the filter or projection. A Scan
+    // charges each partition it reads on its own.
+    public record ScanResult(List<JsonNode> items, int scannedCount, List<Long> readBytes, JsonNode lastEvaluatedKey,
                             List<JsonNode> scannedItems) {}
     public record QueryResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey,
                               List<JsonNode> scannedItems) {}

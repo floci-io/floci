@@ -70,6 +70,13 @@ class IamServiceTest {
         iamService = iamService(false);
     }
 
+    // A session's caller is the long-term principal it acts as plus aws:TokenIssueTime, which the
+    // IAM User Guide includes "only when the principal uses temporary credentials".
+    private static void assertSessionCaller(IamService.CallerArns expected, IamService.CallerArns actual) {
+        assertNotNull(actual.tokenIssueTime());
+        assertEquals(expected.withTokenIssueTime(actual.tokenIssueTime()), actual);
+    }
+
     private static IamService iamService(boolean seedDeployerPrincipal) {
         return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
     }
@@ -499,9 +506,12 @@ class IamServiceTest {
         // The principal keys ride along from the same lookup: a role session is typed as an
         // assumed role, its aws:userid is the stored role-id:session-name, and it has no
         // aws:username, which the guide lists as not present for a role.
-        assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
+        // It carries what its credentials say about MFA as well, which for a session minted
+        // without a device is the key present and false.
+        assertSessionCaller(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
                         "arn:aws:iam::123456789012:role/team/TestRole",
-                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null),
+                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
@@ -742,8 +752,9 @@ class IamServiceTest {
         assertNull(context.sessionPolicyDocument());
         // Acting as the user means carrying the user's principal keys, aws:username included:
         // the guide gives one to an IAM user and to no other principal.
-        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn(),
-                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice"),
+        assertSessionCaller(new IamService.CallerArns(alice.getArn(), alice.getArn(),
+                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice")
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
         assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
     }
@@ -760,9 +771,10 @@ class IamServiceTest {
         assertEquals(1, context.identityPolicies().size());
         // "aws:userid: AWS account ID" and no aws:username, which the guide lists as not
         // present for the account root.
-        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root",
+        assertSessionCaller(new IamService.CallerArns("arn:aws:iam::000000000000:root",
                         "arn:aws:iam::000000000000:root", IamService.CallerArns.TYPE_ACCOUNT,
-                        "000000000000", null),
+                        "000000000000", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
     }
 
@@ -792,6 +804,59 @@ class IamServiceTest {
                 Instant.now().plusSeconds(3600), null, "000000000000", "ASIAROLESESSION");
 
         assertNotACredential(service, "ASIAFROMSESSION");
+    }
+
+    @Test
+    void aSessionTokenReachesIamOnlyWhereADeviceMintedIt() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.registerIssuedSession("ASIANODEVICE", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+        service.registerIssuedSession("ASIABEHINDDEVICE", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+        service.recordSessionMfa("ASIABEHINDDEVICE", Instant.now());
+
+        // "You cannot call any IAM API operations unless MFA authentication information is
+        // included in the request."
+        assertEquals("Cannot call ListUsers with session credentials that include no MFA information",
+                service.sessionTokenRefusal("ASIANODEVICE", "iam:ListUsers").orElseThrow());
+        assertTrue(service.sessionTokenRefusal("ASIABEHINDDEVICE", "iam:ListUsers").isEmpty());
+        // "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity", which is not
+        // conditioned on a device, so the one minted behind it reaches no more of STS than the other.
+        assertEquals("Cannot call GetAccessKeyInfo with session credentials",
+                service.sessionTokenRefusal("ASIABEHINDDEVICE", "sts:GetAccessKeyInfo").orElseThrow());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "sts:AssumeRole").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "sts:GetCallerIdentity").isEmpty());
+        // Every other namespace is the policies' business rather than the credential's, and an
+        // action that names none is nobody's to refuse.
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "s3:GetObject").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "iam").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", null).isEmpty());
+    }
+
+    @Test
+    void onlyASessionTokenCarriesTheseLimits() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.createRole("Worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        service.registerSession("ASIAROLESESSION", "secret", "token",
+                "arn:aws:iam::000000000000:role/Worker", Instant.now().plusSeconds(3600), null,
+                "000000000000", "s", "AROAWORKER:s");
+        service.registerIssuedSession("ASIAFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/Bob", Instant.now().plusSeconds(3600),
+                null, "000000000000", aliceKey);
+
+        // An assumed-role session reaches whatever its role allows: AWS keeps GetFederationToken
+        // and GetSessionToken from it, and both operations turn it away themselves.
+        assertTrue(service.sessionTokenRefusal("ASIAROLESESSION", "iam:ListUsers").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIAROLESESSION", "sts:GetAccessKeyInfo").isEmpty());
+        // A federated session carries limits of its own, as the Deny in the context it resolves to.
+        assertTrue(service.sessionTokenRefusal("ASIAFEDERATED", "iam:ListUsers").isEmpty());
+        // A long-term key carries none, and neither does a key no session matches.
+        assertTrue(service.sessionTokenRefusal(aliceKey, "iam:ListUsers").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANOSUCHSESSION", "iam:ListUsers").isEmpty());
     }
 
     @Test
@@ -870,8 +935,10 @@ class IamServiceTest {
         assertFederatedUserLimits(withPolicy.identityPolicies().getLast());
         assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
         // The same aws:userid both ways, since one derivation now serves both readers, and no
-        // aws:username: the guide lists it as not present for a federated user.
-        assertEquals(new IamService.CallerArns(federatedArn, federatedArn,
+        // aws:username: the guide lists it as not present for a federated user. No MFA state
+        // either, the same guide putting federated identities with the long-term keys, so this
+        // session publishes neither MFA key where every other session publishes the first.
+        assertSessionCaller(new IamService.CallerArns(federatedArn, federatedArn,
                         IamService.CallerArns.TYPE_FEDERATED_USER, "000000000000:Bob", null),
                 service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());
         assertEquals("000000000000:Bob", service.resolveCallerUserId("ASIAWITHPOLICY", "token").orElseThrow());

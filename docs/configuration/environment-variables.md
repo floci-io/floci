@@ -80,6 +80,35 @@ See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss:/
 | `FLOCI_PROTOCOLS_STRICT_CLAIMING` | `false` | Reject RPC-signaled requests that no supported wire protocol claims, per the [Smithy wire-protocol-selection guide](https://smithy.io/2.0/guides/wire-protocol-selection.html) (e.g. an unknown `Smithy-Protocol` header value or an unimplemented `rpc-v2-json` request). When disabled such requests are logged and pass through, and are handled as the protocol of the route that serves them: one served by the JSON, CBOR or Query endpoint is an RPC call, and one served by a service's route is a REST request |
 | `FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE` | `true` | Reject REST requests whose SigV4 credential scope names a service Floci does not implement, with `UnknownOperationException` instead of letting them fall through to S3's path-style routes and return a misleading `NoSuchBucket`. Set to `false` if Floci serves a route whose signing scope is not yet enumerated: the request then falls through as before instead of failing with a 404 |
 
+
+---
+
+## Request Log
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_REQUEST_LOG_ENABLED` | `false` | Write every request and its response to the request log, one JSON object per line |
+| `FLOCI_REQUEST_LOG_FILE` | `./floci-requests.jsonl` | Where the request log is written |
+
+Each line of the request log is one JSON object shaped like a HAR 1.2 `entry`: the request with its headers, query
+string and body, the response with its status, headers and body, and the time taken. It also carries
+`callerAccessKeyId`, the access key id the request was signed with, so each line can be tied to the caller that made
+it, whether that is Terraform, CloudFormation or a direct SDK or CLI call. A request body is captured when its
+declared length is 256 KiB or less; a larger one, and one sent without a declared length, is noted but not read. A
+response body is cut at 256 KiB. A body that is not valid UTF-8 is stored base64 with `"encoding": "base64"`, and a
+response streamed to the client is not read. Lines are written by a thread of their own, so a slow file never holds up
+a response; when the writer falls 10,000 lines behind, new lines are dropped and Floci logs a warning.
+
+!!! warning "The request log holds secrets"
+    Request and response bodies are written as plain text, and they can carry secrets: a secret access key in a
+    response, a password in a request, a secret value in a parameter. Floci redacts the `Authorization`,
+    `X-Amz-Security-Token`, `X-Amz-Content-Sha256`, `Cookie` and `Set-Cookie` headers and the `X-Amz-Signature`,
+    `X-Amz-Security-Token` and `X-Amz-Credential` query parameters, in the URL too, but a secret inside a body is
+    written as is. On a file system with POSIX permissions, Floci creates the file readable and writable by its owner
+    only; a file that already exists keeps its permissions. Floci writes only to a regular file, and refuses a symbolic
+    link, a named pipe or a directory at the path. Keep the log off in shared environments, and do not commit or share
+    the file.
+
 ---
 
 ## Storage
@@ -119,6 +148,7 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls, plus CodeBuild phase commands, EKS audit log followers and ECS Exec sessions. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `2048` | Connection pool size for streams that last a container's lifetime, kept apart from the main pool so they never starve create, start, stop and remove. Each live Lambda container holds two (log stream and exit watcher) plus one per extension. See [Docker Configuration](docker.md#connection-pool) |
+| `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS` | `60` | Seconds between the log lines that report each Docker pool's leased, available and pending connections and its open streams, written only while a pool is in use; `0` turns them off. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -462,6 +492,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT` | `6379` | First port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT` | `6399` | Last port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE` | `valkey/valkey:8` | Default Docker image for cache clusters |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` | `false` | Pass server flags as container arguments and take and restore snapshots without a shell or CLI in the image (`SAVE` over RESP, the Docker archive API, the snapshot file placed before the server starts). Never inferred from the image; see [ElastiCache](../services/elasticache.md#images-with-no-shell-or-cli) |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup; used only with `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` |
 | `FLOCI_SERVICES_ELASTICACHE_DOCKER_NETWORK` | _(none)_ | Docker network for ElastiCache containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_ELASTICACHE_CLUSTER_ANNOUNCE_HOSTNAME` | _(none)_ | Hostname cluster-mode nodes announce in `MOVED`/`ASK` redirects and topology responses, and report as the `ConfigurationEndpoint`. Set to a name every client resolves (e.g. `localhost.floci.io`) when `FLOCI_HOSTNAME` only resolves inside Floci's Docker network. Defaults to `FLOCI_HOSTNAME` |
 
@@ -473,6 +505,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | When `true`, DB clusters and instances are created instantly without a real container or auth proxy (API only) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | Report the requested `Port` instead of the proxy port in `Describe*` |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
@@ -561,6 +594,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable the ECS service |
 | `FLOCI_SERVICES_ECS_MOCK` | `false` | When `true`, tasks are registered but not actually run |
 | `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST` | `false` | Publish `awsvpc` task ports on stable Docker host ports for host-side clients |
+| `FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK` | `false` | Put an `awsvpc` task's containers in one network namespace, held by a helper container, so they reach each other on `localhost` as on Fargate. Applies while security-group enforcement is off and needs no privileges, so it works on rootless Docker and Podman |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
@@ -644,6 +678,7 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable the Route 53 service |
 | `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
+| `FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE` | `aws` | ALB minimum-zone policy: `aws` requires two distinct ordinary Availability Zones in every region; `allow-single-zone` explicitly permits one. Per-region YAML overrides take precedence. |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
 | `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE` | `true` | Reuse backend HTTP/1.x connections for ordinary HTTP forwarding. Set to `false` for fresh connections per request; WebSocket and TCP transports are unaffected. See [backend connection reuse](../services/elb.md#backend-connection-reuse) |
 | `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE_TIMEOUT_SECONDS` | `60` | Default idle-pool timeout for backend HTTP/1.x connections, in non-negative seconds; `0` disables expiry. A target's advertised `Keep-Alive` timeout overrides it. Does not time out active responses or WebSockets |
@@ -659,6 +694,7 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_BACKUP_ENABLED` | `true` | Enable the AWS Backup service |
 | `FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS` | `3` | Simulated delay before backup jobs transition to `COMPLETED` |
 | `FLOCI_SERVICES_FIS_ENABLED` | `true` | Enable the AWS Fault Injection Service management API |
+| `FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE` | `false` | Let the FIS `aws:fis:inject-api-*` actions target any service namespace, not only `ec2` and `kinesis` |
 | `FLOCI_SERVICES_RESOURCEEXPLORER2_ENABLED` | `true` | Enable the Resource Explorer 2 service |
 | `FLOCI_SERVICES_APPCONFIG_ENABLED` | `true` | Enable the AppConfig service |
 | `FLOCI_SERVICES_APPCONFIGDATA_ENABLED` | `true` | Enable the AppConfig Data service |

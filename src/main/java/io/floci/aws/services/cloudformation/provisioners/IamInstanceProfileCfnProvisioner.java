@@ -147,12 +147,29 @@ public class IamInstanceProfileCfnProvisioner implements CfnResourceProvisioner 
     private void reconcileRoles(String name, List<String> current, List<String> desired) {
         for (String roleName : new ArrayList<>(current)) {
             if (!desired.contains(roleName)) {
-                iamService.removeRoleFromInstanceProfile(name, roleName);
+                detachPairing(name, roleName);
             }
         }
         for (String roleName : desired) {
             if (!current.contains(roleName)) {
                 iamService.addRoleToInstanceProfile(name, roleName);
+            }
+        }
+    }
+
+    /**
+     * Detaches one role, tolerating a pairing that is already gone: the operation refuses a role
+     * the profile does not hold, and a caller outside the stack can detach between the list being
+     * read here and this call, which must not leave a deletion or a reconcile part way through. A
+     * profile that has itself gone is a different case and still propagates, so the deletion ends
+     * where it always did rather than carrying on against a profile that is not there.
+     */
+    private void detachPairing(String name, String roleName) {
+        try {
+            iamService.removeRoleFromInstanceProfile(name, roleName);
+        } catch (AwsException e) {
+            if (!"NoSuchEntity".equals(e.getErrorCode()) || findProfile(name) == null) {
+                throw e;
             }
         }
     }
@@ -197,7 +214,7 @@ public class IamInstanceProfileCfnProvisioner implements CfnResourceProvisioner 
         CfnDeletes.safeDelete("IAM instance profile", physicalId, () -> {
             InstanceProfile profile = iamService.getInstanceProfile(physicalId);
             for (String roleName : new ArrayList<>(profile.getRoleNames())) {
-                iamService.removeRoleFromInstanceProfile(physicalId, roleName);
+                detachPairing(physicalId, roleName);
             }
             iamService.deleteInstanceProfile(physicalId);
         }, "NoSuchEntity");

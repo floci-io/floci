@@ -104,6 +104,8 @@ class RequestResourceMembersTest {
                 RequestResourceMembers.table().resourceTagKeys().get("secretsmanager").get("Secret"));
         assertEquals(List.of("aws:ResourceTag/", "ssm:resourceTag/"),
                 RequestResourceMembers.table().resourceTagKeys().get("ssm").get("parameter"));
+        assertEquals(List.of("aws:ResourceTag/", "rds:pg-tag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("rds").get("pg"));
         ObjectNode document = (ObjectNode) MAPPER.readTree("""
                 {"namespaces":{"example":["example"]},"arnFormats":{"example":{
                 "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
@@ -114,7 +116,9 @@ class RequestResourceMembersTest {
                 parse(document.toString()).resourceTagKeys().get("example").get("thing"));
         for (String invalid : List.of("{\"missing\":[\"vendor:ResourceTag/\"]}",
                 "{\"thing\":\"vendor:ResourceTag/\"}", "{\"thing\":[\"vendor:ResourceTag\"]}",
-                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}")) {
+                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}",
+                "{\"thing\":[\"vendor:thing-tag/\"]}", "{\"thing\":[\"example:other-tag/\"]}",
+                "{\"thing\":[\"example:req-tag/\"]}")) {
             ObjectNode changed = document.deepCopy();
             ((ObjectNode) changed.path("resourceTagKeys")).set("example", MAPPER.readTree(invalid));
             assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
@@ -176,6 +180,8 @@ class RequestResourceMembersTest {
                 .collect(Collectors.toSet()),
                 "only the operations listed to read override hand-built operations");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
+        assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
+        assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {
             Map<String, ArnFormat> formats = table.formats().get(operation.substring(0, operation.indexOf(':')));
@@ -670,7 +676,7 @@ class RequestResourceMembersTest {
      * {@code ""}).
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
-        if (resource.arn() != null || resource.fill().values().stream()
+        if (resource.arn() != null || Stream.concat(resource.fill().values().stream(), resource.find().stream())
                 .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
                         || !AwsArnUtils.isArn(given.get(member))))) {
             return false;

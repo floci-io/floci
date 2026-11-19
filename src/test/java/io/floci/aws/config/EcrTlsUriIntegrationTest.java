@@ -1,13 +1,10 @@
 package io.floci.aws.config;
 
 import com.sun.net.httpserver.HttpServer;
-import io.floci.aws.services.acm.CertificateGenerator.GeneratedCertificate;
-import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.ecr.registry.RegistryHttpClient;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
@@ -29,7 +26,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -43,7 +39,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 
 @QuarkusTest
-@TestProfile(EcrTlsUriIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class EcrTlsUriIntegrationTest {
 
     static final String ACCOUNT = "123456789012";
@@ -124,7 +120,7 @@ class EcrTlsUriIntegrationTest {
                 .setSsl(true)
                 .setForceSni(true)
                 .setTrustOptions(new PemTrustOptions().addCertPath(
-                        FlociCertificateAuthority.loadOrCreate(Profile.TLS_DIR).certificatePath().toString()))
+                        FlociCertificateAuthority.loadOrCreate(tlsDir()).certificatePath().toString()))
                 .setVerifyHost(true));
         try {
             RegistryResponse ping = execute(client, HttpMethod.GET, login, "/v2/");
@@ -150,6 +146,11 @@ class EcrTlsUriIntegrationTest {
 
     String expectedRepositoryUri(String repository) {
         return ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:" + ADVERTISED_PORT + "/" + repository;
+    }
+
+    /** Where the profile keeps the CA that issued the leaf the server presents. */
+    Path tlsDir() {
+        return Path.of(SelfSignedTlsProfile.TLS_DIR);
     }
 
     private ValidatableResponse request(String action, Map<String, Object> body) {
@@ -180,40 +181,4 @@ class EcrTlsUriIntegrationTest {
     }
 
     private record RegistryResponse(int status, String body, String digest) {}
-
-    public static class Profile implements QuarkusTestProfile {
-
-        static final Path DATA_DIR = Path.of("target", "floci-ecr-tls-uri-test").toAbsolutePath();
-        static final Path TLS_DIR = DATA_DIR.resolve("tls");
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                GeneratedCertificate leaf = ca.issueServerCertificate(
-                        "localhost", TlsConfigSource.DEFAULT_SAN_HOSTNAMES, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-            } catch (IOException e) {
-                throw new IllegalStateException("Could not prepare ECR TLS URI test certificates", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.ofEntries(
-                    Map.entry("floci.services.ecr.tls-uri", "true"),
-                    Map.entry("floci.services.ecr.uri-style", "hostname"),
-                    Map.entry("floci.default-account-id", ACCOUNT),
-                    Map.entry("floci.default-region", "us-east-1"),
-                    Map.entry("floci.port", String.valueOf(ADVERTISED_PORT)),
-                    Map.entry("floci.tls.enabled", "true"),
-                    Map.entry("floci.tls.aws-https-port", "0"),
-                    Map.entry("floci.storage.persistent-path", DATA_DIR.toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString()),
-                    Map.entry("quarkus.http.test-ssl-port", "0"),
-                    Map.entry("quarkus.http.insecure-requests", "enabled"));
-        }
-    }
 }

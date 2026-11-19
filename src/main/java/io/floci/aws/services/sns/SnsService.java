@@ -373,16 +373,12 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     // The client HTTP and HTTPS subscriptions are posted to. Pin to HTTP/1.1 like AWS SNS: the default
-    // HTTP_2 sends an h2c upgrade to http:// endpoints. sslContext, when given, adds the extra CAs in
-    // floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the JVM's roots
+    // HTTP_2 sends an h2c upgrade to http:// endpoints.
     private static HttpClient deliveryClient(SSLContext sslContext) {
-        HttpClient.Builder builder = HttpClient.newBuilder()
+        return ContainerCaBundle.httpClientBuilder(sslContext)
                 .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(Duration.ofSeconds(5));
-        if (sslContext != null) {
-            builder.sslContext(sslContext);
-        }
-        return builder.build();
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
     }
 
     public void clear() {
@@ -740,6 +736,15 @@ public class SnsService implements Resettable, ResourceProvider {
             requireLargePayloadSubscriptions(topicArn, region);
         }
         topic.getAttributes().put(attributeName, attributeValue);
+        topicStore.put(key, topic);
+    }
+
+    /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
+    public synchronized void removeTopicAttribute(String topicArn, String attributeName, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        topic.getAttributes().remove(attributeName);
         topicStore.put(key, topic);
     }
 

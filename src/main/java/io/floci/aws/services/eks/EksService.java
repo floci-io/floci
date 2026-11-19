@@ -2,6 +2,7 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
@@ -106,6 +107,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final StorageBackend<String, Cluster> storage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final StorageBackend<String, FargateProfile> fargateProfileStorage;
+    private final StorageBackend<String, String> deletedFargateArns;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
@@ -140,6 +142,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.fargateProfileStorage = storageFactory.create("eks", "eks-fargate-profiles.json",
                 new TypeReference<Map<String, FargateProfile>>() {
                 });
+        this.deletedFargateArns = storageFactory.create("eks", "eks-deleted-fargate-arns.json",
+                new TypeReference<Map<String, String>>() {});
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
@@ -413,8 +417,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 continue;
             }
             // The cluster's own region, from its ARN: the issuer must match the one create mints there.
-            String issuer = oidcService.newIssuerUrl(
-                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
+            String issuer = oidcService.newIssuerUrl(regionResolver.regionOf(cluster.getArn()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, clusterKey(cluster), issuer);
             putClusterForAccount(accountId, cluster);
@@ -661,11 +664,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void migrateLegacyKeys() {
         migrateLegacyEntries(storage, this::clusterKey);
         migrateLegacyEntries(nodeGroupStorage, group -> group.getClusterName() == null ? null
-                : nodeGroupKey(clusterKey(AwsArnUtils.regionOrDefault(group.getNodegroupArn(), config.defaultRegion()),
+                : nodeGroupKey(clusterKey(regionResolver.regionOf(group.getNodegroupArn()),
                         group.getClusterName()), group.getNodegroupName()));
         migrateLegacyEntries(fargateProfileStorage, profile -> profile.getClusterName() == null ? null
-                : fargateProfileKey(clusterKey(AwsArnUtils.regionOrDefault(profile.getFargateProfileArn(),
-                        config.defaultRegion()), profile.getClusterName()), profile.getFargateProfileName()));
+                : fargateProfileKey(clusterKey(regionResolver.regionOf(profile.getFargateProfileArn()),
+                        profile.getClusterName()), profile.getFargateProfileName()));
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
             Cluster cluster = entry.value();
             if (cluster.getName() != null && cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null) {
@@ -811,7 +814,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
 
-        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        // The checks below run before the cluster security group is created, so a request they refuse
+        // leaves no group behind for a stack's VPC rollback to trip over.
+        String ipFamily = resolveIpFamily(request.getKubernetesNetworkConfig());
+        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId, ipFamily);
+        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
+        KubernetesNetworkConfig networkConfig = buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr);
+        Logging logging = buildLogging(request.getLogging());
+        List<EncryptionConfig> encryptionConfig = buildEncryptionConfig(request.getEncryptionConfig());
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
             try {
@@ -826,11 +836,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         cluster.setResourcesVpcConfig(vpcConfig);
-        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
-        cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr));
+        cluster.setKubernetesNetworkConfig(networkConfig);
         cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
-        cluster.setLogging(buildLogging(request.getLogging()));
-        cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
+        cluster.setLogging(logging);
+        cluster.setEncryptionConfig(encryptionConfig);
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
@@ -956,7 +965,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      * cluster {@code clusterName} when {@code collection} is null, or else the node group, Fargate profile,
      * add-on, access entry or Pod Identity association {@code name} in that cluster, by the route's
      * collection segment, or for the update {@code name} the add-on it was made to. Empty when there is none,
-     * or the handler would refuse the lookup.
+     * or the handler would refuse the lookup. Deleted add-ons and Fargate profiles retain their ARN for scoped IAM deletion waiters.
      */
     public Optional<String> findResourceArn(String clusterName, String collection, String name) {
         Optional<Cluster> cluster = storage.get(requestClusterKey(clusterName));
@@ -966,8 +975,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         try {
             return Optional.ofNullable(switch (collection) {
                 case "node-groups" -> describeNodeGroup(clusterName, name).getNodegroupArn();
-                case "fargate-profiles" -> describeFargateProfile(clusterName, name).getFargateProfileArn();
-                case "addons" -> addons.describe(cluster.get(), name).addonArn();
+                case "fargate-profiles" -> fargateAuthorizationArn(cluster.get(), name).orElse(null);
+                case "addons" -> addons.authorizationArn(cluster.get(), name).orElse(null);
                 case "access-entries" -> accessEntries.describe(cluster.get(), name).accessEntryArn();
                 case "pod-identity-associations" -> podIdentityAssociations.describe(cluster.get(), name).associationArn();
                 case "updates" -> {
@@ -1036,11 +1045,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void validateInstanceRegion(Cluster cluster, Instance instance) {
         String clusterReg = resolveClusterRegion(cluster);
         String instReg = instance.getRegion();
-        if (instReg == null && instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
-            String az = instance.getPlacement().getAvailabilityZone();
-            if (az.length() > 1 && Character.isLetter(az.charAt(az.length() - 1))) {
-                instReg = az.substring(0, az.length() - 1);
-            }
+        if (instReg == null && instance.getPlacement() != null) {
+            instReg = AvailabilityZoneIds.regionOf(instance.getPlacement().getAvailabilityZone());
         }
         if (instReg != null && !instReg.equals(clusterReg)) {
             throw new AwsException("InvalidParameterException", "Cannot join instance " + instance.getInstanceId()
@@ -1149,6 +1155,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             if (addons != null) {
                 addons.deleteClusterAddons(cluster);
             }
+            String deletedPrefix = deletedFargatePrefix(cluster);
+            deletedFargateArns.keys().stream().filter(key -> key.startsWith(deletedPrefix))
+                    .toList().forEach(deletedFargateArns::delete);
             synchronized (clustersBeingDeleted) {
                 storage.delete(clusterKey(cluster));
                 clearAppliedClusterUserData(cluster, name);
@@ -1455,7 +1464,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
+    public synchronized FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
         Cluster cluster = describeCluster(clusterName);
 
         String fargateProfileName = request.getFargateProfileName();
@@ -1492,6 +1501,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         profile.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
         fargateProfileStorage.put(storageKey, profile);
+        deletedFargateArns.delete(deletedFargatePrefix(cluster) + fargateProfileName);
         return profile;
     }
 
@@ -1510,8 +1520,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 .collect(Collectors.toList());
     }
 
-    public FargateProfile deleteFargateProfile(String clusterName, String fargateProfileName) {
+    private static String deletedFargatePrefix(Cluster cluster) {
+        return cluster.getArn() + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
+    }
+
+    private synchronized Optional<String> fargateAuthorizationArn(Cluster cluster, String name) {
+        return fargateProfileStorage.get(fargateProfileKey(clusterKey(cluster), name))
+                .map(FargateProfile::getFargateProfileArn)
+                .or(() -> deletedFargateArns.get(deletedFargatePrefix(cluster) + name));
+    }
+
+    public synchronized FargateProfile deleteFargateProfile(String clusterName, String fargateProfileName) {
         FargateProfile profile = describeFargateProfile(clusterName, fargateProfileName);
+        deletedFargateArns.put(deletedFargatePrefix(describeCluster(clusterName)) + fargateProfileName,
+                profile.getFargateProfileArn());
         profile.setStatus(FargateProfileStatus.DELETING);
         fargateProfileStorage.delete(fargateProfileKey(requestClusterKey(clusterName), fargateProfileName));
         return profile;
@@ -1665,17 +1687,25 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         String vpcId = null;
         for (String subnetId : vpcConfig.getSubnetIds()) {
+            String subnetVpcId;
             try {
-                vpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
+                subnetVpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
             } catch (AwsException e) {
                 throw new AwsException("InvalidParameterException",
                         "Subnet ID '" + subnetId + "' does not exist", 400);
             }
+            if (vpcId != null && !vpcId.equals(subnetVpcId)) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' is in VPC '" + subnetVpcId
+                                + "', not in VPC '" + vpcId + "' of the other subnets", 400);
+            }
+            vpcId = subnetVpcId;
         }
         return vpcId;
     }
 
-    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId) {
+    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId,
+                                                      String ipFamily) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
         if (request != null) {
             response.setSubnetIds(request.getSubnetIds() != null ? request.getSubnetIds() : List.of());
@@ -1690,6 +1720,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
+            if (request.getPublicAccessCidrs() != null) {
+                for (String cidr : request.getPublicAccessCidrs()) {
+                    if (!SecurityGroupPolicy.validCidr(cidr)) {
+                        throw new AwsException("InvalidParameterException",
+                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                        + cidr, 400);
+                    }
+                    if (cidr.contains(":") && !"ipv6".equals(ipFamily)) {
+                        throw new AwsException("InvalidParameterException",
+                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                        + cidr + ". IPv6 blocks cannot be added to IPv4 clusters.", 400);
+                    }
+                }
+            }
             response.setPublicAccessCidrs(
                     request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
         } else {
@@ -1772,8 +1816,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         config.setServiceIpv4Cidr(resolvedCidr);
-        config.setIpFamily(request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
+        config.setIpFamily(resolveIpFamily(request));
         return config;
+    }
+
+    private static String resolveIpFamily(KubernetesNetworkConfig request) {
+        String ipFamily = request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4";
+        if (!"ipv4".equals(ipFamily) && !"ipv6".equals(ipFamily)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid ipFamily '" + ipFamily + "'. Valid values: ipv4 | ipv6", 400);
+        }
+        return ipFamily;
     }
 
     static Logging defaultLogging() {
@@ -1838,8 +1891,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     "Only one encryption configuration is allowed", 400);
         }
         EncryptionConfig config = requestedConfigs.getFirst();
-        if (config == null || config.getResources() == null || config.getResources().isEmpty()
-                || !List.of("secrets").equals(config.getResources())) {
+        // AWS: Resources is optional, "this field no longer affects which resources are encrypted", and
+        // "secrets" is the only supported value.
+        boolean resourcesOmitted = config != null && (config.getResources() == null || config.getResources().isEmpty());
+        if (config == null || !(resourcesOmitted || List.of("secrets").equals(config.getResources()))) {
             throw new AwsException("InvalidParameterException",
                     "Invalid k8s resource and provider for encryption", 400);
         }

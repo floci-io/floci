@@ -13,12 +13,18 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrNotebookExecution;
+import io.floci.aws.services.emr.model.EmrPersistentAppUi;
+import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
+import io.floci.aws.services.emr.model.EmrStudio;
+import io.floci.aws.services.emr.model.EmrStudioSessionMapping;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -48,11 +54,18 @@ public class EmrHandler {
     static final int INSTANCES_PER_PAGE = 2000;
 
     private final EmrService service;
+    private final EmrStudioService studios;
+    private final EmrNotebookExecutionService notebookExecutions;
+    private final EmrAppUiService appUis;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public EmrHandler(EmrService service, ObjectMapper objectMapper) {
+    public EmrHandler(EmrService service, EmrStudioService studios, EmrNotebookExecutionService notebookExecutions,
+                      EmrAppUiService appUis, ObjectMapper objectMapper) {
         this.service = service;
+        this.studios = studios;
+        this.notebookExecutions = notebookExecutions;
+        this.appUis = appUis;
         this.objectMapper = objectMapper;
     }
 
@@ -73,15 +86,39 @@ public class EmrHandler {
                 case "DescribeStep" -> handleDescribeStep(request);
                 case "ListSteps" -> handleListSteps(request);
                 case "CancelSteps" -> handleCancelSteps(request);
+                case "StartSession" -> handleStartSession(request);
+                case "GetSession" -> handleGetSession(request);
+                case "ListSessions" -> handleListSessions(request);
+                case "TerminateSession" -> handleTerminateSession(request);
+                case "GetSessionEndpoint" -> handleGetSessionEndpoint(request);
+                case "CreateStudio" -> handleCreateStudio(request);
+                case "DescribeStudio" -> handleDescribeStudio(request);
+                case "ListStudios" -> handleListStudios(request);
+                case "UpdateStudio" -> handleUpdateStudio(request);
+                case "DeleteStudio" -> handleDeleteStudio(request);
+                case "CreateStudioSessionMapping" -> handleCreateStudioSessionMapping(request);
+                case "GetStudioSessionMapping" -> handleGetStudioSessionMapping(request);
+                case "ListStudioSessionMappings" -> handleListStudioSessionMappings(request);
+                case "UpdateStudioSessionMapping" -> handleUpdateStudioSessionMapping(request);
+                case "DeleteStudioSessionMapping" -> handleDeleteStudioSessionMapping(request);
+                case "StartNotebookExecution" -> handleStartNotebookExecution(request);
+                case "DescribeNotebookExecution" -> handleDescribeNotebookExecution(request);
+                case "StopNotebookExecution" -> handleStopNotebookExecution(request);
+                case "ListNotebookExecutions" -> handleListNotebookExecutions(request);
+                case "CreatePersistentAppUI" -> handleCreatePersistentAppUi(request);
+                case "DescribePersistentAppUI" -> handleDescribePersistentAppUi(request);
+                case "GetPersistentAppUIPresignedURL" -> handleGetPersistentAppUiPresignedUrl(request);
+                case "GetOnClusterAppUIPresignedURL" -> handleGetOnClusterAppUiPresignedUrl(request);
+                case "GetClusterSessionCredentials" -> handleGetClusterSessionCredentials(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
                 case "ListInstanceFleets" -> handleListInstanceFleets(request);
                 case "ListInstances" -> handleListInstances(request);
-                case "CreateSecurityConfiguration" -> handleCreateSecurityConfiguration(request);
-                case "DescribeSecurityConfiguration" -> handleDescribeSecurityConfiguration(request);
-                case "DeleteSecurityConfiguration" -> handleDeleteSecurityConfiguration(request);
-                case "ListSecurityConfigurations" -> handleListSecurityConfigurations();
+                case "CreateSecurityConfiguration" -> handleCreateSecurityConfiguration(request, region);
+                case "DescribeSecurityConfiguration" -> handleDescribeSecurityConfiguration(request, region);
+                case "DeleteSecurityConfiguration" -> handleDeleteSecurityConfiguration(request, region);
+                case "ListSecurityConfigurations" -> handleListSecurityConfigurations(region);
                 case "AddTags" -> handleAddTags(request);
                 case "RemoveTags" -> handleRemoveTags(request);
                 case "ModifyInstanceGroups" -> handleModifyInstanceGroups(request, region);
@@ -160,6 +197,7 @@ public class EmrHandler {
         cluster.setKeepJobFlowAliveWhenNoSteps(instances.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
         cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
+        cluster.setSessionEnabled(request.path("SessionEnabled").asBoolean(false));
         cluster.setEc2Attributes(buildEc2Attributes(instances, region));
         cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
         cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
@@ -275,6 +313,618 @@ public class EmrHandler {
             }
             arr.add(node);
         }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Sessions ────────────────────────────
+
+    private Response handleStartSession(JsonNode request) {
+        EmrSessions.Request start = new EmrSessions.Request(string(request, "Name"),
+                string(request, "ExecutionRoleArn"), configurationList(request.path("EngineConfigurations"),
+                "EngineConfigurations"), monitoringConfiguration(request.path("MonitoringConfiguration")),
+                longOrNull(request.path("SessionIdleTimeoutInMinutes"), "SessionIdleTimeoutInMinutes"),
+                string(request, "ClientRequestToken"), tagList(request.path("Tags"), "Tags"));
+        EmrSession session = service.startSession(string(request, "ClusterId"), start);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Id", session.getId());
+        response.put("ClusterId", session.getClusterId());
+        response.put("Arn", session.getArn());
+        response.put("AccountId", session.getAccountId());
+        response.put("State", session.getState());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetSession(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Session", sessionNode(service.getSession(string(request, "ClusterId"),
+                string(request, "SessionId"))));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSessions(JsonNode request) {
+        PaginatedResult<EmrSession> page = service.listSessions(string(request, "ClusterId"),
+                strings(request.path("SessionStates"), "SessionStates"), intOrNull(request.path("MaxResults")),
+                string(request, "NextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode sessions = response.putArray("Sessions");
+        page.items().forEach(session -> sessions.add(sessionNode(session)));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleTerminateSession(JsonNode request) {
+        EmrSession session = service.terminateSession(string(request, "ClusterId"), string(request, "SessionId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ClusterId", session.getClusterId());
+        response.put("SessionId", session.getId());
+        response.put("State", session.getState());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetSessionEndpoint(JsonNode request) {
+        SparkConnectEndpoint endpoint = service.sessionEndpoint(string(request, "ClusterId"),
+                string(request, "SessionId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Endpoint", endpoint.url());
+        response.put("AuthToken", endpoint.authToken());
+        putEpoch(response, "AuthTokenExpirationTime", endpoint.authTokenExpiresAt());
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode sessionNode(EmrSession session) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", session.getId());
+        node.put("ClusterId", session.getClusterId());
+        if (session.getName() != null) {
+            node.put("Name", session.getName());
+        }
+        node.put("Arn", session.getArn());
+        node.put("State", session.getState());
+        if (session.getStateChangeReason() != null) {
+            node.put("StateChangeReason", session.getStateChangeReason());
+        }
+        node.put("ReleaseLabel", session.getReleaseLabel());
+        if (session.getExecutionRoleArn() != null) {
+            node.put("ExecutionRoleArn", session.getExecutionRoleArn());
+        }
+        node.put("AccountId", session.getAccountId());
+        putEpoch(node, "CreatedAt", session.getCreatedAt());
+        putEpoch(node, "UpdatedAt", session.getUpdatedAt());
+        putEpoch(node, "StartedAt", session.getStartedAt());
+        putEpoch(node, "EndedAt", session.getEndedAt());
+        putEpoch(node, "IdleSince", session.getIdleSince());
+        setRawJson(node, "EngineConfigurations", session.getEngineConfigurations());
+        setRawJson(node, "MonitoringConfiguration", session.getMonitoringConfiguration());
+        node.put("SessionIdleTimeoutInMinutes", session.getSessionIdleTimeoutInMinutes());
+        node.set("Tags", tagArray(session.getTags()));
+        return node;
+    }
+
+    /**
+     * A member a string where the model has one; another JSON type is refused with SerializationException, as an
+     * awsJson1_1 service refuses a member of the wrong type (Smithy's malformed-request tests), in Floci's own wording.
+     */
+    private static String string(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw malformed(member + " must be a string");
+        }
+        return value.asText();
+    }
+
+    private static Long longOrNull(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw malformed(member + " must be an integer");
+        }
+        return value.asLong();
+    }
+
+    /**
+     * StartSession's SessionMonitoringConfiguration, kept as its raw JSON; null when it is not there or empty. Each of
+     * its S3, CloudWatch and managed logging configurations is a structure of an {@code Enabled} boolean, strings, and
+     * {@code LogTypes}, a map of lists of strings.
+     */
+    private static String monitoringConfiguration(JsonNode value) {
+        String member = "MonitoringConfiguration";
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        requireStructure(value, member);
+        for (String logging : List.of("S3LoggingConfiguration", "CloudWatchLoggingConfiguration",
+                "ManagedLoggingConfiguration")) {
+            JsonNode configuration = value.path(logging);
+            if (configuration.isMissingNode() || configuration.isNull()) {
+                continue;
+            }
+            String path = member + "." + logging;
+            requireStructure(configuration, path);
+            configuration.properties().forEach(entry -> {
+                JsonNode field = entry.getValue();
+                if (field.isNull()) {
+                    return;
+                }
+                // Not a switch on the member names: the action tables read a string case here as an EMR action.
+                if ("Enabled".equals(entry.getKey())) {
+                    if (!field.isBoolean()) {
+                        throw malformed(path + ".Enabled must be a boolean");
+                    }
+                } else if ("LogTypes".equals(entry.getKey())) {
+                    requireStructure(field, path + ".LogTypes");
+                    field.forEach(types -> strings(types, path + ".LogTypes"));
+                } else if (!field.isTextual()) {
+                    throw malformed(path + "." + entry.getKey() + " must be a string");
+                }
+            });
+        }
+        return value.isEmpty() ? null : value.toString();
+    }
+
+    private static void requireStructure(JsonNode value, String member) {
+        if (!value.isObject()) {
+            throw malformed(member + " must be a structure");
+        }
+    }
+
+    // A list of strings; null when it is not there.
+    private static List<String> strings(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of strings");
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode element : value) {
+            if (!element.isTextual()) {
+                throw malformed(member + " must be a list of strings");
+            }
+            values.add(element.asText());
+        }
+        return values;
+    }
+
+    /**
+     * A ConfigurationList member, kept as its raw JSON; null when it is not there or empty. Each Configuration's
+     * {@code Classification} is a string, its {@code Properties} a map of strings, and its {@code Configurations}
+     * a ConfigurationList in turn.
+     */
+    private static String configurationList(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        checkConfigurations(value, member);
+        return value.isEmpty() ? null : value.toString();
+    }
+
+    private static void checkConfigurations(JsonNode value, String member) {
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of configurations");
+        }
+        for (JsonNode configuration : value) {
+            if (!configuration.isObject()) {
+                throw malformed(member + " must be a list of configurations");
+            }
+            JsonNode classification = configuration.path("Classification");
+            if (!classification.isMissingNode() && !classification.isNull() && !classification.isTextual()) {
+                throw malformed(member + "'s Classification must be a string");
+            }
+            JsonNode properties = configuration.path("Properties");
+            if (!properties.isMissingNode() && !properties.isNull()) {
+                if (!properties.isObject()) {
+                    throw malformed(member + "'s Properties must be a map of strings");
+                }
+                properties.forEach(property -> {
+                    if (!property.isTextual()) {
+                        throw malformed(member + "'s Properties must be a map of strings");
+                    }
+                });
+            }
+            JsonNode nested = configuration.path("Configurations");
+            if (!nested.isMissingNode() && !nested.isNull()) {
+                checkConfigurations(nested, member);
+            }
+        }
+    }
+
+    /**
+     * A TagList member: each Tag's Key and Value strings. A tag without its Key, "the minimum required information for
+     * a valid tag", is refused, in Floci's own wording.
+     */
+    private static Map<String, String> tagList(JsonNode value, String member) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (value.isMissingNode() || value.isNull()) {
+            return tags;
+        }
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of tags");
+        }
+        for (JsonNode tag : value) {
+            if (!tag.isObject()) {
+                throw malformed(member + " must be a list of tags");
+            }
+            String key = string(tag, "Key");
+            if (key == null) {
+                throw new AwsException("InvalidRequestException", "A tag in " + member + " has no Key.", 400);
+            }
+            tags.put(key, string(tag, "Value"));
+        }
+        return tags;
+    }
+
+    private static AwsException malformed(String message) {
+        return new AwsException("SerializationException", message, 400);
+    }
+
+    // ──────────────────────────── Studios ────────────────────────────
+
+    private Response handleCreateStudio(JsonNode request) {
+        EmrStudio studio = new EmrStudio();
+        studio.setName(string(request, "Name"));
+        studio.setDescription(string(request, "Description"));
+        studio.setAuthMode(string(request, "AuthMode"));
+        studio.setVpcId(string(request, "VpcId"));
+        studio.setSubnetIds(strings(request.path("SubnetIds"), "SubnetIds"));
+        studio.setServiceRole(string(request, "ServiceRole"));
+        studio.setUserRole(string(request, "UserRole"));
+        studio.setWorkspaceSecurityGroupId(string(request, "WorkspaceSecurityGroupId"));
+        studio.setEngineSecurityGroupId(string(request, "EngineSecurityGroupId"));
+        studio.setDefaultS3Location(string(request, "DefaultS3Location"));
+        studio.setIdpAuthUrl(string(request, "IdpAuthUrl"));
+        studio.setIdpRelayStateParameterName(string(request, "IdpRelayStateParameterName"));
+        studio.setTags(tagList(request.path("Tags"), "Tags"));
+        studio.setTrustedIdentityPropagationEnabled(bool(request, "TrustedIdentityPropagationEnabled"));
+        studio.setIdcUserAssignment(string(request, "IdcUserAssignment"));
+        studio.setIdcInstanceArn(string(request, "IdcInstanceArn"));
+        studio.setEncryptionKeyArn(string(request, "EncryptionKeyArn"));
+        EmrStudio created = studios.createStudio(studio);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StudioId", created.getStudioId());
+        response.put("Url", created.getUrl());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeStudio(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Studio", studioNode(studios.describeStudio(string(request, "StudioId"))));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStudios(JsonNode request) {
+        PaginatedResult<EmrStudio> page = studios.listStudios(string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("Studios");
+        for (EmrStudio studio : page.items()) {
+            ObjectNode summary = summaries.addObject();
+            summary.put("StudioId", studio.getStudioId());
+            summary.put("Name", studio.getName());
+            summary.put("VpcId", studio.getVpcId());
+            if (studio.getDescription() != null) {
+                summary.put("Description", studio.getDescription());
+            }
+            summary.put("Url", studio.getUrl());
+            summary.put("AuthMode", studio.getAuthMode());
+            putEpoch(summary, "CreationTime", studio.getCreationTime());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStudio(JsonNode request) {
+        studios.updateStudio(string(request, "StudioId"), string(request, "Name"), string(request, "Description"),
+                strings(request.path("SubnetIds"), "SubnetIds"), string(request, "DefaultS3Location"),
+                string(request, "EncryptionKeyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteStudio(JsonNode request) {
+        studios.deleteStudio(string(request, "StudioId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateStudioSessionMapping(JsonNode request) {
+        studios.createSessionMapping(string(request, "StudioId"), identity(request),
+                string(request, "SessionPolicyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetStudioSessionMapping(JsonNode request) {
+        String studioId = string(request, "StudioId");
+        EmrStudioSessionMapping mapping = studios.getSessionMapping(studioId, identity(request));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode detail = sessionMappingNode(studioId, mapping);
+        putEpoch(detail, "LastModifiedTime", mapping.getLastModifiedTime());
+        response.set("SessionMapping", detail);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStudioSessionMappings(JsonNode request) {
+        PaginatedResult<EmrStudioService.StudioMapping> page = studios.listSessionMappings(
+                string(request, "StudioId"), string(request, "IdentityType"), string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode mappings = response.putArray("SessionMappings");
+        page.items().forEach(item -> mappings.add(sessionMappingNode(item.studioId(), item.mapping())));
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStudioSessionMapping(JsonNode request) {
+        studios.updateSessionMapping(string(request, "StudioId"), identity(request),
+                string(request, "SessionPolicyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteStudioSessionMapping(JsonNode request) {
+        studios.deleteSessionMapping(string(request, "StudioId"), identity(request));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static EmrStudioService.Identity identity(JsonNode request) {
+        return new EmrStudioService.Identity(string(request, "IdentityType"), string(request, "IdentityId"),
+                string(request, "IdentityName"));
+    }
+
+    private ObjectNode studioNode(EmrStudio studio) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("StudioId", studio.getStudioId());
+        node.put("StudioArn", studio.getStudioArn());
+        node.put("Name", studio.getName());
+        putIfSet(node, "Description", studio.getDescription());
+        node.put("AuthMode", studio.getAuthMode());
+        node.put("VpcId", studio.getVpcId());
+        ArrayNode subnets = node.putArray("SubnetIds");
+        studio.getSubnetIds().forEach(subnets::add);
+        node.put("ServiceRole", studio.getServiceRole());
+        putIfSet(node, "UserRole", studio.getUserRole());
+        node.put("WorkspaceSecurityGroupId", studio.getWorkspaceSecurityGroupId());
+        node.put("EngineSecurityGroupId", studio.getEngineSecurityGroupId());
+        node.put("Url", studio.getUrl());
+        putEpoch(node, "CreationTime", studio.getCreationTime());
+        node.put("DefaultS3Location", studio.getDefaultS3Location());
+        putIfSet(node, "IdpAuthUrl", studio.getIdpAuthUrl());
+        putIfSet(node, "IdpRelayStateParameterName", studio.getIdpRelayStateParameterName());
+        node.set("Tags", tagArray(studio.getTags()));
+        putIfSet(node, "IdcInstanceArn", studio.getIdcInstanceArn());
+        if (studio.getTrustedIdentityPropagationEnabled() != null) {
+            node.put("TrustedIdentityPropagationEnabled", studio.getTrustedIdentityPropagationEnabled());
+        }
+        putIfSet(node, "IdcUserAssignment", studio.getIdcUserAssignment());
+        putIfSet(node, "EncryptionKeyArn", studio.getEncryptionKeyArn());
+        return node;
+    }
+
+    // A SessionMappingSummary; GetStudioSessionMapping's detail adds its LastModifiedTime.
+    private ObjectNode sessionMappingNode(String studioId, EmrStudioSessionMapping mapping) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("StudioId", studioId);
+        node.put("IdentityId", mapping.getIdentityId());
+        putIfSet(node, "IdentityName", mapping.getIdentityName());
+        node.put("IdentityType", mapping.getIdentityType());
+        node.put("SessionPolicyArn", mapping.getSessionPolicyArn());
+        putEpoch(node, "CreationTime", mapping.getCreationTime());
+        return node;
+    }
+
+    private static void putIfSet(ObjectNode node, String field, String value) {
+        if (value != null) {
+            node.put(field, value);
+        }
+    }
+
+    private static Boolean bool(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isBoolean()) {
+            throw malformed(member + " must be a boolean");
+        }
+        return value.asBoolean();
+    }
+
+    // ──────────────────────────── Notebook executions ────────────────────────────
+
+    private Response handleStartNotebookExecution(JsonNode request) {
+        EmrNotebookExecution execution = new EmrNotebookExecution();
+        execution.setEditorId(string(request, "EditorId"));
+        execution.setRelativePath(string(request, "RelativePath"));
+        execution.setName(string(request, "NotebookExecutionName"));
+        execution.setNotebookParams(string(request, "NotebookParams"));
+        JsonNode engine = request.path("ExecutionEngine");
+        if (!engine.isMissingNode() && !engine.isNull()) {
+            requireStructure(engine, "ExecutionEngine");
+            execution.setEngineId(string(engine, "Id"));
+            execution.setEngineType(string(engine, "Type"));
+            execution.setMasterInstanceSecurityGroupId(string(engine, "MasterInstanceSecurityGroupId"));
+            execution.setExecutionRoleArn(string(engine, "ExecutionRoleArn"));
+        }
+        execution.setServiceRole(string(request, "ServiceRole"));
+        execution.setNotebookInstanceSecurityGroupId(string(request, "NotebookInstanceSecurityGroupId"));
+        execution.setTags(tagList(request.path("Tags"), "Tags"));
+        JsonNode input = request.path("NotebookS3Location");
+        if (!input.isMissingNode() && !input.isNull()) {
+            requireStructure(input, "NotebookS3Location");
+            execution.setNotebookS3Bucket(string(input, "Bucket"));
+            execution.setNotebookS3Key(string(input, "Key"));
+        }
+        JsonNode output = request.path("OutputNotebookS3Location");
+        if (!output.isMissingNode() && !output.isNull()) {
+            requireStructure(output, "OutputNotebookS3Location");
+            execution.setOutputNotebookS3Bucket(string(output, "Bucket"));
+            execution.setOutputNotebookS3Key(string(output, "Key"));
+        }
+        execution.setOutputNotebookFormat(string(request, "OutputNotebookFormat"));
+        execution.setEnvironmentVariables(stringMap(request.path("EnvironmentVariables"), "EnvironmentVariables"));
+        EmrNotebookExecution started = notebookExecutions.start(execution);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("NotebookExecutionId", started.getId());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeNotebookExecution(JsonNode request) {
+        EmrNotebookExecution execution = notebookExecutions.describe(string(request, "NotebookExecutionId"));
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("NotebookExecutionId", execution.getId());
+        putIfSet(node, "EditorId", execution.getEditorId());
+        ObjectNode engine = node.putObject("ExecutionEngine");
+        engine.put("Id", execution.getEngineId());
+        engine.put("Type", execution.getEngineType());
+        putIfSet(engine, "MasterInstanceSecurityGroupId", execution.getMasterInstanceSecurityGroupId());
+        putIfSet(engine, "ExecutionRoleArn", execution.getExecutionRoleArn());
+        putIfSet(node, "NotebookExecutionName", execution.getName());
+        putIfSet(node, "NotebookParams", execution.getNotebookParams());
+        node.put("Status", execution.getStatus());
+        putEpoch(node, "StartTime", execution.getStartTime());
+        putEpoch(node, "EndTime", execution.getEndTime());
+        node.put("Arn", execution.getArn());
+        putIfSet(node, "LastStateChangeReason", execution.getLastStateChangeReason());
+        putIfSet(node, "NotebookInstanceSecurityGroupId", execution.getNotebookInstanceSecurityGroupId());
+        node.set("Tags", tagArray(execution.getTags()));
+        putS3Location(node, "NotebookS3Location", execution.getNotebookS3Bucket(), execution.getNotebookS3Key());
+        putS3Location(node, "OutputNotebookS3Location", execution.getOutputNotebookS3Bucket(),
+                execution.getOutputNotebookS3Key());
+        putIfSet(node, "OutputNotebookFormat", execution.getOutputNotebookFormat());
+        putIfSet(node, "OutputNotebookURI", execution.getOutputNotebookUri());
+        if (execution.getEnvironmentVariables() != null) {
+            ObjectNode variables = node.putObject("EnvironmentVariables");
+            execution.getEnvironmentVariables().forEach(variables::put);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("NotebookExecution", node);
+        return Response.ok(response).build();
+    }
+
+    private Response handleStopNotebookExecution(JsonNode request) {
+        notebookExecutions.stop(string(request, "NotebookExecutionId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListNotebookExecutions(JsonNode request) {
+        PaginatedResult<EmrNotebookExecution> page = notebookExecutions.list(string(request, "EditorId"),
+                string(request, "Status"),
+                // As ListClusters reads its CreatedAfter and CreatedBefore.
+                AwsJsonTimestamp.epochSeconds(request, "From", "InvalidRequestException"),
+                AwsJsonTimestamp.epochSeconds(request, "To", "InvalidRequestException"),
+                string(request, "ExecutionEngineId"), string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("NotebookExecutions");
+        for (EmrNotebookExecution execution : page.items()) {
+            ObjectNode summary = summaries.addObject();
+            summary.put("NotebookExecutionId", execution.getId());
+            putIfSet(summary, "EditorId", execution.getEditorId());
+            putIfSet(summary, "NotebookExecutionName", execution.getName());
+            summary.put("Status", execution.getStatus());
+            putEpoch(summary, "StartTime", execution.getStartTime());
+            putEpoch(summary, "EndTime", execution.getEndTime());
+            putS3Location(summary, "NotebookS3Location", execution.getNotebookS3Bucket(),
+                    execution.getNotebookS3Key());
+            summary.put("ExecutionEngineId", execution.getEngineId());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private void putS3Location(ObjectNode node, String field, String bucket, String key) {
+        if (bucket != null || key != null) {
+            ObjectNode location = node.putObject(field);
+            putIfSet(location, "Bucket", bucket);
+            putIfSet(location, "Key", key);
+        }
+    }
+
+    // A map of strings; null when it is not there.
+    private static Map<String, String> stringMap(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        requireStructure(value, member);
+        Map<String, String> values = new LinkedHashMap<>();
+        value.properties().forEach(entry -> {
+            if (!entry.getValue().isTextual()) {
+                throw malformed(member + " must be a map of strings");
+            }
+            values.put(entry.getKey(), entry.getValue().asText());
+        });
+        return values;
+    }
+
+    // ──────────────────────────── Application UIs ────────────────────────────
+
+    private Response handleCreatePersistentAppUi(JsonNode request) {
+        JsonNode containers = request.path("EMRContainersConfig");
+        if (!containers.isMissingNode() && !containers.isNull()) {
+            requireStructure(containers, "EMRContainersConfig");
+            string(containers, "JobRunId");
+        }
+        string(request, "XReferer");
+        EmrAppUiService.Created created = appUis.create(string(request, "TargetResourceArn"),
+                string(request, "ProfilerType"), tagList(request.path("Tags"), "Tags"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PersistentAppUIId", created.appUi().getId());
+        response.put("RuntimeRoleEnabledCluster", created.runtimeRoleEnabledCluster());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribePersistentAppUi(JsonNode request) {
+        EmrPersistentAppUi appUi = appUis.describe(string(request, "PersistentAppUIId"));
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("PersistentAppUIId", appUi.getId());
+        ArrayNode types = node.putArray("PersistentAppUITypeList");
+        appUi.getTypes().forEach(types::add);
+        node.put("PersistentAppUIStatus", appUi.getStatus());
+        node.put("AuthorId", appUi.getAuthorId());
+        putEpoch(node, "CreationTime", appUi.getCreationTime());
+        putEpoch(node, "LastModifiedTime", appUi.getLastModifiedTime());
+        putIfSet(node, "LastStateChangeReason", appUi.getLastStateChangeReason());
+        node.set("Tags", tagArray(appUi.getTags()));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("PersistentAppUI", node);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetPersistentAppUiPresignedUrl(JsonNode request) {
+        bool(request, "AuthProxyCall");
+        string(request, "ExecutionRoleArn");
+        return presignedUrl(appUis.persistentUrl(string(request, "PersistentAppUIId"),
+                string(request, "PersistentAppUIType"), string(request, "ApplicationId")));
+    }
+
+    private Response handleGetOnClusterAppUiPresignedUrl(JsonNode request) {
+        string(request, "ExecutionRoleArn");
+        Boolean dryRun = bool(request, "DryRun");
+        return presignedUrl(appUis.onClusterUrl(string(request, "ClusterId"), string(request, "OnClusterAppUIType"),
+                string(request, "ApplicationId"), Boolean.TRUE.equals(dryRun)));
+    }
+
+    // A presigned URL's answer: whether it is ready, and the URL, none for a dry run.
+    private Response presignedUrl(EmrAppUiService.Presigned presigned) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PresignedURLReady", presigned.ready());
+        putIfSet(response, "PresignedURL", presigned.url());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetClusterSessionCredentials(JsonNode request) {
+        EmrService.ClusterSessionCredentials credentials = service.clusterSessionCredentials(
+                string(request, "ClusterId"), string(request, "ExecutionRoleArn"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode usernamePassword = response.putObject("Credentials").putObject("UsernamePassword");
+        usernamePassword.put("Username", credentials.username());
+        usernamePassword.put("Password", credentials.password());
+        putEpoch(response, "ExpiresAt", credentials.expiresAt());
         return Response.ok(response).build();
     }
 
@@ -485,17 +1135,17 @@ public class EmrHandler {
 
     // ──────────────────────────── Security configurations ────────────────────────────
 
-    private Response handleCreateSecurityConfiguration(JsonNode request) {
+    private Response handleCreateSecurityConfiguration(JsonNode request, String region) {
         SecurityConfiguration sc = service.createSecurityConfiguration(
-                text(request, "Name"), text(request, "SecurityConfiguration"));
+                text(request, "Name"), text(request, "SecurityConfiguration"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", sc.getName());
         response.put("CreationDateTime", epoch(sc.getCreationDateTime()));
         return Response.ok(response).build();
     }
 
-    private Response handleDescribeSecurityConfiguration(JsonNode request) {
-        SecurityConfiguration sc = service.describeSecurityConfiguration(text(request, "Name"));
+    private Response handleDescribeSecurityConfiguration(JsonNode request, String region) {
+        SecurityConfiguration sc = service.describeSecurityConfiguration(text(request, "Name"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", sc.getName());
         response.put("SecurityConfiguration", sc.getSecurityConfiguration());
@@ -503,8 +1153,8 @@ public class EmrHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteSecurityConfiguration(JsonNode request) {
-        service.deleteSecurityConfiguration(text(request, "Name"));
+    private Response handleDeleteSecurityConfiguration(JsonNode request, String region) {
+        service.deleteSecurityConfiguration(text(request, "Name"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -573,10 +1223,10 @@ public class EmrHandler {
         return node.asInt();
     }
 
-    private Response handleListSecurityConfigurations() {
+    private Response handleListSecurityConfigurations(String region) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("SecurityConfigurations");
-        for (SecurityConfiguration sc : service.listSecurityConfigurations()) {
+        for (SecurityConfiguration sc : service.listSecurityConfigurations(region)) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", sc.getName());
             node.put("CreationDateTime", epoch(sc.getCreationDateTime()));
@@ -587,13 +1237,24 @@ public class EmrHandler {
 
     // ──────────────────────────── Tags ────────────────────────────
 
+    // A tag call's ResourceId is "a cluster identifier or an Amazon EMR Studio ID".
     private Response handleAddTags(JsonNode request) {
-        service.addTags(text(request, "ResourceId"), parseTags(request.path("Tags")));
+        String resourceId = text(request, "ResourceId");
+        if (EmrStudioService.isStudioId(resourceId)) {
+            studios.addTags(resourceId, parseTags(request.path("Tags")));
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        service.addTags(resourceId, parseTags(request.path("Tags")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleRemoveTags(JsonNode request) {
-        service.removeTags(text(request, "ResourceId"), stringList(request.path("TagKeys")));
+        String resourceId = text(request, "ResourceId");
+        if (EmrStudioService.isStudioId(resourceId)) {
+            studios.removeTags(resourceId, stringList(request.path("TagKeys")));
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        service.removeTags(resourceId, stringList(request.path("TagKeys")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -759,6 +1420,7 @@ public class EmrHandler {
         node.put("EbsRootVolumeSize", c.getEbsRootVolumeSize());
         node.put("StepConcurrencyLevel", c.getStepConcurrencyLevel());
         node.put("ClusterArn", c.getClusterArn());
+        node.put("SessionEnabled", c.isSessionEnabled());
         return node;
     }
 

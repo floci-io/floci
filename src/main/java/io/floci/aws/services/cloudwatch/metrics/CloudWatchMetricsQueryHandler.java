@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.dashboards.model.Dashboard;
@@ -26,6 +27,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -260,7 +262,7 @@ public class CloudWatchMetricsQueryHandler {
 
     private Response handlePutMetricAlarm(MultivaluedMap<String, String> params, String region) {
         MetricAlarm alarm = parseAlarm(params);
-        metricsService.putMetricAlarm(alarm, region);
+        metricsService.putMetricAlarm(alarm, region, parseEvaluationInterval(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("PutMetricAlarm", null)).build();
     }
 
@@ -1011,6 +1013,19 @@ public class CloudWatchMetricsQueryHandler {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    /** None if absent or empty; a value that is no integer is an InvalidParameterValue, as in PutMetricData. */
+    private BigInteger parseEvaluationInterval(MultivaluedMap<String, String> params) {
+        String value = params.getFirst("EvaluationInterval");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!QueryConstraintCheck.isInteger(value)) {
+            throw CloudWatchMetricsException.invalidParameterValue(
+                    "EvaluationInterval must be an integer between 10 and 3600.");
+        }
+        return new BigInteger(value.trim());
     }
 
     private double parseDouble(String value, double defaultValue) {

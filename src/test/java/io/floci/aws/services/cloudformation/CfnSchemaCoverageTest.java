@@ -133,14 +133,14 @@ class CfnSchemaCoverageTest {
     /**
      * Calls that hand the whole resolved property object to the service request, so every writable
      * property of the type counts as read without a name appearing in the source. Explicit, one entry
-     * per helper: {@code camelisedProperties} (AppSync), {@code lowerKeys} over the resolved node
+     * per helper: {@code camelisedProperties} (AppSync), {@code CfnApiShapeConverter} over the resolved node
      * (CodeBuild, CodePipeline), {@code jsonObjectToMap} over it (Cognito user pool), {@code
      * toCamelCase} over it (Lambda web), {@code requestBody} (IoT domain configuration), {@code
      * request} (EventBridge V2).
      */
     private static final Set<String> WHOLESALE_CALLS = Set.of(
             "camelisedProperties(props, ctx)",
-            "lowerKeys(ctx.engine().resolveNode(props))",
+            "CfnApiShapeConverter.convert(ctx.engine().resolveNode(props)",
             "jsonObjectToMap(ctx.engine().resolveNode(props))",
             "toCamelCase(ctx.engine().resolveNodeOmittingNoValue(props)",
             "toCamelCase(resolved,",

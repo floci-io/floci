@@ -181,6 +181,21 @@ public final class EksClusterArgs {
         }
     }
 
+    /** Whether {@code clusterArgs} set the kubelet's resolv-conf, the resolver file its pods get. */
+    public static boolean setsKubeletResolvConf(List<String> clusterArgs) {
+        if (clusterArgs == null) {
+            return false;
+        }
+        String prefix = Component.KUBELET.flagPrefix();
+        for (String arg : clusterArgs) {
+            if (arg != null && arg.startsWith(prefix)
+                    && "resolvconf".equals(normalizedFlagName(extractFlagName(arg.substring(prefix.length()))))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private record ParsedTag(Component component, TagKind kind, String prefixMatched) {}
 
     private enum TagKind {
@@ -280,7 +295,7 @@ public final class EksClusterArgs {
 
     private static void validateCollision(Component component, String flag) {
         String rawName = extractFlagName(flag);
-        String flagName = rawName.replace("-", "").toLowerCase(Locale.ROOT);
+        String flagName = normalizedFlagName(rawName);
 
         if (component == Component.KUBELET) {
             if (FLOCI_MANAGED_KUBELET_FLAGS.contains(flagName)) {
@@ -299,6 +314,11 @@ public final class EksClusterArgs {
                         + "' is refused outright and cannot be configured.");
             }
         }
+    }
+
+    /** A flag name without its hyphens, lower-cased, so spellings that differ only in those match. */
+    private static String normalizedFlagName(String flagName) {
+        return flagName.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
     private static String extractFlagName(String flag) {

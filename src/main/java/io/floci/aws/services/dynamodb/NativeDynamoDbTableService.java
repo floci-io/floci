@@ -155,7 +155,7 @@ public class NativeDynamoDbTableService {
 
         applyOnDemandThroughput(table, settings.onDemandThroughput());
 
-        request.tags().forEach(table.getTags()::put);
+        dynamoDbService.putCreationTags(table, request.tags());
 
         if (Boolean.TRUE.equals(settings.streamEnabled())) {
             enableStream(table, settings.streamViewType(), region);

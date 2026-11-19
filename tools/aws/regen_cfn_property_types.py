@@ -51,8 +51,9 @@ FETCH_TIMEOUT_SECONDS = 60
 
 # The resource types whose provisioners read their properties through CfnPropertyTypes.
 RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::DSQL::Cluster", "AWS::EC2::Instance",
-                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::Events::Rule",
-                  "AWS::Lambda::Function", "AWS::Lambda::LayerVersion"]
+                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::EKS::Cluster", "AWS::Events::Rule",
+                  "AWS::Lambda::Function", "AWS::Lambda::LayerVersion",
+                  "AWS::SES::ConfigurationSetEventDestination"]
 
 # The shared shape each scalar body is written as, inline; a definition keeps its own name.
 SCALAR_SHAPES = {"string": "String", "integer": "Integer", "boolean": "Boolean", "double": "Double", "json": "Json"}
@@ -75,12 +76,21 @@ ANCHORS = {
     ("AWS::ECS::TaskDefinition/ContainerDefinition", "Memory"): "Integer",
     ("AWS::ECS::TaskDefinition/ContainerDefinition", "Essential"): "Boolean",
     ("AWS::ECS::TaskDefinition/KernelCapabilities", "Add"): ["String"],
+    ("AWS::SES::ConfigurationSetEventDestination/EventDestination", "Enabled"): "Boolean",
+    ("AWS::SES::ConfigurationSetEventDestination/EventDestination", "MatchingEventTypes"): ["String"],
 }
 
 # Required members the provisioners rely on, measured the same way: shape -> its required members.
 REQUIRED_ANCHORS = {
     "AWS::ECS::TaskDefinition/ContainerDefinition": ["Name", "Image"],
     "AWS::ECS::TaskDefinition/Tmpfs": ["Size"],
+    "AWS::SES::ConfigurationSetEventDestination": ["ConfigurationSetName", "EventDestination"],
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination": ["MatchingEventTypes"],
+    "AWS::SES::ConfigurationSetEventDestination/SnsDestination": ["TopicARN"],
+    "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination": ["IAMRoleARN", "DeliveryStreamARN"],
+    "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination": ["EventBusArn"],
+    "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration": [
+        "DimensionValueSource", "DefaultDimensionValue", "DimensionName"],
 }
 
 

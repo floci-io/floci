@@ -73,6 +73,36 @@ class EmrServiceTest {
         assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), "eu-west-1"));
     }
 
+    /**
+     * A resource-tag condition reads the tags of the cluster the ARN names, in its account and Region, or of one stored
+     * with no Region, as the tag handlers find it; tagging puts a new map in place of the held one.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheClusterTheArnNamesAndTaggingPutsANewMap() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster cluster = service.runJobFlow(cluster("tagged", true), REGION);
+        String arn = cluster.getClusterArn();
+        String elsewhere = arn.replace(":" + REGION + ":", ":eu-west-1:");
+        service.addTags(cluster.getId(), Map.of("team", "data"));
+        AccountAwareStorageBackend<EmrCluster> clusters = fixture.storage.create("emr", "emr-clusters.json",
+                new TypeReference<Map<String, EmrCluster>>() {});
+        Map<String, String> held = clusters.get(cluster.getId()).orElseThrow().getTags();
+
+        service.addTags(cluster.getId(), Map.of("env", "prod"));
+
+        assertEquals(Map.of("team", "data"), held);
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(elsewhere));
+        assertEquals(Map.of(), service.storedTags(arn + "/session/s-1"));
+        assertEquals(Map.of(), service.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")));
+
+        EmrCluster regionless = clusters.get(cluster.getId()).orElseThrow();
+        regionless.setRegion(null);
+        clusters.put(cluster.getId(), regionless);
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(elsewhere));
+    }
+
     @Test
     void aClusterIsStartingThenBootstrappingUntilItIsReady() {
         EmrServiceFixture fixture = new EmrServiceFixture(10, 0, 0);

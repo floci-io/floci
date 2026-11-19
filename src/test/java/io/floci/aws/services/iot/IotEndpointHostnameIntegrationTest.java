@@ -19,6 +19,6 @@ class IotEndpointHostnameIntegrationTest {
             .get("/endpoint")
         .then()
             .statusCode(200)
-            .body("endpointAddress", equalTo("floci:4566"));
+            .body("endpointAddress", equalTo(ConfiguredHostnameProfile.HOSTNAME + ":4566"));
     }
 }
