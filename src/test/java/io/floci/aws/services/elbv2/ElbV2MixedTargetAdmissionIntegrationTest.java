@@ -10,6 +10,7 @@ import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RdsMockProfile;
+import io.floci.aws.testing.TlsTrust;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -28,8 +29,6 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetDescri
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthStateEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetTypeEnum;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -38,7 +37,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
@@ -132,7 +131,8 @@ class ElbV2MixedTargetAdmissionIntegrationTest {
                             null, null, Map.of(), REGION);
                     String certificateArn = certificate.getArn();
                     listener.certificates(value -> value.certificateArn(certificateArn));
-                    transport.sslContext(trustedContext(certificate));
+                    X509Certificate listenerCertificate = Pem.parseCertificate(certificate.getCertificateBody());
+                    transport.sslContext(TlsTrust.trusting(listenerCertificate));
                 }
                 client.createListener(listener.build());
                 URI search = URI.create(protocol.toString().toLowerCase() + "://localhost:" + port + "/docs/_search");
@@ -257,16 +257,5 @@ class ElbV2MixedTargetAdmissionIntegrationTest {
                 .GET().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         return response.body();
-    }
-
-    private static SSLContext trustedContext(Certificate certificate) throws Exception {
-        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
-        trustStore.load(null, null);
-        trustStore.setCertificateEntry("listener", Pem.parseCertificate(certificate.getCertificateBody()));
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trustStore);
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, factory.getTrustManagers(), null);
-        return context;
     }
 }
