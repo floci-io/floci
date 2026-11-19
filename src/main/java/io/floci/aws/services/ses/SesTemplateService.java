@@ -60,8 +60,6 @@ public class SesTemplateService implements SesTaggable {
             "\\{\\{\\{\\s*([\\w-]+)\\s*\\}\\}\\}|\\{\\{\\s*([\\w-]+)\\s*\\}\\}");
     private static final DateTimeFormatter RENDER_DATE =
             DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSX", Locale.ROOT).withZone(ZoneOffset.UTC);
-    private static final int MAX_TEMPLATE_NAME_LENGTH = 64;
-    private static final Pattern TEMPLATE_NAME = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Pattern SUBJECT_WHITESPACE_RUN = Pattern.compile("[ \\t\\r\\n]+");
     static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
     // What TestRenderTemplate shows in place of the list-management link a send would carry.
@@ -213,7 +211,7 @@ public class SesTemplateService implements SesTaggable {
 
     /**
      * The name rules create, update, get, delete and test-render apply before anything else, in
-     * SES's order: blank, then longer than {@value #MAX_TEMPLATE_NAME_LENGTH}, then a character
+     * SES's order: blank, then longer than {@value SesNames#MAX_LENGTH}, then a character
      * outside ASCII letters, digits, '_' and '-'. The sends, the tag operations and the tenant
      * association read a template without them: what SES answers there for such a name is not known.
      */
@@ -221,14 +219,8 @@ public class SesTemplateService implements SesTaggable {
         if (templateName == null || templateName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
         }
-        if (templateName.length() > MAX_TEMPLATE_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Template name cannot exceed " + MAX_TEMPLATE_NAME_LENGTH + " characters.", 400);
-        }
-        if (!TEMPLATE_NAME.matcher(templateName).matches()) {
-            throw new AwsException("InvalidParameterValue", "Template name <" + templateName
-                    + ">: only alphanumeric ASCII characters, '_', and '-' are allowed.", 400);
-        }
+        SesNames.requireMaxLength(templateName, "InvalidParameterValue", "Template name");
+        SesNames.requireAllowedCharacters(templateName, "InvalidParameterValue", "Template name");
     }
 
     private static String templateKey(String region, String templateName) {
