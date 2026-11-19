@@ -1,5 +1,6 @@
 package io.floci.aws.services.glue;
 
+import io.floci.aws.testing.GlueRequests;
 import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
@@ -16,7 +17,6 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -34,8 +34,8 @@ class GlueScriptRunIntegrationTest {
     private record CreatedJob(String region, String name) {
     }
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String ROLE = "arn:aws:iam::000000000000:role/my-role";
+    private static final String ACCOUNT_ID = "000000000000";
+    private static final String ROLE = "arn:aws:iam::" + ACCOUNT_ID + ":role/my-role";
     private static final String SCRIPT = "s3://glue-demo/scripts/job.py";
 
     @InjectMock
@@ -69,13 +69,7 @@ class GlueScriptRunIntegrationTest {
     }
 
     private static ValidatableResponse call(String region, String action, String body) {
-        return given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue." + action)
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
-                        + "/glue/aws4_request, SignedHeaders=host, Signature=x")
-                .body(body)
-        .when().post("/")
-        .then();
+        return GlueRequests.call(action, ACCOUNT_ID, region, body);
     }
 
     private static String state(String region, String jobName, String runId) {
