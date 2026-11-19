@@ -81,6 +81,25 @@ class KinesisStreamingViewParserTest {
     }
 
     @Test
+    void anEscapedQuoteInAnEscapeStringDoesNotHideASecondStatement() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE MATERIALIZED VIEW v AS SELECT E'\\'' FROM kds.t; DROP TABLE public.x"));
+        ExternalStatement.CreateStreamingView view = (ExternalStatement.CreateStreamingView) parser.parse(
+                "CREATE MATERIALIZED VIEW v AS SELECT E'\\';' AS x FROM kds.t;").orElseThrow();
+
+        assertThat(error.sqlState(), equalTo("42601"));
+        assertThat(view.select(), equalTo("SELECT E'\\';' AS x FROM kds.t"));
+    }
+
+    @Test
+    void aCommentMarkerAfterAnEscapedQuoteIsStillAComment() {
+        ExternalStatement.CreateStreamingView view = (ExternalStatement.CreateStreamingView) parser.parse(
+                "CREATE MATERIALIZED VIEW v AS SELECT E'\\'' AS x FROM kds.t -- ; DROP TABLE public.x").orElseThrow();
+
+        assertThat(view.select(), equalTo("SELECT E'\\'' AS x FROM kds.t"));
+    }
+
+    @Test
     void leavesOtherStatementsAlone() {
         assertThat(parser.parse("CREATE MATERIALIZED VIEW v DISTSTYLE ALL AS SELECT 1").isPresent(), is(false));
         assertThat(parser.parse("REFRESH MATERIALIZED VIEW").isPresent(), is(false));

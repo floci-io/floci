@@ -1104,6 +1104,9 @@ service, never through Firehose or S3.
 - **Not supported:** `AUTO REFRESH YES` is refused with `0A000`; refresh the view yourself. Shard splits and
   merges, `ALTER MATERIALIZED VIEW`, and PartiQL navigation into `SUPER` values are not implemented.
   A `JOIN` in the view is refused with `0A000`, as on Redshift; a comma join (`FROM a, b`) is not detected.
+  Grouping and aggregation (`GROUP BY`, `HAVING`, `DISTINCT`, and aggregate functions such as `COUNT` or `MAX`)
+  are refused with `0A000` too, because each refresh batch is inserted on its own and would leave a partial row
+  per batch. Aggregate over the view with a query instead.
 - `CREATE MATERIALIZED VIEW` over a stream fails with `0A000` inside a transaction block, and `DROP MATERIALIZED VIEW`
   and `REFRESH MATERIALIZED VIEW` of a streaming view with `25001`.
 - Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with

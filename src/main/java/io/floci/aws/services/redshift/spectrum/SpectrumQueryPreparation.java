@@ -32,7 +32,12 @@ public class SpectrumQueryPreparation {
     private static final Logger LOG = Logger.getLogger(SpectrumQueryPreparation.class);
     private static final String DUPLICATE_SCHEMA = "42P06";
     private static final Pattern JOIN = Pattern.compile("\\bJOIN\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
+    // Each batch is inserted on its own, so a view that groups or aggregates would keep a partial row per batch.
+    private static final Pattern AGGREGATE = Pattern.compile(
+            "\\b(?:GROUP\\s+BY|HAVING|DISTINCT)\\b|\\b(?:COUNT|SUM|AVG|MIN|MAX|MEDIAN|LISTAGG|STDDEV\\w*|VAR_\\w+|VARIANCE"
+                    + "|BOOL_AND|BOOL_OR|ARRAY_AGG|APPROXIMATE|PERCENTILE_\\w+)\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"");
     private final ExternalCatalogRegistry registry;
     private final KinesisSchemaRegistry kinesisSchemas;
     private final KinesisStreamingViews views;
@@ -535,8 +540,13 @@ public class SpectrumQueryPreparation {
             throw new SpectrumSqlException("0A000",
                     "AUTO REFRESH YES is not supported; refresh the view with REFRESH MATERIALIZED VIEW");
         }
-        if (JOIN.matcher(STRING_LITERAL.matcher(view.select()).replaceAll("''")).find()) {
+        String unquoted = STRING_LITERAL.matcher(view.select()).replaceAll("''");
+        if (JOIN.matcher(unquoted).find()) {
             throw new SpectrumSqlException("0A000", "A streaming materialized view cannot contain a JOIN");
+        }
+        if (AGGREGATE.matcher(unquoted).find()) {
+            throw new SpectrumSqlException("0A000",
+                    "A streaming materialized view cannot group or aggregate: each refresh batch is inserted on its own");
         }
         Set<ExternalReferenceScanner.Reference> streams =
                 ExternalReferenceScanner.scan(view.select(), kinesis.keySet());

@@ -121,6 +121,22 @@ class SpectrumKinesisViewPreparationTest {
     }
 
     @Test
+    void aGroupingOrAggregateInTheViewIsRefused() {
+        for (String select : new String[] {
+                "SELECT partition_key, count(*) FROM kds.events GROUP BY partition_key",
+                "SELECT max(sequence_number) FROM kds.events",
+                "SELECT DISTINCT shard_id FROM kds.events"}) {
+            SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> preparation.prepare(
+                    "CREATE MATERIALIZED VIEW v AS " + select, SESSION, backend));
+
+            assertThat(select, error.sqlState(), equalTo("0A000"));
+            assertThat(select, error.getMessage(), containsString("aggregate"));
+        }
+        preparation.prepare("CREATE MATERIALIZED VIEW v AS SELECT 'count(x)' AS c, \"group by\" FROM kds.events",
+                SESSION, backend);
+    }
+
+    @Test
     void droppingTheLastViewAlsoDropsTheStagingTable() {
         preparation.prepare(CREATE_VIEW, SESSION, backend);
 

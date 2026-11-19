@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.core.common.SqlParameterParser;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
@@ -66,7 +67,7 @@ public class ExternalStatementParser {
             }
             return Optional.of(new ExternalStatement.CreateStreamingView(qualifier(createView.group(1), createView.group(2)),
                     objectName(createView.group(1), createView.group(2)), "YES".equalsIgnoreCase(createView.group(3)),
-                    createView.group(4)));
+                    createView.group(4).replaceFirst("[\\s;]+$", "")));
         }
         Matcher refreshView = REFRESH_VIEW.matcher(viewText);
         if (refreshView.matches()) {
@@ -152,54 +153,12 @@ public class ExternalStatementParser {
 
     /** The SQL with each comment outside a quoted string or identifier replaced by a space. */
     static String withoutComments(String sql) {
-        StringBuilder out = new StringBuilder(sql.length());
-        char quote = 0;
-        int i = 0;
-        while (i < sql.length()) {
-            char c = sql.charAt(i);
-            if (quote != 0) {
-                out.append(c);
-                if (c == quote) {
-                    quote = 0;
-                }
-                i++;
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-                out.append(c);
-                i++;
-            } else if (sql.startsWith("--", i)) {
-                while (i < sql.length() && sql.charAt(i) != '\n') {
-                    i++;
-                }
-                out.append(' ');
-            } else if (sql.startsWith("/*", i)) {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? sql.length() : end + 2;
-                out.append(' ');
-            } else {
-                out.append(c);
-                i++;
-            }
-        }
-        return out.toString();
+        return SqlParameterParser.stripComments(sql, SqlParameterParser.Options.REDSHIFT);
     }
 
-    /** True when a {@code ;} sits outside a quoted string or identifier. */
+    /** True when a statement follows a {@code ;} that sits outside a quoted string or identifier. */
     static boolean hasStatementSeparator(String sql) {
-        char quote = 0;
-        for (int i = 0; i < sql.length(); i++) {
-            char c = sql.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-            } else if (c == ';') {
-                return true;
-            }
-        }
-        return false;
+        return SqlParameterParser.isMultiStatement(sql, SqlParameterParser.Options.REDSHIFT);
     }
 
     /** The schema of {@code first.second}, null for a bare name. */
