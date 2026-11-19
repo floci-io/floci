@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
@@ -29,6 +30,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.xml.HasXPath.hasXPath;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * End-to-end check that CloudFormation provisions an {@code AWS::CloudFront::Distribution} for real
@@ -520,5 +522,72 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                     equalTo("sni-only")))
             .body(hasXPath("//*[local-name()='ViewerCertificate']/*[local-name()='MinimumProtocolVersion']",
                     equalTo("TLSv1.2_2021")));
+    }
+
+    @Test
+    void replacingTheViewerCertificateMovesTheDistributionOverBeforeTheOldOneIsDeleted() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cloudfront-cert-swap-" + suffix;
+        CfnRequests.deploy("CreateStack", stackName, certificateAndDistributionTemplate("old-" + suffix),
+                CFN_AUTH, "CREATE_COMPLETE");
+        String oldCertificateArn = CfnRequests.physicalId(stackName, "Cert", CFN_AUTH);
+        String distributionId = CfnRequests.physicalId(stackName, "Dist", CFN_AUTH);
+        assertThat(viewerCertificateArn(distributionId), equalTo(oldCertificateArn));
+
+        CfnRequests.deploy("UpdateStack", stackName, certificateAndDistributionTemplate("new-" + suffix),
+                CFN_AUTH, "UPDATE_COMPLETE");
+
+        String newCertificateArn = CfnRequests.physicalId(stackName, "Cert", CFN_AUTH);
+        assertThat(newCertificateArn, not(equalTo(oldCertificateArn)));
+        assertThat(viewerCertificateArn(distributionId), equalTo(newCertificateArn));
+        AwsException gone = assertThrows(AwsException.class,
+                () -> acmService.describeCertificate(oldCertificateArn, "us-east-1"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+        assertEquals(newCertificateArn, acmService.describeCertificate(newCertificateArn, "us-east-1").getArn());
+    }
+
+    private static String certificateAndDistributionTemplate(String certificateDomainLabel) {
+        return """
+                {
+                  "Resources": {
+                    "Cert": {
+                      "Type": "AWS::CertificateManager::Certificate",
+                      "Properties": {"DomainName": "%s.cfn-cloudfront.example.test"}
+                    },
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "Origins": [{
+                            "Id": "origin",
+                            "DomainName": "origin.example.com",
+                            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "origin",
+                            "ViewerProtocolPolicy": "redirect-to-https"
+                          },
+                          "ViewerCertificate": {
+                            "AcmCertificateArn": {"Ref": "Cert"},
+                            "SslSupportMethod": "sni-only",
+                            "MinimumProtocolVersion": "TLSv1.2_2021"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(certificateDomainLabel);
+    }
+
+    private static String viewerCertificateArn(String distributionId) {
+        return given()
+        .when()
+            .get("/2020-05-31/distribution/" + distributionId)
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getString("**.find { it.name() == 'ACMCertificateArn' }");
     }
 }

@@ -250,21 +250,23 @@ class CloudFrontCfnProvisionerTest {
         assertNull(sent.getValue().getConfig().getConnectionMode());
     }
 
+    /** A minimal DistributionConfig template carrying the given ViewerCertificate object, or none when null. */
+    private JsonNode withViewerCertificate(String viewerCertificate) throws Exception {
+        String fragment = viewerCertificate == null ? "" : "\"ViewerCertificate\": " + viewerCertificate + ",";
+        return json("{\"DistributionConfig\": {" + fragment
+                + "\"Origins\": [{\"Id\": \"o1\", \"DomainName\": \"origin.example.com\","
+                + " \"CustomOriginConfig\": {\"OriginProtocolPolicy\": \"https-only\"}}],"
+                + " \"DefaultCacheBehavior\": {\"TargetOriginId\": \"o1\","
+                + " \"ViewerProtocolPolicy\": \"redirect-to-https\"}}}");
+    }
+
     @Test
     void copiesTheAcmViewerCertificateTheTemplateDeclares() throws Exception {
         when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
         StackResource r = resource(DISTRIBUTION);
 
-        provisioner.provision(r, json("""
-                {"DistributionConfig": {
-                   "ViewerCertificate": {"AcmCertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/abc",
-                                         "SslSupportMethod": "sni-only",
-                                         "MinimumProtocolVersion": "TLSv1.2_2021"},
-                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
-                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
-                }}
-                """), distributionCtx(null));
+        provisioner.provision(r, withViewerCertificate("{\"AcmCertificateArn\": \"arn:aws:acm:us-east-1:000000000000:certificate/abc\", \"SslSupportMethod\": \"sni-only\", \"MinimumProtocolVersion\": \"TLSv1.2_2021\"}"),
+                distributionCtx(null));
 
         ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
         verify(cloudFront).createDistribution(sent.capture(), any());
@@ -280,16 +282,8 @@ class CloudFrontCfnProvisionerTest {
         when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
         StackResource r = resource(DISTRIBUTION);
 
-        provisioner.provision(r, json("""
-                {"DistributionConfig": {
-                   "ViewerCertificate": {"IamCertificateId": "ASCAEXAMPLE",
-                                         "SslSupportMethod": "vip",
-                                         "MinimumProtocolVersion": "TLSv1"},
-                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
-                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
-                }}
-                """), distributionCtx(null));
+        provisioner.provision(r, withViewerCertificate("{\"IamCertificateId\": \"ASCAEXAMPLE\", \"SslSupportMethod\": \"vip\", \"MinimumProtocolVersion\": \"TLSv1\"}"),
+                distributionCtx(null));
 
         ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
         verify(cloudFront).createDistribution(sent.capture(), any());
@@ -305,14 +299,8 @@ class CloudFrontCfnProvisionerTest {
         when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
         StackResource r = resource(DISTRIBUTION);
 
-        provisioner.provision(r, json("""
-                {"DistributionConfig": {
-                   "ViewerCertificate": {"CloudFrontDefaultCertificate": true},
-                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
-                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
-                }}
-                """), distributionCtx(null));
+        provisioner.provision(r, withViewerCertificate("{\"CloudFrontDefaultCertificate\": true}"),
+                distributionCtx(null));
 
         ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
         verify(cloudFront).createDistribution(sent.capture(), any());
@@ -325,13 +313,7 @@ class CloudFrontCfnProvisionerTest {
         when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
         StackResource r = resource(DISTRIBUTION);
 
-        provisioner.provision(r, json("""
-                {"DistributionConfig": {
-                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
-                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
-                }}
-                """), distributionCtx(null));
+        provisioner.provision(r, withViewerCertificate(null), distributionCtx(null));
 
         ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
         verify(cloudFront).createDistribution(sent.capture(), any());
