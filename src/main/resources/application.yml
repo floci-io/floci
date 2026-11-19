@@ -409,10 +409,11 @@ floci:
     # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
     # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
     # (log follow and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS
-    # Exec session, EKS audit follower, user data script and EMR bootstrap action one; 2048 covers the
-    # 500 Lambda containers the runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
+    # Exec session, EKS audit follower, user data script and EMR bootstrap action one; 3072 covers the
+    # 500 Lambda containers the runtime API port range allows with two extensions each (2000) and
+    # leaves about 1000 for everything else. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 2048
+    streaming-max-connections: 3072
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.

@@ -64,12 +64,12 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; other containers' log streams use it too, and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 2048 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
+Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; other containers' log streams use it too, and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
   docker:
-    streaming-max-connections: 2048
+    streaming-max-connections: 3072
 ```
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
@@ -107,7 +107,7 @@ Environment variable: `FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS`
 To see how close Floci is to those limits, it logs a line every `pool-gauge-interval-seconds` (60 by default) while a pool is in use, and nothing while both are idle. Each pool reports its leased, available and pending connections against its limit and its open streams by kind and by the service whose container each one follows, followed by the number of docker-java stream threads:
 
 ```
-Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0 pending=0 max=2048 streams[logs=20 wait=20] services[lambda=36 unattributed=4]; stream threads=40
+Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0 pending=0 max=3072 streams[logs=20 wait=20] services[lambda=36 unattributed=4]; stream threads=40
 ```
 
 A stream is `unattributed` when it follows no container (an exec, an image pull or build, daemon events), or a container this Floci process did not start with a service label: one started before a restart, by a tool other than Floci, or by a Floci helper that labels no service.
@@ -368,7 +368,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
-| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `2048` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
