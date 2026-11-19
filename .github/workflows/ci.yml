@@ -243,7 +243,10 @@ jobs:
           KEEP: maven-Linux-${{ hashFiles('pom.xml') }}
         run: |
           set -euo pipefail
-          keys=$(gh cache list --repo "$GITHUB_REPOSITORY" --key maven-Linux- --limit 100 --json id,key)
+          # main's entries only: a cache another ref saved under the same key must not stand in for
+          # main's own when deciding whether the older ones can go.
+          keys=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key maven-Linux- \
+            --limit 100 --json id,key)
           if ! jq -e --arg keep "$KEEP" 'any(.[]; .key == $keep)' <<<"$keys" >/dev/null; then
             echo "The current pom's cache ($KEEP) is not saved yet; keeping the older ones."
             exit 0
