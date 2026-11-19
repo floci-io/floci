@@ -971,6 +971,23 @@ class SqsServiceTest {
     }
 
     @Test
+    void changeMessageVisibilityIfUnchanged_messageReceivedAgain_keepsTheNewReceiversTimeout() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("if-received-again", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg1", 0, region);
+        Message first = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).getFirst();
+        String firstHandle = first.getReceiptHandle();
+        Instant setByFirstReceive = first.getVisibleAt();
+        assertEquals(1, sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).size());
+
+        boolean changed = sqsService.changeMessageVisibilityIfUnchanged(
+                queue.getQueueUrl(), firstHandle, setByFirstReceive, 0, region);
+
+        assertFalse(changed);
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).isEmpty());
+    }
+
+    @Test
     void changeMessageVisibilityIfUnchanged_deletedMessage_isRejected() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("if-unchanged-gone", null, region);

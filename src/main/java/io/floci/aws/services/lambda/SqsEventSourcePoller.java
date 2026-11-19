@@ -129,8 +129,12 @@ public class SqsEventSourcePoller implements Resettable {
     /** Messages received across earlier polls that a batching window is still holding open. */
     private static final class PendingBatch {
         final List<Message> messages = new ArrayList<>();
-        final Map<String, Instant> visibleAtOnReceive = new HashMap<>();
+        final Map<String, ReceivedMessage> receivedById = new HashMap<>();
         long windowStartedAtMs;
+    }
+
+    /** The receipt handle and visibility one receive gave a message. */
+    private record ReceivedMessage(String receiptHandle, Instant visibleAt) {
     }
 
     public void startPolling(EventSourceMapping esm) {
@@ -205,16 +209,16 @@ public class SqsEventSourcePoller implements Resettable {
                         esm.getQueueUrl(), Math.min(10, wanted), visibilityTimeout, 0, esm.getRegion());
 
                 List<Message> messages;
-                Map<String, Instant> visibleAtOnReceive;
+                Map<String, ReceivedMessage> receivedById;
                 if (window <= 0) {
                     // No window, or one that was just turned off: deliver now, draining anything a
                     // previous positive window had buffered so those messages are not stranded
                     // until their visibility expires (and cannot be replayed if the window returns).
                     List<Message> batch = pending != null ? pending.messages : new ArrayList<>();
-                    visibleAtOnReceive = pending != null ? pending.visibleAtOnReceive : new HashMap<>();
+                    receivedById = pending != null ? pending.receivedById : new HashMap<>();
                     pendingBatches.remove(esm.getUuid());
                     batch.addAll(received);
-                    recordVisibleAt(received, visibleAtOnReceive);
+                    recordReceipts(received, receivedById);
                     if (batch.isEmpty()) {
                         return;
                     }
@@ -228,7 +232,7 @@ public class SqsEventSourcePoller implements Resettable {
                         pending.windowStartedAtMs = clockMs.getAsLong();
                     }
                     pending.messages.addAll(received);
-                    recordVisibleAt(received, pending.visibleAtOnReceive);
+                    recordReceipts(received, pending.receivedById);
                     if (pending.messages.isEmpty()) {
                         return;
                     }
@@ -239,7 +243,7 @@ public class SqsEventSourcePoller implements Resettable {
                         return;
                     }
                     messages = new ArrayList<>(pending.messages);
-                    visibleAtOnReceive = new HashMap<>(pending.visibleAtOnReceive);
+                    receivedById = new HashMap<>(pending.receivedById);
                     pendingBatches.remove(esm.getUuid());
                 }
 
@@ -316,12 +320,12 @@ public class SqsEventSourcePoller implements Resettable {
                     if (!failedIds.isEmpty()) {
                         List<Message> toReturn = matched.stream()
                                 .filter(m -> failedIds.contains(m.getMessageId())).toList();
-                        returnMessagesToQueue(esm, toReturn, visibleAtOnReceive);
+                        returnMessagesToQueue(esm, toReturn, receivedById);
                     }
                 } else {
                     LOG.warnv("ESM {0}: Lambda returned error [{1}], returning {2} delivered message(s) to queue for retry/redrive",
                             esm.getUuid(), result.getFunctionError(), matched.size());
-                    returnMessagesToQueue(esm, matched, visibleAtOnReceive);
+                    returnMessagesToQueue(esm, matched, receivedById);
                 }
             } catch (Exception e) {
                 LOG.warnv("ESM {0}: poll/invoke error: {1} ({2})",
@@ -344,20 +348,27 @@ public class SqsEventSourcePoller implements Resettable {
      * climbs and the queue's RedrivePolicy moves them to the DLQ once
      * {@code maxReceiveCount} is exceeded.
      *
-     * <p>A message whose visibility the function changed during the invocation (with
-     * ChangeMessageVisibility) keeps that timeout, as on AWS, where the mapping leaves a failed
-     * message's visibility alone.
+     * <p>A message whose visibility changed during the invocation keeps it, as on AWS, where the
+     * mapping leaves a failed message's visibility alone: the function may have called
+     * ChangeMessageVisibility, or another consumer may have received the message since. The reset
+     * uses the handle and visibility this mapping's receive recorded, never the live message's,
+     * which a later receive replaces.
      */
     private void returnMessagesToQueue(EventSourceMapping esm, List<Message> messages,
-                                       Map<String, Instant> visibleAtOnReceive) {
+                                       Map<String, ReceivedMessage> receivedById) {
         int retryVisibility = retryVisibilityTimeout(esm);
         for (Message msg : messages) {
+            ReceivedMessage receipt = receivedById.get(msg.getMessageId());
+            if (receipt == null) {
+                LOG.warnv("ESM {0}: no receive recorded for message {1}, leaving its visibility as it is",
+                        esm.getUuid(), msg.getMessageId());
+                continue;
+            }
             try {
                 boolean returned = sqsService.changeMessageVisibilityIfUnchanged(esm.getQueueUrl(),
-                        msg.getReceiptHandle(), visibleAtOnReceive.get(msg.getReceiptHandle()),
-                        retryVisibility, esm.getRegion());
+                        receipt.receiptHandle(), receipt.visibleAt(), retryVisibility, esm.getRegion());
                 if (!returned) {
-                    LOG.debugv("ESM {0}: message {1} keeps the visibility timeout set during the invocation",
+                    LOG.debugv("ESM {0}: message {1} keeps the visibility set during the invocation",
                             esm.getUuid(), msg.getMessageId());
                 }
             } catch (Exception e) {
@@ -368,12 +379,13 @@ public class SqsEventSourcePoller implements Resettable {
     }
 
     /**
-     * Received messages are the queue's live instances, which a ChangeMessageVisibility call made
-     * during the invocation updates, so the visibility each receive set is recorded separately.
+     * Received messages are the queue's live instances, which a ChangeMessageVisibility call or a
+     * later receive updates during the invocation, so the handle and visibility each receive gave
+     * them are recorded separately.
      */
-    private static void recordVisibleAt(List<Message> received, Map<String, Instant> visibleAtOnReceive) {
+    private static void recordReceipts(List<Message> received, Map<String, ReceivedMessage> receivedById) {
         for (Message msg : received) {
-            visibleAtOnReceive.put(msg.getReceiptHandle(), msg.getVisibleAt());
+            receivedById.put(msg.getMessageId(), new ReceivedMessage(msg.getReceiptHandle(), msg.getVisibleAt()));
         }
     }
 

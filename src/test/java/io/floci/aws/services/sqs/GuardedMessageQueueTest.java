@@ -173,6 +173,20 @@ class GuardedMessageQueueTest {
     }
 
     @Test
+    void changeVisibility_fifoMessageReceivedAgain_keepsTheNewReceiversVisibility() {
+        Message message = new Message("msg");
+        message.setMessageGroupId("group");
+        queue.addMessage(message);
+        Message first = queue.claimVisibleMessages(1, 0, true, -1, null).claimed().get(0);
+        ReceiptHandle firstHandle = ReceiptHandle.parse(first.getReceiptHandle());
+        Instant setByFirstClaim = first.getVisibleAt();
+        assertEquals(1, queue.claimVisibleMessages(1, 30, true, -1, null).claimed().size());
+
+        assertEquals(HandleResult.VISIBILITY_CHANGED, queue.changeVisibility(firstHandle, setByFirstClaim, 0, true));
+        assertTrue(queue.claimVisibleMessages(1, 30, true, -1, null).claimed().isEmpty());
+    }
+
+    @Test
     void changeVisibilityInvalidReturnsFalse() {
         assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), 0, false));
     }

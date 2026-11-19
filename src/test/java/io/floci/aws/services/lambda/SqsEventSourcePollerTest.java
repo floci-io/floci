@@ -944,4 +944,34 @@ class SqsEventSourcePollerTest {
         verify(sqsService).changeMessageVisibilityIfUnchanged(
                 esm.getQueueUrl(), "rh-m1", setByReceive, 2, "us-east-1");
     }
+
+    @Test
+    void partialBatchFailure_messageReceivedAgainDuringInvocation_returnsItWithTheOriginalReceipt() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        Instant setByReceive = Instant.parse("2026-01-15T10:31:00Z");
+        Message msg = message("m1");
+        msg.setVisibleAt(setByReceive);
+        stubReceive(esm, List.of(msg));
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "2"));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"m1\"}]}".getBytes());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    // Another consumer receives the message once the function's short visibility
+                    // runs out, which gives the queue's live instance a new handle and visibility.
+                    msg.setReceiptHandle("rh-m1-second");
+                    msg.setVisibleAt(setByReceive.plusSeconds(30));
+                    return result;
+                });
+
+        awaitPoll(poller.pollAndInvoke(esm));
+
+        verify(sqsService).changeMessageVisibilityIfUnchanged(
+                esm.getQueueUrl(), "rh-m1", setByReceive, 2, "us-east-1");
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(
+                eq(esm.getQueueUrl()), eq("rh-m1-second"), any(), anyInt(), any());
+    }
 }

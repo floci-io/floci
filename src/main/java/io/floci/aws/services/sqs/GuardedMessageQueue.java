@@ -203,16 +203,19 @@ class GuardedMessageQueue {
      * Changes the message's visibility only while it is still {@code expectedVisibleAt}, so a change
      * made since (by a ChangeMessageVisibility call or another receive) is kept. A null
      * {@code expectedVisibleAt} changes it unconditionally.
+     *
+     * <p>The visibility is compared before the handle is checked: after another receive, a FIFO
+     * queue would reject the caller's older handle as expired, but the outcome the caller asked
+     * for, leaving a changed message alone, is the same.
      */
     HandleResult changeVisibility(ReceiptHandle handle, Instant expectedVisibleAt, int visibilityTimeout,
                                   boolean fifo) {
         try (Guard _ = hold()) {
             Message msg = findByMessageId(handle.messageId());
-            HandleResult result = checkHandle(msg, handle, fifo);
-            if (result == HandleResult.APPLIED && expectedVisibleAt != null
-                    && !expectedVisibleAt.equals(msg.getVisibleAt())) {
+            if (msg != null && expectedVisibleAt != null && !expectedVisibleAt.equals(msg.getVisibleAt())) {
                 return HandleResult.VISIBILITY_CHANGED;
             }
+            HandleResult result = checkHandle(msg, handle, fifo);
             if (result == HandleResult.APPLIED) {
                 Instant previous = msg.getVisibleAt();
                 msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
