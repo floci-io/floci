@@ -97,7 +97,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
-| `DeleteDBCluster` | Delete a cluster |
+| `DeleteDBCluster` | Delete a cluster; refused with `InvalidParameterCombination` while deletion protection is on |
 | `ModifyDBCluster` | Update cluster settings, including deletion protection |
 | `CreateDBParameterGroup` | Create a parameter group |
 | `DescribeDBParameterGroups` | List parameter groups |

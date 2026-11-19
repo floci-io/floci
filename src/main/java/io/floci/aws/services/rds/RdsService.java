@@ -6538,6 +6538,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
 
+        if (cluster.isDeletionProtection()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
+        }
         if (!cluster.getDbClusterMembers().isEmpty()) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " still has DB instances.", 400);

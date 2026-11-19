@@ -75,6 +75,24 @@ class RdsClusterDeletionProtectionIntegrationTest {
     }
 
     @Test
+    void protectedClusterIsNotDeletedUntilProtectionIsDisabled() {
+        createCluster("true").then().statusCode(200);
+
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("SkipFinalSnapshot", "true")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterCombination</Code>"));
+        describeReports("true");
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("DeletionProtection", "false")
+                .when().post("/").then().statusCode(200);
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("SkipFinalSnapshot", "true")
+                .when().post("/").then().statusCode(200);
+    }
+
+    @Test
     void modifyWithoutDeletionProtectionKeepsIt() {
         createCluster("true").then().statusCode(200);
 
