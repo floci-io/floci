@@ -241,7 +241,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             "execute-api", "*.execute-api",
             "ecs-agent", "ecs-a",
             "ecs-telemetry", "ecs-t",
-            "data.iot", "");
+            "data.iot", "",
+            "dynamodb", "");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
