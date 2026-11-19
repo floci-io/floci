@@ -1680,22 +1680,45 @@ public class SnsService implements Resettable, ResourceProvider {
         return new BatchPublishResult(successful, failed);
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+    /**
+     * Gives the topic a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags, String region) {
         String key = topicKey(region, resourceArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
-        if (tags != null) topic.getTags().putAll(tags);
+        if (tags != null) {
+            Map<String, String> merged = new LinkedHashMap<>(topic.getTags());
+            merged.putAll(tags);
+            topic.setTags(merged);
+        }
         topicStore.put(key, topic);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+    /** Gives the topic a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys, String region) {
         String key = topicKey(region, resourceArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
-        if (tagKeys != null) tagKeys.forEach(topic.getTags()::remove);
+        if (tagKeys != null) {
+            Map<String, String> remaining = new LinkedHashMap<>(topic.getTags());
+            tagKeys.forEach(remaining::remove);
+            topic.setTags(remaining);
+        }
         topicStore.put(key, topic);
+    }
+
+    /**
+     * The tags of the topic whose ARN is {@code topicArn} in {@code account}, read in place under the key the handlers
+     * read for the ARN's Region; none when there is no such topic.
+     */
+    Map<String, String> topicTagsInAccount(String account, String topicArn) {
+        return AccountAwareStorageBackend.readInAccount(topicStore, account,
+                        topicKey(AwsArnUtils.parse(topicArn).region(), topicArn))
+                .map(Topic::getTags).orElse(Map.of());
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {

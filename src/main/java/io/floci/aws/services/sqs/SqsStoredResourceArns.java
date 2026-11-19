@@ -6,7 +6,6 @@ import io.floci.aws.core.common.StoredResourceArns;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -65,9 +64,6 @@ public class SqsStoredResourceArns implements StoredResourceArns {
                 || !arn.equals(AwsArnUtils.Arn.of(NAMESPACE, parsed.region(), account, parsed.resource()).toString())) {
             return Map.of();
         }
-        Map<String, String> copy = new LinkedHashMap<>();
-        sqs.queueTagsInAccount(account, parsed.region(), parsed.resource())
-                .forEach((key, value) -> copy.put(key, value == null ? "" : value));
-        return copy;
+        return StoredResourceArns.withEmptyValues(sqs.queueTagsInAccount(account, parsed.region(), parsed.resource()));
     }
 }

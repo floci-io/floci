@@ -1007,6 +1007,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         return url;
     }
 
+    /**
+     * An SNS request is checked on the topic its TopicArn names, from the generated table, so a grant on one topic
+     * does not reach another; and an {@code aws:ResourceTag} condition reads the tags SNS holds on that topic, as
+     * TagResource leaves them.
+     */
+    @Test
+    void anSnsRequestIsCheckedOnTheTopicItNamesWithItsTags() {
+        String tagged = snsTopic("res-topic-" + suffix());
+        String other = snsTopic("res-topic-" + suffix());
+        admin("sns").formParam("Action", "TagResource").formParam("ResourceArn", tagged)
+                .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "data").post("/").then()
+                .statusCode(200);
+
+        User user = user("res-topic");
+        user.policy(allowOn("sns:Publish", tagged) + ",{\"Effect\":\"Allow\",\"Action\":\"sns:GetTopicAttributes\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        user.query("sns", "Publish").formParam("TopicArn", tagged).formParam("Message", "x").post("/").then()
+                .statusCode(200);
+        refused(user.query("sns", "Publish").formParam("TopicArn", other).formParam("Message", "x").post("/")
+                .then(), "sns:Publish");
+        user.query("sns", "GetTopicAttributes").formParam("TopicArn", tagged).post("/").then().statusCode(200);
+        refused(user.query("sns", "GetTopicAttributes").formParam("TopicArn", other).post("/").then(),
+                "sns:GetTopicAttributes");
+    }
+
+    /** An SNS topic an administrator creates, deleted after the test; its ARN. */
+    private String snsTopic(String name) {
+        String arn = admin("sns").formParam("Action", "CreateTopic").formParam("Name", name).post("/").then()
+                .statusCode(200).extract().path("CreateTopicResponse.CreateTopicResult.TopicArn");
+        cleanup.register(() -> admin("sns").formParam("Action", "DeleteTopic").formParam("TopicArn", arn).post("/")
+                .then().statusCode(200));
+        return arn;
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());

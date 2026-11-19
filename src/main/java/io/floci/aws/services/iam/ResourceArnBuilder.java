@@ -185,7 +185,6 @@ public class ResourceArnBuilder {
                 : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, ctx, region);
-            case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
@@ -1198,20 +1197,6 @@ public class ResourceArnBuilder {
             resourceArn = body == null ? null : body.path("resourceArn").asText(null);
         }
         return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
-    }
-
-    // ── SNS ─────────────────────────────────────────────────────────────────────
-    private String buildSnsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String topicArn = firstFormParam(ctx, "TopicArn");
-        if (topicArn == null) {
-            JsonNode json = readJsonBody(ctx);
-            if (json != null && json.isObject() && json.hasNonNull("TopicArn")) {
-                topicArn = json.get("TopicArn").asText().trim();
-            }
-        }
-        return (topicArn != null && !topicArn.isEmpty())
-                ? topicArn
-                : AwsArnUtils.Arn.of("sns", region, accountId, "*").toString();
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
