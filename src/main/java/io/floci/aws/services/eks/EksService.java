@@ -1061,15 +1061,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 if (updateParametersMatch(previous.get().request(), request)) {
                     return List.of(previous.get().update());
                 }
-                throw new AwsException("InvalidParameterException",
-                        "clientRequestToken was already used with different parameters", 400);
+                throw new AwsException("InvalidParameterException", EksAddonService.TOKEN_REUSED, 400);
             }
         }
         // Validated whole before anything is written, so a refused request changes nothing.
         ResourcesVpcConfig vpc = cluster.getResourcesVpcConfig();
         ResourcesVpcConfig requestedVpc = request.resourcesVpcConfig();
-        Boolean publicAccess = vpc == null ? null : vpc.getEndpointPublicAccess();
-        Boolean privateAccess = vpc == null ? null : vpc.getEndpointPrivateAccess();
+        Boolean publicAccess = vpc == null || vpc.getEndpointPublicAccess() == null ? Boolean.TRUE : vpc.getEndpointPublicAccess();
+        Boolean privateAccess = vpc == null || vpc.getEndpointPrivateAccess() == null ? Boolean.FALSE : vpc.getEndpointPrivateAccess();
         List<String> cidrs = vpc == null ? null : vpc.getPublicAccessCidrs();
         if (requestedVpc != null) {
             requireSameMembers("subnetIds", requestedVpc.getSubnetIds(), vpc == null ? null : vpc.getSubnetIds());
@@ -1084,10 +1083,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             requireValidPublicAccessCidrs(requestedVpc.getPublicAccessCidrs(),
                     stored == null || stored.getIpFamily() == null ? "ipv4" : stored.getIpFamily());
             cidrs = requestedVpc.getPublicAccessCidrs() != null ? requestedVpc.getPublicAccessCidrs() : cidrs;
+            requireEndpointChange(vpc, publicAccess, privateAccess, cidrs);
         }
         Logging logging = request.logging() == null || request.logging().getClusterLogging() == null
                 ? null : buildLogging(mergedLogging(cluster.getLogging(), request.logging()));
-        String mode = cluster.getAccessConfig() == null ? null : cluster.getAccessConfig().authenticationMode();
+        if (logging != null && enabledLogTypes(logging).equals(enabledLogTypes(cluster.getLogging()))) {
+            throw new AwsException("InvalidParameterException", "No changes needed for the logging config provided", 400);
+        }
+        String mode = cluster.getAccessConfig() == null || cluster.getAccessConfig().authenticationMode() == null
+                ? "CONFIG_MAP" : cluster.getAccessConfig().authenticationMode();
         String requestedMode = request.accessConfig() == null ? null : request.accessConfig().authenticationMode();
         if (requestedMode != null) {
             requireForwardAuthenticationMode(mode, requestedMode);
@@ -1110,14 +1114,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 params.add(new UpdateParam("EndpointPublicAccess", String.valueOf(finalPublicAccess)));
                 params.add(new UpdateParam("EndpointPrivateAccess", String.valueOf(finalPrivateAccess)));
                 if (requestedVpc.getPublicAccessCidrs() != null) {
-                    params.add(new UpdateParam("PublicAccessCidrs", String.join(",", finalCidrs)));
+                    params.add(new UpdateParam("PublicAccessCidrs", json(finalCidrs)));
                 }
                 updates.add(addons.recordUpdate(current, "EndpointAccessUpdate", params, null, updates.isEmpty() ? request : null));
             }
             if (logging != null) {
                 current.setLogging(logging);
                 updates.add(addons.recordUpdate(current, "LoggingUpdate",
-                        List.of(new UpdateParam("ClusterLogging", loggingJson(logging))), null,
+                        List.of(new UpdateParam("ClusterLogging", json(logging))), null,
                         updates.isEmpty() ? request : null));
             }
             if (requestedMode != null) {
@@ -1189,11 +1193,46 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return new Logging(merged);
     }
 
-    private static String loggingJson(Logging logging) {
+    private static String json(Object value) {
         try {
-            return MAPPER.writeValueAsString(logging);
+            return MAPPER.writeValueAsString(value);
         } catch (JsonProcessingException e) {
-            throw new AwsException("InternalFailure", "Could not serialize the logging setting", 500);
+            throw new AwsException("InternalFailure", "Could not serialize the update parameter", 500);
+        }
+    }
+
+    private static Set<String> enabledLogTypes(Logging logging) {
+        Set<String> enabled = new HashSet<>();
+        if (logging != null && logging.getClusterLogging() != null) {
+            for (LogSetup setup : logging.getClusterLogging()) {
+                if (setup != null && setup.getTypes() != null && Boolean.TRUE.equals(setup.getEnabled())) {
+                    enabled.addAll(setup.getTypes());
+                }
+            }
+        }
+        return enabled;
+    }
+
+    /** EKS refuses an endpoint update that leaves both endpoints off or changes nothing. */
+    private static void requireEndpointChange(ResourcesVpcConfig stored, Boolean publicAccess, Boolean privateAccess,
+                                              List<String> cidrs) {
+        if (Boolean.FALSE.equals(publicAccess) && Boolean.FALSE.equals(privateAccess)) {
+            throw new AwsException("InvalidParameterException",
+                    "You must enable private access to disable public access", 400);
+        }
+        if (stored == null) {
+            return;
+        }
+        List<String> storedCidrs = stored.getPublicAccessCidrs() != null
+                ? stored.getPublicAccessCidrs() : List.of("0.0.0.0/0");
+        List<String> effectiveCidrs = cidrs != null ? cidrs : List.of("0.0.0.0/0");
+        if (publicAccess.equals(stored.getEndpointPublicAccess() == null || stored.getEndpointPublicAccess())
+                && privateAccess.equals(stored.getEndpointPrivateAccess() != null && stored.getEndpointPrivateAccess())
+                && new HashSet<>(effectiveCidrs).equals(new HashSet<>(storedCidrs))) {
+            throw new AwsException("InvalidParameterException",
+                    "Cluster is already at the desired configuration with endpointPrivateAccess: " + privateAccess
+                            + " , endpointPublicAccess: " + publicAccess
+                            + ", and Public Endpoint Restrictions: [" + String.join(",", effectiveCidrs) + "]", 400);
         }
     }
 
@@ -1209,11 +1248,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         if (to == null) {
             throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
         }
-        Integer from = current == null ? null : AUTHENTICATION_MODE_RANK.get(current);
-        // The user guide: "you can't change the authentication mode back to a mode that removes the EKS API".
-        if (to == 0 && from != null && from > 0) {
+        Integer from = AUTHENTICATION_MODE_RANK.get(current);
+        // EKS moves the mode one step forward only: CONFIG_MAP, API_AND_CONFIG_MAP, API.
+        if (from == null || to != from + 1) {
             throw new AwsException("InvalidParameterException",
-                    "Floci does not support moving the authentication mode from " + current + " back to " + requested, 400);
+                    "Unsupported authentication mode update from " + current + " to " + requested, 400);
         }
     }
 

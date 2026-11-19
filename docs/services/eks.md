@@ -341,6 +341,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Supported log types**: The valid EKS log types are `api`, `audit`, `authenticator`, `controllerManager`, and `scheduler`. Specifying an unrecognized type causes `InvalidParameterException` (HTTP 400).
 - **Response normalization**: AWS EKS always returns the status of all five log types. Enabled types are returned first (`enabled: true`), followed by disabled types (`enabled: false`).
 - **Changing logging later**: A logging change made through `UpdateClusterConfig` is stored and returned by `DescribeCluster`; it is read when a cluster's container is started or adopted, when the control plane log stream and audit follower are attached and the audit flags are given to the API server, so it does not change what a running cluster exports.
+- **Refused updates**: `UpdateClusterConfig` moves the authentication mode one step forward only (`CONFIG_MAP`, `API_AND_CONFIG_MAP`, `API`), and refuses an endpoint or logging update that changes nothing, as EKS does.
 - **Default logging**: When omitted or empty at creation time, Floci returns all five log types disabled in a single entry (`enabled: false`).
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:

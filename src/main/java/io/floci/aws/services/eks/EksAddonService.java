@@ -44,6 +44,8 @@ import java.util.function.UnaryOperator;
 @ApplicationScoped
 public class EksAddonService {
 
+    static final String TOKEN_REUSED = "clientRequestToken was already used with different parameters";
+
     private static final Logger LOG = Logger.getLogger(EksAddonService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int DEFAULT_PAGE_SIZE = 100;
@@ -119,8 +121,7 @@ public class EksAddonService {
                 if (parametersMatch(stored.addon(), request)) {
                     return stored.addon();
                 }
-                throw new AwsException("InvalidParameterException",
-                        "clientRequestToken was already used with different parameters", 400);
+                throw new AwsException("InvalidParameterException", TOKEN_REUSED, 400);
             }
             throw new AwsException("ResourceInUseException", "Addon already exists: " + addonName, 409);
         }
@@ -401,7 +402,7 @@ public class EksAddonService {
     public Update describeUpdate(Cluster cluster, String updateId, String addonName) {
         StoredUpdate stored = storedUpdate(cluster, updateId);
         if (addonName != null && !addonName.isBlank()
-                && stored.addonName() != null && !stored.addonName().equalsIgnoreCase(addonName.trim())) {
+                && (stored.addonName() == null || !stored.addonName().equalsIgnoreCase(addonName.trim()))) {
             throw new AwsException("ResourceNotFoundException",
                     "No update: " + updateId + " found for addon: " + addonName, 404);
         }
