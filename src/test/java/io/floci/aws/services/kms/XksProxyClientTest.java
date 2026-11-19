@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +53,53 @@ class XksProxyClientTest {
     void rejectsPrivateAddressesEvenWhenTheyBelongToTheConfiguredProxyHost() {
         XksProxyClient.PublicOnlyDnsResolver resolver =
                 new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver());
+
+        assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
+    }
+
+    @Test
+    void allowsPrivateAddressesOnlyForExplicitlyTrustedProxyHosts() throws Exception {
+        XksProxyClient.PublicOnlyDnsResolver resolver =
+                new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver(), Set.of("proxy.internal"));
+
+        assertEquals(1, resolver.resolve("proxy.internal").length);
+        assertThrows(UnknownHostException.class, () -> resolver.resolve("other.internal"));
+    }
+
+    @Test
+    void explicitlyTrustedPrivateHostsCannotResolveToPublicOrReservedAddresses() throws Exception {
+        DnsResolver publicResolver = new DnsResolver() {
+            @Override
+            public InetAddress[] resolve(String host) throws UnknownHostException {
+                return new InetAddress[]{InetAddress.getByName("8.8.8.8")};
+            }
+
+            @Override
+            public String resolveCanonicalHostname(String host) {
+                return host;
+            }
+        };
+        XksProxyClient.PublicOnlyDnsResolver resolver =
+                new XksProxyClient.PublicOnlyDnsResolver(publicResolver, Set.of("proxy.internal"));
+
+        assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
+    }
+
+    @Test
+    void explicitlyTrustedPrivateHostsStillCannotResolveToMetadataAddresses() {
+        DnsResolver metadataResolver = new DnsResolver() {
+            @Override
+            public InetAddress[] resolve(String host) throws UnknownHostException {
+                return new InetAddress[]{InetAddress.getByName("169.254.169.254")};
+            }
+
+            @Override
+            public String resolveCanonicalHostname(String host) {
+                return host;
+            }
+        };
+        XksProxyClient.PublicOnlyDnsResolver resolver =
+                new XksProxyClient.PublicOnlyDnsResolver(metadataResolver, Set.of("proxy.internal"));
 
         assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
     }

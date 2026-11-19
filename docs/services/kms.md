@@ -75,15 +75,19 @@ Base64-encoded 32-byte key as `FLOCI_SERVICES_KMS_XKS_CREDENTIAL_ENCRYPTION_KEY`
 or connecting an XKS custom key store. Generate and store this key outside Floci (for example in
 your deployment secret manager), keep it stable across restarts, and back it up securely. Floci
 does not generate a fallback key: without the setting, credential persistence and connection fail
-closed. Changing or losing the key makes existing encrypted proxy credentials unreadable.
+closed with the AWS KMS `KMSInternalException` error. Changing or losing the key makes existing
+encrypted proxy credentials unreadable.
 
-The proxy endpoint must be an HTTPS origin with a publicly routable DNS hostname. DNS results
-containing loopback, private, link-local, multicast, reserved or cloud-metadata addresses are
-rejected even when they belong to the configured endpoint hostname; IP-literal endpoints are also
-rejected. This deliberately fails closed rather than treating a caller-supplied hostname as a
-private-network trust grant. Redirects and automatic retries are disabled, the health check has a
-250 ms end-to-end deadline and a bounded worker pool, the health response is size-limited, and
-proxy-controlled error text is not persisted or logged.
+The proxy endpoint must be an HTTPS origin with a DNS hostname; IP-literal endpoints are rejected.
+By default, DNS results containing loopback, private, link-local, multicast, reserved or
+cloud-metadata addresses are rejected. For a deliberately private proxy (for example, another
+container on a private Docker network), explicitly list its exact DNS hostname(s) in
+`FLOCI_SERVICES_KMS_XKS_ALLOWED_PRIVATE_PROXY_HOSTS` as a comma-separated deployment setting.
+This is an exact-host trust grant, not a wildcard. Even for listed hosts, link-local and cloud
+metadata addresses are always rejected. Keep this allowlist limited to proxy hostnames you control.
+Redirects and automatic retries are disabled, the health check has a 250 ms end-to-end deadline
+and a bounded worker pool, the health response is size-limited, and proxy-controlled error text
+is not persisted or logged.
 
 The cryptographic data plane (`Origin=EXTERNAL_KEY_STORE`, `XksKeyId`, and routing Encrypt/Decrypt
 through the proxy) is a separate follow-up milestone. `AWS_CLOUDHSM` and `VPC_ENDPOINT_SERVICE`

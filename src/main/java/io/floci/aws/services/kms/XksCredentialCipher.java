@@ -101,7 +101,9 @@ public class XksCredentialCipher {
             throw new AwsException("InternalFailure", "Could not decrypt stored XKS proxy credentials; verify the configured encryption key", 500);
         } finally {
             // payload contains ciphertext, but clear the temporary copy regardless.
-            if (payload != null) Arrays.fill(payload, (byte) 0);
+            if (payload != null) {
+                Arrays.fill(payload, (byte) 0);
+            }
         }
     }
 
@@ -111,18 +113,20 @@ public class XksCredentialCipher {
 
     @PreDestroy
     void destroy() {
-        if (key != null) Arrays.fill(key, (byte) 0);
+        if (key != null) {
+            Arrays.fill(key, (byte) 0);
+        }
     }
 
     private void requireKey() {
         if (key == null) {
-            throw new AwsException("XksProxyCredentialEncryptionKeyNotConfiguredException",
-                    "Configure FLOCI_SERVICES_KMS_XKS_CREDENTIAL_ENCRYPTION_KEY with a stable Base64-encoded 32-byte key before creating or connecting XKS custom key stores", 400);
+            throw new AwsException("KMSInternalException",
+                    "Configure FLOCI_SERVICES_KMS_XKS_CREDENTIAL_ENCRYPTION_KEY with a stable Base64-encoded 32-byte key before creating or connecting XKS custom key stores", 500);
         }
     }
 
     private static AwsException configurationError() {
-        return new AwsException("ConfigurationError",
+        return new AwsException("KMSInternalException",
                 "FLOCI_SERVICES_KMS_XKS_CREDENTIAL_ENCRYPTION_KEY must be valid Base64 encoding of exactly 32 bytes", 500);
     }
 }

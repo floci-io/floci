@@ -2561,6 +2561,13 @@ public interface EmulatorConfig {
 
         /** Stable, deployment-managed 32-byte Base64 key used to encrypt XKS proxy credentials at rest. */
         Optional<String> xksCredentialEncryptionKey();
+
+        /**
+         * Comma-separated exact DNS hostnames trusted to resolve to private XKS proxy addresses.
+         * Cloud metadata and non-private ranges remain blocked.
+         */
+        @WithDefault("")
+        String xksAllowedPrivateProxyHosts();
     }
 
     interface CognitoServiceConfig {

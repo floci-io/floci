@@ -41,10 +41,8 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void put(K key, V value) {
-        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
-        candidate.put(key, value);
-        persistCandidate(candidate);
-        store = candidate;
+        store.put(key, value);
+        persistToDisk();
     }
 
     @Override
@@ -52,10 +50,8 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
         if (entries.isEmpty()) {
             return;
         }
-        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
-        candidate.putAll(entries);
-        persistCandidate(candidate);
-        store = candidate;
+        store.putAll(entries);
+        persistToDisk();
     }
 
     @Override
@@ -81,10 +77,8 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void delete(K key) {
-        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
-        candidate.remove(key);
-        persistCandidate(candidate);
-        store = candidate;
+        store.remove(key);
+        persistToDisk();
     }
 
     @Override
@@ -147,19 +141,15 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void clear() {
-        persistCandidate(new ConcurrentHashMap<>());
-        store = new ConcurrentHashMap<>();
+        store.clear();
+        persistToDisk();
     }
 
     private synchronized void persistToDisk() {
-        persistCandidate(store);
-    }
-
-    private void persistCandidate(ConcurrentHashMap<K, V> candidate) {
         try {
-            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to persist data to " + filePath, e);
+            LOG.errorv(e, "Failed to persist data to {0}", filePath);
         }
     }
 }

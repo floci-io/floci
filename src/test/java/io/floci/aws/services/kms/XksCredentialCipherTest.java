@@ -22,7 +22,10 @@ class XksCredentialCipherTest {
     @Test
     void refusesMissingOrInvalidDeploymentKey() {
         XksCredentialCipher missing = new XksCredentialCipher(null);
-        assertThrows(AwsException.class, () -> missing.encrypt("secret-value", "scope"));
-        assertThrows(AwsException.class, () -> new XksCredentialCipher("not-base64"));
+        AwsException missingKey = assertThrows(AwsException.class,
+                () -> missing.encrypt("secret-value", "scope"));
+        assertEquals("KMSInternalException", missingKey.getErrorCode());
+        AwsException invalidKey = assertThrows(AwsException.class, () -> new XksCredentialCipher("not-base64"));
+        assertEquals("KMSInternalException", invalidKey.getErrorCode());
     }
 }
