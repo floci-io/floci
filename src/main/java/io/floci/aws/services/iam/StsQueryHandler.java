@@ -350,8 +350,11 @@ public class StsQueryHandler {
 
         Map<String, List<String>> trustContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
-        AssumeRolePolicyEvaluator.putRequestKeys(trustContext, getParam(params, "RoleSessionName"),
-                getParam(params, "ExternalId"));
+        trustContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
+        String externalId = getParam(params, "ExternalId");
+        if (externalId != null) {
+            trustContext.put("sts:ExternalId", List.of(externalId));
+        }
         if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
                 trustContext)) {
             return null;

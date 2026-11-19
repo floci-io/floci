@@ -392,19 +392,29 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates 
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
-The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
+Unless the trust policy grants the call on its own within the role's account (below), the caller's own identity
+policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
 allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
 
-The trust policy acts as the role's resource-based policy, so an IAM user whose exact ARN it names may assume a role
-in its own account without an identity policy of its own. The [AssumeRole API reference](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html)
-lets a user assume a role in the same account either through "a policy to the user that allows the user to call
-`AssumeRole` (as long as the role's trust policy trusts the account)" or by adding "the user as a principal directly
-in the role's trust policy", because "when a resource-based policy grants access to a principal in the same account,
-no additional identity-based policy is required". Such a grant is not limited by the user's permissions boundary
-either ([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html):
-"not limited by an implicit deny in an identity-based policy or permissions boundary"), while an explicit `Deny` in
-any of the user's policies, and the account's SCPs, still refuse it. A trust policy that names the account (its id
-or its root ARN) still needs the user's identity policy, as does a role in another account.
+The trust policy is the role's resource-based policy, and IAM enforcement evaluates it as it does a bucket or a
+queue policy, with the role as its resource, since a trust policy names no `Resource`. Within the role's account, an
+`Allow` that names the caller grants the call without an identity policy of the caller's: the
+[AssumeRole API reference](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) lets a user
+assume a role in the same account either through "a policy to the user that allows the user to call `AssumeRole`
+(as long as the role's trust policy trusts the account)" or by adding "the user as a principal directly in the
+role's trust policy", because "the role's trust policy acts as an IAM resource-based policy. When a resource-based
+policy grants access to a principal in the same account, no additional identity-based policy is required". The same
+holds for a role session whose role, or session, the trust policy names, and for `"*"`. A grant to an IAM user's
+exact ARN is not limited by the user's permissions boundary either
+([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html):
+"not limited by an implicit deny in an identity-based policy or permissions boundary"), while a grant to a role's
+ARN is ("limited by an implicit deny in a permissions boundary or session policy"). A trust policy that names the
+account (its id or its root ARN) still needs the caller's identity policy. For a role in another account, both the
+caller's identity policy and the trust policy have to allow the call
+([cross-account policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic-cross-account.html):
+"The request is allowed only if both evaluations return a decision of `Allow`"), so IAM enforcement refuses an IAM
+user or a role session the trust policy does not allow before STS does. An explicit `Deny` in the trust policy, in
+any of the caller's policies or in the account's SCPs refuses the call.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -430,9 +440,6 @@ when it is written; Floci stores it as given, so the whole document is refused w
 
 ### Known limitations
 
-- **Only an IAM user named by its ARN is granted by the trust policy alone.** Within the role's account, a
-  trust policy naming `"*"`, a role, a role session or a federated user still needs the caller's identity
-  policy to allow `sts:AssumeRole`.
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
   `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
   on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.

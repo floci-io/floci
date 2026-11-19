@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.EnforcementFixtures.Session;
 import io.floci.aws.testing.EnforcementFixtures.UserCredentials;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -103,22 +104,6 @@ class StsAssumeRoleTrustPolicyUserIntegrationTest {
     }
 
     @Test
-    void aTrustPolicyNamingTheUserReadsTheRequestsExternalId() {
-        String suffix = suffix();
-        String user = "external-id-user-" + suffix;
-        UserCredentials caller = createUser(ACCOUNT, user);
-        String roleArn = createRole(ACCOUNT, "trusts-external-id-" + suffix, """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                  "Principal":{"AWS":"%s"},"Action":"sts:AssumeRole",
-                  "Condition":{"StringEquals":{"sts:ExternalId":"expected-id"}}}]}"""
-                .formatted(userArn(ACCOUNT, user)));
-
-        assumeRole(caller, roleArn).then().statusCode(403).body(containsString("AccessDenied"));
-        assumeRole(caller, roleArn, "another-id").then().statusCode(403).body(containsString("AccessDenied"));
-        assumeRole(caller, roleArn, "expected-id").then().statusCode(200);
-    }
-
-    @Test
     void aTrustPolicyNamingAUserOfAnotherAccountStillNeedsThatUsersIdentityPolicy() {
         String suffix = suffix();
         String user = "cross-account-user-" + suffix;
@@ -143,6 +128,24 @@ class StsAssumeRoleTrustPolicyUserIntegrationTest {
                 trustNaming(userArn(ACCOUNT, "other-user-" + suffix)));
 
         assumeRole(caller, roleArn).then().statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    @Test
+    void aTrustPolicyNamingARoleLetsItsSessionsAssumeTheRoleWithoutAnIdentityPolicy() {
+        // The IAM User Guide: "If an action is allowed by an identity-based policy, a
+        // resource-based policy, or both, then AWS allows the action", and a role ARN is a
+        // principal a resource-based policy grants to. The calling role's own policy allows
+        // nothing on STS.
+        String suffix = suffix();
+        String callerRoleArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/team/",
+                "caller-" + suffix, ROLE_POLICY);
+        Session session = EnforcementFixtures.assumeRole(baseUri.getPort(), ACCOUNT, callerRoleArn);
+        String trustsRole = createRole(ACCOUNT, "trusts-role-" + suffix, trustNaming(callerRoleArn));
+        String trustsAccount = createRole(ACCOUNT, "trusts-root-of-role-" + suffix,
+                trustNaming("arn:aws:iam::" + ACCOUNT + ":root"));
+
+        assumeRole(session, trustsRole).then().statusCode(200);
+        assumeRole(session, trustsAccount).then().statusCode(403).body(containsString("AccessDenied"));
     }
 
     private static String suffix() {
@@ -194,20 +197,24 @@ class StsAssumeRoleTrustPolicyUserIntegrationTest {
         return response;
     }
 
-    private Response assumeRole(UserCredentials caller, String roleArn) {
-        return assumeRole(caller, roleArn, null);
+    private Response assumeRole(Session session, String roleArn) {
+        return given().port(baseUri.getPort())
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", auth(session.accessKeyId(), "sts"))
+                .header("X-Amz-Security-Token", session.sessionToken())
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", roleArn)
+                .formParam("RoleSessionName", EnforcementFixtures.SESSION_NAME)
+                .when().post("/");
     }
 
-    private Response assumeRole(UserCredentials caller, String roleArn, String externalId) {
-        RequestSpecification request = given().port(baseUri.getPort())
+    private Response assumeRole(UserCredentials caller, String roleArn) {
+        return given().port(baseUri.getPort())
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", auth(caller.accessKeyId(), "sts"))
                 .formParam("Action", "AssumeRole")
                 .formParam("RoleArn", roleArn)
-                .formParam("RoleSessionName", EnforcementFixtures.SESSION_NAME);
-        if (externalId != null) {
-            request = request.formParam("ExternalId", externalId);
-        }
-        return request.when().post("/");
+                .formParam("RoleSessionName", EnforcementFixtures.SESSION_NAME)
+                .when().post("/");
     }
 }

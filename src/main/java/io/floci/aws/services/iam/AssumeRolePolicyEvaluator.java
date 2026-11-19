@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -83,13 +82,7 @@ public class AssumeRolePolicyEvaluator {
         NEUTRAL
     }
 
-    /**
-     * What a statement grants the caller, in increasing precedence: an explicit Deny wins over any
-     * Allow, and the narrowest principal an Allow names wins over a wider one. {@link #IAM_USER}
-     * is an Allow naming the caller, an IAM user, by its own ARN, which {@link #decide} reports as
-     * {@link TrustDecision#ALLOW} and {@link #grantsToIamUser} tells apart.
-     */
-    private enum Grant { NONE, ACCOUNT, CALLER, IAM_USER, EXPLICIT_DENY }
+    private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
 
     /**
      * Returns true if {@code trustPolicyDocument} allows {@code caller} (in {@code callerAccount})
@@ -202,98 +195,40 @@ public class AssumeRolePolicyEvaluator {
      */
     public TrustDecision decide(String trustPolicyDocument, IamService.CallerArns caller,
                                 String callerAccount, Map<String, List<String>> requestContext) {
-        Optional<JsonNode> root = wellFormedDocument(trustPolicyDocument);
-        if (root.isEmpty()) {
-            return TrustDecision.NEUTRAL;
-        }
-        String callerArn = caller == null ? null : caller.callerArn();
-        String principalArn = caller == null ? null : caller.principalArn();
-        Map<String, List<String>> context = new HashMap<>(requestContext);
-        if (principalArn != null) {
-            caller.putPrincipalKeys(context);
-        }
-        return switch (grant(root.get(), callerArn, principalArn, callerAccount, context)) {
-            case EXPLICIT_DENY -> TrustDecision.EXPLICIT_DENY;
-            case IAM_USER, CALLER -> TrustDecision.ALLOW;
-            case ACCOUNT -> TrustDecision.ALLOW_ACCOUNT;
-            case NONE -> TrustDecision.NEUTRAL;
-        };
-    }
-
-    /**
-     * Returns true if {@code trustPolicyDocument} allows {@code userArn}, an IAM user in
-     * {@code callerAccount}, to perform {@code sts:AssumeRole} through an Allow that names that
-     * user's ARN, and no Deny applies. A role's trust policy "acts as an IAM resource-based policy",
-     * so within the role's account such a grant needs no identity-based policy of the user's (STS
-     * API Reference, AssumeRole), which a grant to the account, to every principal or to another
-     * principal type does not establish here.
-     *
-     * <p>{@code context} is the request's own, holding the caller's principal keys already, as the
-     * enforcement filter has written them, and the keys the request carries, such as
-     * {@code sts:ExternalId} (see {@link #putRequestKeys}). A {@code userArn} that is not an IAM
-     * user's ARN is never granted here.
-     */
-    public boolean grantsToIamUser(String trustPolicyDocument, String userArn, String callerAccount,
-                                   Map<String, List<String>> context) {
-        if (!isIamUserArn(userArn)) {
-            return false;
-        }
-        return wellFormedDocument(trustPolicyDocument)
-                .map(root -> grant(root, userArn, userArn, callerAccount, context) == Grant.IAM_USER)
-                .orElse(false);
-    }
-
-    /** The parsed document, or empty when it is null, blank, unparseable or not well formed. */
-    private Optional<JsonNode> wellFormedDocument(String trustPolicyDocument) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
-            return Optional.empty();
+            return TrustDecision.NEUTRAL;
         }
         JsonNode root;
         try {
             root = objectMapper.readTree(trustPolicyDocument);
         } catch (Exception e) {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
-            return Optional.empty();
+            return TrustDecision.NEUTRAL;
         }
-        return TrustPolicyStatements.wellFormed(root.path("Statement")) ? Optional.of(root) : Optional.empty();
-    }
-
-    /**
-     * Writes the keys an {@code sts:AssumeRole} request itself carries onto {@code context}:
-     * {@code sts:RoleSessionName}, and {@code sts:ExternalId} when the caller passes one.
-     */
-    public static void putRequestKeys(Map<String, List<String>> context, String roleSessionName,
-                                      String externalId) {
-        if (roleSessionName != null) {
-            context.put("sts:RoleSessionName", List.of(roleSessionName));
-        }
-        if (externalId != null) {
-            context.put("sts:ExternalId", List.of(externalId));
-        }
-    }
-
-    /** The strongest grant any statement of the well-formed document {@code root} makes the caller. */
-    private Grant grant(JsonNode root, String callerArn, String principalArn, String callerAccount,
-                        Map<String, List<String>> context) {
         JsonNode statements = root.path("Statement");
+        if (!TrustPolicyStatements.wellFormed(statements)) {
+            return TrustDecision.NEUTRAL;
+        }
         String version = root.path("Version").asText(null);
+        String callerArn = caller == null ? null : caller.callerArn();
+        String principalArn = caller == null ? null : caller.principalArn();
+        Map<String, List<String>> context = new HashMap<>(requestContext);
+        if (principalArn != null) {
+            caller.putPrincipalKeys(context);
+        }
         Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
-        Grant strongest = Grant.NONE;
+        TrustDecision decision = TrustDecision.NEUTRAL;
         for (JsonNode stmt : statementList) {
-            Grant match = evaluateStatement(stmt, callerArn, principalArn, callerAccount, context, version);
-            if (match.compareTo(strongest) > 0) {
-                strongest = match;
+            TrustDecision match =
+                    evaluateStatement(stmt, callerArn, principalArn, callerAccount, context, version);
+            if (match == TrustDecision.EXPLICIT_DENY) {
+                return TrustDecision.EXPLICIT_DENY;
+            }
+            if (match == TrustDecision.ALLOW || decision == TrustDecision.NEUTRAL) {
+                decision = match;
             }
         }
-        return strongest;
-    }
-
-    private static boolean isIamUserArn(String arn) {
-        if (arn == null || !AwsArnUtils.isArn(arn)) {
-            return false;
-        }
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        return "iam".equals(parsed.service()) && parsed.resource().startsWith("user/");
+        return decision;
     }
 
     /**
@@ -370,23 +305,23 @@ public class AssumeRolePolicyEvaluator {
 
     private enum Match { ALLOW, DENY, NO_MATCH }
 
-    private Grant evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
-                                    String callerAccount, Map<String, List<String>> context,
-                                    String policyVersion) {
+    private TrustDecision evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
+                                            String callerAccount, Map<String, List<String>> context,
+                                            String policyVersion) {
         if (!actionApplies(stmt)) {
-            return Grant.NONE;
+            return TrustDecision.NEUTRAL;
         }
-        Grant principal = matchPrincipal(stmt.get("Principal"), callerArn, principalArn, callerAccount);
-        if (principal == Grant.NONE) {
-            return Grant.NONE;
+        PrincipalMatch principal = matchPrincipal(stmt.get("Principal"), callerArn, principalArn, callerAccount);
+        if (principal == PrincipalMatch.NONE) {
+            return TrustDecision.NEUTRAL;
         }
         if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context, policyVersion)) {
-            return Grant.NONE;
+            return TrustDecision.NEUTRAL;
         }
         return switch (effectOf(stmt)) {
-            case DENY -> Grant.EXPLICIT_DENY;
-            case ALLOW -> principal;
-            case NO_MATCH -> Grant.NONE;
+            case DENY -> TrustDecision.EXPLICIT_DENY;
+            case ALLOW -> principal == PrincipalMatch.CALLER ? TrustDecision.ALLOW : TrustDecision.ALLOW_ACCOUNT;
+            case NO_MATCH -> TrustDecision.NEUTRAL;
         };
     }
 
@@ -488,70 +423,66 @@ public class AssumeRolePolicyEvaluator {
         return false;
     }
 
-    /**
-     * The narrowest of the statement's principals that matches the caller wins: the caller named
-     * as an IAM user over the caller otherwise named, and either over its account.
-     */
-    private Grant matchPrincipal(JsonNode principalNode, String callerArn, String principalArn,
-                                 String callerAccount) {
+    /** The narrowest of the statement's principals that matches the caller wins: the caller over its account. */
+    private PrincipalMatch matchPrincipal(JsonNode principalNode, String callerArn, String principalArn,
+                                          String callerAccount) {
         if (principalNode == null) {
-            return Grant.NONE;
+            return PrincipalMatch.NONE;
         }
         // Principal: "*"
         if (principalNode.isTextual()) {
-            return "*".equals(principalNode.asText()) ? Grant.CALLER : Grant.NONE;
+            return "*".equals(principalNode.asText()) ? PrincipalMatch.CALLER : PrincipalMatch.NONE;
         }
         if (!principalNode.isObject()) {
-            return Grant.NONE;
+            return PrincipalMatch.NONE;
         }
         // Only the AWS principal type can match a SigV4 caller.
         JsonNode aws = principalNode.get("AWS");
         if (aws == null) {
-            return Grant.NONE;
+            return PrincipalMatch.NONE;
         }
         if (aws.isTextual()) {
             return matchAwsPrincipal(aws.asText(), callerArn, principalArn, callerAccount);
         }
-        Grant match = Grant.NONE;
+        PrincipalMatch match = PrincipalMatch.NONE;
         if (aws.isArray()) {
             for (JsonNode entry : aws) {
-                Grant entryMatch = entry.isTextual()
+                PrincipalMatch entryMatch = entry.isTextual()
                         ? matchAwsPrincipal(entry.asText(), callerArn, principalArn, callerAccount)
-                        : Grant.NONE;
-                if (entryMatch.compareTo(match) > 0) {
-                    match = entryMatch;
+                        : PrincipalMatch.NONE;
+                if (entryMatch == PrincipalMatch.CALLER) {
+                    return PrincipalMatch.CALLER;
+                }
+                if (entryMatch == PrincipalMatch.ACCOUNT) {
+                    match = PrincipalMatch.ACCOUNT;
                 }
             }
         }
         return match;
     }
 
-    private Grant matchAwsPrincipal(String principal, String callerArn, String principalArn,
-                                    String callerAccount) {
+    private PrincipalMatch matchAwsPrincipal(String principal, String callerArn, String principalArn,
+                                             String callerAccount) {
         if (principal == null) {
-            return Grant.NONE;
+            return PrincipalMatch.NONE;
         }
         if ("*".equals(principal)) {
-            return Grant.CALLER;
+            return PrincipalMatch.CALLER;
         }
         // Bare 12-digit account id, or an account-root ARN → matches any principal in that account.
         if (principal.matches("\\d{12}")) {
-            return principal.equals(callerAccount) ? Grant.ACCOUNT : Grant.NONE;
+            return principal.equals(callerAccount) ? PrincipalMatch.ACCOUNT : PrincipalMatch.NONE;
         }
         Matcher rootMatcher = ACCOUNT_ROOT_ARN.matcher(principal);
         if (rootMatcher.matches()) {
-            return rootMatcher.group(1).equals(callerAccount) ? Grant.ACCOUNT : Grant.NONE;
-        }
-        // An IAM user is named by its exact ARN: "Principals must always name specific users."
-        if (principal.equals(callerArn) && isIamUserArn(callerArn)) {
-            return Grant.IAM_USER;
+            return rootMatcher.group(1).equals(callerAccount) ? PrincipalMatch.ACCOUNT : PrincipalMatch.NONE;
         }
         // Otherwise an exact (glob-capable) principal ARN: the caller's own ARN, which for a role
         // session is its assumed-role session ARN, or the role's ARN for a Principal naming the role.
         if (callerArn != null && IamPolicyEvaluator.globMatches(principal, callerArn)) {
-            return Grant.CALLER;
+            return PrincipalMatch.CALLER;
         }
         return principalArn != null && IamPolicyEvaluator.globMatches(principal, principalArn)
-                ? Grant.CALLER : Grant.NONE;
+                ? PrincipalMatch.CALLER : PrincipalMatch.NONE;
     }
 }
