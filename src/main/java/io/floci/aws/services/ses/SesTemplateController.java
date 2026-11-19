@@ -66,7 +66,7 @@ public class SesTemplateController {
         try {
             JsonNode request = readOptionBody(objectMapper, body);
             String templateName = request.path("TemplateName").asText(null);
-            if (templateName == null || templateName.isBlank()) {
+            if (templateName == null || templateName.isEmpty()) {
                 throw new AwsException("BadRequestException", "TemplateName is required.", 400);
             }
             EmailTemplate template = parseTemplateContent(templateName, request.path("TemplateContent"));

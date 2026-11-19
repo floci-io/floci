@@ -60,6 +60,8 @@ public class SesTemplateService implements SesTaggable {
             "\\{\\{\\{\\s*([\\w-]+)\\s*\\}\\}\\}|\\{\\{\\s*([\\w-]+)\\s*\\}\\}");
     private static final DateTimeFormatter RENDER_DATE =
             DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSX", Locale.ROOT).withZone(ZoneOffset.UTC);
+    private static final int MAX_TEMPLATE_NAME_LENGTH = 64;
+    private static final Pattern TEMPLATE_NAME = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Pattern SUBJECT_WHITESPACE_RUN = Pattern.compile("[ \\t\\r\\n]+");
     static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
     // What TestRenderTemplate shows in place of the list-management link a send would carry.
@@ -102,13 +104,18 @@ public class SesTemplateService implements SesTaggable {
     }
 
     public EmailTemplate getTemplate(String templateName, String region) {
+        validateTemplateName(templateName);
+        return stored(templateName, region);
+    }
+
+    private EmailTemplate stored(String templateName, String region) {
         return templateStore.get(templateKey(region, templateName))
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
                         "Template " + templateName + " does not exist.", 400));
     }
 
     EmailContent.InlineTemplate inline(EmailContent.Template template, String region) {
-        EmailTemplate stored = getTemplate(template.templateName(), region);
+        EmailTemplate stored = stored(template.templateName(), region);
         return new EmailContent.InlineTemplate(stored.getSubject(), stored.getTextPart(),
                 stored.getHtmlPart(), template.templateData(), template.headers());
     }
@@ -131,6 +138,7 @@ public class SesTemplateService implements SesTaggable {
     }
 
     public void deleteTemplate(String templateName, String region) {
+        validateTemplateName(templateName);
         String key = templateKey(region, templateName);
         if (templateStore.get(key).isEmpty()) {
             throw new AwsException("TemplateDoesNotExist",
@@ -203,19 +211,27 @@ public class SesTemplateService implements SesTaggable {
         }
     }
 
+    /**
+     * The name rules create, update, get, delete and test-render apply before anything else, in
+     * SES's order: blank, then longer than {@value #MAX_TEMPLATE_NAME_LENGTH}, then a character
+     * outside ASCII letters, digits, '_' and '-'. The sends, the tag operations and the tenant
+     * association read a template without them: what SES answers there for such a name is not known.
+     */
     private static void validateTemplateName(String templateName) {
         if (templateName == null || templateName.isBlank()) {
-            throw new AwsException("InvalidTemplate", "TemplateName is required.", 400);
+            throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
         }
-        if (Character.isWhitespace(templateName.charAt(0))
-                || Character.isWhitespace(templateName.charAt(templateName.length() - 1))) {
-            throw new AwsException("InvalidTemplate",
-                    "TemplateName must not contain leading or trailing whitespace.", 400);
+        if (templateName.length() > MAX_TEMPLATE_NAME_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Template name cannot exceed " + MAX_TEMPLATE_NAME_LENGTH + " characters.", 400);
+        }
+        if (!TEMPLATE_NAME.matcher(templateName).matches()) {
+            throw new AwsException("InvalidParameterValue", "Template name <" + templateName
+                    + ">: only alphanumeric ASCII characters, '_', and '-' are allowed.", 400);
         }
     }
 
     private static String templateKey(String region, String templateName) {
-        validateTemplateName(templateName);
         return "template::" + region + "::" + templateName;
     }
 
@@ -278,6 +294,7 @@ public class SesTemplateService implements SesTaggable {
 
     public String renderTestTemplate(String templateName, String templateDataRaw, String region,
                                      String accountId) {
+        validateTemplateName(templateName);
         // The rendering data is read before the template is looked up: both wrong answers the data error.
         JsonNode templateData = parseRenderingData(objectMapper, templateDataRaw);
         // TestRenderTemplate words a missing template its own way, unlike the template CRUD.
