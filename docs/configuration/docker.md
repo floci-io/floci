@@ -135,6 +135,18 @@ floci:
 
 Environment variables: `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD`, `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS`
 
+### Concurrent container launches
+
+Floci sends at most `max-concurrent-launches` container creates and starts to the daemon at once, so a burst of container work (a pipeline stage starting a dozen containers, a fan-out of Lambda cold starts) reaches it a few at a time instead of all at once. The rest wait up to `connection-request-timeout-seconds` for one to finish, and a launch that waits longer fails. The default, 0, means twice the CPUs Floci sees and at least 4. Image pulls, stops, removes and every other Docker call are not limited by it:
+
+```yaml
+floci:
+  docker:
+    max-concurrent-launches: 0
+```
+
+Environment variable: `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
@@ -383,6 +395,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
 | `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
 | `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
+| `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES` | `0` | Most container creates and starts sent to the daemon at once; `0` means twice the CPUs Floci sees, at least 4 |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |

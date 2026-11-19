@@ -4511,6 +4511,14 @@ public interface EmulatorConfig {
         int breakerProbeIntervalSeconds();
 
         /**
+         * Most container creates and starts sent to the Docker daemon at once; more wait, up to
+         * {@link #connectionRequestTimeoutSeconds}, for one to finish. 0 means twice the CPUs Floci
+         * sees, and at least 4. Image pulls, stops, removes and every other call are not limited here.
+         */
+        @WithDefault("0")
+        int maxConcurrentLaunches();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

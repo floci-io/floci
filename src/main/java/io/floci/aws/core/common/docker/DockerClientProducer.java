@@ -449,6 +449,15 @@ public class DockerClientProducer {
                 "FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS");
     }
 
+    /** 0 means the default, twice the CPUs Floci sees and at least 4; a negative value is a misconfiguration. */
+    static int validateMaxConcurrentLaunches(int value) {
+        if (value < 0) {
+            throw new IllegalArgumentException("floci.docker.max-concurrent-launches "
+                    + "(FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES) must be 0 or more, got: " + value);
+        }
+        return value;
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
         if (value < 1) {
             throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
@@ -575,8 +584,18 @@ public class DockerClientProducer {
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
+        int launchSlots = "control-plane".equals(role)
+                ? LaunchBulkheadDockerHttpClient.resolveSize(
+                        validateMaxConcurrentLaunches(config.docker().maxConcurrentLaunches()),
+                        Runtime.getRuntime().availableProcessors())
+                : 0;
+        if (launchSlots > 0) {
+            LOG.infov("At most {0} container creates and starts run at once", launchSlots);
+        }
+        Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
         usePingTransport(clientConfig);
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout, breaker));
+        return DockerClientImpl.getInstance(clientConfig,
+                wrapForRole(transport, role, apiTimeout, breaker, launchSlots, launchWait));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -601,7 +620,7 @@ public class DockerClientProducer {
      * silent daemon, not the length of each of its attempts.
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
-        return wrapForRole(transport, role, callTimeout, null);
+        return wrapForRole(transport, role, callTimeout, null, 0, Duration.ZERO);
     }
 
     /**
@@ -612,6 +631,29 @@ public class DockerClientProducer {
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
                                         DockerCircuitBreaker breaker) {
+        return wrapForRole(transport, role, callTimeout, breaker, 0, Duration.ZERO);
+    }
+
+    /**
+     * As {@link #wrapForRole(DockerHttpClient, String, Duration)}, with the control-plane transport's
+     * container creates and starts limited to {@code launchSlots} at once ({@link
+     * LaunchBulkheadDockerHttpClient}), each waiting up to {@code launchWait} for a slot. The bulkhead sits
+     * under the retry layer, so a backoff never holds a slot. 0 slots leaves launches unbounded.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        int launchSlots, Duration launchWait) {
+        return wrapForRole(transport, role, callTimeout, null, launchSlots, launchWait);
+    }
+
+    /**
+     * Both of the above. The bulkhead sits under the breaker, so an open breaker fails a launch at once
+     * instead of after a wait for a slot.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        DockerCircuitBreaker breaker, int launchSlots, Duration launchWait) {
+        if (launchSlots > 0 && "control-plane".equals(role)) {
+            transport = new LaunchBulkheadDockerHttpClient(transport, launchSlots, launchWait);
+        }
         if (breaker != null && breaker.isEnabled()) {
             transport = new CircuitBreakingDockerHttpClient(transport, breaker);
         }
