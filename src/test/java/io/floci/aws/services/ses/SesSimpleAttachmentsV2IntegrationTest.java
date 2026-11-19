@@ -1,7 +1,7 @@
 package io.floci.aws.services.ses;
 
-import io.floci.aws.services.ses.mime.SesContentScan;
 import io.floci.aws.services.ses.mime.SesMimeParser;
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
@@ -146,7 +146,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     @Test
     @Order(4)
     void simpleSend_withVirusInAnAttachment_isRejectedLikeARawSend() {
-        String virus = b64(SesContentScan.signature().getBytes(StandardCharsets.US_ASCII));
+        String virus = b64(SesTestSignature.value().getBytes(StandardCharsets.US_ASCII));
         String messageId = send("""
                 {"FromEmailAddress": "%s",
                  "Destination": {"ToAddresses": ["to@example.com"]},

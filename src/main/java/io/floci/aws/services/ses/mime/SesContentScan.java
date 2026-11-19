@@ -29,9 +29,8 @@ import java.util.Set;
  *
  * <p>The EICAR string is a signature that endpoint protection quarantines on sight, so it is never
  * written out verbatim: it is assembled from fragments at class initialisation, must never be
- * logged, and is read through {@link #signature()} by tests alone, public only because they sit
- * in more than one package, so no test source carries it either. A message that trips the scan is
- * likewise never persisted with its body.
+ * logged, and is exposed to tests only through {@link #signature()} so no test source carries it
+ * either. A message that trips the scan is likewise never persisted with its body.
  */
 public final class SesContentScan {
 
@@ -64,7 +63,7 @@ public final class SesContentScan {
     private SesContentScan() {}
 
     /** The assembled test string, for tests that need to send it. Never log or persist it. */
-    public static String signature() {
+    static String signature() {
         return SIGNATURE_TEXT;
     }
 

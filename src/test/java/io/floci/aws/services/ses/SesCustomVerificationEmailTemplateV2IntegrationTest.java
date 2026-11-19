@@ -1,6 +1,6 @@
 package io.floci.aws.services.ses;
 
-import io.floci.aws.services.ses.mime.SesContentScan;
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -164,7 +164,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void sendWithTemplateCarryingTheTestSignature_isRecordedWithoutItsBodyAndNotRelayed() {
         // The signature comes from the scanner so it never appears in test source; the JSON needs
         // its one backslash escaped.
-        String content = SesContentScan.signature().replace("\\", "\\\\");
+        String content = SesTestSignature.value().replace("\\", "\\\\");
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
                     {"TemplateName": "cvet-v2-scan", "FromEmailAddress": "%s", "TemplateSubject": "scan",

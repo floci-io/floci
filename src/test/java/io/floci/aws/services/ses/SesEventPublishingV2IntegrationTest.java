@@ -7,7 +7,7 @@ import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService.MetricI
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
-import io.floci.aws.services.ses.mime.SesContentScan;
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -1674,7 +1674,7 @@ class SesEventPublishingV2IntegrationTest {
     void eicarAttachment_isAcceptedThenRejected() throws Exception {
         // The signature comes from the scanner itself so it never appears in test source.
         String encoded = Base64.getEncoder().encodeToString(
-                SesContentScan.signature().getBytes(StandardCharsets.US_ASCII));
+                SesTestSignature.value().getBytes(StandardCharsets.US_ASCII));
         String mime = "From: " + SENDER + "\r\nTo: success@simulator.amazonses.com\r\nSubject: scan\r\n"
                 + "X-SES-MESSAGE-TAGS: probe=leak\r\n"
                 + "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
@@ -1762,7 +1762,7 @@ class SesEventPublishingV2IntegrationTest {
                      "Content": {"Simple": {"Subject": {"Data": "scan"},
                                             "Body": {"Text": {"Data": "%s"},
                                                      "Html": {"Data": "<p>clean</p>"}}}}}
-                    """.formatted(SENDER, CS, SesContentScan.signature().replace("\\", "\\\\")))
+                    """.formatted(SENDER, CS, SesTestSignature.value().replace("\\", "\\\\")))
         .when().post("/v2/email/outbound-emails").then().statusCode(200)
                 .extract().jsonPath().getString("MessageId");
 
@@ -1785,7 +1785,7 @@ class SesEventPublishingV2IntegrationTest {
         // A raw send is scanned as a whole, header block included, so the simple path has to
         // cover the subject and the caller's header names and values as well or the two paths
         // disagree; and the stored record keeps none of them.
-        String signature = SesContentScan.signature().replace("\\", "\\\\");
+        String signature = SesTestSignature.value().replace("\\", "\\\\");
         for (String content : new String[] {
                 "\"Subject\": {\"Data\": \"" + signature + "\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}",
                 "\"Subject\": {\"Data\": \"clean\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}, "
@@ -1833,7 +1833,7 @@ class SesEventPublishingV2IntegrationTest {
     void customVerificationEmail_publishesThroughTheSameClassifierAsAnyOtherSend() throws Exception {
         // SendCustomVerificationEmail accepts a ConfigurationSetName like the other send APIs, so a
         // clean verification email publishes a Send and one carrying the signature adds a Reject.
-        String signature = SesContentScan.signature().replace("\\", "\\\\");
+        String signature = SesTestSignature.value().replace("\\", "\\\\");
         String recipient = "cvet-events@cvet-events.floci.test";
         createCustomVerificationTemplate("cvet-events-clean", "<p>verify</p>");
         createCustomVerificationTemplate("cvet-events-scan", "<p>" + signature + "</p>");
