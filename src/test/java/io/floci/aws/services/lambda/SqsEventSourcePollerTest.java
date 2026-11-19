@@ -338,8 +338,7 @@ class SqsEventSourcePollerTest {
         // The failed message must be made visible again after the queue's own visibility
         // timeout (2s here) so the next poll re-receives it and the queue's RedrivePolicy
         // can move it to the DLQ — rather than staying in-flight for fn.timeout + 30s.
-        verify(sqsService).changeMessageVisibility(
-                esm.getQueueUrl(), "rh-m1", 2, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m1", null, 2, "us-east-1");
         verify(sqsService, never()).deleteMessage(any(), any(), any());
     }
 
@@ -413,8 +412,7 @@ class SqsEventSourcePollerTest {
         awaitPoll(poller.pollAndInvoke(esm));
 
         // Falls back to the AWS default of 30s rather than 0 (which would spin a tight retry loop).
-        verify(sqsService).changeMessageVisibility(
-                esm.getQueueUrl(), "rh-m1", 30, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m1", null, 30, "us-east-1");
     }
 
     @Test
@@ -436,7 +434,7 @@ class SqsEventSourcePollerTest {
         awaitPoll(poller.pollAndInvoke(esm));
 
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
-        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -733,7 +731,7 @@ class SqsEventSourcePollerTest {
         }
         // m1 deleted after successful invoke; nothing returned to the queue.
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
-        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -770,7 +768,7 @@ class SqsEventSourcePollerTest {
         // Filtered-out m2 is consumed (deleted) regardless of the invoke outcome.
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
         // Matched m1 failed → returned to the queue (visibility reset), NOT deleted.
-        verify(sqsService).changeMessageVisibility(esm.getQueueUrl(), "rh-m1", 5, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m1", null, 5, "us-east-1");
         verify(sqsService, never()).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
     }
 
@@ -794,7 +792,7 @@ class SqsEventSourcePollerTest {
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
         // The stale failure id does not cause a second delete or a visibility reset.
-        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -855,8 +853,8 @@ class SqsEventSourcePollerTest {
 
         // AWS treats these as a complete failure: nothing is deleted, every delivered
         // message goes back to the queue for retry/redrive.
-        verify(sqsService).changeMessageVisibility(esm.getQueueUrl(), "rh-m1", 2, "us-east-1");
-        verify(sqsService).changeMessageVisibility(esm.getQueueUrl(), "rh-m2", 2, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m1", null, 2, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m2", null, 2, "us-east-1");
         verify(sqsService, never()).deleteMessage(any(), any(), any());
     }
 
@@ -872,7 +870,7 @@ class SqsEventSourcePollerTest {
 
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
-        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -880,8 +878,70 @@ class SqsEventSourcePollerTest {
         EventSourceMapping esm = pollReportingBatch("{\"batchItemFailures\":[{\"itemIdentifier\":\"m2\"}]}");
 
         verify(sqsService).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
-        verify(sqsService).changeMessageVisibility(esm.getQueueUrl(), "rh-m2", 2, "us-east-1");
+        verify(sqsService).changeMessageVisibilityIfUnchanged(esm.getQueueUrl(), "rh-m2", null, 2, "us-east-1");
         verify(sqsService, never()).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
-        verify(sqsService, never()).changeMessageVisibility(eq(esm.getQueueUrl()), eq("rh-m1"), anyInt(), any());
+        verify(sqsService, never()).changeMessageVisibilityIfUnchanged(eq(esm.getQueueUrl()), eq("rh-m1"), any(), anyInt(), any());
+    }
+
+    @Test
+    void partialBatchFailure_functionChangedVisibility_returnsTheMessageAgainstItsReceiveTimeVisibility() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        Instant setByReceive = Instant.parse("2026-01-15T10:31:00Z");
+        Message msg = message("m1");
+        msg.setVisibleAt(setByReceive);
+        stubReceive(esm, List.of(msg));
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "2"));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"m1\"}]}".getBytes());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    // The received message is the queue's live instance, so a ChangeMessageVisibility
+                    // call the function makes shows up on it.
+                    msg.setVisibleAt(setByReceive.plusSeconds(5));
+                    return result;
+                });
+
+        awaitPoll(poller.pollAndInvoke(esm));
+
+        verify(sqsService).changeMessageVisibilityIfUnchanged(
+                esm.getQueueUrl(), "rh-m1", setByReceive, 2, "us-east-1");
+        verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+        verify(sqsService, never()).deleteMessage(any(), any(), any());
+    }
+
+    @Test
+    void batchingWindow_failedMessage_isReturnedAgainstTheVisibilityItsReceiveSet() {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(2);
+        esm.setMaximumBatchingWindowInSeconds(5);
+        AtomicLong now = new AtomicLong(0);
+        poller.setClockForTest(now::get);
+        Instant setByReceive = Instant.parse("2026-01-15T10:31:00Z");
+        Message msg = message("m1");
+        msg.setVisibleAt(setByReceive);
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg))
+                .thenReturn(List.of());
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "2"));
+        InvokeResult failure = new InvokeResult();
+        failure.setFunctionError("Handled");
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    msg.setVisibleAt(setByReceive.plusSeconds(5));
+                    return failure;
+                });
+
+        awaitPoll(poller.pollAndInvoke(esm));
+        verify(executorService, never()).invoke(any(), any(), any());
+        now.set(5000);
+        awaitPoll(poller.pollAndInvoke(esm));
+
+        verify(sqsService).changeMessageVisibilityIfUnchanged(
+                esm.getQueueUrl(), "rh-m1", setByReceive, 2, "us-east-1");
     }
 }

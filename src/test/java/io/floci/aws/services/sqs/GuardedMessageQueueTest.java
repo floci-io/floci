@@ -151,6 +151,28 @@ class GuardedMessageQueueTest {
     }
 
     @Test
+    void changeVisibility_expectedVisibleAtNoLongerCurrent_keepsTheNewerVisibility() {
+        queue.addMessage(new Message("msg"));
+        Message claimed = queue.claimVisibleMessages(1, 30, false, -1, null).claimed().get(0);
+        Instant setByClaim = claimed.getVisibleAt();
+        ReceiptHandle handle = ReceiptHandle.parse(claimed.getReceiptHandle());
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(handle, 60, false));
+
+        assertEquals(HandleResult.VISIBILITY_CHANGED, queue.changeVisibility(handle, setByClaim, 0, false));
+        assertTrue(queue.claimVisibleMessages(1, 30, false, -1, null).claimed().isEmpty());
+    }
+
+    @Test
+    void changeVisibility_expectedVisibleAtStillCurrent_appliesTheTimeout() {
+        queue.addMessage(new Message("msg"));
+        Message claimed = queue.claimVisibleMessages(1, 30, false, -1, null).claimed().get(0);
+        ReceiptHandle handle = ReceiptHandle.parse(claimed.getReceiptHandle());
+
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(handle, claimed.getVisibleAt(), 0, false));
+        assertEquals(1, queue.claimVisibleMessages(1, 30, false, -1, null).claimed().size());
+    }
+
+    @Test
     void changeVisibilityInvalidReturnsFalse() {
         assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), 0, false));
     }

@@ -178,7 +178,7 @@ class GuardedMessageQueue {
         }
     }
 
-    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED }
+    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED, VISIBILITY_CHANGED }
 
     record Removal(HandleResult result, Message message) {
     }
@@ -196,9 +196,23 @@ class GuardedMessageQueue {
     }
 
     HandleResult changeVisibility(ReceiptHandle handle, int visibilityTimeout, boolean fifo) {
+        return changeVisibility(handle, null, visibilityTimeout, fifo);
+    }
+
+    /**
+     * Changes the message's visibility only while it is still {@code expectedVisibleAt}, so a change
+     * made since (by a ChangeMessageVisibility call or another receive) is kept. A null
+     * {@code expectedVisibleAt} changes it unconditionally.
+     */
+    HandleResult changeVisibility(ReceiptHandle handle, Instant expectedVisibleAt, int visibilityTimeout,
+                                  boolean fifo) {
         try (Guard _ = hold()) {
             Message msg = findByMessageId(handle.messageId());
             HandleResult result = checkHandle(msg, handle, fifo);
+            if (result == HandleResult.APPLIED && expectedVisibleAt != null
+                    && !expectedVisibleAt.equals(msg.getVisibleAt())) {
+                return HandleResult.VISIBILITY_CHANGED;
+            }
             if (result == HandleResult.APPLIED) {
                 Instant previous = msg.getVisibleAt();
                 msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
