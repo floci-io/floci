@@ -538,13 +538,14 @@ public class DockerClientProducer {
      * docker call survives a transient socket drop. The streaming transport replays only container
      * waits, as the control-plane one does: its other requests (log follow, attach, exec output)
      * hold hijacked or long-lived streams that must never be replayed, and its exec-start calls are
-     * the one request retrying could turn into a re-run command. {@code callTimeout} bounds a
-     * retried call across its attempts and backoffs, so it is the longest one call waits on a
+     * the one request retrying could turn into a re-run command. {@code callTimeout} bounds a retried
+     * control-plane call across its attempts and backoffs, so it is the longest one call waits on a
      * silent daemon, not the length of each of its attempts.
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
         if (!"control-plane".equals(role)) {
-            return RetryingDockerHttpClient.forContainerWaits(transport, callTimeout);
+            // The streaming transport replays only container waits, long-lived streams the call timeout never bounds.
+            return RetryingDockerHttpClient.forContainerWaits(transport);
         }
         LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
         return new RetryingDockerHttpClient(transport, callTimeout);

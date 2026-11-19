@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,7 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 
@@ -83,25 +83,35 @@ class RetryingDockerHttpClientTest {
         return new RuntimeException(new IOException("Broken pipe"));
     }
 
+    /** A monotonic clock the tests advance by hand: an attempt or a backoff takes exactly what it adds. */
+    private final AtomicLong clockNanos = new AtomicLong();
+
+    private RetryingDockerHttpClient onTheTestClock(DockerHttpClient delegate, long backoffMillis,
+                                                    Duration callTimeout, long backoffOversleepMillis) {
+        return new RetryingDockerHttpClient(delegate, 6, backoffMillis, callTimeout, clockNanos::get,
+                millis -> clockNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(millis + backoffOversleepMillis)));
+    }
+
+    private void spend(Duration time) {
+        clockNanos.addAndGet(time.toNanos());
+    }
+
     // Catches: the call timeout bounding each attempt, so a silent daemon held a replayable call for
     // six times the setting plus backoff (30 minutes at the default) before it failed.
     @Test
     void aDaemonThatNeverAnswersFailsTheCallAtTheCallTimeoutNotAfterEveryAttempt() {
-        Duration callTimeout = Duration.ofMillis(300);
+        Duration callTimeout = Duration.ofSeconds(300);
         FakeTransport delegate = new FakeTransport(attempt -> {
-            sleepQuietly(callTimeout.toMillis());
+            spend(callTimeout);
             throw new RuntimeException(new SocketTimeoutException("Read timed out"));
         });
-        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, 6, 50L, callTimeout);
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, callTimeout, 0L);
         Request inspect = Request.builder().method(Request.Method.GET).path("/containers/abc/json").build();
 
-        long start = System.nanoTime();
         RuntimeException failure = assertThrows(RuntimeException.class, () -> client.execute(inspect));
-        long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
         assertInstanceOf(SocketTimeoutException.class, failure.getCause());
         assertEquals(1, delegate.calls.get(), "an attempt that times out at the limit leaves no time to retry");
-        assertTrue(tookMillis < 2 * callTimeout.toMillis(), "took " + tookMillis + " ms");
     }
 
     @Test
@@ -113,7 +123,7 @@ class RetryingDockerHttpClientTest {
             }
             return ok;
         });
-        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, 6, 10L, Duration.ofSeconds(30));
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, Duration.ofSeconds(300), 0L);
 
         assertSame(ok, client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
         assertEquals(3, delegate.calls.get());
@@ -124,16 +134,29 @@ class RetryingDockerHttpClientTest {
         FakeTransport delegate = new FakeTransport(attempt -> {
             throw brokenPipe();
         });
-        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, 6, 200L, Duration.ofMillis(500));
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 200L, Duration.ofMillis(500), 0L);
 
-        long start = System.nanoTime();
         assertThrows(RuntimeException.class,
                 () -> client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
-        long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
         // Backoffs of 200 then 400 ms: the second would end past 500 ms, so only two attempts run.
         assertEquals(2, delegate.calls.get());
-        assertTrue(tookMillis < 500, "took " + tookMillis + " ms");
+        assertEquals(Duration.ofMillis(200).toNanos(), clockNanos.get(), "only the first backoff was slept");
+    }
+
+    // Catches: a backoff that overslept the deadline still starting the next attempt.
+    @Test
+    void aBackoffThatOversleepsTheCallTimeoutStartsNoFurtherAttempt() {
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        // The 200 ms backoff fits the 500 ms limit when it starts, but the wait returns 600 ms later.
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 200L, Duration.ofMillis(500), 400L);
+
+        assertThrows(RuntimeException.class,
+                () -> client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
+
+        assertEquals(1, delegate.calls.get());
     }
 
     // Catches: the call timeout cutting the retries of an image pull, which has no response timeout and
@@ -141,27 +164,19 @@ class RetryingDockerHttpClientTest {
     @Test
     void aLongLivedStreamKeepsItsRetriesPastTheCallTimeout() {
         Response ok = mock(Response.class);
-        Duration callTimeout = Duration.ofMillis(100);
+        Duration callTimeout = Duration.ofSeconds(300);
         FakeTransport delegate = new FakeTransport(attempt -> {
             if (attempt < 3) {
-                sleepQuietly(2 * callTimeout.toMillis());
+                spend(callTimeout.multipliedBy(2));
                 throw brokenPipe();
             }
             return ok;
         });
-        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, 6, 10L, callTimeout);
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, callTimeout, 0L);
         Request pull = Request.builder().method(Request.Method.POST).path("/images/create?fromImage=alpine").build();
 
         assertSame(ok, client.execute(pull));
         assertEquals(3, delegate.calls.get(), "a pull is retried whatever the call timeout");
-    }
-
-    private static void sleepQuietly(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     @Test
