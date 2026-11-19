@@ -20,6 +20,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.core.common.docker.RunLabelledContainers;
+import io.floci.aws.core.common.docker.StreamingDocker;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.floci.aws.services.codebuild.model.Build;
@@ -76,6 +77,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     private static final int FAILURE_OUTPUT_CHARS = 512;
 
     private final DockerClient dockerClient;
+    /** Carries a phase's output, a stream that stays open for as long as the phase runs. */
+    private final DockerClient streamingDockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
@@ -97,6 +100,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
+                           @StreamingDocker DockerClient streamingDockerClient,
                            ContainerBuilder containerBuilder,
                            ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer,
@@ -110,6 +114,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
                            Ec2Service ec2Service,
                            CodeBuildRoleCredentials roleCredentials) {
         this.dockerClient = dockerClient;
+        this.streamingDockerClient = streamingDockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -735,7 +740,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             CountDownLatch latch = new CountDownLatch(1);
             OutputTail outputCapture = new OutputTail();
 
-            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {

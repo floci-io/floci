@@ -1040,7 +1040,10 @@ class EcrRegistryManagerTest {
         when(execCreateCmd.exec()).thenReturn(execResponse);
         when(execResponse.getId()).thenReturn("gc-exec-1");
         ExecStartCmd execStartCmd = Mockito.mock(ExecStartCmd.class, Mockito.RETURNS_SELF);
-        when(dockerClient.execStartCmd("gc-exec-1")).thenReturn(execStartCmd);
+        // The collection's output holds its connection for minutes, so it streams on the streaming client.
+        DockerClient streamingDockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getStreamingDockerClient()).thenReturn(streamingDockerClient);
+        when(streamingDockerClient.execStartCmd("gc-exec-1")).thenReturn(execStartCmd);
         ResultCallback.Adapter<Frame> execCallback = Mockito.mock(ResultCallback.Adapter.class);
         when(execStartCmd.exec(any())).thenReturn(execCallback);
         when(execCallback.awaitCompletion(anyLong(), any())).thenReturn(false);

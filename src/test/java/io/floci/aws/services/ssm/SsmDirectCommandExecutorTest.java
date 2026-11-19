@@ -39,6 +39,9 @@ class SsmDirectCommandExecutorTest {
     @Test
     void executesRunShellScriptInsideEc2Container() throws Exception {
         DockerClient dockerClient = mock(DockerClient.class);
+        // The command's output holds its connection for as long as the command runs, so it streams on
+        // the streaming client while the exec is created and inspected on the control-plane one.
+        DockerClient streamingDockerClient = mock(DockerClient.class);
         Ec2Service ec2Service = mock(Ec2Service.class);
         Instance instance = instance("i-container", "container-1");
         when(ec2Service.findInstanceById("i-container")).thenReturn(instance);
@@ -61,7 +64,7 @@ class SsmDirectCommandExecutorTest {
             resultCallback.onComplete();
             return resultCallback;
         });
-        when(dockerClient.execStartCmd("exec-1")).thenReturn(execStart);
+        when(streamingDockerClient.execStartCmd("exec-1")).thenReturn(execStart);
 
         InspectExecCmd inspectExec = mock(InspectExecCmd.class);
         InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
@@ -69,7 +72,8 @@ class SsmDirectCommandExecutorTest {
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, streamingDockerClient,
+                ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -125,7 +129,7 @@ class SsmDirectCommandExecutorTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.findInstanceById("i-agent")).thenReturn(null);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-agent",
                 "AWS-RunShellScript",
@@ -151,7 +155,7 @@ class SsmDirectCommandExecutorTest {
         when(ec2Service.isInstanceContainerRunning("i-running")).thenReturn(true);
         when(ec2Service.isInstanceContainerRunning("i-stopped")).thenReturn(false);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
 
         assertTrue(executor.isContainerBacked("i-running"));
         assertFalse(executor.isContainerBacked("i-stopped"));
@@ -163,7 +167,7 @@ class SsmDirectCommandExecutorTest {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2Service ec2Service = mock(Ec2Service.class);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunPowerShellScript",
@@ -181,7 +185,7 @@ class SsmDirectCommandExecutorTest {
         when(ec2Service.findInstanceById("i-container")).thenReturn(instance);
         when(ec2Service.isInstanceContainerRunning("i-container")).thenReturn(true);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -225,7 +229,7 @@ class SsmDirectCommandExecutorTest {
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -258,7 +262,7 @@ class SsmDirectCommandExecutorTest {
         when(execStart.exec(any())).thenReturn(callback);
         when(dockerClient.execStartCmd("exec-1")).thenReturn(execStart);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -302,7 +306,7 @@ class SsmDirectCommandExecutorTest {
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -349,7 +353,7 @@ class SsmDirectCommandExecutorTest {
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -395,7 +399,7 @@ class SsmDirectCommandExecutorTest {
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
                 "i-container",
                 "AWS-RunShellScript",
@@ -415,7 +419,7 @@ class SsmDirectCommandExecutorTest {
         when(ec2Service.findInstanceById("111122223333", "i-container")).thenReturn(instance);
         when(ec2Service.isInstanceContainerRunning("111122223333", "i-container")).thenReturn(true);
 
-        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, dockerClient, ec2Service);
         assertTrue(executor.supports("111122223333", "i-container", "AWS-RunShellScript"));
         assertFalse(executor.supports("444455556666", "i-container", "AWS-RunShellScript"));
     }
