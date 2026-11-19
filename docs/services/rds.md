@@ -98,7 +98,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
 | `DeleteDBCluster` | Delete a cluster |
-| `ModifyDBCluster` | Update cluster settings |
+| `ModifyDBCluster` | Update cluster settings, including deletion protection |
 | `CreateDBParameterGroup` | Create a parameter group |
 | `DescribeDBParameterGroups` | List parameter groups |
 | `DeleteDBParameterGroup` | Delete a parameter group |
@@ -234,9 +234,9 @@ checked against the instance's other window. Modifications apply immediately —
 
 ## Cluster settings read-back
 
-`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot` and the enabled
-CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration` enable
-and disable deltas; omitted fields preserve their values, including an explicit
+`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot`, `DeletionProtection`
+and the enabled CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration`
+enable and disable deltas; omitted fields preserve their values, including an explicit
 false snapshot-copy flag. Create, modify and describe return the stored settings.
 
 Aurora member instances retain `PromotionTier` from create and modify, defaulting

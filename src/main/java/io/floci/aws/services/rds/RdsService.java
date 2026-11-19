@@ -11989,6 +11989,14 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    public synchronized DbCluster setDeletionProtection(String region, String clusterId, boolean deletionProtection) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        cluster.setDeletionProtection(deletionProtection);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     public synchronized DbCluster setClusterSnapshotAndLogSettings(String region, String clusterId,
             Boolean copyTagsToSnapshot, List<String> exports, LogExportChanges changes) {
         String effectiveRegion = effectiveRegion(region);

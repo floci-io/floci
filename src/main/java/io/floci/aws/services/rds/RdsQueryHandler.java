@@ -1448,6 +1448,7 @@ public class RdsQueryHandler {
             List<DbRoleAssociation> associatedRoles = parseAssociatedRoles(params);
             service.validateClusterRoleAssociations(id, engine, associatedRoles);
             boolean enableHttpEndpoint = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableHttpEndpoint"));
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             String globalCluster = params.getFirst("GlobalClusterIdentifier");
             if (enableHttpEndpoint && (globalCluster == null || globalCluster.isBlank())) {
                 // A global cluster's members take its Aurora engine; any other create names its own.
@@ -1513,6 +1514,9 @@ public class RdsQueryHandler {
             }
             if (copyTagsToSnapshot != null || exports != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, exports, null);
+            }
+            if (Boolean.TRUE.equals(deletionProtection)) {
+                cluster = service.setDeletionProtection(region, id, true);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -1630,6 +1634,7 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
@@ -1647,6 +1652,9 @@ public class RdsQueryHandler {
             }
             if (copyTagsToSnapshot != null || exportChanges != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, null, exportChanges);
+            }
+            if (deletionProtection != null) {
+                cluster = service.setDeletionProtection(region, id, deletionProtection);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3652,6 +3660,7 @@ public class RdsQueryHandler {
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
+           .elem("DeletionProtection", c.isDeletionProtection())
            .elem("CopyTagsToSnapshot", c.isCopyTagsToSnapshot())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
