@@ -104,7 +104,7 @@ class ElastiCacheContainerManagerTest {
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
                 "container-id", Map.of(6379,
                         new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 6379))));
-        when(lifecycleManager.getDockerClient()).thenThrow(new IllegalStateException("no daemon"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.attach(any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed after daemon went away"));

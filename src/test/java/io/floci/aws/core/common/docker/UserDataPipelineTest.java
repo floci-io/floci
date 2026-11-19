@@ -73,11 +73,13 @@ class UserDataPipelineTest {
             }
             return null;
         });
-        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, "container-id", 0L,
+        // The script's output stays open for as long as it runs, so it streams on the streaming client.
+        DockerClient streaming = mock(DockerClient.class);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, streaming, "container-id", 0L,
                 "bootstrap complete\n", "");
         List<String> output = new ArrayList<>();
 
-        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, "container-id",
+        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, streaming, "container-id",
                 "test instance", script, Duration.ofSeconds(1), output::add, null, 0L);
 
         assertTrue(result.isSuccess(), result.getFailureMessage());
@@ -87,7 +89,8 @@ class UserDataPipelineTest {
         assertEquals(List.of(List.of(UserDataPipeline.USER_DATA_SCRIPT_PATH)), commands);
         assertEquals(List.of("bootstrap complete"), output);
         verify(copyCmd, times(2)).withRemotePath("/var/lib");
-        verify(docker).execStartCmd("exec-container-id");
+        verify(streaming).execStartCmd("exec-container-id");
+        verify(docker, never()).execStartCmd(anyString());
     }
 
     @Test
@@ -97,7 +100,7 @@ class UserDataPipelineTest {
         when(docker.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
         when(copyCmd.exec()).thenThrow(new NotFoundException("Could not find the file /var/lib in container"));
 
-        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, "container-id",
+        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, docker, "container-id",
                 "test instance", "#!/bin/sh\nexit 0\n", Duration.ofSeconds(1), null, null);
 
         assertFalse(result.isSuccess());

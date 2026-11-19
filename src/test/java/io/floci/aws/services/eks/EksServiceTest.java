@@ -26,13 +26,16 @@ import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.CreateFargateProfileRequest;
 import io.floci.aws.services.eks.model.CreateNodeGroupRequest;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.EncryptionConfig;
 import io.floci.aws.services.eks.model.FargateProfile;
 import io.floci.aws.services.eks.model.FargateProfileStatus;
@@ -45,6 +48,7 @@ import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -2245,6 +2249,84 @@ class EksServiceTest {
         req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
         req.setVersion("1.29");
         return req;
+    }
+
+    private static final String AUTO_MODE_NODE_ROLE = "arn:aws:iam::000000000000:role/eks-auto-node";
+    private static final String AUTO_MODE_PARTIAL = "For EKS Auto Mode, please ensure that all required configs, "
+            + "including computeConfig, kubernetesNetworkConfig, and blockStorage are all either fully enabled or "
+            + "fully disabled.";
+
+    /** A cluster request with EKS Auto Mode's three capabilities; a null one is left out of the request. */
+    private CreateClusterRequest autoModeRequest(String name, ComputeConfig compute, Boolean blockStorage,
+                                                 Boolean loadBalancing) {
+        CreateClusterRequest req = createTestClusterRequest(name);
+        req.setComputeConfig(compute);
+        if (blockStorage != null) {
+            req.setStorageConfig(new StorageConfig(new BlockStorage(blockStorage)));
+        }
+        if (loadBalancing != null) {
+            KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+            network.setElasticLoadBalancing(new ElasticLoadBalancing(loadBalancing));
+            req.setKubernetesNetworkConfig(network);
+        }
+        return req;
+    }
+
+    private void assertCreateClusterRefused(CreateClusterRequest req, String message) {
+        AwsException refused = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertEquals(message, refused.getMessage());
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> eksService.describeCluster(req.getName())).getErrorCode());
+    }
+
+    @Test
+    void aClusterCreatedWithAutoModeDescribesItsComputeStorageAndLoadBalancing() {
+        ComputeConfig compute = new ComputeConfig(true, List.of("general-purpose", "system"), AUTO_MODE_NODE_ROLE);
+
+        eksService.createCluster(autoModeRequest("auto-mode-cluster", compute, true, true));
+        Cluster described = eksService.describeCluster("auto-mode-cluster");
+
+        assertEquals(compute, described.getComputeConfig());
+        assertEquals(new StorageConfig(new BlockStorage(true)), described.getStorageConfig());
+        assertEquals(new ElasticLoadBalancing(true), described.getKubernetesNetworkConfig().getElasticLoadBalancing());
+    }
+
+    @Test
+    void autoModeIsRefusedUnlessComputeBlockStorageAndLoadBalancingAreEnabledTogether() {
+        ComputeConfig on = new ComputeConfig(true, List.of("general-purpose"), AUTO_MODE_NODE_ROLE);
+        ComputeConfig off = new ComputeConfig(false, null, null);
+        assertCreateClusterRefused(autoModeRequest("auto-compute", on, false, false), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-storage", off, true, false), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-load-balancing", off, false, true), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-no-load-balancing", on, true, false), AUTO_MODE_PARTIAL);
+        // A capability the request leaves out is not enabled.
+        assertCreateClusterRefused(autoModeRequest("auto-compute-alone", on, null, null), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-storage-alone", null, true, null), AUTO_MODE_PARTIAL);
+    }
+
+    @Test
+    void autoModeNodePoolsAreRefusedWithoutANodeRole() {
+        String message = "When Compute Config nodeRoleArn is null or empty, nodePool list cannot be populated";
+        assertCreateClusterRefused(autoModeRequest("auto-null-node-role",
+                new ComputeConfig(true, List.of("general-purpose", "system"), null), true, true), message);
+        assertCreateClusterRefused(autoModeRequest("auto-empty-node-role",
+                new ComputeConfig(true, List.of("general-purpose", "system"), ""), true, true), message);
+    }
+
+    @Test
+    void autoModeNodeRoleIsRefusedWithoutNodePools() {
+        String message = "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.";
+        assertCreateClusterRefused(autoModeRequest("auto-null-node-pools",
+                new ComputeConfig(true, null, AUTO_MODE_NODE_ROLE), true, true), message);
+        assertCreateClusterRefused(autoModeRequest("auto-empty-node-pools",
+                new ComputeConfig(true, List.of(), AUTO_MODE_NODE_ROLE), true, true), message);
+
+        // Without built-in node pools, Auto Mode takes no node role either.
+        eksService.createCluster(autoModeRequest("auto-without-node-pools", new ComputeConfig(true, List.of(), null),
+                true, true));
+        assertEquals(new ComputeConfig(true, List.of(), null),
+                eksService.describeCluster("auto-without-node-pools").getComputeConfig());
     }
 
     @Test

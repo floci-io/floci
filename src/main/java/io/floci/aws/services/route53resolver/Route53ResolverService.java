@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -27,6 +28,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -67,6 +69,15 @@ public class Route53ResolverService {
     private static final String INVALID_PARAMETER = "InvalidParameterException";
     /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
     private static final String VALIDATION = "ValidationException";
+
+    /** The ListResolverRules filter names, lower-cased without underscores, and the rule field each one reads. */
+    private static final Map<String, String> RULE_FILTER_FIELDS = Map.of(
+            "creatorrequestid", "CreatorRequestId",
+            "domainname", "DomainName",
+            "name", "Name",
+            "resolverendpointid", "ResolverEndpointId",
+            "status", "Status",
+            "type", "RuleType");
 
     /** The AWS-managed domain lists available in commercial regions. */
     static final List<String> AWS_MANAGED_DOMAIN_LIST_NAMES = List.of(
@@ -547,8 +558,54 @@ public class Route53ResolverService {
         return require(ruleStore, id, "resolver rule", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRules(String region) {
-        return recordsIn(ruleStore, region);
+    /**
+     * The rules of {@code region} matching every filter of {@code filters}, a rule matching a filter when its field
+     * equals any of the filter's values. A filter name may also be given in the legacy upper-case form
+     * ({@code CREATOR_REQUEST_ID}); a name the operation does not list filters nothing.
+     */
+    public List<ObjectNode> listResolverRules(JsonNode filters, String region) {
+        List<ObjectNode> rules = recordsIn(ruleStore, region);
+        if (filters == null || filters.isNull()) {
+            return rules;
+        }
+        if (!filters.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+        }
+        for (JsonNode filter : filters) {
+            if (!filter.isObject()) {
+                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+            }
+            String name = filter.path("Name").asText("");
+            if (name.isEmpty() || name.length() > 64) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
+            }
+            JsonNode filterValues = filter.path("Values");
+            if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+            }
+            List<String> values = new ArrayList<>();
+            for (JsonNode value : filterValues) {
+                if (!value.isTextual()) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+                }
+                if (value.asText().isEmpty() || value.asText().length() > 600) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
+                }
+                values.add(value.asText());
+            }
+            String field = RULE_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
+            if (field == null) {
+                continue;
+            }
+            boolean domain = "DomainName".equals(field);
+            rules = rules.stream()
+                    .filter(rule -> values.stream().anyMatch(value -> domain
+                            ? DnsLookupHelper.normalizeTarget(value)
+                                    .equalsIgnoreCase(DnsLookupHelper.normalizeTarget(text(rule, field)))
+                            : value.equals(text(rule, field))))
+                    .toList();
+        }
+        return rules;
     }
 
     public ObjectNode updateResolverRule(String id, JsonNode config, String region) {

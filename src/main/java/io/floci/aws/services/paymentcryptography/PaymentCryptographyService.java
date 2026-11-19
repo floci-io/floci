@@ -1570,6 +1570,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return exchange.publicKeyCertificate(key);
     }
 
+    /**
+     * The material of a key that came under a key the two parties agreed with, and goes out
+     * under another key.
+     *
+     * @param region the region the request is in
+     * @param material the request's members
+     * @return the wrapped key, its check value and the format it is in
+     */
+    public Map<String, Object> translateKeyMaterial(String region, Map<String, Object> material) {
+        return exchange.translateKeyMaterial(region, material);
+    }
+
     /** The parameters a counterparty needs to import a key into this service. */
     public Map<String, Object> parametersForImport(String materialType, String algorithm,
                                                     boolean reuse) {

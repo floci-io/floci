@@ -94,6 +94,7 @@ public class ContainerLifecycleManager {
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
 
     private final DockerClient dockerClient;
+    private final DockerClient streamingDockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
@@ -112,11 +113,12 @@ public class ContainerLifecycleManager {
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
+                                     @StreamingDocker DockerClient streamingDockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
                                      EmulatorConfig config) {
-        this(dockerClient, imageCacheService, containerDetector, config,
-                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+        this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -135,7 +137,20 @@ public class ContainerLifecycleManager {
                               long archiveRetryBackoffMillis,
                               LongSupplier nanoTime,
                               CreateWait createWait) {
+        this(dockerClient, dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
+                nanoTime, createWait);
+    }
+
+    private ContainerLifecycleManager(DockerClient dockerClient,
+                                      DockerClient streamingDockerClient,
+                                      ImageCacheService imageCacheService,
+                                      ContainerDetector containerDetector,
+                                      EmulatorConfig config,
+                                      long archiveRetryBackoffMillis,
+                                      LongSupplier nanoTime,
+                                      CreateWait createWait) {
         this.dockerClient = dockerClient;
+        this.streamingDockerClient = streamingDockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.config = config;
@@ -385,6 +400,7 @@ public class ContainerLifecycleManager {
             }
             throw e;
         }
+        DockerContainerServices.record(containerId, spec.name(), labels);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
@@ -1584,12 +1600,37 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Whether the Docker daemon answers a ping, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons. The one probe the container-backed services share.
+     */
+    public boolean isDockerReachable() {
+        try {
+            dockerClient.pingCmd().exec();
+            return true;
+        } catch (RuntimeException e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Returns the underlying control-plane DockerClient for operations not covered by this
      * manager. Prefer using manager methods when available. A stream that stays open for a
      * container's lifetime belongs on the {@link StreamingDocker} client instead.
      */
     public DockerClient getDockerClient() {
         return dockerClient;
+    }
+
+    /**
+     * Returns the {@link StreamingDocker} client, for a request that holds its connection for as long
+     * as what it follows, so it never takes a control-plane lease: an exec start whose output may run
+     * long, a container wait, or a followed log. Only those belong here: the streaming transport
+     * replays nothing but a container wait after a dropped connection, while the control-plane one
+     * also replays reads.
+     */
+    public DockerClient getStreamingDockerClient() {
+        return streamingDockerClient;
     }
 
     /**

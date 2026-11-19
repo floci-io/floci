@@ -10,7 +10,9 @@ import java.lang.annotation.Target;
 /**
  * CDI qualifier for the DockerClient dedicated to long-lived streaming operations:
  * container log-follow ({@link ContainerLogStreamer}), Lambda extension execs and exit
- * watchers, and Lambda Web attach streams. These calls occupy a connection pool
+ * watchers, Lambda Web attach streams, and the output of long-running execs (CodeBuild phases,
+ * SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS
+ * user data, EMR bootstrap actions). These calls occupy a connection pool
  * slot for a container's entire lifetime, so they must not share a pool
  * with short-lived control-plane calls (create/start/stop/remove/copyArchive): a fan-out
  * of many long-lived streams would otherwise starve the control-plane calls out of a

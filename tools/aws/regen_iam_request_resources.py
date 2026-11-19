@@ -293,11 +293,12 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
-              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
+              "sqs", "sns", "kinesis")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
-              "resource-groups", "s3", "sns", "sqs", "sts")
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kms", "logs", "pipes",
+              "resource-groups", "s3", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -764,8 +765,9 @@ def with_absent_account(resources: list[dict], formats: dict[str, str], accounts
 # Words that end a type's name in a member's documentation: "The name of the pipeline to start".
 DOC_STOP = {"to", "that", "you", "for", "which", "created", "from", "in", "of", "about", "whose", "with", "on",
             "belonging", "being", "the", "a", "an", "is", "are", "and", "or", "by", "used", "will", "should", "can", ""}
-# "The name of the pipeline", "Specifies the name or the CloudTrail ARN of the trail", "The ID of the delivery".
-DOC_NAMES_RE = re.compile(r"^(?:specifies )?(?:the |a |an )?(?:unique )?(?:name|id|identifier)"
+# "The name of the pipeline", "Specifies the name or the CloudTrail ARN of the trail", "The ID of the delivery", "The URL of
+# the queue".
+DOC_NAMES_RE = re.compile(r"^(?:specifies )?(?:the |a |an )?(?:unique )?(?:name|id|identifier|url)"
                           r"(?: or (?:the )?(?:[a-z]+ )?arn)? (?:of|for) (?:the |a |an )?(?P<phrase>.+)$")
 # "A list of service-generated unique DB Instance Ids belonging to the DB Cluster".
 DOC_LIST_RE = re.compile(r"^(?:a |the )?(?:list of )?(?:service-generated |unique )*(?P<phrase>[a-z][a-z0-9 -]*?) "
@@ -796,12 +798,14 @@ def doc_head(lead: str) -> tuple[str, str | None]:
 
 
 def doc_kind(lead: str) -> str | None:
-    """Whether the documentation says the member is a name or an id; None when it says neither."""
+    """Whether the documentation says the member is a name, an id or a URL; None when it says none of them."""
     head, _ = doc_head(lead)
     if re.search(r"\bname(?: or (?:the )?(?:\w+ )?arn)?$", head):
         return "name"
     if re.search(r"\b(?:id|identifier|ids|identifiers)(?: or (?:the )?(?:\w+ )?arn)?$", head):
         return "id"
+    if re.search(r"\burl$", head):
+        return "url"
     return None
 
 
@@ -821,7 +825,8 @@ def spelled(kind: str, arn: str) -> str | None:
 def doc_names(lead: str, kind: str, formats: dict[str, str]) -> bool:
     """Whether a member's documentation says it names a resource of the type, by the type's name or its format's
     leading resource word, word for word and followed by a word that ends it: "The name of the stream processor you
-    want to delete" names a `streamprocessor`, "The ID of the pipeline execution" no `pipeline`."""
+    want to delete" names a `streamprocessor`, "The ID of the pipeline execution" no `pipeline`. A hyphenated word
+    before it qualifies it: "The URL of a dead-letter queue" names a `queue`."""
     word = RESOURCE_PART_RE.match(formats.get(kind, ""))
     targets = {re.sub(r"[^a-z0-9]", "", kind.lower())} | ({re.sub(r"[^a-z0-9]", "", word.group(1).lower())} if word else set())
     for regex in (DOC_NAMES_RE, DOC_LIST_RE):
@@ -829,19 +834,31 @@ def doc_names(lead: str, kind: str, formats: dict[str, str]) -> bool:
         if not match:
             continue
         words = re.split(r"[\s,;()]+", match.group("phrase"))
-        joined = ""
-        for index, piece in enumerate(words[:4]):
-            joined += re.sub(r"[^a-z0-9]", "", piece)
-            if joined in targets:
-                return regex is DOC_LIST_RE or re.sub(r"[^a-z0-9]", "", words[index + 1] if index + 1 < len(words) else "") in DOC_STOP
-            if not any(target.startswith(joined) for target in targets):
-                break
+        starts = [0, 1] if len(words) > 1 and "-" in words[0] else [0]
+        for start in starts:
+            joined = ""
+            for index, piece in enumerate(words[start:start + 4], start):
+                joined += re.sub(r"[^a-z0-9]", "", piece)
+                if joined in targets:
+                    return regex is DOC_LIST_RE or re.sub(r"[^a-z0-9]", "", words[index + 1] if index + 1 < len(words) else "") in DOC_STOP
+                if not any(target.startswith(joined) for target in targets):
+                    break
     return False
+
+
+def _without_service_name(lead: str, model: dict) -> str:
+    """A documentation lead without the model's own service name before the word it qualifies, as botocore's metadata
+    spells it: "the url of the amazon sqs queue to delete" reads "the url of the queue to delete"."""
+    for name in (model["metadata"].get("serviceFullName"), model["metadata"].get("serviceAbbreviation")):
+        if name:
+            lead = re.sub(r"\b" + re.escape(name.lower()) + r" (?=[a-z])", "", lead)
+    return lead
 
 
 def documented_members(models: dict[str, dict], operation: str) -> dict[str, dict]:
     """The request's members holding a string or a list of strings, top-level and fields of a top-level structure,
-    each with its documentation's lead, its pattern and whether it is nested, by name or `Name.Field`."""
+    each with its documentation's lead, without its service's own name (`_without_service_name`), its pattern and
+    whether it is nested, by name or `Name.Field`."""
     found: dict[str, dict] = {}
     for model in models.values():
         spec = model["operations"].get(operation)
@@ -863,7 +880,8 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                     continue
                 element = model["shapes"][item_shape["member"]["shape"]] if item_shape["type"] == "list" else item_shape
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
-                                        "lead": _lead(item.get("documentation") or item_shape.get("documentation")),
+                                        "lead": _without_service_name(_lead(item.get("documentation")
+                                                                            or item_shape.get("documentation")), model),
                                         "arnValue": bool(re.search(
                                             r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
                                             _lead_text(item.get("documentation") or item_shape.get("documentation")))),
@@ -1707,7 +1725,7 @@ def _kinds(resource: dict) -> list[str]:
 
 
 def kind_of(name: str) -> str:
-    """Whether a name ends as a name, an id, or an identifier (which is either), or neither."""
+    """Whether a name ends as a name, an id, or an identifier (which is either), a URL, or none of them."""
     lower = name.lower()
     if re.search(r"identifiers?$", lower):
         return "identifier"
@@ -1715,6 +1733,8 @@ def kind_of(name: str) -> str:
         return "name"
     if re.search(r"ids?$", lower):
         return "id"
+    if re.search(r"urls?$", lower):
+        return "url"
     return ""
 
 
