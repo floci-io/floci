@@ -496,10 +496,6 @@ public class SesQueryHandler {
     private Response handleSetIdentityMailFromDomain(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
         String mailFromDomain = getParam(params, "MailFromDomain");
-        if (mailFromDomain == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "MailFromDomain is required (use an empty string to clear the existing setting).", 400);
-        }
         String behaviorOnMxFailure = getParam(params, "BehaviorOnMXFailure");
         identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure,
                 region);

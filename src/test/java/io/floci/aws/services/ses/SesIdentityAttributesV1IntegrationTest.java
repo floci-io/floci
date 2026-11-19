@@ -178,7 +178,19 @@ class SesIdentityAttributesV1IntegrationTest {
 
     @Test
     @Order(11)
-    void setIdentityMailFromDomain_missingMailFromDomain_returnsInvalidParameterValue() {
+    void setIdentityMailFromDomain_missingMailFromDomain_clears() {
+        // Probed: SES takes an absent MailFromDomain as the request to clear the domain.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SetIdentityMailFromDomain")
+            .formParam("Identity", "v1-attrs.floci.test")
+            .formParam("MailFromDomain", "mail.v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
@@ -187,8 +199,20 @@ class SesIdentityAttributesV1IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("InvalidParameterValue"));
+            .statusCode(200)
+            .body(containsString("SetIdentityMailFromDomainResponse"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<BehaviorOnMXFailure>UseDefaultValue</BehaviorOnMXFailure>"))
+            .body(not(containsString("MailFromDomain>")));
     }
 
     @Test
