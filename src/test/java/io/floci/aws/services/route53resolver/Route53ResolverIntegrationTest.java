@@ -108,14 +108,23 @@ class Route53ResolverIntegrationTest {
         String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.82.0.0/16")
                 .extract().path("CreateVpcResponse.vpc.vpcId");
         try {
-            String id = dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+            String id = dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200)
+                    .body("ResolverDNSSECConfig.ResourceId", equalTo(vpc))
+                    .body("ResolverDNSSECConfig.OwnerId", notNullValue())
+                    .body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"))
+                    .extract().path("ResolverDNSSECConfig.Id");
+            assertTrue(id.startsWith("rdsc-"));
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.Id", equalTo(id));
+
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
                     + "\",\"Validation\":\"ENABLE\"}")
                 .statusCode(200)
+                .body("ResolverDNSSECConfig.Id", equalTo(id))
                 .body("ResolverDNSSECConfig.ResourceId", equalTo(vpc))
                 .body("ResolverDNSSECConfig.OwnerId", notNullValue())
-                .body("ResolverDNSSECConfig.ValidationStatus", equalTo("ENABLED"))
-                .extract().path("ResolverDNSSECConfig.Id");
-            assertTrue(id.startsWith("rdsc-"));
+                .body("ResolverDNSSECConfig.ValidationStatus", equalTo("ENABLED"));
 
             dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
                     .statusCode(200).body("ResolverDNSSECConfig.Id", equalTo(id));
@@ -136,25 +145,28 @@ class Route53ResolverIntegrationTest {
                     .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
             dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}",
                     AUTH_HEADER.replace("us-east-1", "us-west-2")).statusCode(400)
-                    .body("__type", equalTo("ResourceNotFoundException"));
+                    .body("__type", equalTo("AccessDeniedException"));
             dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}",
                     AUTH_HEADER.replace("AKID", "000000000077")).statusCode(400)
-                    .body("__type", equalTo("ResourceNotFoundException"));
+                    .body("__type", equalTo("AccessDeniedException"));
         } finally {
             ec2Ok("DeleteVpc", "VpcId", vpc);
         }
         dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
-                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                + "\",\"Validation\":\"ENABLE\"}")
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
     }
 
     @Test
     void updateResolverDnssecConfig_requiresExistingVpcAndValidValidation() {
         dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\",\"Validation\":\"ENABLE\"}")
-                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
         dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\",\"Validation\":\"INVALID\"}")
                 .statusCode(400).body("__type", equalTo("InvalidParameterException"));
         dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\"}")
-                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+                .statusCode(400).body("__type", equalTo("AccessDeniedException"));
     }
 
     private static ValidatableResponse dnssec(String action, String body) {

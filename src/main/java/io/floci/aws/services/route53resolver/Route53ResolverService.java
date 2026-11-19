@@ -16,6 +16,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.services.ec2.model.Vpc;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -605,17 +606,10 @@ public class Route53ResolverService {
         String validation = requireText(request, "Validation", INVALID_PARAMETER);
         requireEnum(validation, "Validation", List.of("ENABLE", "DISABLE", "USE_LOCAL_RESOURCE_SETTING"),
                 INVALID_PARAMETER);
-        if (ec2Service != null && ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).isEmpty()) {
-            throw new AwsException("ResourceNotFoundException", "VPC not found: " + resourceId, 400);
-        }
+        requireDnssecVpc(resourceId, region);
         String key = region + "::" + resourceId;
-        ObjectNode config = dnssecConfigStore.get(key).map(ObjectNode::deepCopy).orElseGet(() -> {
-            ObjectNode created = objectMapper.createObjectNode();
-            created.put("Id", "rdsc-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
-            created.put("OwnerId", accountId);
-            created.put("ResourceId", resourceId);
-            return created;
-        });
+        ObjectNode config = dnssecConfigStore.get(key).map(ObjectNode::deepCopy)
+                .orElseGet(() -> newDnssecConfig(resourceId, accountId));
         String validationStatus = switch (validation) {
             case "ENABLE" -> "ENABLED";
             case "DISABLE" -> "DISABLED";
@@ -627,16 +621,39 @@ public class Route53ResolverService {
         return config.deepCopy();
     }
 
-    public ObjectNode getResolverDnssecConfig(String resourceId, String region) {
+    public synchronized ObjectNode getResolverDnssecConfig(String resourceId, String region) {
         if (resourceId == null || resourceId.isBlank()) {
             throw new AwsException(INVALID_PARAMETER, "ResourceId is required", 400);
         }
+        Vpc vpc = requireDnssecVpc(resourceId, region);
         return dnssecConfigStore.get(region + "::" + resourceId)
-                .filter(config -> ec2Service == null
-                        || !ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).isEmpty())
-                .map(ObjectNode::deepCopy)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "DNSSEC configuration not found for VPC: " + resourceId, 400));
+                .orElseGet(() -> {
+                    if (vpc == null) {
+                        throw new AwsException("ResourceNotFoundException",
+                                "DNSSEC configuration not found for VPC: " + resourceId, 400);
+                    }
+                    ObjectNode config = newDnssecConfig(resourceId, vpc.getOwnerId());
+                    config.put("ValidationStatus", "DISABLED");
+                    dnssecConfigStore.put(region + "::" + resourceId, config);
+                    return config;
+                }).deepCopy();
+    }
+
+    private Vpc requireDnssecVpc(String resourceId, String region) {
+        if (ec2Service == null) {
+            return null;
+        }
+        return ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).stream()
+                .findFirst().orElseThrow(() -> new AwsException("AccessDeniedException",
+                        "Unable to access VPC: " + resourceId, 400));
+    }
+
+    private ObjectNode newDnssecConfig(String resourceId, String accountId) {
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("Id", "rdsc-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        config.put("OwnerId", accountId);
+        config.put("ResourceId", resourceId);
+        return config;
     }
 
     /**

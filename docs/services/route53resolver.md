@@ -25,7 +25,7 @@
 | `GetResolverRuleAssociation` | Returns a resolver rule association by id. |
 | `ListResolverRuleAssociations` | Lists all resolver rule associations. |
 | `UpdateResolverDnssecConfig` | Creates or updates a VPC's DNSSEC validation configuration and returns its terminal validation status. |
-| `GetResolverDnssecConfig` | Returns the stored DNSSEC validation configuration for an existing VPC. |
+| `GetResolverDnssecConfig` | Returns a stable DNSSEC validation configuration for an existing VPC, defaulting to `DISABLED` before its first update. |
 | `TagResource` | Adds or overwrites tags on a resolver endpoint, resolver rule or custom firewall domain list, by ARN. |
 | `UntagResource` | Removes tag keys from a resolver endpoint, resolver rule or custom firewall domain list; absent keys are ignored. |
 | `ListTagsForResource` | Lists a resource's tags, paginated by `MaxResults` (default and maximum 100) and `NextToken`. |
