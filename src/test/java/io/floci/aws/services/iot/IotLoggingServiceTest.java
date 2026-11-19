@@ -132,6 +132,14 @@ class IotLoggingServiceTest {
         assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "[{\"roleArn\": \"x\", \"defaultLogLevel\": \"INFO\"}]", "null", "42", "\"INFO\""})
+    void rejectsABodyThatIsNotAJsonObject(String body) {
+        assertEquals("SerializationException", failure(body));
+        assertEquals("NotConfiguredException",
+                assertThrows(AwsException.class, () -> service.getV2LoggingOptions(REGION)).getErrorCode());
+    }
+
     @Test
     void eachRegionKeepsItsOwnOptions() throws Exception {
         set("""

@@ -31,6 +31,9 @@ public class IotLoggingService {
     }
 
     public void setV2LoggingOptions(JsonNode request, String region) {
+        if (!request.isObject()) {
+            throw serializationError("request body", "object");
+        }
         String roleArn = text(request.path("roleArn"), "roleArn");
         String defaultLogLevel = text(request.path("defaultLogLevel"), "defaultLogLevel");
         Boolean disableAllLogs = bool(request.path("disableAllLogs"), "disableAllLogs");
