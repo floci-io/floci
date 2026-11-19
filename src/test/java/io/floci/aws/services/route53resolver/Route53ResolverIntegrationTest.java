@@ -1,6 +1,7 @@
 package io.floci.aws.services.route53resolver;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.Route53ResolverRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.path.xml.XmlPath;
@@ -174,10 +175,7 @@ class Route53ResolverIntegrationTest {
     }
 
     private static ValidatableResponse dnssec(String action, String body, String authorization) {
-        return given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", authorization).body(body)
-                .when().post("/").then();
+        return Route53ResolverRequests.call(action, body, authorization);
     }
 
     // ── CreateResolverEndpoint: the request member is IpAddresses ──────────────

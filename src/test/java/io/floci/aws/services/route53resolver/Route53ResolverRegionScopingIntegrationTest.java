@@ -1,6 +1,7 @@
 package io.floci.aws.services.route53resolver;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.Route53ResolverRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,7 +9,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -113,13 +113,9 @@ class Route53ResolverRegionScopingIntegrationTest {
     }
 
     static ValidatableResponse call(String region, String action, String body) {
-        return given()
-                .contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region
-                        + "/route53resolver/aws4_request")
-                .body(body)
-                .when().post("/").then();
+        String authorization = "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region
+                + "/route53resolver/aws4_request";
+        return Route53ResolverRequests.call(action, body, authorization);
     }
 
     private static void notFound(ValidatableResponse response) {
