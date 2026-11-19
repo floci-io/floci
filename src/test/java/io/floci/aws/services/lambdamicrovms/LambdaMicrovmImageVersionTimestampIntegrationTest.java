@@ -6,6 +6,7 @@ import io.restassured.path.json.config.JsonPathConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -26,7 +27,7 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
     @Test
     void getPreservesVersionTimestampWhenParentBuildsAnotherVersion() {
         String image = createImage();
-        double original = versionTimestamp(image, "1.0");
+        BigDecimal original = versionTimestamp(image, "1.0");
         updateImage(image);
 
         assertEquals(original, versionTimestamp(image, "1.0"));
@@ -35,11 +36,11 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
     @Test
     void listPreservesVersionTimestampWhenParentBuildsAnotherVersion() {
         String image = createImage();
-        double original = versionTimestamp(image, "1.0");
+        BigDecimal original = versionTimestamp(image, "1.0");
         updateImage(image);
 
-        double listed = given().when().get(IMAGES + "/" + image + "/versions")
-                .then().statusCode(200).extract().jsonPath(EXACT_NUMBERS).getDouble("items[0].updatedAt");
+        BigDecimal listed = given().when().get(IMAGES + "/" + image + "/versions")
+                .then().statusCode(200).extract().jsonPath(EXACT_NUMBERS).getObject("items[0].updatedAt", BigDecimal.class);
         assertEquals(original, listed);
     }
 
@@ -47,19 +48,19 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
     void statusChangeUpdatesOnlyTheTargetVersionTimestamp() {
         String image = createImage();
         updateImage(image);
-        double original = versionTimestamp(image, "1.0");
-        double other = versionTimestamp(image, "2.0");
-        double parent = given().when().get(IMAGES + "/" + image).then().statusCode(200)
-                .extract().jsonPath(EXACT_NUMBERS).getDouble("updatedAt");
+        BigDecimal original = versionTimestamp(image, "1.0");
+        BigDecimal other = versionTimestamp(image, "2.0");
+        BigDecimal parent = given().when().get(IMAGES + "/" + image).then().statusCode(200)
+                .extract().jsonPath(EXACT_NUMBERS).getObject("updatedAt", BigDecimal.class);
 
         given().contentType("application/json").body("{\"status\":\"INACTIVE\"}")
                 .when().patch(IMAGES + "/" + image + "/versions/1.0").then().statusCode(200);
 
-        assertTrue(versionTimestamp(image, "1.0") > original,
+        assertTrue(versionTimestamp(image, "1.0").compareTo(original) > 0,
                 "Changing a version's status must advance its own updatedAt");
         assertEquals(other, versionTimestamp(image, "2.0"));
         assertEquals(parent, given().when().get(IMAGES + "/" + image).then().statusCode(200)
-                .extract().jsonPath(EXACT_NUMBERS).getDouble("updatedAt"));
+                .extract().jsonPath(EXACT_NUMBERS).getObject("updatedAt", BigDecimal.class));
     }
 
     private String createImage() {
@@ -76,9 +77,9 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
                 .when().put(IMAGES + "/" + image).then().statusCode(200);
     }
 
-    private double versionTimestamp(String image, String version) {
+    private BigDecimal versionTimestamp(String image, String version) {
         return given().when().get(IMAGES + "/" + image + "/versions/" + version)
-                .then().statusCode(200).extract().jsonPath(EXACT_NUMBERS).getDouble("updatedAt");
+                .then().statusCode(200).extract().jsonPath(EXACT_NUMBERS).getObject("updatedAt", BigDecimal.class);
     }
 
     private static String fields(String label) {
