@@ -74,6 +74,11 @@ public class Route53ResolverJsonHandler {
                         service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId"), region));
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations(region);
 
+                case "UpdateResolverDnssecConfig" -> dnssecConfigResponse(service.updateResolverDnssecConfig(
+                        request, region, accountId));
+                case "GetResolverDnssecConfig" -> dnssecConfigResponse(service.getResolverDnssecConfig(
+                        text(request, "ResourceId"), region));
+
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
                     yield Response.ok(objectMapper.createObjectNode()).build();
@@ -194,5 +199,9 @@ public class Route53ResolverJsonHandler {
             associations.add(association);
         }
         return Response.ok(result).build();
+    }
+
+    private Response dnssecConfigResponse(ObjectNode config) {
+        return Response.ok(objectMapper.createObjectNode().set("ResolverDNSSECConfig", config)).build();
     }
 }

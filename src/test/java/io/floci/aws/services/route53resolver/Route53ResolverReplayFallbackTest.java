@@ -41,7 +41,8 @@ class Route53ResolverReplayFallbackTest {
     void setUp() {
         endpointIpRequests = new InMemoryStorage<>();
         service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                endpointIpRequests, new InMemoryStorage<>(),
                 objectMapper);
     }
 
@@ -145,7 +146,8 @@ class Route53ResolverReplayFallbackTest {
             }
         };
         Route53ResolverService racing = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), readOnce, new InMemoryStorage<>(), objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                readOnce, new InMemoryStorage<>(), objectMapper);
         ObjectNode created = racing.createResolverEndpoint(createRequest("tok-race", "10.0.0.5"), REGION, ACCOUNT);
         String id = created.get("Id").asText();
         ObjectNode record = objectMapper.createObjectNode();

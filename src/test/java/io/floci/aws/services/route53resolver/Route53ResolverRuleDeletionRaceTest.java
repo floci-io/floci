@@ -28,7 +28,8 @@ class Route53ResolverRuleDeletionRaceTest {
     void aDeletionWaitsForAnAssociationBeingStoredAndThenRefusesTheRule() throws Exception {
         ParkingStore<ObjectNode> associations = new ParkingStore<>();
         Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), associations, new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
+                new InMemoryStorage<>(), associations, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), objectMapper);
         String ruleId = service.createResolverRule(objectMapper.createObjectNode().put("RuleType", "SYSTEM")
                 .put("DomainName", "example.com"), REGION, "000000000000").get("Id").asText();
         associations.parkNextWrite();
