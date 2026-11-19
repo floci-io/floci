@@ -116,11 +116,11 @@ class RdsStorageTypeIntegrationTest {
             create(gp3).formParam("StorageType", "gp3").post("/").then().statusCode(200);
             create(io1, "postgres", "100").formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
             assertAll(() -> assertTrue(described(gp2, "Iops").isEmpty()),
-                    () -> assertTrue(described(gp2, "StorageThroughput").isEmpty()),
+                    () -> assertEquals(List.of("0"), described(gp2, "StorageThroughput")),
                     () -> assertEquals(List.of("3000"), described(gp3, "Iops")),
                     () -> assertEquals(List.of("125"), described(gp3, "StorageThroughput")),
                     () -> assertEquals(List.of("2000"), described(io1, "Iops")),
-                    () -> assertTrue(described(io1, "StorageThroughput").isEmpty()));
+                    () -> assertEquals(List.of("0"), described(io1, "StorageThroughput")));
 
             Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", gp3)
                     .formParam("Iops", "6000").formParam("StorageThroughput", "250").post("/");
@@ -162,7 +162,7 @@ class RdsStorageTypeIntegrationTest {
             query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp2")
                     .post("/").then().statusCode(200);
             assertAll(() -> assertTrue(described(id, "Iops").isEmpty()),
-                    () -> assertTrue(described(id, "StorageThroughput").isEmpty()));
+                    () -> assertEquals(List.of("0"), described(id, "StorageThroughput")));
             query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
                     .post("/").then().statusCode(200);
             assertAll(() -> assertEquals(List.of("3000"), described(id, "Iops")),

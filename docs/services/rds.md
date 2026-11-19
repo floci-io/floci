@@ -502,7 +502,7 @@ reloads. Legacy records without the member retain the existing `gp2` fallback.
 Storage type changes apply immediately to control-plane metadata; the backing container volume's
 performance is unchanged. `MultiAZ` changes remain unimplemented. `Iops` and `StorageThroughput` are stored from Create and
 Modify and described for the storage types that carry them (`Iops` on io1, io2 and gp3, throughput on gp3);
-a gp3 instance that named neither reports the
+every other type reports `StorageThroughput` as `0`; a gp3 instance that named neither reports the
 [gp3 baseline](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage).
 `Iops` on a type without provisioned IOPS (`Iops=0` is allowed) and `StorageThroughput` on any type but gp3 are
 refused with `InvalidParameterCombination`; a create that names `Iops` and no type defaults to io1.

@@ -3394,10 +3394,10 @@ public class RdsQueryHandler {
         return gp3 ? (gp3BaselineSteppedUp(i) ? "12000" : "3000") : null;
     }
 
-    /** StorageThroughput as Describe reports it: on gp3 only, the stored value, else the baseline. */
+    /** StorageThroughput as Describe reports it: on gp3 the stored value, else the baseline; 0 on any other type. */
     private static String storageThroughput(DbInstance i) {
         if (!"gp3".equals(i.getStorageType())) {
-            return null;
+            return "0";
         }
         if (i.getStorageThroughput() != null) {
             return i.getStorageThroughput().toString();
