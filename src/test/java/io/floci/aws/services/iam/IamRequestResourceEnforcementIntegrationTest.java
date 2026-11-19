@@ -1116,6 +1116,66 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "servicediscovery:CreateService");
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cloud Map holds on the namespace or the service a request
+     * names by its id, as a tag call or the create leaves them, so an allow on one team's tag lets the caller read that
+     * team's namespace and service and not another's.
+     */
+    @Test
+    void aCloudMapResourceTagConditionReadsTheTagsOfTheNamespaceAndTheService() {
+        String tagged = cloudMapNamespace("res-ns-team-" + suffix());
+        String other = cloudMapNamespace("res-ns-team-" + suffix());
+        adminJson("servicediscovery", "Route53AutoNaming_v20170314.TagResource").body("{\"ResourceARN\":\""
+                + "arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":namespace/" + tagged + "\",\"Tags\":"
+                + teamTag("data") + "}").post("/").then().statusCode(200);
+        String taggedService = cloudMapService(tagged, "data");
+        String otherService = cloudMapService(other, "web");
+
+        User user = user("res-cloud-map-team");
+        user.policy(onTeam("servicediscovery:GetNamespace") + "," + onTeam("servicediscovery:GetService"));
+        cloudMap(user, "GetNamespace", tagged).statusCode(200);
+        refusedJson(cloudMap(user, "GetNamespace", other), "servicediscovery:GetNamespace");
+        cloudMap(user, "GetService", taggedService).statusCode(200);
+        refusedJson(cloudMap(user, "GetService", otherService), "servicediscovery:GetService");
+    }
+
+    /**
+     * Cloud Map's handlers find a namespace by its id in every Region, so a request sent to another Region acts on it
+     * and is checked with its tags: a deny on its team's tag holds there too.
+     */
+    @Test
+    void aCloudMapTagDenyHoldsForARequestSentToAnotherRegion() {
+        String namespaceId = cloudMapNamespace("res-ns-deny-" + suffix());
+        adminJson("servicediscovery", "Route53AutoNaming_v20170314.TagResource").body("{\"ResourceARN\":\""
+                + "arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":namespace/" + namespaceId + "\",\"Tags\":"
+                + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-cloud-map-deny");
+        user.policy(allowOn("servicediscovery:GetNamespace", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"servicediscovery:GetNamespace\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(given().header("Authorization", auth(user.accessKeyId(), "us-west-2", "servicediscovery"))
+                .header("X-Amz-Target", "Route53AutoNaming_v20170314.GetNamespace")
+                .contentType("application/x-amz-json-1.1").body("{\"Id\":\"" + namespaceId + "\"}").post("/").then(),
+                "servicediscovery:GetNamespace");
+    }
+
+    /** An allow of {@code action} on every resource whose {@code team} tag is {@code data}. */
+    private static String onTeam(String action) {
+        return "{\"Effect\":\"Allow\",\"Action\":\"" + action + "\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}";
+    }
+
+    /** A Cloud Map service in the namespace, tagged with the team when created and deleted after the test; its id. */
+    private String cloudMapService(String namespaceId, String team) {
+        String id = adminJson("servicediscovery", "Route53AutoNaming_v20170314.CreateService")
+                .body("{\"Name\":\"res-svc-" + suffix() + "\",\"NamespaceId\":\"" + namespaceId + "\",\"Tags\":"
+                        + teamTag(team) + "}").post("/").then().statusCode(200).extract().path("Service.Id");
+        cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteService")
+                .body("{\"Id\":\"" + id + "\"}").post("/").then().statusCode(200));
+        return id;
+    }
+
     /** A service's tags are checked on the service it creates, not on the namespace it creates it in. */
     @Test
     void aServicesTagsAreCheckedOnTheServiceNotItsNamespace() {
