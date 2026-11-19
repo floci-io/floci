@@ -5,13 +5,11 @@ import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -240,18 +238,8 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(FIFO_FALSE_STACK, CFN_AUTH);
         assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
-        String events = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackEvents")
-            .formParam("StackName", FIFO_FALSE_STACK)
-        .when().post("/").then().statusCode(200).extract().asString();
-        List<String> failures = XmlParser.extractGroups(events, "member").stream()
-                .filter(event -> "Queue".equals(event.get("LogicalResourceId"))
-                        && "CREATE_FAILED".equals(event.get("ResourceStatus")))
-                .map(event -> event.get("ResourceStatusReason"))
-                .toList();
-        assertThat(failures, contains(containsString("Unknown Attribute FifoQueue.")));
+        assertThat(CfnStackWaits.failedResourceReason(FIFO_FALSE_STACK, CFN_AUTH),
+                containsString("Unknown Attribute FifoQueue."));
         cloudFormation(FIFO_FALSE_STACK, "DeleteStack", null);
     }
 
