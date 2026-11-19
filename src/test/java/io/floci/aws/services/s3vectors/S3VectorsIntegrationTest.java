@@ -43,6 +43,21 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("vectorBucketArn", containsString("arn:aws:s3vectors:"));
+
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s"
+                }
+                """.formatted(BUCKET_NAME))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("A vector bucket with the specified name already exists"));
     }
 
     @Test
@@ -96,6 +111,25 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("indexArn", containsString("arn:aws:s3vectors:"));
+
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "dimension": 3,
+                    "distanceMetric": "cosine",
+                    "dataType": "float32"
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/CreateIndex")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("An index with the specified name already exists"));
     }
 
     @Test
