@@ -2,6 +2,7 @@ package io.floci.aws.services.iot;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
@@ -13,6 +14,10 @@ import jakarta.inject.Inject;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+
+import static io.floci.aws.services.iot.IotRequestBody.requireObject;
+import static io.floci.aws.services.iot.IotRequestBody.serializationError;
+import static io.floci.aws.services.iot.IotRequestBody.text;
 
 @ApplicationScoped
 public class IotLoggingService {
@@ -33,9 +38,7 @@ public class IotLoggingService {
     }
 
     public void setV2LoggingOptions(JsonNode request, String region) {
-        if (!request.isObject()) {
-            throw serializationError("request body", "object");
-        }
+        requireObject(request);
         String roleArn = text(request.path("roleArn"), "roleArn");
         String defaultLogLevel = text(request.path("defaultLogLevel"), "defaultLogLevel");
         Boolean disableAllLogs = bool(request.path("disableAllLogs"), "disableAllLogs");
@@ -61,27 +64,13 @@ public class IotLoggingService {
                 new AwsException("NotConfiguredException", "V2 logging options are not configured.", 404));
     }
 
-    private static String text(JsonNode node, String member) {
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isTextual()) {
-            throw serializationError(member, "string");
-        }
-        return node.textValue();
-    }
-
     private static Boolean bool(JsonNode node, String member) {
         if (node.isMissingNode() || node.isNull()) {
             return null;
         }
         if (!node.isBoolean()) {
-            throw serializationError(member, "boolean");
+            throw serializationError(member, JsonNodeType.BOOLEAN);
         }
         return node.booleanValue();
-    }
-
-    private static AwsException serializationError(String member, String type) {
-        return new AwsException("SerializationException", member + " must be a JSON " + type, 400);
     }
 }
