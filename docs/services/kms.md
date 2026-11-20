@@ -82,7 +82,8 @@ The proxy endpoint must be an HTTPS origin with a DNS hostname; IP-literal endpo
 By default, DNS results containing loopback, private, link-local, multicast, reserved or
 cloud-metadata addresses are rejected. For a deliberately private proxy (for example, another
 container on a private Docker network), explicitly list its exact DNS hostname(s) in
-`FLOCI_SERVICES_KMS_XKS_ALLOWED_PRIVATE_PROXY_HOSTS` as a comma-separated deployment setting.
+`FLOCI_SERVICES_KMS_XKS_ALLOWED_PRIVATE_PROXY_HOSTS` as a deployment list setting (comma-separated
+when supplied through an environment variable).
 This is an exact-host trust grant, not a wildcard. Even for listed hosts, link-local and cloud
 metadata addresses are always rejected. Keep this allowlist limited to proxy hostnames you control.
 Redirects and automatic retries are disabled, the health check has a 250 ms end-to-end deadline

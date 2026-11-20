@@ -70,7 +70,9 @@ public class KmsCustomKeyStoreService {
             if (lastId == null) {
                 throw new AwsException("InvalidMarkerException", "The pagination marker is invalid", 400);
             }
-            while (start < all.size() && all.get(start).getCustomKeyStoreId().compareTo(lastId) <= 0) start++;
+            while (start < all.size() && all.get(start).getCustomKeyStoreId().compareTo(lastId) <= 0) {
+                start++;
+            }
         }
         int end = Math.min(start + pageSize, all.size());
         List<KmsCustomKeyStore> page = all.subList(start, end);

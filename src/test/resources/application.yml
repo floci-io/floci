@@ -314,7 +314,6 @@ floci:
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
-      xks-allowed-private-proxy-hosts: ""
     cognito:
       enabled: true
       google-issuer: https://accounts.google.com

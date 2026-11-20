@@ -167,7 +167,9 @@ public class KmsJsonHandler {
             entry.put("CustomKeyStoreName", store.getCustomKeyStoreName());
             entry.put("CustomKeyStoreType", store.getCustomKeyStoreType());
             entry.put("ConnectionState", store.getConnectionState());
-            if (store.getConnectionErrorCode() != null) entry.put("ConnectionErrorCode", store.getConnectionErrorCode());
+            if (store.getConnectionErrorCode() != null) {
+                entry.put("ConnectionErrorCode", store.getConnectionErrorCode());
+            }
             entry.put("CreationDate", (double) store.getCreationDate());
             ObjectNode proxy = entry.putObject("XksProxyConfiguration");
             proxy.put("AccessKeyId", store.getAccessKeyId());
@@ -176,7 +178,9 @@ public class KmsJsonHandler {
             proxy.put("UriPath", store.getProxyUriPath());
         }
         response.put("Truncated", page.truncated());
-        if (page.truncated()) response.put("NextMarker", page.nextMarker());
+        if (page.truncated()) {
+            response.put("NextMarker", page.nextMarker());
+        }
         return Response.ok(response).build();
     }
 
@@ -189,7 +193,10 @@ public class KmsJsonHandler {
         String secretAccessKey = null;
         JsonNode credential = request.path("XksProxyAuthenticationCredential");
         if (!credential.isMissingNode() && !credential.isNull()) {
-            if (!credential.isObject()) throw new AwsException("SerializationException", "XksProxyAuthenticationCredential must be an object", 400);
+            if (!credential.isObject()) {
+                throw new AwsException("SerializationException",
+                        "XksProxyAuthenticationCredential must be an object", 400);
+            }
             accessKeyId = requiredStringText(credential, "AccessKeyId");
             secretAccessKey = requiredStringText(credential, "RawSecretAccessKey");
         }
@@ -226,8 +233,12 @@ public class KmsJsonHandler {
 
     private static String optionalText(JsonNode request, String field) {
         JsonNode value = request.path(field);
-        if (value.isMissingNode() || value.isNull()) return null;
-        if (!value.isTextual()) throw new AwsException("SerializationException", field + " must be a String", 400);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("SerializationException", field + " must be a String", 400);
+        }
         return value.textValue();
     }
 

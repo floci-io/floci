@@ -1,12 +1,12 @@
 package io.floci.aws.core.common;
 
+import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
-import jakarta.inject.Inject;
 
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -52,7 +52,9 @@ public class AwsRequestIdFilter implements ContainerRequestFilter, ContainerResp
         String requestId = existingRequestId(headers);
         if (headers.getFirst(AMZ_REQUEST_ID) == null && headers.getFirst(AMZN_REQUEST_ID) == null) {
             String correlatedId = this.requestContext.getRequestId();
-            if (correlatedId != null && !correlatedId.isBlank()) requestId = correlatedId;
+            if (correlatedId != null && !correlatedId.isBlank()) {
+                requestId = correlatedId;
+            }
         }
 
         if (!headers.containsKey(AMZ_REQUEST_ID)) {

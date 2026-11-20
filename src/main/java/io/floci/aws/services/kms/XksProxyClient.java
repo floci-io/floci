@@ -8,6 +8,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.SsrfProtection;
+import io.floci.aws.core.common.ValidatingDnsResolver;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import jakarta.annotation.PreDestroy;
@@ -40,9 +41,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -81,7 +83,7 @@ public class XksProxyClient implements AutoCloseable {
     public XksProxyClient(ObjectMapper objectMapper, EmulatorConfig config) {
         this(objectMapper, SystemDefaultDnsResolver.INSTANCE,
                 ContainerCaBundle.sslContext(config).orElse(null), false,
-                parseAllowedPrivateHosts(config.services().kms().xksAllowedPrivateProxyHosts()));
+                parseAllowedPrivateHosts(config.services().kms().xksAllowedPrivateProxyHosts().orElse(List.of())));
     }
 
     XksProxyClient(ObjectMapper objectMapper, DnsResolver dnsResolver, SSLContext sslContext) {
@@ -106,7 +108,7 @@ public class XksProxyClient implements AutoCloseable {
         this.requestExecutor = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(8), requestThreadFactory, new ThreadPoolExecutor.AbortPolicy());
         DnsResolver publicOnlyResolver = allowTestEndpoint ? dnsResolver
-                : new PublicOnlyDnsResolver(dnsResolver, allowedPrivateHosts);
+                : validatingResolver(dnsResolver, allowedPrivateHosts);
         Timeout timeout = Timeout.of(allowTestEndpoint ? Duration.ofSeconds(3) : HTTP_TIMEOUT);
         PoolingHttpClientConnectionManagerBuilder connections = PoolingHttpClientConnectionManagerBuilder.create()
                 .setDnsResolver(publicOnlyResolver)
@@ -372,13 +374,16 @@ public class XksProxyClient implements AutoCloseable {
         return value == null || value.isBlank();
     }
 
-    private static Set<String> parseAllowedPrivateHosts(String configuredHosts) {
-        Set<String> hosts = new LinkedHashSet<>();
-        if (configuredHosts == null || configuredHosts.isBlank()) {
+    static Set<String> parseAllowedPrivateHosts(List<String> configuredHosts) {
+        if (configuredHosts == null || configuredHosts.isEmpty()) {
             return Set.of();
         }
-        for (String configuredHost : configuredHosts.split(",")) {
-            String host = configuredHost.trim().toLowerCase(Locale.ROOT);
+        Set<String> hosts = new HashSet<>();
+        for (String configuredHost : configuredHosts) {
+            if (configuredHost == null || configuredHost.isBlank()) {
+                continue;
+            }
+            String host = normalizeHost(configuredHost);
             if (!DNS_HOSTNAME.matcher(host).matches() || host.matches("[0-9.]+")) {
                 throw new IllegalArgumentException("XKS allowed private proxy hosts must be exact DNS hostnames");
             }
@@ -387,26 +392,13 @@ public class XksProxyClient implements AutoCloseable {
         return Set.copyOf(hosts);
     }
 
-    static final class PublicOnlyDnsResolver implements DnsResolver {
-        private final DnsResolver delegate;
-        private final Set<String> allowedPrivateHosts;
-
-        PublicOnlyDnsResolver(DnsResolver delegate) {
-            this(delegate, Set.of());
-        }
-
-        PublicOnlyDnsResolver(DnsResolver delegate, Set<String> allowedPrivateHosts) {
-            this.delegate = delegate;
-            this.allowedPrivateHosts = Set.copyOf(allowedPrivateHosts);
-        }
-
-        @Override
-        public InetAddress[] resolve(String host) throws UnknownHostException {
-            InetAddress[] addresses = delegate.resolve(host);
-            if (addresses == null || addresses.length == 0) {
-                throw new UnknownHostException("XKS proxy host has no addresses");
-            }
-            boolean explicitlyTrustedPrivateHost = allowedPrivateHosts.contains(host.toLowerCase(Locale.ROOT));
+    static DnsResolver validatingResolver(DnsResolver delegate, Set<String> allowedPrivateHosts) {
+        Set<String> allowedHosts = allowedPrivateHosts.stream()
+                .map(XksProxyClient::normalizeHost)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        return new ValidatingDnsResolver(delegate, (host, addresses) -> {
+            String normalizedHost = normalizeHost(host);
+            boolean explicitlyTrustedPrivateHost = allowedHosts.contains(normalizedHost);
             for (InetAddress address : addresses) {
                 boolean blocked = explicitlyTrustedPrivateHost
                         ? !isExplicitlyAllowedPrivateAddress(address)
@@ -417,23 +409,30 @@ public class XksProxyClient implements AutoCloseable {
                             : "XKS proxy host resolves to a non-public address");
                 }
             }
-            return addresses.clone();
-        }
+        }, XksProxyClient::normalizeHost);
+    }
 
-        private static boolean isExplicitlyAllowedPrivateAddress(InetAddress address) {
-            if (SsrfProtection.isMetadataAddress(address) || address.isAnyLocalAddress()
-                    || address.isMulticastAddress()) {
-                return false;
-            }
-            byte[] bytes = address.getAddress();
-            boolean uniqueLocalIpv6 = bytes.length == 16 && (Byte.toUnsignedInt(bytes[0]) & 0xfe) == 0xfc;
-            return address.isLoopbackAddress() || address.isSiteLocalAddress() || uniqueLocalIpv6;
-        }
+    private static String normalizeHost(String host) {
+        String normalized = host.trim().toLowerCase(Locale.ROOT);
+        return normalized.endsWith(".") ? normalized.substring(0, normalized.length() - 1) : normalized;
+    }
 
-        @Override
-        public String resolveCanonicalHostname(String host) {
-            return delegate.resolveCanonicalHostname(host);
+    private static boolean isExplicitlyAllowedPrivateAddress(InetAddress address) {
+        if (SsrfProtection.isMetadataAddress(address) || address.isAnyLocalAddress()
+                || address.isLinkLocalAddress() || address.isMulticastAddress()) {
+            return false;
         }
+        if (address.isLoopbackAddress()) {
+            return true;
+        }
+        byte[] bytes = address.getAddress();
+        if (bytes.length == 4) {
+            int first = Byte.toUnsignedInt(bytes[0]);
+            int second = Byte.toUnsignedInt(bytes[1]);
+            return first == 10 || (first == 172 && second >= 16 && second <= 31)
+                    || (first == 192 && second == 168);
+        }
+        return bytes.length == 16 && (Byte.toUnsignedInt(bytes[0]) & 0xfe) == 0xfc;
     }
 
     public static final class XksProxyException extends AwsException {

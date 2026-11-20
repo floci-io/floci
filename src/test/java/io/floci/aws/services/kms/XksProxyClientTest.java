@@ -10,17 +10,18 @@ import org.apache.hc.client5.http.DnsResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.charset.StandardCharsets;
 import java.io.IOException;
-import java.nio.file.Path;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -51,16 +52,14 @@ class XksProxyClientTest {
 
     @Test
     void rejectsPrivateAddressesEvenWhenTheyBelongToTheConfiguredProxyHost() {
-        XksProxyClient.PublicOnlyDnsResolver resolver =
-                new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver());
+        DnsResolver resolver = XksProxyClient.validatingResolver(loopbackResolver(), Set.of());
 
         assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
     }
 
     @Test
     void allowsPrivateAddressesOnlyForExplicitlyTrustedProxyHosts() throws Exception {
-        XksProxyClient.PublicOnlyDnsResolver resolver =
-                new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver(), Set.of("proxy.internal"));
+        DnsResolver resolver = XksProxyClient.validatingResolver(loopbackResolver(), Set.of("proxy.internal"));
 
         assertEquals(1, resolver.resolve("proxy.internal").length);
         assertThrows(UnknownHostException.class, () -> resolver.resolve("other.internal"));
@@ -71,7 +70,7 @@ class XksProxyClientTest {
         DnsResolver publicResolver = new DnsResolver() {
             @Override
             public InetAddress[] resolve(String host) throws UnknownHostException {
-                return new InetAddress[]{InetAddress.getByName("8.8.8.8")};
+                return new InetAddress[]{InetAddress.getByName("8.8.8.8"), InetAddress.getByName("192.0.2.1")};
             }
 
             @Override
@@ -79,8 +78,7 @@ class XksProxyClientTest {
                 return host;
             }
         };
-        XksProxyClient.PublicOnlyDnsResolver resolver =
-                new XksProxyClient.PublicOnlyDnsResolver(publicResolver, Set.of("proxy.internal"));
+        DnsResolver resolver = XksProxyClient.validatingResolver(publicResolver, Set.of("proxy.internal"));
 
         assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
     }
@@ -98,10 +96,19 @@ class XksProxyClientTest {
                 return host;
             }
         };
-        XksProxyClient.PublicOnlyDnsResolver resolver =
-                new XksProxyClient.PublicOnlyDnsResolver(metadataResolver, Set.of("proxy.internal"));
+        DnsResolver resolver = XksProxyClient.validatingResolver(metadataResolver, Set.of("proxy.internal"));
 
         assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
+    }
+
+    @Test
+    void parsesAnOptionalListOfExactPrivateProxyHostnames() {
+        assertEquals(Set.of("proxy.internal", "xks.local"), XksProxyClient.parseAllowedPrivateHosts(
+                List.of(" PROXY.INTERNAL. ", "xks.local")));
+        assertThrows(IllegalArgumentException.class,
+                () -> XksProxyClient.parseAllowedPrivateHosts(List.of("*.internal")));
+        assertThrows(IllegalArgumentException.class,
+                () -> XksProxyClient.parseAllowedPrivateHosts(List.of("127.0.0.1")));
     }
 
     @Test
