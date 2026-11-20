@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -256,6 +257,46 @@ public class SesTemplateService implements SesTaggable {
                     "TemplateArn is missing a template name: " + arn, 400);
         }
         return name;
+    }
+
+    /**
+     * The template a v2 send's {@code TemplateArn} names. SES checks the ARN's partition, service,
+     * region and resource type, each with a message of its own, and not its account
+     * (probe-confirmed). The order among several mismatches at once is not probed.
+     */
+    public static String sendTemplateNameFromArn(String arn, String region) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
+            throw new AwsException("InvalidParameterValue", "ARNs must start with 'arn:': " + arn, 400);
+        }
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "TemplateArn is not a valid SES template ARN: " + arn, 400);
+        }
+        String partition = AwsRegions.partitionFor(region);
+        if (!partition.equals(parsed.partition())) {
+            throw invalidTemplateArn(arn, "Partition should be <" + partition + ">");
+        }
+        if (!"ses".equals(parsed.service())) {
+            throw invalidTemplateArn(arn, "Vendor should be <ses>");
+        }
+        if (!region.equals(parsed.region())) {
+            throw invalidTemplateArn(arn, "Template must be in region <" + region + ">");
+        }
+        if (!parsed.resource().startsWith("template/")) {
+            throw invalidTemplateArn(arn, "Relative ID should start with <template/>");
+        }
+        String name = parsed.resource().substring("template/".length());
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
+        }
+        return name;
+    }
+
+    private static AwsException invalidTemplateArn(String arn, String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid template ARN <" + arn + ">. " + reason, 400);
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */

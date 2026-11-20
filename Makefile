@@ -318,6 +318,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_eks_shapes.py
 	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
+	$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
 	$(PYTHON) tools/aws/regen_iam_paginators.py
@@ -497,6 +498,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo ""; \
 		echo "error: src/main/resources/aws/emr-serverless-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py --check || { \
+		echo "error: RPC v2 CBOR wire shapes are stale; run make aws-data-sync-botocore."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_query_services.py --check || { \
