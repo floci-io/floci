@@ -1139,6 +1139,51 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void createTableRejectsWarmThroughputAboveThePerTableQuota() {
+        AwsException tableEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", true, "{\"ReadUnitsPerSecond\": 40001}", null));
+        assertEquals("LimitExceededException", tableEx.getErrorCode());
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", false, null, "{\"WriteUnitsPerSecond\": 40001}"));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        AwsException lowFirst = warmFailure("CreateTable", warmTableRequest("warm-quota-create", true,
+                "{\"ReadUnitsPerSecond\": 1, \"WriteUnitsPerSecond\": 40001}", null));
+        assertEquals("ValidationException", lowFirst.getErrorCode());
+        assertThrows(AwsException.class, () -> describedTable("warm-quota-create"));
+    }
+
+    @Test
+    void updateTableRejectsWarmThroughputAboveThePerTableQuota() throws Exception {
+        createWarmTable("warm-quota-update", true, null, null);
+
+        AwsException tableEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40001,
+                    "WriteUnitsPerSecond": 1}}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"WriteUnitsPerSecond": 40001}}}]}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 12000, 4000, "ACTIVE");
+        updateWarm("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40000,
+                    "WriteUnitsPerSecond": 40000}}
+                """);
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 40000, 40000, "ACTIVE");
+    }
+
+    @Test
     void updateTableRejectsEmptyTableWarmThroughputWithInternalFailure() throws Exception {
         createWarmTable("warm-empty-table", true, null, null);
 
