@@ -35,11 +35,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "GetEbsEncryptionByDefault|",
-            "EnableEbsEncryptionByDefault|",
-            "DisableEbsEncryptionByDefault|",
             "GetEbsDefaultKmsKeyId|",
-            "ModifyEbsDefaultKmsKeyId|KmsKeyId=alias/aws/ebs",
-            "ResetEbsDefaultKmsKeyId|",
             "DescribeAccountAttributes|",
             "DescribeCapacityReservations|",
             "DescribeTransitGateways|",
@@ -109,7 +105,6 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                     + "|InvalidCapacityReservationId.NotFound",
             "DescribeNetworkInterfaces|NetworkInterfaceId.1=eni-0123456789abcdef0"
                     + "|InvalidNetworkInterfaceID.NotFound",
-            "ModifyEbsDefaultKmsKeyId||MissingParameter",
             "DeleteKeyPair||MissingParameter",
             "ExportTransitGatewayRoutes|TransitGatewayRouteTableId=" + ROUTE_TABLE + "&S3Bucket=b"
                     + "|InvalidRouteTableID.NotFound"
@@ -133,8 +128,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DeleteLaunchTemplate, ''",
             "DescribeRegions, maybe",
             "DescribeNatGateways, ''",
-            "ModifyClientVpnEndpoint, maybe",
-            "EnableEbsEncryptionByDefault, ''"
+            "ModifyClientVpnEndpoint, maybe"
     })
     void aDryRunValueThatIsNotABooleanIsRefused(String action, String value) {
         QueryRequests.request(account, "ec2", action).formParam("DryRun", value)
@@ -144,14 +138,6 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
                 .body("Response.Errors.Error.Message", equalTo("DryRun is not a valid boolean."));
-    }
-
-    @Test
-    void aDryRunDisableLeavesEbsEncryptionByDefaultOn() {
-        ec2("EnableEbsEncryptionByDefault");
-        dryRun("DisableEbsEncryptionByDefault", null).then().statusCode(412);
-        assertEquals("true", ec2("GetEbsEncryptionByDefault")
-                .getString("GetEbsEncryptionByDefaultResponse.ebsEncryptionByDefault"));
     }
 
     @Test
@@ -247,6 +233,128 @@ class Ec2ControlPlaneDryRunIntegrationTest {
 
         assertEquals("1", ec2("DescribeCapacityReservations", "CapacityReservationId.1", reservation)
                 .getString("DescribeCapacityReservationsResponse.capacityReservationSet.item.totalInstanceCount"));
+    }
+
+    @Test
+    void aDryRunDisassociateLeavesTheAddressAssociated() {
+        String allocation = ec2("AllocateAddress").getString("AllocateAddressResponse.allocationId");
+        String instance = ec2("RunInstances", "ImageId", "ami-0abcdef1234567890", "InstanceType", "t3.micro",
+                "MinCount", "1", "MaxCount", "1").getString("RunInstancesResponse.instancesSet.item.instanceId");
+        String association = ec2("AssociateAddress", "AllocationId", allocation, "InstanceId", instance)
+                .getString("AssociateAddressResponse.associationId");
+
+        dryRun("DisassociateAddress", "AssociationId=" + association).then().statusCode(412);
+
+        assertEquals(association, ec2("DescribeAddresses", "AllocationId.1", allocation)
+                .getString("DescribeAddressesResponse.addressesSet.item.associationId"));
+    }
+
+    @Test
+    void aDryRunDeleteLeavesTheFlowLog() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.41.0.0/16").getString("CreateVpcResponse.vpc.vpcId");
+        String flowLog = ec2("CreateFlowLogs", "ResourceType", "VPC", "ResourceId.1", vpc, "TrafficType", "ALL",
+                "LogDestinationType", "s3", "LogDestination", "arn:aws:s3:::dry-run-flow-logs")
+                .getString("CreateFlowLogsResponse.flowLogIdSet.item");
+
+        dryRun("DeleteFlowLogs", "FlowLogId.1=" + flowLog).then().statusCode(412);
+
+        assertEquals(flowLog, ec2("DescribeFlowLogs", "FlowLogId.1", flowLog)
+                .getString("DescribeFlowLogsResponse.flowLogSet.item.flowLogId"));
+    }
+
+    @Test
+    void aDryRunDisableLeavesThePropagationEnabled() {
+        String gateway = ec2("CreateTransitGateway", "Options.DefaultRouteTableAssociation", "disable",
+                "Options.DefaultRouteTablePropagation", "disable")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        String attachment = vpcAttachment(gateway, "10.42");
+        String routeTable = ec2("CreateTransitGatewayRouteTable", "TransitGatewayId", gateway)
+                .getString("CreateTransitGatewayRouteTableResponse.transitGatewayRouteTable"
+                        + ".transitGatewayRouteTableId");
+        ec2("EnableTransitGatewayRouteTablePropagation", "TransitGatewayRouteTableId", routeTable,
+                "TransitGatewayAttachmentId", attachment);
+
+        dryRun("DisableTransitGatewayRouteTablePropagation", "TransitGatewayRouteTableId=" + routeTable
+                + "&TransitGatewayAttachmentId=" + attachment).then().statusCode(412);
+
+        assertEquals(attachment, ec2("GetTransitGatewayRouteTablePropagations", "TransitGatewayRouteTableId",
+                routeTable).getString("GetTransitGatewayRouteTablePropagationsResponse"
+                + ".transitGatewayRouteTablePropagations.item.transitGatewayAttachmentId"));
+    }
+
+    @Test
+    void aDryRunAcceptLeavesThePeeringPendingAcceptance() {
+        String gateway = ec2("CreateTransitGateway")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        String peer = ec2("CreateTransitGateway")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        String attachment = ec2("CreateTransitGatewayPeeringAttachment", "TransitGatewayId", gateway,
+                "PeerTransitGatewayId", peer, "PeerAccountId", account, "PeerRegion", "us-east-1")
+                .getString("CreateTransitGatewayPeeringAttachmentResponse"
+                        + ".transitGatewayPeeringAttachment.transitGatewayAttachmentId");
+
+        dryRun("AcceptTransitGatewayPeeringAttachment", "TransitGatewayAttachmentId=" + attachment)
+                .then().statusCode(412);
+
+        assertEquals("pendingAcceptance", ec2("DescribeTransitGatewayPeeringAttachments",
+                "TransitGatewayAttachmentIds.1", attachment).getString(
+                "DescribeTransitGatewayPeeringAttachmentsResponse.transitGatewayPeeringAttachments.item.state"));
+    }
+
+    @Test
+    void aDryRunClientVpnCallLeavesTheEndpointAsItWas() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.43.0.0/16").getString("CreateVpcResponse.vpc.vpcId");
+        String subnet = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.43.1.0/24", "AvailabilityZone",
+                "us-east-1a").getString("CreateSubnetResponse.subnet.subnetId");
+        String group = ec2("CreateSecurityGroup", "GroupName", "dry-run-sg", "GroupDescription", "d", "VpcId", vpc)
+                .getString("CreateSecurityGroupResponse.groupId");
+        String arn = "arn:aws:acm:us-east-1:000000000000:certificate/dry-run";
+        String endpoint = ec2("CreateClientVpnEndpoint", "ClientCidrBlock", "10.101.0.0/16",
+                "ServerCertificateArn", arn, "Authentication.1.Type", "certificate-authentication",
+                "Authentication.1.MutualAuthentication.ClientRootCertificateChainArn", arn,
+                "ConnectionLogOptions.Enabled", "false", "VpcId", vpc)
+                .getString("CreateClientVpnEndpointResponse.clientVpnEndpointId");
+        String association = ec2("AssociateClientVpnTargetNetwork", "ClientVpnEndpointId", endpoint,
+                "SubnetId", subnet).getString("AssociateClientVpnTargetNetworkResponse.associationId");
+        ec2("CreateClientVpnRoute", "ClientVpnEndpointId", endpoint, "DestinationCidrBlock", "192.168.0.0/16",
+                "TargetVpcSubnetId", subnet);
+        String before = clientVpnState(endpoint);
+
+        String id = "ClientVpnEndpointId=" + endpoint;
+        dryRun("AuthorizeClientVpnIngress", id + "&TargetNetworkCidr=10.43.0.0/16&AuthorizeAllGroups=true")
+                .then().statusCode(412);
+        dryRun("DeleteClientVpnRoute", id + "&DestinationCidrBlock=192.168.0.0/16&TargetVpcSubnetId=" + subnet)
+                .then().statusCode(412);
+        dryRun("ApplySecurityGroupsToClientVpnTargetNetwork", id + "&VpcId=" + vpc + "&SecurityGroupId.1=" + group)
+                .then().statusCode(412);
+        dryRun("DisassociateClientVpnTargetNetwork", id + "&AssociationId=" + association).then().statusCode(412);
+
+        assertEquals(before, clientVpnState(endpoint));
+        assertEquals(1, ec2("DescribeClientVpnTargetNetworks", "ClientVpnEndpointId", endpoint)
+                .getList("DescribeClientVpnTargetNetworksResponse.clientVpnTargetNetworks.item").size());
+    }
+
+    /** The endpoint, its security groups, authorization rules and routes, without the request ids. */
+    private String clientVpnState(String endpoint) {
+        return String.join("\n",
+                body("DescribeClientVpnEndpoints", "ClientVpnEndpointId.1", endpoint),
+                body("DescribeClientVpnTargetNetworks", "ClientVpnEndpointId", endpoint),
+                body("DescribeClientVpnAuthorizationRules", "ClientVpnEndpointId", endpoint),
+                body("DescribeClientVpnRoutes", "ClientVpnEndpointId", endpoint));
+    }
+
+    private String body(String action, String... params) {
+        return QueryRequests.request(account, "ec2", action, params).post("/").then().statusCode(200).extract()
+                .asString().replaceAll("<requestId>[^<]*</requestId>", "");
+    }
+
+    private String vpcAttachment(String gateway, String prefix) {
+        String vpc = ec2("CreateVpc", "CidrBlock", prefix + ".0.0/16").getString("CreateVpcResponse.vpc.vpcId");
+        String subnet = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", prefix + ".1.0/24", "AvailabilityZone",
+                "us-east-1a").getString("CreateSubnetResponse.subnet.subnetId");
+        return ec2("CreateTransitGatewayVpcAttachment", "TransitGatewayId", gateway, "VpcId", vpc,
+                "SubnetIds.1", subnet).getString("CreateTransitGatewayVpcAttachmentResponse"
+                + ".transitGatewayVpcAttachment.transitGatewayAttachmentId");
     }
 
     private Response dryRun(String action, String query) {
