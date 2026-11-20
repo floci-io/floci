@@ -63,6 +63,7 @@ order:
   - AWS::Logs
   - AWS::WAFv2
   - AWS::Config
+  - AWS::Bedrock
   - AWS::BedrockAgentCore
   - AWS::CloudFormation
   - AWS::CloudTrail
@@ -134,6 +135,7 @@ service_labels:
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::Backup: Backup
+  AWS::Bedrock: Amazon Bedrock
   AWS::BedrockAgentCore: Bedrock AgentCore
   AWS::CDK: CDK
   AWS::CertificateManager: ACM
@@ -222,7 +224,12 @@ notes:
   AWS::CDK::Metadata: accepted; no-op
   AWS::Transfer::Server: 'management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported'
   AWS::Transfer::User: 'management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user'
+  AWS::EKS::Cluster: 'created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version`, `ResourcesVpcConfig`, `Logging` or `AccessConfig` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion` or `UpdateClusterConfig`'
+  AWS::EKS::Nodegroup: 'created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place'
   AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
+  AWS::ApiGateway::Authorizer: 'created with `Name`, `Type`, `AuthorizerUri`, `IdentitySource`, `AuthorizerResultTtlInSeconds` and `ProviderARNs`; updated in place for those, keeping the id; a template that drops `AuthorizerResultTtlInSeconds`, `IdentitySource` or `ProviderARNs` restores the TTL of 300 and clears the identity source and the pools, a dropped `AuthorizerUri` keeps the current one, and dropping `IdentitySource` from a `TOKEN` or `COGNITO_USER_POOLS` authorizer fails the resource, as AWS requires it there; a change to `RestApiId` replaces the authorizer, as the registry marks it create-only, and deletes the old one once the update commits; `AuthorizerCredentials`, `AuthType` and `IdentityValidationExpression` are not stored'
+  AWS::ApiGateway::Stage: 'created with `RestApiId`, `StageName`, `DeploymentId` and `Description`; updated in place for `DeploymentId` and `Description`, keeping the stage variables and method settings set outside the stack; a template that drops `Description` clears it, and a dropped `DeploymentId` keeps the current one; a change to `RestApiId` or `StageName` replaces the stage, as the registry marks them create-only, and deletes the old one once the update commits unless `UpdateReplacePolicy: Retain` keeps it, a name already taken on the API fails the update; `AccessLogSetting`, `CacheClusterEnabled`, `CacheClusterSize`, `CanarySetting`, `ClientCertificateId`, `DocumentationVersion`, `MethodSettings`, `Tags`, `TracingEnabled` and `Variables` are accepted and not stored'
+  AWS::KMS::Key: 'created with `Description`, `KeyPolicy`, `KeySpec`, `KeyUsage`, `Origin`, `MultiRegion`, `Enabled`, `EnableKeyRotation` and `Tags`; updated in place for `Description`, `KeyPolicy`, `Enabled`, `EnableKeyRotation` and `Tags`, keeping tags added outside the stack; a template that drops `Description`, `Enabled` or `EnableKeyRotation` clears the description, enables the key and turns rotation off, a dropped `KeyPolicy` keeps the current policy, and one the stack never declared keeps the value set outside it; a rotation change on a key that stays disabled fails, as AWS raises `DisabledException`; a change to `KeySpec`, `KeyUsage`, `Origin` or `MultiRegion` fails the update, as on AWS, and the stack rolls back'
   AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
   AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'
   AWS::Route53::RecordSetGroup: 'written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group''s hosted zone'
@@ -240,6 +247,7 @@ notes:
   AWS::AppConfig::DeploymentStrategy: '`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document'
   AWS::CloudFront::Function: '`KeyValueStoreAssociations` is ignored'
   AWS::GuardDuty::MalwareProtectionPlan: 'management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected'
+  AWS::Bedrock::ApplicationInferenceProfile: 'Ref returns the profile id; InferenceProfileArn and InferenceProfileId are available through GetAtt'
   AWS::BedrockAgentCore::Runtime: 'Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored'
   AWS::BedrockAgentCore::RuntimeEndpoint: 'Ref returns the endpoint ARN; Tags are accepted and not stored'
   AWS::BedrockAgentCore::Memory: 'Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored'

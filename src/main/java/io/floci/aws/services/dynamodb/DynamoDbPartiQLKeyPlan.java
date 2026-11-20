@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -32,6 +33,7 @@ final class DynamoDbPartiQLKeyPlan {
     private final boolean everyBranchPinsPartition;
     private final List<Cond.Leaf> keyConditions = new ArrayList<>();
     private final List<Branch> branches;
+    private final boolean readsWholeTable;
     private boolean tooManyBranches;
 
     private record Spread(List<Cond.Leaf> keyConditions, List<Cond> filters) {
@@ -44,10 +46,16 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
-    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond> filters) {
+    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond.Leaf> keyConditions,
+                          List<Cond.Leaf> sortConditions, List<Cond> filters) {
 
         static final Comparator<Branch> IN_KEY_ORDER = Comparator.comparing(Branch::partition)
                 .thenComparing(Branch::sortRange, Range.BY_LOWER);
+
+        // A key condition holds one sort-key condition, so a branch that names two reads the whole table.
+        boolean readsWholeTable() {
+            return sortConditions.size() > 1;
+        }
     }
 
     DynamoDbPartiQLKeyPlan(List<Cond> where, DynamoDbAccessPath accessPath, TableDefinition table) {
@@ -58,14 +66,29 @@ final class DynamoDbPartiQLKeyPlan {
         this.everyBranchPinsPartition = everyBranchPinsPartition(conditions);
         List<Spread> spread = spread(conditions);
         this.branches = tooManyBranches
-                ? List.of(new Branch(null, null, Range.ALL, where))
+                ? List.of(new Branch(null, null, Range.ALL, List.of(), List.of(), where))
                 : spread.stream().map(this::branchOf).toList();
+        this.readsWholeTable = branches.stream().anyMatch(Branch::readsWholeTable);
+    }
+
+    /** A statement with a branch that DynamoDB cannot read by key is read as a scan of the whole table or index. */
+    boolean readsWholeTable() {
+        return readsWholeTable;
     }
 
     void requireKeyTypesMatchSchema() {
+        // Only the branches read by key check the types of their key values.
+        Set<Cond.Leaf> readByKey = branches.stream()
+                .filter(branch -> !branch.readsWholeTable())
+                .flatMap(branch -> branch.keyConditions().stream())
+                .collect(Collectors.toSet());
         for (Cond.Leaf condition : keyConditions) {
             String name = condition.path().root();
             for (PVal value : values(condition)) {
+                Cond.Leaf held = condition instanceof Cond.In in ? new Cond.Eq(in.path(), value) : condition;
+                if (readsWholeTable && !readByKey.contains(held)) {
+                    continue;
+                }
                 String type = DynamoDbPartiQLParser.typeCode(value);
                 if (!DynamoDbPartiQLParser.ORDERED_TYPES.contains(type)) {
                     throw DynamoDbPartiQLParser.validationEx(
@@ -84,7 +107,8 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     void requireReadsWithinLimit() {
-        if (everyBranchPinsPartition && (tooManyBranches || branches.size() > MAX_DECOMPOSED_READS)) {
+        if (everyBranchPinsPartition && !readsWholeTable
+                && (tooManyBranches || branches.size() > MAX_DECOMPOSED_READS)) {
             throw DynamoDbPartiQLParser.validationEx("Too many decomposed read operations for a given query.");
         }
     }
@@ -186,6 +210,21 @@ final class DynamoDbPartiQLKeyPlan {
         return Optional.of(branches.getFirst().partitionValue());
     }
 
+    /**
+     * @return the sort-key condition of each read, in the order DynamoDB reads them, when every
+     *         branch reads the same partition with one sort-key condition
+     */
+    Optional<List<Cond.Leaf>> sortKeyReads(boolean descending) {
+        if (singlePartition().isEmpty() || branches.stream().anyMatch(this::testsAKeyOutsideARange)
+                || branches.stream().anyMatch(branch -> branch.sortConditions().size() != 1)) {
+            return Optional.empty();
+        }
+        return Optional.of(branches.stream()
+                .sorted(descending ? Branch.IN_KEY_ORDER.reversed() : Branch.IN_KEY_ORDER)
+                .map(branch -> branch.sortConditions().getFirst())
+                .toList());
+    }
+
     static Stream<Path> attributePaths(Cond cond) {
         return DynamoDbPartiQLParser.leaves(cond).map(Cond.Leaf::path);
     }
@@ -199,7 +238,7 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     private boolean keyed() {
-        return branches.stream().allMatch(branch -> branch.partition() != null);
+        return !readsWholeTable && branches.stream().allMatch(branch -> branch.partition() != null);
     }
 
     private Branch branchOf(Spread spread) {
@@ -207,6 +246,7 @@ final class DynamoDbPartiQLKeyPlan {
         PVal partitionValue = null;
         boolean conflicting = false;
         Range sortRange = Range.ALL;
+        List<Cond.Leaf> sortConditions = new ArrayList<>();
         for (Cond.Leaf condition : spread.keyConditions()) {
             if (condition.path().root().equals(partitionKey)) {
                 PVal value = ((Cond.Eq) condition).val();
@@ -218,9 +258,13 @@ final class DynamoDbPartiQLKeyPlan {
                 }
             } else {
                 sortRange = sortRange.intersect(rangeOf(condition));
+                if (!sortConditions.contains(condition)) {
+                    sortConditions.add(condition);
+                }
             }
         }
-        return new Branch(conflicting ? null : partition, partitionValue, sortRange, spread.filters());
+        return new Branch(conflicting ? null : partition, partitionValue, sortRange, spread.keyConditions(),
+                sortConditions, spread.filters());
     }
 
     private List<Spread> spread(Cond cond) {
@@ -243,20 +287,33 @@ final class DynamoDbPartiQLKeyPlan {
                 yield spread;
             }
             case Cond.Or or when anyLeaf(or, this::isKeyCondition) -> {
-                List<Spread> spread = or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
-                tooManyBranches |= spread.size() > MAX_BRANCHES;
-                yield spread;
+                List<List<Spread>> operands = or.operands().stream().map(this::spread).toList();
+                yield upToTheFirstScan(operands.stream().flatMap(List::stream));
             }
             default -> List.of(new Spread(List.of(), List.of(cond)));
         };
     }
 
     private List<Spread> and(List<Spread> left, List<Spread> right) {
-        if ((long) left.size() * right.size() > MAX_BRANCHES) {
-            tooManyBranches = true;
-            return left;
+        return upToTheFirstScan(left.stream().flatMap(l -> right.stream().map(l::and)));
+    }
+
+    // DynamoDB walks the branches in written order and scans from the first one that names the sort key
+    // twice, so it never reads the branches after that one by key.
+    private List<Spread> upToTheFirstScan(Stream<Spread> branches) {
+        List<Spread> kept = new ArrayList<>();
+        for (Iterator<Spread> each = branches.iterator(); each.hasNext(); ) {
+            Spread branch = each.next();
+            kept.add(branch);
+            if (branchOf(branch).readsWholeTable()) {
+                break;
+            }
+            if (kept.size() > MAX_BRANCHES) {
+                tooManyBranches = true;
+                break;
+            }
         }
-        return left.stream().flatMap(l -> right.stream().map(l::and)).toList();
+        return kept;
     }
 
     private static boolean anyLeaf(Cond cond, Predicate<Cond.Leaf> test) {

@@ -19,14 +19,16 @@ that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 | `ListGuardrails` | List every guardrail's `DRAFT`, or every version of one guardrail |
 | `ListFoundationModels` | List the catalog's foundation models served in the calling Region, filtered by provider and output modality |
 | `GetFoundationModel` | Read one foundation model by id or ARN |
-| `ListInferenceProfiles` | List the system-defined inference profiles the calling Region can use, with `type`, `maxResults` and `nextToken` |
-| `GetInferenceProfile` | Read one system-defined inference profile by id or ARN, with its destination Regions |
+| `ListInferenceProfiles` | List system-defined and created application profiles, with `type`, `maxResults` and `nextToken` |
+| `GetInferenceProfile` | Read a system-defined or application profile by id or ARN, including its model destinations |
+| `CreateInferenceProfile` | Create an application profile from a regional foundation model or system-defined profile |
+| `DeleteInferenceProfile` | Delete an application profile by id or ARN |
 | `PutResourcePolicy` | Attach a resource-based policy to a guardrail or a guardrail profile (`POST /resource-policy`) |
 | `GetResourcePolicy` | Read the resource-based policy of a guardrail or a guardrail profile |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a guardrail or a guardrail profile |
-| `TagResource` | Tag a guardrail (`POST /tagResource`) |
-| `UntagResource` | Remove tags from a guardrail (`POST /untagResource`) |
-| `ListTagsForResource` | List a guardrail's tags (`POST /listTagsForResource`) |
+| `TagResource` | Tag a guardrail or application inference profile (`POST /tagResource`) |
+| `UntagResource` | Remove tags from a guardrail or application inference profile (`POST /untagResource`) |
+| `ListTagsForResource` | List a guardrail's or application inference profile's tags (`POST /listTagsForResource`) |
 <!-- floci:actions:end -->
 
 Guardrails are versioned. The working copy is `DRAFT`, and `GetGuardrail` without a
@@ -51,7 +53,7 @@ guardrail and all of its versions.
 Both an id (`abc123def456`) and a full ARN are accepted wherever the API takes a
 `guardrailIdentifier` or a `resourceARN`.
 
-The three tag actions require a full ARN to match the stored guardrail ARN exactly,
+For guardrails, the three tag actions require a full ARN to match the stored ARN exactly,
 including partition, service, Region, account, and resource type. An ARN that only
 shares the guardrail ID returns `ResourceNotFoundException` (HTTP 404) without changing tags.
 The existing bare-ID form remains accepted.
@@ -108,11 +110,12 @@ those tags, as `TagResource` and `UntagResource` do.
 
 ## Foundation models and inference profiles
 
-`ListFoundationModels`, `GetFoundationModel`, `ListInferenceProfiles` and
-`GetInferenceProfile` read a fixed catalog, `bedrock/model-catalog.yaml`. It is a seed
-rather than a mirror of AWS: a few real models (Amazon Nova Micro and Nova Lite, Titan Text
-Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5) with the modalities, streaming
-support, lifecycle status and Regional availability their
+`ListFoundationModels` and `GetFoundationModel` read a fixed catalog,
+`bedrock/model-catalog.yaml`. System-defined inference profiles come from the same seed,
+while application inference profiles are created and stored by the Bedrock control plane.
+The catalog is a seed rather than a mirror of AWS: a few real models (Amazon Nova Micro
+and Nova Lite, Titan Text Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5)
+with the modalities, streaming support, lifecycle status and Regional availability their
 [model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) publish,
 and their US and EU system-defined inference profiles.
 
@@ -126,25 +129,33 @@ The answers depend on the calling Region, as on AWS:
 - `byOutputModality` accepts `SPEECH` and `VIDEO` as well as the published `TEXT`,
   `IMAGE` and `EMBEDDING`, as AWS does. No catalog model produces speech or video, so
   those filters return an empty list.
-- An inference profile is listed only in its source Regions, and its `models` are the
-  foundation models in the destination Regions the card gives for the calling Region, so
-  `us.amazon.nova-lite-v1:0` called from `us-west-1` routes to four Regions and from
+- A system-defined inference profile is listed only in its source Regions. Its
+  `models` are the foundation models in the destination Regions the card gives for
+  the calling Region, so `us.amazon.nova-lite-v1:0` called from `us-west-1` routes to four Regions and from
   `us-east-1` to three. `GetInferenceProfile` on a profile the Region cannot use returns
   `ResourceNotFoundException`.
-- `inferenceTypesSupported` is `ON_DEMAND` only where the model is served in the Region
-  itself, and empty where it is reachable only through an inference profile, so
-  `byInferenceType=ON_DEMAND` leaves those out.
+- `inferenceTypesSupported` includes `ON_DEMAND` where the model is served in the Region
+  itself, and `INFERENCE_PROFILE` where a seeded system-defined profile can be called from
+  the Region. A model reachable only through a profile reports `INFERENCE_PROFILE` without
+  `ON_DEMAND`, so `byInferenceType=ON_DEMAND` leaves those out.
 - `modelArn` is `arn:<partition>:bedrock:<region>::foundation-model/<modelId>`, and
-  `inferenceProfileArn` carries the calling Region and account. `GetInferenceProfile`
-  answers an ARN of another service or without an account with `ValidationException`,
-  one of another account with `AccessDeniedException`, and one of another Region,
+  the system-defined `inferenceProfileArn` carries the calling Region and account.
+  `GetInferenceProfile` answers an ARN of another service or without an account with
+  `ValidationException`, one of another account with `AccessDeniedException`, and one of another Region,
   partition or resource type with `ResourceNotFoundException`.
 - The error codes and statuses follow AWS; the message text is Floci's own.
 
+`CreateInferenceProfile` accepts `modelSource.copyFrom` with a foundation-model ARN served
+in the calling Region, or a system-defined inference-profile ARN available to the calling
+Region and account. It creates a stored `APPLICATION` profile whose `GetInferenceProfile`
+result includes its id, ARN, name, description, models and timestamps. `ListInferenceProfiles`
+includes these profiles alongside the system-defined catalog; `type=APPLICATION` selects
+only the created profiles. An application profile can be deleted by id or ARN and tagged
+through the Bedrock tag actions. Copying an application profile is not supported.
+
 Deviations: models that are not in the catalog are not listed, provisioned throughput is
 never reported, and `customizationsSupported` is always empty, so `byCustomizationType`
-and `byInferenceType=PROVISIONED` return no models. Application inference profiles cannot
-be created yet, so `type=APPLICATION` returns an empty list. `ListInferenceProfiles` pages
+and `byInferenceType=PROVISIONED` return no models. `ListInferenceProfiles` pages
 up to 1000 profiles; `maxResults` outside 1 to 1000 is rejected with `ValidationException`.
 
 ## Not implemented
@@ -155,8 +166,8 @@ emulating it faithfully would require behaviour Floci has no way to model:
 - Custom model, model customization, model import and distillation jobs. These
   depend on real training runs.
 - Model evaluation and evaluation jobs. These depend on real inference.
-- Provisioned throughput, application inference profiles and prompt routers. These
-  describe real capacity reservations and routing.
+- Provisioned throughput and prompt routers. These describe real capacity reservations
+  and routing.
 - Model invocation logging, batch inference and async invoke. These are data-plane
   operations backed by real model execution.
 

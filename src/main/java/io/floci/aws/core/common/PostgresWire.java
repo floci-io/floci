@@ -32,6 +32,14 @@ public final class PostgresWire {
         return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
+    /**
+     * An identifier, always quoted, with any double quote doubled, so no name needs checking
+     * against PostgreSQL's reserved words and its case is kept.
+     */
+    public static String quoteIdentifier(String identifier) {
+        return '"' + identifier.replace("\"", "\"\"") + '"';
+    }
+
     /** A message after the startup: its type byte and its body, without the length. */
     public record Message(byte type, byte[] body) {
     }

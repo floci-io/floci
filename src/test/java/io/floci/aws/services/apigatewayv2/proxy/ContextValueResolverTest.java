@@ -100,6 +100,12 @@ class ContextValueResolverTest {
     }
 
     @Test
+    void requestPathWithoutNameResolvesToTheRequestPath() {
+        ContextValueResolver r = new ContextValueResolver();
+        assertEquals("/foo", r.resolve("$request.path", ctx(Map.of(), Map.of(), Map.of(), Map.of(), Map.of())));
+    }
+
+    @Test
     void unknownExpressionReturnsNull() {
         ContextValueResolver r = new ContextValueResolver();
         assertNull(r.resolve("$context.unknown",

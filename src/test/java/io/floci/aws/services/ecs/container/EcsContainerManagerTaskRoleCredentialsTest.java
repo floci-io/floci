@@ -32,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -73,6 +75,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
         when(containerBuilder.resolveDockerNetwork(any())).thenReturn(Optional.of(NETWORK));
 
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
@@ -188,6 +192,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     @Test
     void revokesCredentialsEvenWhenAContainerCouldNotBeRemoved() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         DockerClient dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
@@ -233,6 +239,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     @Test
     void keepsAddressesReservedWhenAContainerCouldNotBeRemoved() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         DockerClient dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
@@ -257,6 +265,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     @Test
     void keepsAddressesReservedWhenCleanupCannotRemoveAContainer() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
@@ -284,6 +294,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     @Test
     void keepsAddressesReservedWhenAFailedLaunchCannotRemoveAContainer() {
         ContainerLifecycleManager failing = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(failing.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(failing.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         // The first container starts and the second does not, so the launch unwinds with one
@@ -361,6 +373,8 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     @Test
     void revokesCredentialsWhenTheLaunchFailsPartWayThrough() {
         ContainerLifecycleManager failing = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(failing.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(failing.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(failing.createAndStartEphemeral(any(), any())).thenThrow(new IllegalStateException("no daemon"));

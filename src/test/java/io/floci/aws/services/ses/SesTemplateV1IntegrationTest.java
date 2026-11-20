@@ -52,11 +52,14 @@ class SesTemplateV1IntegrationTest {
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "v1-welcome")
             .formParam("Template.SubjectPart", "dup")
+            .formParam("Template.TextPart", "dup")
         .when()
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>AlreadyExists</Code>"));
+            .body(containsString("<Code>AlreadyExists</Code>"))
+            .body(containsString(
+                    "<Message>Template v1-welcome already exists for account id 000000000000</Message>"));
     }
 
     @Test
@@ -276,7 +279,7 @@ class SesTemplateV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>InvalidTemplate</Code>"));
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
     }
 
     @Test

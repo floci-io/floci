@@ -98,7 +98,7 @@ public class Nodegroup {
     private Object warmPoolConfig;
 
     @JsonProperty("tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     @JsonProperty("clientRequestToken")
     @JsonIgnore

@@ -520,18 +520,42 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public void addTags(String region, List<String> names, Map<String, String> tags) {
+    /**
+     * Gives each load balancer a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them
+     * never lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void addTags(String region, List<String> names, Map<String, String> tags) {
         for (String name : names) {
-            requireLoadBalancer(region, name).getTags().putAll(tags);
+            ClassicLoadBalancer lb = requireLoadBalancer(region, name);
+            Map<String, String> merged = new LinkedHashMap<>(lb.getTags());
+            merged.putAll(tags);
+            lb.setTags(merged);
         }
         persist(region);
     }
 
-    public void removeTags(String region, List<String> names, Collection<String> tagKeys) {
+    /** Gives each load balancer a new map without {@code tagKeys}, one tag call at a time. */
+    public synchronized void removeTags(String region, List<String> names, Collection<String> tagKeys) {
         for (String name : names) {
-            requireLoadBalancer(region, name).getTags().keySet().removeAll(tagKeys);
+            ClassicLoadBalancer lb = requireLoadBalancer(region, name);
+            Map<String, String> remaining = new LinkedHashMap<>(lb.getTags());
+            remaining.keySet().removeAll(tagKeys);
+            lb.setTags(remaining);
         }
         persist(region);
+    }
+
+    /**
+     * The tags of the load balancer {@code name} in {@code account} and {@code region}, read in place, for IAM's
+     * lookup of stored tags; none when there is no such load balancer, or the one of that name records another
+     * account, which a service without storage keeps beside every account's in one map.
+     */
+    public Map<String, String> tagsInAccount(String account, String region, String name) {
+        Map<String, ClassicLoadBalancer> regionLbs = loadBalancerStore != null
+                ? AccountAwareStorageBackend.readInAccount(loadBalancerStore, account, region).orElse(Map.of())
+                : loadBalancers.getOrDefault(region, Map.of());
+        ClassicLoadBalancer lb = regionLbs.get(name);
+        return lb == null || lb.getAccountId() != null && !lb.getAccountId().equals(account) ? Map.of() : lb.getTags();
     }
 
     public Map<String, Map<String, String>> describeTags(String region, List<String> names) {

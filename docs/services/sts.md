@@ -291,7 +291,8 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSession
 are evaluated as the identity whose long-term key signed the call, as on AWS:
 
 - `GetSessionToken` credentials have the permissions of that IAM user, or of the account root when its key minted them,
-  still bounded by the account's service control policies.
+  still bounded by the account's service control policies. Whatever those allow, they reach no IAM operation unless an
+  MFA device minted the session, and no STS operation but `AssumeRole` and `GetCallerIdentity`; see [MFA](#mfa).
 - `GetFederationToken` credentials have no permissions without a session policy (`Policy`). With one, they have the
   intersection of that policy and the permissions of the IAM user that minted them, never those of a role that shares
   the federated user's name. A resource policy naming the federated user's ARN can grant access on its own, but not
@@ -303,6 +304,79 @@ A session minted with another session's temporary credentials, which AWS does no
 key or one that belongs to another account, or by an IAM user since deleted and recreated under the same name, is not
 a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
 as the account root, as the key itself does.
+
+## MFA
+
+`GetSessionToken` and `AssumeRole` read `SerialNumber` and `TokenCode`. AWS describes the pair on
+both: `SerialNumber` is "the identification number of the MFA device that is associated with the IAM
+user who is making the GetSessionToken call", and `TokenCode` is "the value provided by the MFA
+device", six digits. Floci holds the code to the seed of the virtual MFA device that serial names,
+with the one step of drift `EnableMFADevice` allows, and the device has to be enabled for the
+identity that signed the call: a serial naming a device enabled for somebody else authenticates
+nobody. The window is the wall clock's, as it is on the IAM actions that take codes, since the code
+comes from a device keeping time of its own rather than from the emulator's clock.
+
+A call that names neither parameter claims nothing and keeps whatever its own credentials carry, so
+a session minted behind a device assumes a role as an MFA-authenticated caller without naming the
+device again: "because temporary credentials returned by `GetSessionToken` include MFA information,
+you can check for MFA in individual API operations made by the credentials". A call that names
+either one is a claim of MFA and has to make it good, a code naming no device and a device with no
+code both proving nothing, and the code is spent once it authenticates: RFC 6238 has a verifier
+"MUST NOT accept the second attempt of the OTP generated for the same time step", so one code mints
+one session rather than every session its window allows. A key IAM holds nowhere is the one caller
+whose claim is taken as made, there being no identity behind it whose devices could be checked,
+which is the reading Floci already takes of such a key everywhere else. A claim that fails is
+refused with `AccessDenied` (403),
+which is the outcome AWS documents ("an incorrect MFA code causes the API to return an access denied
+error", and for `AssumeRole` "if the role being assumed requires MFA and if the TokenCode value is
+missing or expired, the AssumeRole call returns an access denied error"). The sentence Floci writes
+with it is its own, the one the IAM actions already write for a code that does not match, since AWS
+publishes no message for this refusal.
+
+What the authentication then buys differs by operation, and AWS draws the line itself. A
+`GetSessionToken` session carries it onward: a request signed with it has
+`aws:MultiFactorAuthPresent` as `true` and `aws:MultiFactorAuthAge` as the seconds since the device
+was used, which [IAM](iam.md#condition-keys-floci-populates) populates, "because temporary
+credentials returned by `GetSessionToken` include MFA information, you can check for MFA in
+individual API operations made by the credentials". An `AssumeRole` session does not: "the temporary
+credentials returned by `AssumeRole` do not include MFA information in the context, so you cannot
+check individual API operations for MFA", and "once the user has assumed the role, no further MFA
+checks are made". So a role session publishes the key as `false` whatever device got it issued, and
+Floci records none on it.
+
+The device a call presents is part of that request's own context, which is how a long-term key
+reaches an MFA-protected role at all. A trust policy may require it, AWS's own example being
+`"Condition": {"Bool": {"aws:MultiFactorAuthPresent": true}}`, and then "if the caller does not
+include valid MFA information, the request to assume the role is denied". The caller's own
+permission to make the call is read against that same context, since AWS denies such a request when
+"users have not been MFA authenticated, or if they provide an invalid MFA device identifier or
+invalid TOTP", so an identity policy conditioned on MFA for `sts:AssumeRole` is satisfied by the
+device the call carries.
+
+What a session token then reaches is narrower than its policies, and under
+[enforcement](iam.md#iam-enforcement-mode) Floci holds it to that. The reference limits these
+credentials twice over (`GetSessionToken`, "Permissions"): "You cannot call any IAM API operations
+unless MFA authentication information is included in the request", and "You cannot call any AWS STS
+API except AssumeRole or GetCallerIdentity". So a session minted behind a device calls IAM as its
+own user may, one minted without a device is refused every IAM operation whatever its policies
+allow, and neither reaches an STS operation other than `AssumeRole` and `GetCallerIdentity`. The
+refusal is `AccessDenied` with `Cannot call <Operation> with session credentials`, the sentence
+`GetSessionToken` and `GetFederationToken` already answer a session caller with, and the IAM half
+adds `that include no MFA information` to name what the credentials do not carry. AWS publishes no
+sentence for either refusal, so both are Floci's own wording for the case.
+
+Two readings of the rule differ, and Floci follows the API reference. The IAM User Guide's
+"Choosing between GetSessionToken and AssumeRole" compresses the pair into one sentence, that such
+credentials "can access IAM and AWS STS API operations *only* if you include MFA information in the
+request for credentials", which reads as though a device opened the rest of STS as well. The
+reference publishes the two bullets apart and conditions only the IAM one on MFA, so here a device
+buys IAM and no more of STS. The two readings agree on a session that carries no device.
+
+These limits are read where every other authorization decision is, so they apply under
+`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and nowhere else, while the two operations that take
+long-term credentials only refuse a session caller with either setting, as above. An assumed-role
+session carries none of them: AWS keeps `GetFederationToken` and `GetSessionToken` from it and
+nothing further, and those two operations turn it away themselves.
 
 ## Trust Policy Enforcement
 
@@ -318,8 +392,34 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates 
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
-The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
+Unless the trust policy grants the call on its own within the role's account (below), the caller's own identity
+policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
 allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
+That evaluation sees the request's `sts:RoleSessionName`, and `sts:ExternalId` when the caller passes `ExternalId`,
+as the trust policy does: the [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssecuritytokenservice.html)
+lists both among the condition keys of `AssumeRole`, so an identity policy can require a session name, such as
+`"sts:RoleSessionName": "${aws:username}"`, or an external ID, and a `Deny` conditioned on either applies only when
+it matches.
+
+The trust policy is the role's resource-based policy, and IAM enforcement evaluates it as it does a bucket or a
+queue policy, with the role as its resource, since a trust policy names no `Resource`. Within the role's account, an
+`Allow` that names the caller grants the call without an identity policy of the caller's: the
+[AssumeRole API reference](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) lets a user
+assume a role in the same account either through "a policy to the user that allows the user to call `AssumeRole`
+(as long as the role's trust policy trusts the account)" or by adding "the user as a principal directly in the
+role's trust policy", because "the role's trust policy acts as an IAM resource-based policy. When a resource-based
+policy grants access to a principal in the same account, no additional identity-based policy is required". The same
+holds for a role session whose role, or session, the trust policy names, and for `"*"`. A grant to an IAM user's
+exact ARN is not limited by the user's permissions boundary either
+([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html):
+"not limited by an implicit deny in an identity-based policy or permissions boundary"), while a grant to a role's
+ARN is ("limited by an implicit deny in a permissions boundary or session policy"). A trust policy that names the
+account (its id or its root ARN) still needs the caller's identity policy. For a role in another account, both the
+caller's identity policy and the trust policy have to allow the call
+([cross-account policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic-cross-account.html):
+"The request is allowed only if both evaluations return a decision of `Allow`"), so IAM enforcement refuses an IAM
+user or a role session the trust policy does not allow before STS does. An explicit `Deny` in the trust policy, in
+any of the caller's policies or in the account's SCPs refuses the call.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -392,7 +492,7 @@ The response resolves both header and query-string credentials, including the qu
 so a presigned request reports the same caller identity. A nonblank Authorization header retains
 precedence over query credentials.
 
-When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded access key (`floci` unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` sets another) return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
 
 When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks presigned query
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`

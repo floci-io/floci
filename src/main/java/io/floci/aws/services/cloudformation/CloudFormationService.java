@@ -1520,8 +1520,10 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldProps = oldDef.path("Properties");
-            JsonNode newProps = newDef.path("Properties");
+            JsonNode oldBlock = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
+            JsonNode newBlock = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
+            JsonNode oldProps = withoutNoValue(logicalId, oldBlock, oldParams, oldConditions, oldTemplate);
+            JsonNode newProps = withoutNoValue(logicalId, newBlock, newParams, newConditions, newTemplate);
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1538,6 +1540,30 @@ public class CloudFormationService implements ResourceProvider {
                         ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
+        }
+
+        /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
+        private JsonNode withoutNoValue(String logicalId, JsonNode block, Map<String, String> params,
+                                        Map<String, Boolean> conditions, JsonNode template) {
+            try {
+                JsonNode omitted = engineOver(ownerAccount(stack), params, Map.of(), Map.of(), conditions, template)
+                        .omitNoValue(block);
+                return omitted.isMissingNode() ? block : omitted;
+            } catch (RuntimeException e) {
+                if (warned.add(logicalId)) {
+                    LOG.warnv("AWS::NoValue members of {0} could not be left out for the diff; the preview "
+                            + "compares the block as written: {1}", logicalId, e.getMessage());
+                }
+                return block;
+            }
+        }
+
+        /**
+         * A missing Properties block counts as an empty one when the other side has a block, as adding or
+         * dropping every property in it does.
+         */
+        private JsonNode withoutMissing(JsonNode block, JsonNode other) {
+            return block.isMissingNode() && other.isObject() ? objectMapper.createObjectNode() : block;
         }
 
         private static boolean holdsDynamicReference(JsonNode subtree) {
@@ -1557,12 +1583,15 @@ public class CloudFormationService implements ResourceProvider {
             }
             JsonNode before = compared[0].path(logicalId).path("Properties");
             JsonNode after = compared[1].path(logicalId).path("Properties");
+            JsonNode comparedBefore = withoutMissing(before, after);
+            after = withoutMissing(after, before);
+            before = comparedBefore;
             if (!before.isObject() || !after.isObject()) {
                 return false;
             }
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
-            for (String pointer : CfnCreateOnlyProperties.getCreateOnlyProperties(resourceType)) {
+            for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
                 boolean changed = noEvidence(pointer, before)
                         ? writtenPointerChanged(pointer, oldProps, newProps)
                         : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
@@ -1633,9 +1662,9 @@ public class CloudFormationService implements ResourceProvider {
                 String accountId = ownerAccount(stack);
                 return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
                         engineOver(accountId, oldParams, physicalIds, attributes, oldConditions, oldTemplate)
-                                .resolveNode(oldProps),
+                                .resolveNodeOmittingNoValue(oldProps),
                         engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
-                                .resolveNode(newProps));
+                                .resolveNodeOmittingNoValue(newProps));
             } catch (RuntimeException e) {
                 if (warned.add(logicalId)) {
                     LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
@@ -1681,25 +1710,21 @@ public class CloudFormationService implements ResourceProvider {
         }
         try {
             return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
-                    previous.resolveNode(priorProps), current.resolveNode(props));
+                    previous.resolveNodeOmittingNoValue(priorProps),
+                    current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
-                    + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
+                    + "replacement beyond the engine''s own decision: {2}", logicalId, resourceType, e.getMessage());
             return false;
         }
     }
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
-        if (oldProps == null || oldProps.isMissingNode()) {
+        // The caller reads a dropped or an added Properties block as an empty one, so only a resource
+        // without a block on either side reaches here with a missing node.
+        if (oldProps == null || oldProps.isMissingNode() || newProps == null || newProps.isMissingNode()) {
             return false;
-        }
-        if (newProps == null || newProps.isMissingNode()) {
-            // A dropped Properties block removes every property in it, as removing them one by one does.
-            if (!oldProps.isObject()) {
-                return false;
-            }
-            newProps = objectMapper.createObjectNode();
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
@@ -1718,10 +1743,10 @@ public class CloudFormationService implements ResourceProvider {
             if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
                 JsonNode oldVal = oldProps.get(field);
                 JsonNode newVal = newProps.get(field);
-                if (oldVal != null && !oldVal.equals(newVal)) {
+                if (!newVal.equals(oldVal)) {
                     return true;
                 }
-                if (newVal != null && (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions))) {
+                if (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions)) {
                     return true;
                 }
             }
@@ -1822,7 +1847,7 @@ public class CloudFormationService implements ResourceProvider {
                                          List<StackEvent> events,
                                          Map<String, ChangeSet> changeSets,
                                          Map<ChangeSet, ChangeSetState> changeSetStates,
-                                         String stackPolicyBody) {}
+                                         String stackPolicyBody, String originalTemplateBody) {}
 
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
@@ -1872,6 +1897,11 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (isCreate && cs.getStackPolicyBody() != null) {
                 existing.setStackPolicyBody(cs.getStackPolicyBody());
+            }
+            if (isCreate) {
+                // The stack has its template once CreateStack answers, as GetTemplate and GetTemplateSummary read
+                // it on AWS, not only once its creation starts, which waits for a free operation thread.
+                existing.setOriginalTemplateBody(cs.getTemplateBody());
             }
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
@@ -2235,7 +2265,8 @@ public class CloudFormationService implements ResourceProvider {
             states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
         }
         return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
-                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody());
+                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody(),
+                stack.getOriginalTemplateBody());
     }
 
     private void restore(Stack stack, StackMutationSnapshot snapshot) {
@@ -2245,6 +2276,7 @@ public class CloudFormationService implements ResourceProvider {
         stack.setStatus(snapshot.status());
         stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
         stack.setStackPolicyBody(snapshot.stackPolicyBody());
+        stack.setOriginalTemplateBody(snapshot.originalTemplateBody());
         stack.setEvents(new ArrayList<>(snapshot.events()));
         stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
         snapshot.changeSetStates().forEach((changeSet, state) -> {
@@ -2917,7 +2949,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn(), previousEngine);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

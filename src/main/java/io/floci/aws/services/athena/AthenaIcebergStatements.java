@@ -359,7 +359,7 @@ public class AthenaIcebergStatements {
      * statement, or one writing another catalog's table.
      */
     static Target target(String query) {
-        int start = statementStart(query);
+        int start = TrinoSqlCompatibility.skipSpaceAndComments(query, 0);
         Matcher dml = DML.matcher(query).region(start, query.length());
         if (!dml.lookingAt()) {
             return null;
@@ -369,7 +369,7 @@ public class AthenaIcebergStatements {
         int nameStart = i;
         int nameEnd;
         while (true) {
-            int partEnd = identifierEnd(query, i);
+            int partEnd = TrinoSqlCompatibility.identifierEnd(query, i);
             if (partEnd == i) {
                 return null;
             }
@@ -394,54 +394,11 @@ public class AthenaIcebergStatements {
         };
     }
 
-    /** Where the statement starts, past leading whitespace and comments. */
-    private static int statementStart(String query) {
-        int i = 0;
-        while (true) {
-            i = skipSpaces(query, i);
-            if (query.startsWith("--", i)) {
-                int lineEnd = query.indexOf('\n', i);
-                i = lineEnd < 0 ? query.length() : lineEnd + 1;
-            } else if (query.startsWith("/*", i)) {
-                int commentEnd = query.indexOf("*/", i + 2);
-                i = commentEnd < 0 ? query.length() : commentEnd + 2;
-            } else {
-                return i;
-            }
-        }
-    }
-
     private static int skipSpaces(String query, int i) {
         while (i < query.length() && Character.isWhitespace(query.charAt(i))) {
             i++;
         }
         return i;
-    }
-
-    /** The index just past the identifier at {@code i}, or {@code i} when none starts there. */
-    private static int identifierEnd(String query, int i) {
-        if (i >= query.length()) {
-            return i;
-        }
-        if (query.charAt(i) == '"') {
-            int j = i + 1;
-            while (j < query.length()) {
-                if (query.charAt(j) == '"') {
-                    if (j + 1 < query.length() && query.charAt(j + 1) == '"') {
-                        j += 2;
-                        continue;
-                    }
-                    return j + 1;
-                }
-                j++;
-            }
-            return i;
-        }
-        int j = i;
-        while (j < query.length() && (Character.isLetterOrDigit(query.charAt(j)) || query.charAt(j) == '_')) {
-            j++;
-        }
-        return j;
     }
 
     // ─── VACUUM ───────────────────────────────────────────────────────────────────

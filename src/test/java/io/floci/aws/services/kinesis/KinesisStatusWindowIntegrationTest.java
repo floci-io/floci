@@ -1,10 +1,10 @@
 package io.floci.aws.services.kinesis;
 
 import io.floci.aws.services.kinesis.model.KinesisStream;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -12,12 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.time.Instant;
-import java.util.Map;
 
 import static org.hamcrest.Matchers.equalTo;
 
+/**
+ * A stream is seen CREATING and UPDATING over the wire. The delays, a minute each, come from
+ * {@link CloudFormationSettingsProfile}, so nothing moves on while the test runs.
+ */
 @QuarkusTest
-@TestProfile(KinesisStatusWindowIntegrationTest.WindowProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class KinesisStatusWindowIntegrationTest {
 
     private static final String KINESIS_TARGET = "Kinesis_20131202";
@@ -96,13 +99,5 @@ class KinesisStatusWindowIntegrationTest {
         .then()
             .statusCode(200)
             .body("StreamDescription.StreamStatus", equalTo("ACTIVE"));
-    }
-
-    public static final class WindowProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.kinesis.creating-delay-millis", "60000",
-                    "floci.services.kinesis.updating-delay-millis", "60000");
-        }
     }
 }

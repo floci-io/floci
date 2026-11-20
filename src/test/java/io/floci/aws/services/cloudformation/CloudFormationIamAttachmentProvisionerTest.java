@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -51,6 +52,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     void setUp() {
         iamService = mock(IamService.class);
         IamInlinePolicyMock.configure(iamService);
+        when(iamService.canonicalPolicyArn(anyString())).thenAnswer(returnsFirstArg());
         provisioner = CfnProvisionerFixture.builder()
                 .iam(iamService)
                 .objectMapper(mapper)

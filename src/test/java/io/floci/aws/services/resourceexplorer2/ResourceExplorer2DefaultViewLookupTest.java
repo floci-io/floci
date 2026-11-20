@@ -47,6 +47,22 @@ class ResourceExplorer2DefaultViewLookupTest {
             new ObjectMapper(), indexStore, viewStore, defaultViewStore, new InMemoryStorage<>(),
             new ResourceExplorer2RequestContext());
 
+    /**
+     * IAM's tag lookup reads the tags held on the view the whole ARN names, as tagging leaves them, read in place;
+     * nothing for an ARN naming no stored view or index.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheViewTheArnNames() {
+        String view = service.createView(REGION, "tagged", null, null, List.of(), Map.of("team", "data")).viewArn();
+        service.tagResource(view, Map.of("env", "prod"));
+        service.untagResource(view, List.of("team"));
+
+        assertEquals(Map.of("env", "prod"), service.storedTags(view));
+        assertEquals(Map.of(), service.storedTags(VIEWS + "absent/1"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+        assertTrue(indexStore.scan(key -> true).isEmpty());
+    }
+
     @Test
     void theDefaultViewIsReadWithoutProvisioningTheBaseline() {
         // No index yet: a request naming no view would provision the baseline, whose view's id is not minted yet.

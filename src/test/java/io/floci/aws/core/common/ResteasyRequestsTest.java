@@ -10,9 +10,11 @@ import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestCo
 import org.jboss.resteasy.reactive.server.spi.ServerHttpRequest;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -128,5 +130,25 @@ class ResteasyRequestsTest {
         } finally {
             CurrentRequestManager.set(null);
         }
+    }
+
+    @Test
+    void rawQueryInsideARequestReadsTheServerRequestWithoutTheRequestUri() {
+        UriInfo uriInfo = mock(UriInfo.class);
+        CurrentRequestManager.set(requestContext("a=b%26c", uriInfo));
+        try {
+            assertEquals("a=b%26c", ResteasyRequests.rawQuery(uriInfo));
+            verify(uriInfo, never()).getRequestUri();
+        } finally {
+            CurrentRequestManager.set(null);
+        }
+    }
+
+    @Test
+    void rawQueryOutsideARequestReadsTheRequestUri() {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/b?a=b%26c"));
+
+        assertEquals("a=b%26c", ResteasyRequests.rawQuery(uriInfo));
     }
 }

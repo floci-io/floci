@@ -1,8 +1,9 @@
 package io.floci.aws.services.iot;
 
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
@@ -21,14 +22,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * SearchIndex connectivity against a real MQTT client on the plaintext broker: a client id that
  * names a thing makes that thing connected, and a DISCONNECT packet, a dropped socket and
  * DeleteConnection end it with AWS's disconnect reasons. Unsigned requests run in the default
- * account and region, which is where a plaintext session counts.
+ * account and region, which is where a plaintext session counts. The broker starts at boot, on the
+ * free port {@link S3EnforceAuthProfile} picks; the test reads it from the application's
+ * configuration, since the profile class is loaded apart from the test's and picks its own.
  */
 @QuarkusTest
-@TestProfile(IotFleetIndexingConnectivityIntegrationTest.MqttProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class IotFleetIndexingConnectivityIntegrationTest {
 
-    private static final int PORT = 18840;
-    private static final String BROKER_URI = "tcp://127.0.0.1:" + PORT;
+    @ConfigProperty(name = "floci.services.iot.mqtt.port")
+    int mqttPort;
     private static final String INDEXING = """
         {"thingIndexingConfiguration": {"thingIndexingMode": "REGISTRY", "thingConnectivityIndexingMode": "STATUS"}}
         """;
@@ -40,7 +43,7 @@ class IotFleetIndexingConnectivityIntegrationTest {
         given().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
         assertEquals(Map.of("clientId", thingName, "connected", false, "timestamp", 0), connectivity(null, thingName));
 
-        MqttClient client = new MqttClient(BROKER_URI, thingName, new MemoryPersistence());
+        MqttClient client = new MqttClient(brokerUri(), thingName, new MemoryPersistence());
         client.setTimeToWait(10_000);
         long beforeConnect = System.currentTimeMillis();
         client.connect(options(30, true));
@@ -86,7 +89,7 @@ class IotFleetIndexingConnectivityIntegrationTest {
         assertEquals(Map.of("connected", false, "timestamp", lost.get("timestamp"), "disconnectReason",
                 "CONNECTION_LOST", "keepAliveDuration", 45, "cleanSession", false, "clientId", thingName), lost);
 
-        MqttClient deleted = new MqttClient(BROKER_URI, thingName, new MemoryPersistence());
+        MqttClient deleted = new MqttClient(brokerUri(), thingName, new MemoryPersistence());
         deleted.setTimeToWait(10_000);
         deleted.connect(options(60, true));
         assertEquals(true, connectivity(null, thingName).get("connected"));
@@ -140,14 +143,7 @@ class IotFleetIndexingConnectivityIntegrationTest {
         return options;
     }
 
-    public static final class MqttProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iot.mqtt.enabled", "true",
-                    "floci.services.iot.mqtt.auto-start", "true",
-                    "floci.services.iot.mqtt.host", "127.0.0.1",
-                    "floci.services.iot.mqtt.port", Integer.toString(PORT));
-        }
+    private String brokerUri() {
+        return "tcp://127.0.0.1:" + mqttPort;
     }
 }

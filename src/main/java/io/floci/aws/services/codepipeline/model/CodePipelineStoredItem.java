@@ -21,7 +21,7 @@ public class CodePipelineStoredItem {
     private Double created;
     private Double updated;
     private JsonNode data;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public String getAccountId() {
         return accountId;

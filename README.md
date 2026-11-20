@@ -444,6 +444,16 @@ docker run -d --name floci \
   floci/floci:latest
 ```
 
+### Security group enforcement
+
+By default, security groups on EC2 instances and ECS `awsvpc` tasks are stored, returned and used to decide which ports to publish, but they do not filter traffic. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci gives each Docker-backed instance and `awsvpc` task its own network namespace with an nftables default-deny policy, and filters new connections between Floci-managed containers by the sender's egress rules and the receiver's ingress rules, matched against the ENIs' own IPv4 and IPv6 addresses and group memberships. Replies to an allowed connection pass through connection tracking. It does not emulate VPC routing, network ACLs, NAT gateways or peering.
+
+- It needs rootful Docker running Linux containers. Rootless Docker and Windows containers are not supported.
+- Turn it on with `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`; it is off by default.
+- While it is on, SSH is published, and an application port is published on the host only when an ingress rule opens it to every address (`0.0.0.0/0` or `::/0`), at launch or later, and only on the host addresses of that rule's family. Docker can replace a host client's address, so a port that only a narrower CIDR, a prefix list or a referenced group opens is reachable only from the Floci-managed containers that rule admits, not from the host.
+
+See [Security Group Port Publishing](docs/services/ec2.md#security-group-port-publishing) for the details.
+
 ### Overriding default images
 
 | Variable | Default |

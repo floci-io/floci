@@ -274,6 +274,7 @@ can still make it work from configuration alone.
 | Floci UI | `floci/floci-ui` | Floci's own console, the default. Served by a built-in profile until it adopts `/api/health`. |
 | [Floci Dash](https://github.com/ofsazib/floci-dash) | `ghcr.io/ofsazib/floci-dash` | AWS Console-style dashboard. Honours `PORT`; reads `FLOCI_URL` and answers `/api/healthz`, so it needs those two named. [Setup](index.md#example-floci-dash). |
 | [StackPort](https://github.com/DaviReisVieira/stackport) | `davireis/stackport` | Third-party; listens on 8080 and answers `/api/health`. |
+| [floci-aws-ui](https://github.com/varun1505/floci-aws-ui) | `ghcr.io/varun1505/floci-aws-ui` | Third-party; looks and works like the AWS console. Follows the contract and labels itself, so the image name is the only setting. |
 
 Built a console against this contract? Open a pull request adding it to this table, or an issue at
 [floci-io/floci](https://github.com/floci-io/floci/issues) if something in the contract got in your

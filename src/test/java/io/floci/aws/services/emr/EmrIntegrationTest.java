@@ -291,7 +291,7 @@ class EmrIntegrationTest {
                 .then().statusCode(200)
                 .body("SecurityConfiguration", equalTo("{\"EncryptionConfiguration\":{}}"));
 
-        emrService.describeSecurityConfiguration("floci-emr-sec")
+        emrService.describeSecurityConfiguration("floci-emr-sec", "us-east-1")
                 .setCreationDateTime(Instant.ofEpochMilli(1_761_000_000_123L));
         try {
             JsonNode describedTime = objectMapper.readTree(emr("DescribeSecurityConfiguration",

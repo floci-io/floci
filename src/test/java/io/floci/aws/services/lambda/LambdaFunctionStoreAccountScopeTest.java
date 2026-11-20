@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambda;
 
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
 
@@ -78,6 +79,28 @@ class LambdaFunctionStoreAccountScopeTest {
         store.saveForAccount(OTHER_ACCOUNT, REGION, function("other-fn", OTHER_ACCOUNT));
 
         assertEquals(2, store.listAll().size());
+    }
+
+    /**
+     * A record stored before accounts were kept apart stays unprefixed until it is next read, and still holds the
+     * subnets its VpcConfig names, so the account's listing of functions and versions finds it.
+     */
+    @Test
+    void listWithVersionsForAccountIncludesARecordStoredBeforeAccountsWereKeptApart() {
+        InMemoryStorage<String, LambdaFunction> raw = new InMemoryStorage<>();
+        LambdaFunctionStore store = new LambdaFunctionStore(
+                new AccountAwareStorageBackend<>(raw, null, DEFAULT_ACCOUNT));
+        store.saveForAccount(OTHER_ACCOUNT, REGION, function("current-fn", OTHER_ACCOUNT));
+        LambdaFunction legacyVersion = function("legacy-fn", OTHER_ACCOUNT);
+        legacyVersion.setVersion("1");
+        raw.put("lambda::" + REGION + "::legacy-fn::1", legacyVersion);
+        raw.put("lambda::" + REGION + "::legacy-default-fn::$LATEST", function("legacy-default-fn", DEFAULT_ACCOUNT));
+        raw.put("lambda::eu-west-1::legacy-elsewhere-fn::$LATEST", function("legacy-elsewhere-fn", OTHER_ACCOUNT));
+
+        assertEquals(List.of("current-fn", "legacy-fn"), store.listWithVersionsForAccount(OTHER_ACCOUNT, REGION)
+                .stream().map(LambdaFunction::getFunctionName).sorted().toList());
+        assertEquals(List.of("legacy-default-fn"), store.listWithVersionsForAccount(DEFAULT_ACCOUNT, REGION)
+                .stream().map(LambdaFunction::getFunctionName).toList());
     }
 
     private LambdaFunctionStore accountAwareStore() {

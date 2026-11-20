@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.DelayedTaskScheduler;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.KinesisStreamingDestination;
@@ -41,7 +42,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>{@code forward} is proven ENQUEUE-ONLY (no synchronous Kinesis I/O, never throws); the actual send,
  * retry, terminal-drop, give-up, overflow, FIFO, and lifecycle behaviour are exercised deterministically
- * by driving a manual {@link KinesisStreamingForwarder.Scheduler} step by step: no real timers, no sleeps
+ * by driving a manual {@link DelayedTaskScheduler} step by step: no real timers, no sleeps
  * in the delivery assertions.
  */
 class KinesisStreamingForwarderTest {
@@ -65,7 +66,7 @@ class KinesisStreamingForwarderTest {
     // ──────────────────────────── helpers ────────────────────────────
 
     /** A Scheduler the test drives by hand: tasks queue up and run only when the test asks. */
-    static final class ManualScheduler implements KinesisStreamingForwarder.Scheduler {
+    static final class ManualScheduler implements DelayedTaskScheduler {
         final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
         final List<Long> delays = new ArrayList<>();
         boolean shutdown;
@@ -100,7 +101,7 @@ class KinesisStreamingForwarderTest {
     }
 
     /** A Scheduler that rejects while {@code reject} is set (executor-shutdown simulation), else queues. */
-    static final class RejectingScheduler implements KinesisStreamingForwarder.Scheduler {
+    static final class RejectingScheduler implements DelayedTaskScheduler {
         final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
         boolean reject = true;
 

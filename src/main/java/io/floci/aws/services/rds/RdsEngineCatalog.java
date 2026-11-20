@@ -56,6 +56,8 @@ final class RdsEngineCatalog {
                     "Aurora (PostgreSQL)", true, AURORA_CLASSES, PROVISIONED),
             new EngineVersion("aurora-postgresql", "17.4", "17", "aurora-postgresql17",
                     "Aurora (PostgreSQL)", false, List.of(), PROVISIONED),
+            new EngineVersion("aurora-postgresql", "18.6", "18", "aurora-postgresql18",
+                    "Aurora (PostgreSQL)", false, List.of(), PROVISIONED),
             new EngineVersion("aurora-mysql", "8.0.mysql_aurora.3.05.2", "8.0", "aurora-mysql8.0",
                     "Aurora MySQL", true, AURORA_CLASSES, PROVISIONED),
             new EngineVersion("aurora-mysql", "8.0.mysql_aurora.3.08.0", "8.0", "aurora-mysql8.0",
@@ -115,9 +117,9 @@ final class RdsEngineCatalog {
         return FEATURE_NAMES.getOrDefault(catalogued, List.of());
     }
 
-    /** Floci creates read replicas of PostgreSQL instances only. */
+    /** Floci creates read replicas of PostgreSQL, MySQL and MariaDB instances. */
     static boolean supportsReadReplica(EngineVersion version) {
-        return version.engine().equals("postgres");
+        return RdsService.READ_REPLICA_ENGINES.contains(version.engine());
     }
 
     static boolean supportsGlobalDatabases(EngineVersion version) {

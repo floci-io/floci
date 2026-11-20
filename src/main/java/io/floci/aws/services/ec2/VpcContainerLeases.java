@@ -7,12 +7,18 @@ import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.net.Cidr4;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
@@ -25,8 +31,10 @@ import java.util.function.Supplier;
  *
  * <p>Leases live in memory: a container kept running across a restart takes its address back with
  * {@link #reclaim}. A container Docker could not be shown to be gone keeps its address, and is looked at again
- * whenever the service is asked whether it holds a subnet or VPC. Without Docker-backed VPC networks, or for a subnet
- * EC2 does not know, a container keeps the network it was created on.
+ * whenever the service is asked whether it holds a subnet or VPC: in the background, waited for up to
+ * {@link #RECHECK_WAIT}, so a healthy daemon's answer counts for the DeleteSubnet or DeleteVpc that asked, while a
+ * slow one costs that call at most the wait and a later one sees the address given back. Without
+ * Docker-backed VPC networks, or for a subnet EC2 does not know, a container keeps the network it was created on.
  */
 public final class VpcContainerLeases {
 
@@ -39,6 +47,13 @@ public final class VpcContainerLeases {
     private final Map<String, Lease> leases = new ConcurrentHashMap<>();
     /** Containers whose removal Docker did not confirm, whose addresses wait for another look. */
     private final Set<String> unconfirmed = ConcurrentHashMap.newKeySet();
+    /** The background look at {@link #unconfirmed} running or last run, so asking again starts no second one. */
+    private final AtomicReference<CompletableFuture<Void>> recheck = new AtomicReference<>();
+    /** How long a dependency check waits for that look before it answers from memory. */
+    private final Duration recheckWait;
+
+    /** The longest a DeleteSubnet or DeleteVpc waits on Docker for an unconfirmed removal. */
+    static final Duration RECHECK_WAIT = Duration.ofSeconds(2);
 
     /**
      * @param ec2    EC2, which leases the addresses; null leaves every container on its own network
@@ -46,9 +61,14 @@ public final class VpcContainerLeases {
      * @param docker the Docker client that says whether a container is gone
      */
     public VpcContainerLeases(Ec2Service ec2, String owner, Supplier<DockerClient> docker) {
+        this(ec2, owner, docker, RECHECK_WAIT);
+    }
+
+    VpcContainerLeases(Ec2Service ec2, String owner, Supplier<DockerClient> docker, Duration recheckWait) {
         this.ec2 = ec2;
         this.owner = owner;
         this.docker = docker;
+        this.recheckWait = recheckWait;
     }
 
     /** An address a container holds in a subnet of a VPC, for the account and Region that own them. */
@@ -82,15 +102,15 @@ public final class VpcContainerLeases {
                         expectedVpcId, subnetId, vpcId);
                 return;
             }
-            Optional<String> address = ec2.allocateVpcPrivateIp(region, subnetId);
+            Optional<String> address = ec2.allocateVpcPrivateIp(accountId, region, subnetId);
             if (address.isEmpty()) {
                 return;
             }
             Optional<String> attached;
             try {
-                attached = ec2.attachContainerToVpc(region, vpcId, subnetId, containerId, address.get());
+                attached = ec2.attachContainerToVpc(accountId, region, vpcId, subnetId, containerId, address.get());
             } catch (RuntimeException e) {
-                ec2.releaseVpcPrivateIp(region, subnetId, address.get());
+                ec2.releaseVpcPrivateIp(accountId, region, subnetId, address.get());
                 throw e;
             }
             if (attached.isPresent()) {
@@ -99,7 +119,7 @@ public final class VpcContainerLeases {
                 joined.set(lease);
                 LOG.infov("{0} {1} joined VPC {2} at {3}", owner, name, vpcId, address.get());
             } else {
-                ec2.releaseVpcPrivateIp(region, subnetId, address.get());
+                ec2.releaseVpcPrivateIp(accountId, region, subnetId, address.get());
             }
         }));
         return Optional.ofNullable(joined.get());
@@ -128,7 +148,7 @@ public final class VpcContainerLeases {
             for (String address : addresses) {
                 Optional<Cidr4> host = address == null ? Optional.empty() : Cidr4.parse(address + "/32");
                 if (host.isPresent() && cidr.get().containsAddress(host.get().network())
-                        && ec2.reserveVpcPrivateIp(region, subnetId, address)) {
+                        && ec2.reserveVpcPrivateIp(accountId, region, subnetId, address)) {
                     Lease lease = new Lease(accountId, region, subnets.getFirst().getVpcId(), subnetId, address);
                     leases.put(containerId, lease);
                     LOG.infov("{0} {1} re-claimed its VPC address {2}", owner, name, address);
@@ -161,7 +181,7 @@ public final class VpcContainerLeases {
             // Gone, so its address is free.
             unconfirmed.remove(containerId);
             if (leases.remove(containerId, lease)) {
-                ec2.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
+                ec2.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
             }
         } catch (RuntimeException e) {
             unconfirmed.add(containerId);
@@ -175,25 +195,79 @@ public final class VpcContainerLeases {
         return Optional.ofNullable(containerId == null ? null : leases.get(containerId));
     }
 
-    /** Whether a live container of the account holds an address in the subnet. */
+    /**
+     * Whether a live container of the account holds an address in the subnet, from memory. A container whose removal
+     * was not confirmed still counts until a background look, waited for up to {@link #RECHECK_WAIT}, finds it gone.
+     */
     public boolean holdsSubnet(String accountId, String region, String subnetId) {
-        recheckUnconfirmed();
+        awaitRecheck();
         return leases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
                 && lease.region().equals(region) && lease.subnetId().equals(subnetId));
     }
 
-    /** Whether a live container of the account is on the VPC's network. */
+    /** Whether a live container of the account is on the VPC's network, from memory, as {@link #holdsSubnet}. */
     public boolean holdsVpc(String accountId, String region, String vpcId) {
-        recheckUnconfirmed();
+        awaitRecheck();
         return leases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
                 && lease.region().equals(region) && lease.vpcId().equals(vpcId));
     }
 
-    /** Gives back the addresses of containers whose removal was not confirmed and that Docker no longer has. */
-    private void recheckUnconfirmed() {
-        for (String containerId : List.copyOf(unconfirmed)) {
-            releaseIfGone(containerId);
+    /** Starts or joins the background look, and waits for it up to {@link #recheckWait}. */
+    private void awaitRecheck() {
+        CompletableFuture<Void> pass = recheckUnconfirmedInBackground();
+        if (pass == null) {
+            return;
         }
+        try {
+            pass.get(recheckWait.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException expected) {
+            // Docker is slow: answer from memory, the look carries on and a later question sees its result.
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException e) {
+            LOG.debugv(e, "{0} lease recheck failed", owner);
+        }
+    }
+
+    /**
+     * Gives back, on a virtual thread, the addresses of containers whose removal was not confirmed and that Docker no
+     * longer has, or returns the look already running; null when nothing waits for one. One look runs at a time, so a
+     * daemon that does not answer holds one thread, not one per question. A look takes up a container that became
+     * unconfirmed while it ran, and one container's failure does not stop it looking at the others.
+     */
+    private CompletableFuture<Void> recheckUnconfirmedInBackground() {
+        if (unconfirmed.isEmpty()) {
+            return null;
+        }
+        CompletableFuture<Void> running = recheck.get();
+        if (running != null && !running.isDone()) {
+            return running;
+        }
+        CompletableFuture<Void> pass = new CompletableFuture<>();
+        if (!recheck.compareAndSet(running, pass)) {
+            return recheck.get();
+        }
+        Thread.ofVirtual().name("vpc-lease-recheck").start(() -> {
+            try {
+                Set<String> looked = new HashSet<>();
+                List<String> next = List.copyOf(unconfirmed);
+                while (!next.isEmpty()) {
+                    for (String containerId : next) {
+                        looked.add(containerId);
+                        try {
+                            releaseIfGone(containerId);
+                        } catch (RuntimeException e) {
+                            LOG.warnv("{0} container {1}: could not give its VPC address back ({2})", owner,
+                                    containerId, e.getMessage());
+                        }
+                    }
+                    next = unconfirmed.stream().filter(id -> !looked.contains(id)).toList();
+                }
+            } finally {
+                pass.complete(null);
+            }
+        });
+        return pass;
     }
 
     private String vpcOf(String region, String subnetId) {

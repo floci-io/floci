@@ -1,11 +1,5 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
@@ -13,9 +7,7 @@ import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -26,7 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -241,34 +232,6 @@ class EcsServiceDeleteDeploymentsTest {
     private final EcsContainerManager containerManager = mock(EcsContainerManager.class);
 
     private EcsService newMockModeService() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                containerManager,
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
-                null);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
+        return EcsServiceFixtures.builder().containerManager(containerManager).build();
     }
 }

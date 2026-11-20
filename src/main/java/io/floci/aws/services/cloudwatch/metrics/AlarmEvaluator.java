@@ -119,7 +119,7 @@ public class AlarmEvaluator {
         long lastCompleteBucket = nowBucket - period;
         long oldestBucket = lastCompleteBucket - (long) period * (range - 1);
         Instant start = Instant.ofEpochSecond(oldestBucket);
-        Instant end = Instant.ofEpochSecond(lastCompleteBucket + period - 1);
+        Instant end = Instant.ofEpochSecond(lastCompleteBucket + period);
 
         List<CloudWatchMetricsService.Datapoint> retrieved = metricsService.getMetricStatistics(
                 alarm.getNamespace(), alarm.getMetricName(), alarm.getDimensions(),

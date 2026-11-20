@@ -733,6 +733,10 @@ public class SqsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "The name of a FIFO queue can only end with '.fifo'.", 400);
         }
+        if (!hasFifoSuffix && attributes != null && attributes.containsKey("FifoQueue")) {
+            // A standard queue has no FifoQueue attribute, so SQS refuses even an explicit false.
+            throw new AwsException("InvalidAttributeName", "Unknown Attribute FifoQueue.", 400);
+        }
         if (hasFifoSuffix && !fifoRequested) {
             // Auto-set FifoQueue attribute when name ends with .fifo
             attributes = attributes == null ? new HashMap<>() : new HashMap<>(attributes);
@@ -1708,11 +1712,22 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout, String region) {
-        changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, region, false);
+        changeMessageVisibility(queueUrl, receiptHandle, null, visibilityTimeout, region, false);
     }
 
-    private void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout,
-                                         String region, boolean inBatch) {
+    /**
+     * Changes a message's visibility timeout unless its visibility is no longer
+     * {@code expectedVisibleAt}: a consumer that called ChangeMessageVisibility since keeps the
+     * timeout it set. Returns whether the timeout was changed.
+     */
+    public boolean changeMessageVisibilityIfUnchanged(String queueUrl, String receiptHandle,
+                                                      Instant expectedVisibleAt, int visibilityTimeout,
+                                                      String region) {
+        return changeMessageVisibility(queueUrl, receiptHandle, expectedVisibleAt, visibilityTimeout, region, false);
+    }
+
+    private boolean changeMessageVisibility(String queueUrl, String receiptHandle, Instant expectedVisibleAt,
+                                            int visibilityTimeout, String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -1721,12 +1736,14 @@ public class SqsService implements Resettable, ResourceProvider {
 
         GuardedMessageQueue messages = getOrCreateQueue(storageKey);
         messages.activity().accessed();
-        GuardedMessageQueue.HandleResult result = messages.changeVisibility(handle, visibilityTimeout, queue.isFifo());
+        GuardedMessageQueue.HandleResult result =
+                messages.changeVisibility(handle, expectedVisibleAt, visibilityTimeout, queue.isFifo());
         rejectUnusableHandle(result, receiptHandle, inBatch);
         if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             throw invalidReceiptHandle(receiptHandle,
                     "Message does not exist or is not available for visibility timeout change", inBatch);
         }
+        return result == GuardedMessageQueue.HandleResult.APPLIED;
     }
 
     private static void rejectUnusableHandle(GuardedMessageQueue.HandleResult result, String receiptHandle,
@@ -2092,7 +2109,7 @@ public class SqsService implements Resettable, ResourceProvider {
         List<BatchResultEntry> results = new ArrayList<>();
         for (ChangeVisibilityBatchEntry entry : entries) {
             try {
-                changeMessageVisibility(queueUrl, entry.receiptHandle(), entry.visibilityTimeout(), region, true);
+                changeMessageVisibility(queueUrl, entry.receiptHandle(), null, entry.visibilityTimeout(), region, true);
                 results.add(new BatchResultEntry(entry.id(), true, null, null));
             } catch (AwsException e) {
                 results.add(new BatchResultEntry(entry.id(), false, e.getErrorCode(), e.getMessage()));
@@ -2101,30 +2118,57 @@ public class SqsService implements Resettable, ResourceProvider {
         return results;
     }
 
-    public void tagQueue(String queueUrl, Map<String, String> tags, String region) {
+    /**
+     * Gives the queue a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void tagQueue(String queueUrl, Map<String, String> tags, String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
         if (tags != null) {
-            queue.getTags().putAll(tags);
+            Map<String, String> merged = new LinkedHashMap<>(queue.getTags());
+            merged.putAll(tags);
+            queue.setTags(merged);
         }
         queueStore.put(storageKey, queue);
         LOG.infov("Tagged queue: {0}", queueUrl);
     }
 
-    public void untagQueue(String queueUrl, List<String> tagKeys, String region) {
+    /** Gives the queue a new map without {@code tagKeys}, one tag call at a time, as {@link #tagQueue}. */
+    public synchronized void untagQueue(String queueUrl, List<String> tagKeys, String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
         if (tagKeys != null) {
-            for (String key : tagKeys) {
-                queue.getTags().remove(key);
-            }
+            Map<String, String> remaining = new LinkedHashMap<>(queue.getTags());
+            tagKeys.forEach(remaining::remove);
+            queue.setTags(remaining);
         }
         queueStore.put(storageKey, queue);
         LOG.infov("Untagged queue: {0}", queueUrl);
+    }
+
+    /**
+     * The ARN of the queue {@code queueUrl} reaches from {@code region}, looked up as the handlers look it up: in the
+     * account the URL's path names, and the queue of that name held in the Region. Empty when there is no such queue.
+     */
+    Optional<String> heldQueueArn(String queueUrl, String region) {
+        return getQueueByUrl(regionKey(region, queueUrl), queueUrl).map(queue -> AwsArnUtils.Arn.of("sqs", region,
+                queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId(),
+                queue.getQueueName()).toString());
+    }
+
+    /**
+     * The tags of the queue {@code queueName} held in {@code region} of {@code account}, read in place under the key
+     * the handlers read; none when there is no such queue.
+     */
+    Map<String, String> queueTagsInAccount(String account, String region, String queueName) {
+        String storageKey = regionKey(region, "sqs://queue/" + account + "/" + queueName);
+        return AccountAwareStorageBackend.readInAccount(queueStore, account, storageKey)
+                .map(Queue::getTags).filter(Objects::nonNull).orElse(Map.of());
     }
 
     private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();

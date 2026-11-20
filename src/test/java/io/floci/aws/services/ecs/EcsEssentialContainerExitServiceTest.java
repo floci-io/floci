@@ -279,6 +279,34 @@ class EcsEssentialContainerExitServiceTest {
         verify(manager, times(1)).releaseTaskNetwork(task, REGION);
     }
 
+    @Test
+    void aNamespaceHelperDockerKeptAfterTheContainersExitedIsRetried() {
+        EcsTask task = runningTask(false);
+        when(manager.getExitCodeIfStopped("app-id")).thenReturn(9);
+        when(manager.getExitCodeIfStopped("sidecar-id")).thenReturn(0);
+        doAnswer(invocation -> {
+            EcsTaskHandle stopped = invocation.getArgument(0);
+            stopped.getContainerIds().keySet().forEach(stopped::recordContainerRemoved);
+            stopped.recordNamespaceHelperPending(true);
+            return null;
+        }).when(manager).cleanupStoppedTask(any());
+        when(manager.stopTaskAndCollectExitCodes(any())).thenAnswer(invocation -> {
+            handle.recordNamespaceHelperPending(false);
+            return completeDockerStop();
+        });
+
+        service.reconcile();
+        service.reconcile();
+        assertEquals("STOPPED", task.getLastStatus());
+        verify(manager, times(1)).cleanupStoppedTask(handle);
+
+        // The helper still holds the task's host ports and link-local address, so its removal is retried
+        // until Docker lets it go, and not after.
+        service.reconcile();
+        service.reconcile();
+        verify(manager, times(1)).stopTaskAndCollectExitCodes(handle);
+    }
+
     private EcsTask runningTask(boolean explicitEssential) {
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");

@@ -29,7 +29,7 @@ public class IdentityPool {
     private List<String> openIdConnectProviderArns = new ArrayList<>();
     private List<CognitoIdentityProvider> cognitoIdentityProviders = new ArrayList<>();
     private List<String> samlProviderArns = new ArrayList<>();
-    private Map<String, String> identityPoolTags = new LinkedHashMap<>();
+    private volatile Map<String, String> identityPoolTags = new LinkedHashMap<>();
 
     private String arn;
     private String accountId;

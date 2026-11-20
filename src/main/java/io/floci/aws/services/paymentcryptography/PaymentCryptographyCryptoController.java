@@ -56,6 +56,12 @@ public class PaymentCryptographyCryptoController extends PaymentCryptographyData
     }
 
     @POST
+    @Path("/keymaterial/translate")
+    public Response translateKeyMaterial(String body, @Context HttpHeaders headers) {
+        return respond(handler.translateKeyMaterial(parse(body), region(headers)));
+    }
+
+    @POST
     @Path("/mac/generate")
     public Response generateMac(String body, @Context HttpHeaders headers) {
         return respond(handler.generateMac(parse(body), region(headers)));

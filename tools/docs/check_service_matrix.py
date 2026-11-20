@@ -21,6 +21,11 @@ matrix row, unless listed under `facet_pages:` in the registry, so a page can no
 longer exist in the nav with no row (elb-classic.md did, hidden by the `elb` key
 exact-matching the v2 page).
 
+Each row's operation count is checked as well: against the page's generated action
+table, or against the dispatchers `action_count_sources:` names for it. A row neither
+covers fails unless `hand_counted:` lists it with the reason it cannot be derived, so a
+new row cannot quietly fall back to a hand-kept number.
+
 Run from anywhere in the repo:
     python3 tools/docs/check_service_matrix.py            # print warnings only
     python3 tools/docs/check_service_matrix.py --strict   # exit non-zero on warnings
@@ -30,7 +35,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -48,13 +53,10 @@ CATALOG_SOURCE = f"{PACKAGE_DIR}/core/common/ResolvedServiceCatalog.java"
 MATRIX_DOC = "docs/services/index.md"
 REGISTRY = "tools/docs/service_matrix.yaml"
 
-# These grouped rows already have one dispatcher each; removing a registry entry
-# must not silently turn off their count check.
-REQUIRED_ACTION_COUNT_SOURCES = frozenset({
-    "autoscaling", "cloudmap", "codebuild", "codedeploy", "cognito", "config",
-    "ec2", "ecs", "elastic-beanstalk", "elb", "elb-classic", "glue", "iam",
-    "resource-groups-tagging",
-})
+# Keys an action_count_sources mapping entry may carry, beside the plain-path form,
+# and the keys of one of its sources.
+ACTION_COUNT_SOURCE_KEYS = frozenset({"sources", "rename_actions", "exclude_actions"})
+SOURCE_KEYS = frozenset({"path", "mode", "route_prefix", "skip_route_prefix"})
 
 MATRIX_HEADING = "## Service Matrix"
 MATRIX_END_HEADING = "## Common Setup"
@@ -70,10 +72,16 @@ DESCRIPTOR_KEY_RE = re.compile(r'\bdescriptor\(\s*"([^"]+)"')
 # definition itself, the one place "descriptor(" appears that isn't a call.
 ALL_DESCRIPTOR_CALLS_RE = re.compile(r"(?<!ServiceDescriptor )\bdescriptor\(")
 
-# A matrix row's first cell is a markdown link to its doc page: `[Label](slug.md...)`.
-# The slug is everything up to `.md`; a trailing `#anchor` (e.g. `cloudwatch.md#metrics`)
-# is not part of the filename and is dropped by stopping the match at `.md` itself.
-MATRIX_LINK_RE = re.compile(r"\]\(([a-z0-9][a-z0-9\-]*)\.md")
+# A matrix row's first cell links its doc page: `[Label](slug.md)`, possibly formatted
+# (`**[Label](slug.md)**`). The key is the slug plus any `#anchor`
+# (`cloudwatch.md#metrics` -> `cloudwatch#metrics`); the slug alone is the doc filename.
+MATRIX_CELL_LINK_RE = re.compile(r"\]\(([a-z0-9][a-z0-9\-]*)\.md(#[^)]*)?\)")
+MATRIX_HEADER_CELL = "Service"
+MATRIX_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
+
+# The operation count closing a row: a number, optionally followed by one
+# parenthetical note.
+MATRIX_COUNT_RE = re.compile(r"\|\s*(\d+)(?:\s*\([^)]*\))?\s*\|$")
 
 SERVICES_DIR = "docs/services"
 
@@ -99,13 +107,11 @@ def count_descriptor_calls(java_source: str) -> int:
     return len(ALL_DESCRIPTOR_CALLS_RE.findall(java_source))
 
 
-def extract_matrix_slugs(md_source: str) -> set[str]:
-    """Doc filenames (no extension, no anchor) linked from the Service Matrix table.
+def _matrix_table(md_source: str) -> str:
+    """The Service Matrix table, between MATRIX_HEADING and MATRIX_END_HEADING.
 
-    Scoped to the table between MATRIX_HEADING and MATRIX_END_HEADING so an unrelated
-    markdown link elsewhere on the page (prose, footer) can never be mistaken for a
-    documented row. Raises ValueError if either heading is missing, rather than letting
-    a renamed heading silently empty the table (and every service look undocumented).
+    Raises ValueError if either heading is missing, rather than letting a renamed
+    heading silently empty the table (and every service look undocumented).
     """
     try:
         start = md_source.index(MATRIX_HEADING)
@@ -115,47 +121,61 @@ def extract_matrix_slugs(md_source: str) -> set[str]:
             f"{MATRIX_DOC}: could not find '{MATRIX_HEADING}' ... '{MATRIX_END_HEADING}' "
             "(has a heading been renamed or reordered?)"
         ) from None
-    table = md_source[start:end]
-    return set(MATRIX_LINK_RE.findall(table))
+    return md_source[start:end]
+
+
+def _matrix_rows(md_source: str) -> list[tuple[str, str]]:
+    """(key, line) of each Service Matrix row, the key being its first cell's link target.
+
+    Presence, counts and coverage all read the rows from here, so a row cannot count as
+    documented while escaping the count checks. A row whose first cell links no page
+    is refused rather than skipped.
+    """
+    rows: list[tuple[str, str]] = []
+    for line in _matrix_table(md_source).splitlines():
+        line = line.strip()
+        if not line.startswith("|") or MATRIX_SEPARATOR_RE.match(line):
+            continue
+        first_cell = line.split("|")[1].strip()
+        link = MATRIX_CELL_LINK_RE.search(first_cell)
+        if link:
+            rows.append((link.group(1) + (link.group(2) or ""), line))
+        elif first_cell != MATRIX_HEADER_CELL:
+            raise ValueError(f"{MATRIX_DOC}: the Service Matrix row '{first_cell}' links no docs/services page "
+                             "from its first cell")
+    return rows
+
+
+def extract_matrix_slugs(md_source: str) -> set[str]:
+    """Doc filenames (no extension, no anchor) linked from the Service Matrix rows.
+
+    Scoped to the table so an unrelated markdown link elsewhere on the page (prose,
+    footer) can never be mistaken for a documented row.
+    """
+    return {key.split("#")[0] for key, _line in _matrix_rows(md_source)}
+
+
+def extract_matrix_row_keys(md_source: str) -> list[str]:
+    """Every Service Matrix row's link target, `slug` or `slug#anchor`, in table order,
+    whether or not its count is numeric."""
+    return [key for key, _line in _matrix_rows(md_source)]
+
 
 def extract_matrix_action_counts(md_source: str) -> dict[str, int]:
-    """Extract documented operation counts for base service-doc rows.
+    """Extract documented operation counts, keyed by the row's link target.
 
-    Supports both plain numeric counts and composite counts such as
-    ``61 (+ 3 tagging ...)``.
-    Rows linking to a document anchor are ignored because the linked
-    document may contain multiple distinct action sections.
+    Supports plain numeric counts and a count followed by a parenthetical note,
+    such as ``71 (+ 3 tagging ...)`` or ``79 (of 161 recognized ...)``, whose
+    leading number is the one checked. A row linking to a document anchor is
+    keyed ``slug#anchor`` (``dynamodb#streams``), so a page documenting two
+    services gives each row its own count.
     """
-    try:
-        start = md_source.index(MATRIX_HEADING)
-        end = md_source.index(MATRIX_END_HEADING, start)
-    except ValueError:
-        raise ValueError(
-            f"{MATRIX_DOC}: could not find '{MATRIX_HEADING}' ... "
-            f"'{MATRIX_END_HEADING}' (has a heading been renamed or reordered?)"
-        ) from None
-
     counts: dict[str, int] = {}
-
-    for line in md_source[start:end].splitlines():
-        match = re.match(
-            r"^\|\s*\[[^\]]+\]\(([a-z0-9][a-z0-9\-]*)\.md"
-            r"(#[^)]*)?\)\s*\|.*\|\s*(\d+)"
-            r"(?:\s*\(\+\s*(\d+)[^)]*\))?\s*\|$",
-            line,
-        )
-        if not match:
-            continue
-
-        slug, anchor, base_count, extra_count = match.groups()
-
-        if anchor:
-            continue
-
-        counts.setdefault(slug, int(base_count))
-
+    for key, line in _matrix_rows(md_source):
+        count = MATRIX_COUNT_RE.search(line)
+        if count:
+            counts.setdefault(key, int(count.group(1)))
     return counts
-
 
 
 def count_generated_actions(md_source: str) -> int | None:
@@ -194,13 +214,81 @@ def count_generated_actions(md_source: str) -> int | None:
     return count
 
 
-def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = frozenset()) -> dict[str, int]:
+def _action_count_entry(repo_root: Path, key: str, spec: object) -> regen_action_docs.ServiceEntry:
+    """The regen_action_docs entry an action_count_sources value describes.
+
+    A value is either one source path, read as a switch dispatcher, or a mapping with
+    `sources:` (paths, or `{path, mode}` for another regen_action_docs mode), an
+    optional `rename_actions:` mapping for a controller method not named after its
+    AWS action, and an optional `exclude_actions:` list for labels or methods that are
+    not actions of the row.
+    """
+    if isinstance(spec, str):
+        spec = {"sources": [spec]}
+    if not isinstance(spec, dict):
+        raise ValueError(f"{REGISTRY}: action count source '{key}' needs a source path")
+    unknown = spec.keys() - ACTION_COUNT_SOURCE_KEYS
+    if unknown:
+        raise ValueError(f"{REGISTRY}: action count source '{key}' has unknown key(s): {', '.join(sorted(unknown))}")
+    raw_sources = spec.get("sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ValueError(f"{REGISTRY}: action count source '{key}' needs a non-empty sources list")
+    sources = []
+    for raw in raw_sources:
+        if isinstance(raw, str):
+            raw = {"path": raw, "mode": "switch"}
+        if not isinstance(raw, dict) or not isinstance(raw.get("path"), str) or not isinstance(raw.get("mode"), str):
+            raise ValueError(f"{REGISTRY}: action count source '{key}' has a source without a path and mode: {raw!r}")
+        unknown = raw.keys() - SOURCE_KEYS
+        if unknown:
+            raise ValueError(f"{REGISTRY}: action count source '{key}' has a source with unknown key(s): "
+                             f"{', '.join(sorted(unknown))}")
+        sources.append(regen_action_docs.Source(
+            path=repo_root / package_source(raw["path"]),
+            mode=raw["mode"],
+            route_prefix=raw.get("route_prefix"),
+            skip_route_prefix=raw.get("skip_route_prefix"),
+        ))
+    renamed = spec.get("rename_actions") or {}
+    if not isinstance(renamed, dict):
+        raise ValueError(f"{REGISTRY}: action count source '{key}' needs rename_actions as a mapping")
+    excluded = spec.get("exclude_actions") or []
+    if not isinstance(excluded, list):
+        raise ValueError(f"{REGISTRY}: action count source '{key}' needs exclude_actions as a list")
+    return regen_action_docs.ServiceEntry(
+        service=key,
+        doc=repo_root / MATRIX_DOC,
+        sources=sources,
+        rename_actions=dict(renamed),
+        exclude_actions=frozenset(excluded),
+    )
+
+
+def count_source_actions(repo_root: Path, key: str, spec: object) -> int:
+    """Distinct actions the sources of one action_count_sources entry dispatch.
+
+    Every source has to contribute at least one action, so a path that moved or a
+    wrong mode fails here instead of quietly lowering the count.
+    """
+    entry = _action_count_entry(repo_root, key, spec)
+    try:
+        for source in entry.sources:
+            if not regen_action_docs.extract_actions(replace(entry, sources=[source])):
+                raise ValueError(
+                    f"has no actions in {source.path.relative_to(repo_root)} ({source.mode})"
+                )
+        return len(regen_action_docs.extract_actions(entry))
+    except ValueError as exc:
+        raise ValueError(f"{REGISTRY}: action count source '{key}' {exc}") from None
+
+
+def extract_action_counts(repo_root: Path) -> dict[str, int]:
     """Extract mechanically verifiable action counts.
     Generated service documents are counted from their generated action-table
-    markers. Explicitly mapped non-tabular Query/JSON dispatchers are counted
-    from source with the same action parser as regen_action_docs.py. Mixed and
-    anchored rows remain outside this check until their operations can be
-    attributed to a single matrix row.
+    markers. Rows mapped in action_count_sources are counted from their
+    dispatchers with the same action parser as regen_action_docs.py, so a
+    grouped or multi-table page keeps its layout. A mapped key is a matrix row's
+    link target, `slug` or `slug#anchor`.
     """
     md_source = (repo_root / MATRIX_DOC).read_text(encoding="utf-8")
     matrix_counts = extract_matrix_action_counts(md_source)
@@ -228,24 +316,53 @@ def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = fr
     sources = registry.get("action_count_sources")
     if not isinstance(sources, dict) or not sources:
         raise ValueError(f"{REGISTRY}: action_count_sources must be a non-empty mapping")
-    missing = required_sources - sources.keys()
-    if missing:
-        raise ValueError(f"{REGISTRY}: required action count source(s) missing: {', '.join(sorted(missing))}")
-    for slug, relative_path in sources.items():
-        if slug not in matrix_counts:
-            raise ValueError(f"{REGISTRY}: action count source '{slug}' has no numeric matrix row")
-        if slug in counts:
-            raise ValueError(f"{REGISTRY}: '{slug}' already has a generated action table")
-        if not isinstance(relative_path, str):
-            raise ValueError(f"{REGISTRY}: action count source '{slug}' needs a source path")
-        actions = regen_action_docs.extract_switch_actions(
-            (repo_root / package_source(relative_path)).read_text(encoding="utf-8")
-        )
-        if not actions:
-            raise ValueError(f"{REGISTRY}: action count source '{slug}' has no actions")
-        counts[slug] = len(set(actions))
+    for key, spec in sources.items():
+        if key not in matrix_counts:
+            raise ValueError(f"{REGISTRY}: action count source '{key}' has no numeric matrix row")
+        if key in counts:
+            raise ValueError(f"{REGISTRY}: '{key}' already has a generated action table")
+        counts[key] = count_source_actions(repo_root, key, spec)
 
     return counts
+
+
+def load_hand_counted(repo_root: Path) -> dict[str, str]:
+    """Rows `hand_counted:` exempts from the count check, each with the reason why."""
+    raw = yaml.safe_load((repo_root / REGISTRY).read_text(encoding="utf-8")) or {}
+    hand_counted = raw.get("hand_counted") or {}
+    if not isinstance(hand_counted, dict):
+        raise ValueError(f"{REGISTRY}: hand_counted must map a row to the reason it is counted by hand")
+    for key, reason in hand_counted.items():
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"{REGISTRY}: hand_counted row '{key}' needs the reason it is counted by hand")
+    return hand_counted
+
+
+def find_unchecked_rows(row_keys: list[str], matrix_counts: dict[str, int],
+                        checked: set[str], hand_counted: dict[str, str]) -> list[str]:
+    """Warnings for rows whose count nothing checks, and for stale hand_counted entries."""
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for key in row_keys:
+        if key in seen:
+            warnings.append(
+                f"two rows in {MATRIX_DOC} link to '{key}'; give one an anchor so each row has its own count"
+            )
+            continue
+        seen.add(key)
+        if key not in matrix_counts:
+            warnings.append(f"row '{key}' in {MATRIX_DOC} has no numeric operation count")
+        elif key in checked and key in hand_counted:
+            warnings.append(f"row '{key}' is checked, so drop it from hand_counted in {REGISTRY}")
+        elif key not in checked and key not in hand_counted:
+            warnings.append(
+                f"nothing checks the count of row '{key}' in {MATRIX_DOC}; map its dispatchers under "
+                f"action_count_sources in {REGISTRY}, or list it under hand_counted with the reason"
+            )
+    for key in sorted(hand_counted.keys() - seen):
+        warnings.append(f"hand_counted row '{key}' in {REGISTRY} is not a row of {MATRIX_DOC}")
+    return warnings
+
 
 def find_unlinked_pages(services_dir: Path, slugs: set[str], facet_pages: set[str]) -> list[str]:
     """docs/services pages (by slug) that no matrix row links and no facet entry excuses.
@@ -365,8 +482,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        matrix_row_keys = extract_matrix_row_keys(md_source)
         matrix_action_counts = extract_matrix_action_counts(md_source)
-        source_action_counts = extract_action_counts(repo_root, REQUIRED_ACTION_COUNT_SOURCES)
+        source_action_counts = extract_action_counts(repo_root)
+        hand_counted = load_hand_counted(repo_root)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -383,10 +502,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if documented_count != source_count:
             warnings.append(
-                f"service '{slug}' documents {documented_count} supported operations "
+                f"row '{slug}' documents {documented_count} supported operations "
                 f"in {MATRIX_DOC}, but the action source contains {source_count}; "
                 "update the matrix count"
             )
+    warnings.extend(find_unchecked_rows(
+        matrix_row_keys, matrix_action_counts, set(source_action_counts), hand_counted))
     for d in expired_deferred:
         warnings.append(
             f"deferred entry '{d.key}' expired on {d.by.isoformat()} ({d.reason}); "

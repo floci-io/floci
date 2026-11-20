@@ -52,6 +52,22 @@ class RequestResourcesTest {
     };
 
     @Test
+    void detachFindsBothAttachmentEndpointsAndKeepsTypedMissingFallbacks() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.findByMembers("instance", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "instance/i-one"));
+        when(stored.findByMembers("network-interface", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "network-interface/eni-one"));
+        assertEquals(List.of(prefix + "instance/i-one", prefix + "network-interface/eni-one"),
+                of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one"), stored));
+        List<String> missing = List.of(prefix + "instance/*", prefix + "network-interface/*");
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-missing"), stored));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one")));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", json("{\"AttachmentId\":\"eni-attach-missing\"}"), stored));
+    }
+
+    @Test
     void ec2ListsUseSdkWireNamesAndIgnoreForgedQuerySpellings() {
         String prefix = "arn:aws:ec2:us-east-1:000000000000:";
         List<String> expected = List.of(prefix + "network-interface/*", prefix + "security-group/sg-one",
@@ -61,6 +77,39 @@ class RequestResourcesTest {
                 + "&Groups.member.1=sg-forged&Groups.2=sg-forged&Groups=sg-forged")));
         assertEquals(expected, of("ec2:CreateNetworkInterface", json("""
                 {"SubnetId":"subnet-one","Groups":["sg-one","sg-two"]}
+                """)));
+    }
+
+    @Test
+    void vpcEndpointModificationChecksAddedAndRemovedResources() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "route-table/rtb-add", prefix + "security-group/sg-add",
+                prefix + "subnet/subnet-add", prefix + "vpc-endpoint/vpce-one",
+                prefix + "route-table/rtb-remove", prefix + "security-group/sg-remove",
+                prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", form("VpcEndpointId=vpce-one"
+                + "&AddRouteTableId.1=rtb-add&RemoveRouteTableId.1=rtb-remove"
+                + "&AddSecurityGroupId.1=sg-add&RemoveSecurityGroupId.1=sg-remove"
+                + "&AddSubnetId.1=subnet-add&RemoveSubnetId.1=subnet-remove")));
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", json("""
+                {"VpcEndpointId":"vpce-one","AddRouteTableIds":["rtb-add"],
+                 "RemoveRouteTableIds":["rtb-remove"],"AddSecurityGroupIds":["sg-add"],
+                 "RemoveSecurityGroupIds":["sg-remove"],"AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
+                """)));
+    }
+
+    @Test
+    void transitGatewayModificationChecksRemovedSubnetsWithItsDistinctWireSpelling() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "subnet/subnet-add",
+                prefix + "transit-gateway-attachment/tgw-attach-one", prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", form(
+                "TransitGatewayAttachmentId=tgw-attach-one&AddSubnetIds.1=subnet-add"
+                        + "&RemoveSubnetIds.1=subnet-remove&RemoveSubnetId.1=subnet-forged")));
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", json("""
+                {"TransitGatewayAttachmentId":"tgw-attach-one","AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
                 """)));
     }
 
@@ -160,6 +209,35 @@ class RequestResourcesTest {
         when(request.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags"));
         when(request.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
         assertEquals(List.of(arn), of("signer:TagResource", request));
+    }
+
+    @Test
+    void endpointTagTargetsRetainTheCallerPartitionAndEachResource() throws Exception {
+        for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
+            List<String> expected = List.of(
+                    "arn:aws-us-gov:ec2:us-gov-west-1:111111111111:network-interface/eni-11111111",
+                    "*");
+            assertEquals(expected, RequestResources.ofBody(operation,
+                    new ObjectMapper().readTree("{\"Resources\":[\"eni-11111111\",\"vpce-22222222\"]}"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(expected, RequestResources.of(operation,
+                    form("ResourceId.1=eni-11111111&ResourceId.2=vpce-22222222"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(List.of("*", "*"), of(operation,
+                    form("ResourceId.1=vpce-svc-22222222&ResourceId.2=eni-attach-11111111")));
+        }
+    }
+
+    @Test
+    void endpointDeletionReadsDistinctEndpointsUsingItsActualQueryListName() throws Exception {
+        List<String> expected = List.of(
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-11111111",
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-22222222");
+        assertEquals(expected, of("ec2:DeleteVpcEndpoints", form("VpcEndpointId.1=vpce-11111111"
+                + "&VpcEndpointId.2=vpce-22222222&VpcEndpointId.3=vpce-11111111&ResourceId.1=vpce-33333333")));
+        assertEquals(expected, RequestResources.ofBody("ec2:DeleteVpcEndpoints", new ObjectMapper().readTree(
+                "{\"VpcEndpointIds\":[\"vpce-11111111\",\"vpce-22222222\",\"vpce-11111111\"]}"),
+                "aws", "us-east-1", "000000000000", null));
     }
 
     @Test
@@ -1226,6 +1304,49 @@ class RequestResourcesTest {
                 namespace -> null));
         assertEquals(List.of(), RequestResources.forwarded("redshift-serverless:GetSnapshot", List.of(own), caller,
                 serverless, namespace -> kms));
+    }
+
+    /**
+     * A DDL statement Athena runs against the Glue Data Catalog makes, as the caller, the Glue requests the table gives
+     * it from the permissions Athena's user guide gives each statement: each action on the catalog, the database and
+     * the table the statement names, in the request's partition, Region and account, partition actions only for a
+     * partitioned table, and none for a statement the guide gives no permissions.
+     */
+    @Test
+    void aStatementMakesTheRequestsTheVendoredPermissionsGiveItOnWhatItNames() {
+        String operation = "athena:StartQueryExecution";
+        String glue = "arn:aws-cn:glue:cn-north-1:111122223333:";
+        Map<String, String> names = Map.of("database", "sales", "table", "orders");
+        List<RequestResources.StatementRequest> drop = RequestResources.statementRequests(operation, "DROP TABLE",
+                names, false, "aws-cn", "cn-north-1", "111122223333");
+        assertEquals(List.of(
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "table/sales/orders"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "table/sales/orders")), drop);
+        List<String> partitioned = RequestResources.statementRequests(operation, "DROP TABLE", names, true, "aws-cn",
+                "cn-north-1", "111122223333").stream().map(RequestResources.StatementRequest::action).distinct().toList();
+        assertEquals(List.of("glue:GetDatabase", "glue:GetTable", "glue:DeleteTable", "glue:GetPartitions",
+                "glue:GetPartition", "glue:DeletePartition"), partitioned);
+
+        // A wildcard of the guide's policy stays open; the database a statement creates is named by its name.
+        assertTrue(RequestResources.statementRequests(operation, "SHOW TABLES", names, false, "aws", "us-east-1",
+                "000000000000").contains(new RequestResources.StatementRequest("glue:GetTables",
+                "arn:aws:glue:us-east-1:000000000000:table/sales/*")));
+        assertEquals(List.of("arn:aws:glue:us-east-1:000000000000:catalog",
+                        "arn:aws:glue:us-east-1:000000000000:database/sales"),
+                RequestResources.statementRequests(operation, "CREATE DATABASE", Map.of("database", "sales"), false,
+                        "aws", "us-east-1", "000000000000").stream()
+                        .filter(request -> request.action().equals("glue:CreateDatabase"))
+                        .map(RequestResources.StatementRequest::resource).toList());
+        assertEquals(List.of(), RequestResources.statementRequests(operation, "VACUUM", names, false, "aws",
+                "us-east-1", "000000000000"));
+        assertEquals(List.of(), RequestResources.statementRequests("athena:GetWorkGroup", "DROP TABLE", names, false,
+                "aws", "us-east-1", "000000000000"));
     }
 
     /**

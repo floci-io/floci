@@ -25,8 +25,13 @@ WIDGET = {
     "typeName": "AWS::Test::Widget",
     "properties": {"Name": {"type": "string"}},
     "createOnlyProperties": ["/properties/Name", "/properties/Network/Subnet/Id", "/properties/Zone"],
+    "conditionalCreateOnlyProperties": ["/properties/Network/Name"],
 }
-GADGET = {"typeName": "AWS::Test::Gadget", "properties": {"Label": {"type": "string"}}}
+GADGET = {
+    "typeName": "AWS::Test::Gadget",
+    "properties": {"Label": {"type": "string"}},
+    "conditionalCreateOnlyProperties": ["/properties/Label"],
+}
 
 
 def _setup(tmp_path, monkeypatch, types, schemas, schemaless):
@@ -42,6 +47,7 @@ def _setup(tmp_path, monkeypatch, types, schemas, schemaless):
 
 
 def test_paths_lose_the_properties_prefix_nested_paths_stay_and_no_list_means_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "CONDITIONAL_REPLACEMENT_TYPES", {"AWS::Test::Widget"})
     source, output = _setup(tmp_path, monkeypatch,
                             ["AWS::Test::Gadget", "AWS::Test::Widget", "Custom::Reasoned"],
                             {"AWS::Test::Widget": WIDGET, "AWS::Test::Gadget": GADGET},
@@ -52,6 +58,10 @@ def test_paths_lose_the_properties_prefix_nested_paths_stay_and_no_list_means_em
     assert json.loads(output.read_text(encoding="utf-8")) == {
         "AWS::Test::Gadget": [],
         "AWS::Test::Widget": ["Name", "Network/Subnet/Id", "Zone"],
+    }
+    conditional = output.with_name("conditional-create-only-properties.json")
+    assert json.loads(conditional.read_text(encoding="utf-8")) == {
+        "AWS::Test::Widget": ["Network/Name"],
     }
 
 
@@ -78,5 +88,17 @@ def test_verify_fails_on_a_hand_edited_entry(tmp_path, monkeypatch):
     edited = json.loads(output.read_text(encoding="utf-8"))
     edited["AWS::Test::Widget"].append("Extra")
     output.write_text(json.dumps(edited, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert r.main(["--verify", "--source-dir", str(source), "--output", str(output)]) == 1
+
+
+def test_verify_fails_on_a_hand_edited_conditional_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "CONDITIONAL_REPLACEMENT_TYPES", {"AWS::Test::Widget"})
+    source, output = _setup(tmp_path, monkeypatch, ["AWS::Test::Widget"], {"AWS::Test::Widget": WIDGET}, {})
+    assert r.main(["--source-dir", str(source), "--output", str(output)]) == 0
+
+    conditional = output.with_name("conditional-create-only-properties.json")
+    assert r.main(["--verify", "--source-dir", str(source), "--output", str(output)]) == 0
+    conditional.write_text(json.dumps({"AWS::Test::Widget": []}, indent=2) + "\n", encoding="utf-8")
 
     assert r.main(["--verify", "--source-dir", str(source), "--output", str(output)]) == 1

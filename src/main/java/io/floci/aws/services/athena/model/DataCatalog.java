@@ -30,7 +30,7 @@ public class DataCatalog {
     private Map<String, String> parameters = new LinkedHashMap<>();
 
     @JsonProperty("Tags")
-    private List<WorkGroupTag> tags = new ArrayList<>();
+    private volatile List<WorkGroupTag> tags = new ArrayList<>();
 
     public DataCatalog() {}
 

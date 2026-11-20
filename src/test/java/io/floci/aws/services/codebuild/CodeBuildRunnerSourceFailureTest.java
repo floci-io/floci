@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -95,8 +96,8 @@ class CodeBuildRunnerSourceFailureTest {
         subnet.setSubnetId("subnet-1");
         subnet.setVpcId("vpc-1");
         when(ec2.describeSubnets("us-east-1", List.of("subnet-1"), Map.of())).thenReturn(List.of(subnet));
-        when(ec2.allocateVpcPrivateIp("us-east-1", "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
-        when(ec2.attachContainerToVpc("us-east-1", "vpc-1", "subnet-1", "container", "10.0.1.20"))
+        when(ec2.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
+        when(ec2.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-1", "container", "10.0.1.20"))
                 .thenReturn(Optional.of("10.0.1.20"));
         Fixture fixture = fixture(false, ec2);
         // StartBuild copied the project's vpcConfig onto the build; the project has since been updated.
@@ -115,7 +116,7 @@ class CodeBuildRunnerSourceFailureTest {
 
         assertTrue(heldDuringCopy.get(), "the build's address holds its subnet and VPC while it runs");
         // The address is given back right after the container is removed, on the build's thread.
-        verify(ec2, timeout(5_000)).releaseVpcPrivateIp("us-east-1", "subnet-1", "10.0.1.20");
+        verify(ec2, timeout(5_000)).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.20");
         assertFalse(fixture.runner().hasSubnetDependency("us-east-1", "subnet-1"));
     }
 
@@ -150,10 +151,12 @@ class CodeBuildRunnerSourceFailureTest {
         when(specBuilder.build()).thenReturn(new ContainerSpec("alpine:latest"));
 
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycle.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("container", Map.of()));
         CountDownLatch finished = new CountDownLatch(1);
         doAnswer(invocation -> { finished.countDown(); return null; })
-                .when(lifecycle).stopAndRemove(eq("container"), nullable(Closeable.class));
+                .when(lifecycle).stopAndRemoveStrict(eq("container"), nullable(Closeable.class), eq(5), eq(false));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.attach(eq("container"), anyString(), anyString(), anyString(), anyString()))
@@ -171,8 +174,12 @@ class CodeBuildRunnerSourceFailureTest {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.port()).thenReturn(4566);
 
-        CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, ec2));
+        CodeBuildRoleCredentials roleCredentials = mock(CodeBuildRoleCredentials.class);
+        when(roleCredentials.provision(anyString(), anyString(), nullable(String.class), anyString(), any()))
+                .thenReturn(new CodeBuildRoleCredentials.BuildCredentials(Map.of(), null));
+        CodeBuildRunner runner = spy(new CodeBuildRunner(docker, docker, containerBuilder, lifecycle, logStreamer,
+                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, ec2,
+                roleCredentials));
         doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
                 .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
 

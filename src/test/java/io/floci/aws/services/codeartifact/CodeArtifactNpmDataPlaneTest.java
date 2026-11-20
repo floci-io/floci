@@ -1324,7 +1324,8 @@ class CodeArtifactNpmDataPlaneTest {
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
         VerdaccioSidecarManager leases = new VerdaccioSidecarManager(mock(ContainerBuilder.class),
-                mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class));
+                mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class),
+                new CodeArtifactContainerRuns(mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class)).containers());
         leases.registerRepository(NPM_REPOSITORY_ID);
         VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
         doAnswer(call -> {

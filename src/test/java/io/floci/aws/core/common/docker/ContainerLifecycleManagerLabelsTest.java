@@ -101,6 +101,22 @@ class ContainerLifecycleManagerLabelsTest {
                 capturedLabels(createCmd));
     }
 
+    // Catches: a container created without being recorded, so every stream that follows it is
+    // reported as unattributed in the Docker pool line.
+    @Test
+    void createRecordsTheServiceTheContainerIsLabelledWith() {
+        stubCreateContainer();
+
+        try {
+            manager().create(specWithLabels(
+                    ContainerStorageHelper.resourceIdentityLabels("rds", "db-1", "000000000000", "us-east-1")));
+
+            assertEquals("rds", DockerContainerServices.serviceOf("container-id"));
+        } finally {
+            DockerContainerServices.forget("container-id");
+        }
+    }
+
     @Test
     void createWritesTheLegacyAliasOfEachNewKeyWithTheSameValue() {
         CreateContainerCmd createCmd = stubCreateContainer();
@@ -289,7 +305,7 @@ class ContainerLifecycleManagerLabelsTest {
 
     private ContainerLifecycleManager manager() {
         return new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config);
+                dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec specWithLabels(Map<String, String> labels) {

@@ -1,0 +1,197 @@
+AWS::ApiGateway::Account	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::ApiKey	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::BasePathMapping	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ApiGateway::Deployment	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::DomainName	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ApiGateway::GatewayResponse	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::Method	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::Resource	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::RestApi	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::UsagePlan	update not yet on the engine's changes (#6606)
+AWS::ApiGateway::UsagePlanKey	update not yet on the engine's changes (#6606)
+AWS::ApiGatewayV2::Api	update not yet on the engine's changes (#6606)
+AWS::ApiGatewayV2::ApiMapping	update not yet on the engine's changes (#6606)
+AWS::ApiGatewayV2::Authorizer	reads only droppedProperties; not yet on ctx.changes
+AWS::ApiGatewayV2::Deployment	update not yet on the engine's changes (#6606)
+AWS::ApiGatewayV2::DomainName	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ApiGatewayV2::Integration	update not yet on the engine's changes (#6606)
+AWS::ApiGatewayV2::Route	reads only droppedProperties; not yet on ctx.changes
+AWS::ApiGatewayV2::Stage	reads only droppedProperties; not yet on ctx.changes
+AWS::ApiGatewayV2::VpcLink	update not yet on the engine's changes (#6606)
+AWS::AppConfig::Application	update not yet on the engine's changes (#6606)
+AWS::AppConfig::DeploymentStrategy	update not yet on the engine's changes (#6606)
+AWS::AppConfig::Environment	update not yet on the engine's changes (#6606)
+AWS::AppSync::ApiKey	reads only droppedProperties; not yet on ctx.changes
+AWS::AppSync::DataSource	reads only droppedProperties; not yet on ctx.changes
+AWS::AppSync::FunctionConfiguration	reads only droppedProperties; not yet on ctx.changes
+AWS::AppSync::GraphQLApi	reads only droppedProperties; not yet on ctx.changes
+AWS::AppSync::GraphQLSchema	wholesale request builder: the whole property node goes to the service
+AWS::AppSync::Resolver	reads only droppedProperties; not yet on ctx.changes
+AWS::ApplicationAutoScaling::ScalableTarget	update not yet on the engine's changes (#6606)
+AWS::ApplicationAutoScaling::ScalingPolicy	update not yet on the engine's changes (#6606)
+AWS::AutoScaling::AutoScalingGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::AutoScaling::LifecycleHook	update not yet on the engine's changes (#6606)
+AWS::AutoScaling::ScalingPolicy	update not yet on the engine's changes (#6606)
+AWS::Backup::BackupVault	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Batch::ComputeEnvironment	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Batch::JobDefinition	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Batch::JobQueue	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::BedrockAgentCore::Memory	update not yet on the engine's changes (#6606)
+AWS::BedrockAgentCore::Runtime	update not yet on the engine's changes (#6606)
+AWS::BedrockAgentCore::RuntimeEndpoint	update not yet on the engine's changes (#6606)
+AWS::CDK::Metadata	update not yet on the engine's changes (#6606)
+AWS::CertificateManager::Certificate	update not yet on the engine's changes (#6606)
+AWS::CloudFormation::CustomResource	update not yet on the engine's changes (#6606)
+AWS::CloudFormation::StackSet	update not yet on the engine's changes (#6606)
+AWS::CloudFront::CachePolicy	update not yet on the engine's changes (#6606)
+AWS::CloudFront::Distribution	update not yet on the engine's changes (#6606)
+AWS::CloudFront::Function	update not yet on the engine's changes (#6606)
+AWS::CloudFront::KeyGroup	update not yet on the engine's changes (#6606)
+AWS::CloudFront::OriginAccessControl	update not yet on the engine's changes (#6606)
+AWS::CloudFront::OriginRequestPolicy	update not yet on the engine's changes (#6606)
+AWS::CloudFront::PublicKey	update not yet on the engine's changes (#6606)
+AWS::CloudFront::ResponseHeadersPolicy	update not yet on the engine's changes (#6606)
+AWS::CloudTrail::Trail	reads only droppedProperties; not yet on ctx.changes
+AWS::CloudWatch::Alarm	update not yet on the engine's changes (#6606)
+AWS::CloudWatch::CompositeAlarm	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::CloudWatch::Dashboard	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::CodeBuild::Project	wholesale request builder: the whole property node goes to the service
+AWS::CodePipeline::CustomActionType	wholesale request builder: the whole property node goes to the service
+AWS::CodePipeline::Pipeline	wholesale request builder: the whole property node goes to the service
+AWS::CodePipeline::Webhook	wholesale request builder: the whole property node goes to the service
+AWS::Cognito::UserPool	wholesale request builder: the whole property node goes to the service
+AWS::Cognito::UserPoolClient	update not yet on the engine's changes (#6606)
+AWS::Cognito::UserPoolDomain	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Cognito::UserPoolGroup	reads only droppedProperties; not yet on ctx.changes
+AWS::Cognito::UserPoolIdentityProvider	update not yet on the engine's changes (#6606)
+AWS::Cognito::UserPoolResourceServer	update not yet on the engine's changes (#6606)
+AWS::Cognito::UserPoolUser	update not yet on the engine's changes (#6606)
+AWS::Cognito::UserPoolUserToGroupAttachment	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Config::ConfigRule	update not yet on the engine's changes (#6606)
+AWS::DSQL::Cluster	update not yet on the engine's changes (#6606)
+AWS::DynamoDB::GlobalTable	update not yet on the engine's changes (#6606)
+AWS::EC2::EIP	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::FlowLog	update not yet on the engine's changes (#6606)
+AWS::EC2::Instance	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::InternetGateway	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::KeyPair	update not yet on the engine's changes (#6606)
+AWS::EC2::LaunchTemplate	update not yet on the engine's changes (#6606)
+AWS::EC2::NatGateway	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::NetworkAcl	update not yet on the engine's changes (#6606)
+AWS::EC2::NetworkAclEntry	update not yet on the engine's changes (#6606)
+AWS::EC2::PrefixList	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::Route	update not yet on the engine's changes (#6606)
+AWS::EC2::RouteTable	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::SecurityGroup	update not yet on the engine's changes (#6606)
+AWS::EC2::SecurityGroupEgress	update not yet on the engine's changes (#6606)
+AWS::EC2::SecurityGroupIngress	update not yet on the engine's changes (#6606)
+AWS::EC2::Subnet	reads only droppedProperties; not yet on ctx.changes
+AWS::EC2::SubnetNetworkAclAssociation	update not yet on the engine's changes (#6606)
+AWS::EC2::SubnetRouteTableAssociation	update not yet on the engine's changes (#6606)
+AWS::EC2::VPC	update not yet on the engine's changes (#6606)
+AWS::EC2::VPCEndpoint	update not yet on the engine's changes (#6606)
+AWS::EC2::VPCGatewayAttachment	update not yet on the engine's changes (#6606)
+AWS::ECS::CapacityProvider	update not yet on the engine's changes (#6606)
+AWS::ECS::Cluster	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ECS::ClusterCapacityProviderAssociations	update not yet on the engine's changes (#6606)
+AWS::ECS::Service	reads only droppedProperties; not yet on ctx.changes
+AWS::ECS::TaskDefinition	update not yet on the engine's changes (#6606)
+AWS::EFS::AccessPoint	update not yet on the engine's changes (#6606)
+AWS::EFS::FileSystem	update not yet on the engine's changes (#6606)
+AWS::EFS::MountTarget	update not yet on the engine's changes (#6606)
+AWS::ElastiCache::ServerlessCache	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ElastiCache::SubnetGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ElastiCache::User	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ElastiCache::UserGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ElasticLoadBalancingV2::Listener	update not yet on the engine's changes (#6606)
+AWS::ElasticLoadBalancingV2::ListenerCertificate	update not yet on the engine's changes (#6606)
+AWS::ElasticLoadBalancingV2::ListenerRule	update not yet on the engine's changes (#6606)
+AWS::ElasticLoadBalancingV2::LoadBalancer	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::ElasticLoadBalancingV2::TargetGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Events::ApiDestination	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Events::Archive	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Events::EventBus	update not yet on the engine's changes (#6606)
+AWS::Events::EventBusPolicy	update not yet on the engine's changes (#6606)
+AWS::Events::Rule	update not yet on the engine's changes (#6606)
+AWS::EventsV2::EventBus	wholesale request builder: the whole property node goes to the service
+AWS::EventsV2::Subscriber	wholesale request builder: the whole property node goes to the service
+AWS::GuardDuty::MalwareProtectionPlan	update not yet on the engine's changes (#6606)
+AWS::IAM::AccessKey	update not yet on the engine's changes (#6606)
+AWS::IAM::InstanceProfile	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::IAM::ManagedPolicy	update not yet on the engine's changes (#6606)
+AWS::IAM::Policy	update not yet on the engine's changes (#6606)
+AWS::IAM::Role	update not yet on the engine's changes (#6606)
+AWS::IAM::User	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::IoT::Authorizer	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::IoT::DomainConfiguration	wholesale request builder: the whole property node goes to the service
+AWS::IoT::Policy	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::IoT::Thing	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::IoT::TopicRule	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::KMS::Alias	update not yet on the engine's changes (#6606)
+AWS::Kinesis::Stream	update not yet on the engine's changes (#6606)
+AWS::KinesisFirehose::DeliveryStream	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Lambda::Alias	reads only droppedProperties; not yet on ctx.changes
+AWS::Lambda::CodeSigningConfig	update not yet on the engine's changes (#6606)
+AWS::Lambda::EventInvokeConfig	update not yet on the engine's changes (#6606)
+AWS::Lambda::EventSourceMapping	update not yet on the engine's changes (#6606)
+AWS::Lambda::Function	update not yet on the engine's changes (#6606)
+AWS::Lambda::LayerVersion	update not yet on the engine's changes (#6606)
+AWS::Lambda::MicrovmImage	update not yet on the engine's changes (#6606)
+AWS::Lambda::NetworkConnector	update not yet on the engine's changes (#6606)
+AWS::Lambda::Permission	update not yet on the engine's changes (#6606)
+AWS::Lambda::Url	update not yet on the engine's changes (#6606)
+AWS::Lambda::Version	update not yet on the engine's changes (#6606)
+AWS::Lambda::WebFunction	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Lambda::WebFunctionEndpoint	wholesale request builder: the whole property node goes to the service
+AWS::Lambda::WebFunctionRevision	wholesale request builder: the whole property node goes to the service
+AWS::Logs::LogStream	update not yet on the engine's changes (#6606)
+AWS::Logs::MetricFilter	update not yet on the engine's changes (#6606)
+AWS::Organizations::Account	update not yet on the engine's changes (#6606)
+AWS::Organizations::Organization	update not yet on the engine's changes (#6606)
+AWS::Organizations::OrganizationalUnit	update not yet on the engine's changes (#6606)
+AWS::Organizations::Policy	update not yet on the engine's changes (#6606)
+AWS::Organizations::ResourcePolicy	update not yet on the engine's changes (#6606)
+AWS::Pipes::Pipe	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::RDS::DBCluster	update not yet on the engine's changes (#6606)
+AWS::RDS::DBClusterParameterGroup	update not yet on the engine's changes (#6606)
+AWS::RDS::DBInstance	update not yet on the engine's changes (#6606)
+AWS::RDS::DBParameterGroup	update not yet on the engine's changes (#6606)
+AWS::RDS::DBProxy	update not yet on the engine's changes (#6606)
+AWS::RDS::DBProxyTargetGroup	update not yet on the engine's changes (#6606)
+AWS::RDS::DBSubnetGroup	update not yet on the engine's changes (#6606)
+AWS::Redshift::Cluster	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Redshift::ClusterParameterGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Redshift::ClusterSecurityGroup	update not yet on the engine's changes (#6606)
+AWS::Redshift::ClusterSubnetGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Redshift::EventSubscription	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::RedshiftServerless::Namespace	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::RedshiftServerless::Workgroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Route53::HealthCheck	update not yet on the engine's changes (#6606)
+AWS::Route53::RecordSet	update not yet on the engine's changes (#6606)
+AWS::Route53::RecordSetGroup	update not yet on the engine's changes (#6606)
+AWS::S3::BucketPolicy	update not yet on the engine's changes (#6606)
+AWS::S3Vectors::Index	update not yet on the engine's changes (#6606)
+AWS::S3Vectors::VectorBucket	update not yet on the engine's changes (#6606)
+AWS::SES::ConfigurationSetEventDestination	update not yet on the engine's changes (#6606)
+AWS::SES::EmailIdentity	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::SES::ReceiptRule	update not yet on the engine's changes (#6606)
+AWS::SNS::TopicPolicy	update not yet on the engine's changes (#6606)
+AWS::SQS::QueuePolicy	update not yet on the engine's changes (#6606)
+AWS::SSM::Parameter	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Scheduler::Schedule	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Scheduler::ScheduleGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::SecretsManager::Secret	reads only droppedProperties; not yet on ctx.changes
+AWS::SecretsManager::SecretTargetAttachment	update not yet on the engine's changes (#6606)
+AWS::ServiceDiscovery::HttpNamespace	update not yet on the engine's changes (#6606)
+AWS::ServiceDiscovery::PrivateDnsNamespace	update not yet on the engine's changes (#6606)
+AWS::ServiceDiscovery::PublicDnsNamespace	update not yet on the engine's changes (#6606)
+AWS::ServiceDiscovery::Service	update not yet on the engine's changes (#6606)
+AWS::Signer::SigningProfile	update not yet on the engine's changes (#6606)
+AWS::StepFunctions::StateMachine	update not yet on the engine's changes (#6606)
+AWS::Transfer::Server	update not yet on the engine's changes (#6606)
+AWS::Transfer::User	update not yet on the engine's changes (#6606)
+AWS::WAFv2::IPSet	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::WAFv2::LoggingConfiguration	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::WAFv2::WebACL	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::WAFv2::WebACLAssociation	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+Custom::DynamoDBReplica	update not yet on the engine's changes (#6606)

@@ -1,9 +1,9 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.PerServicePersistentStorageProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -24,21 +24,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * An {@code AWS::ECS::TaskDefinition} container's {@code LinuxParameters} reach the task
  * definition as RegisterTaskDefinition keeps them: DescribeTaskDefinition shows them in the API's
  * shape, and the Fargate rules RegisterTaskDefinition applies to them apply to a template too.
+ *
+ * <p>Floci refuses a host path outside {@code floci.services.ecs.host-volume-roots} by default; the
+ * template's device, {@code /dev/fuse}, is let through by {@link PerServicePersistentStorageProfile}.
  */
 @QuarkusTest
-@TestProfile(CloudFormationEcsLinuxParametersIntegrationTest.DeviceProfile.class)
+@TestProfile(PerServicePersistentStorageProfile.class)
 class CloudFormationEcsLinuxParametersIntegrationTest {
-
-    /**
-     * Floci refuses a host path outside {@code floci.services.ecs.host-volume-roots} by default; the
-     * template's device, {@code /dev/fuse}, is let through.
-     */
-    public static final class DeviceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.host-volume-roots", "/dev/fuse");
-        }
-    }
 
     private static final String ECS_CT = "application/x-amz-json-1.1";
     private static final String ECS_TARGET = "AmazonEC2ContainerServiceV20141113.";

@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -16,6 +17,8 @@ public class MetricDatum {
     private long timestamp;
     private double value;
     private double sampleCount;
+    @JsonIgnore
+    private boolean sampleCountSet;
     private double sum;
     private double minimum;
     private double maximum;
@@ -54,7 +57,13 @@ public class MetricDatum {
     public void setValue(double value) { this.value = value; }
 
     public double getSampleCount() { return sampleCount; }
-    public void setSampleCount(double sampleCount) { this.sampleCount = sampleCount; }
+    public void setSampleCount(double sampleCount) {
+        this.sampleCount = sampleCount;
+        this.sampleCountSet = true;
+    }
+
+    @JsonIgnore
+    public boolean hasSampleCount() { return sampleCountSet; }
 
     public double getSum() { return sum; }
     public void setSum(double sum) { this.sum = sum; }

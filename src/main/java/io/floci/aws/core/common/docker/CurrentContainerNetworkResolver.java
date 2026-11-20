@@ -195,7 +195,7 @@ public class CurrentContainerNetworkResolver {
                     || ContainerStorageHelper.NETWORK_LABEL_ALIASES.legacyValue(labels,
                             ContainerStorageHelper.OWNER_LABEL) != null);
         } catch (Exception e) {
-            LOG.warnv(e, "Could not inspect Docker network {0}, so it is not taken for Floci's own: {1}", networkName,
+            LOG.warnv(e, "Could not inspect Docker network {0}, so it is not taken for Floci''s own: {1}", networkName,
                     e.getMessage());
             return true;
         }

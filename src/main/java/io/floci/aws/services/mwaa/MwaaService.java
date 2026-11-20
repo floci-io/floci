@@ -893,7 +893,7 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
     }
 
     private String environmentRegion(Environment environment) {
-        return MwaaEnvironmentManager.environmentRegion(environment, regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(environment.getArn());
     }
 
 }

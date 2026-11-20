@@ -8,6 +8,7 @@ import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
@@ -106,7 +107,7 @@ class ElastiCacheServerlessServiceTest {
         kms = mock(KmsService.class);
         when(kms.describeKey(anyString(), anyString())).thenThrow(new AwsException("NotFoundException", "Missing key", 400));
         runtime = new ElastiCacheService(containers, proxies, mock(ValkeyClusterFormation.class), factory,
-                config, ec2, resolver, kms, new ElastiCacheProvisioningIds());
+                config, ec2, resolver, kms, mock(CloudWatchLogsService.class), new ElastiCacheProvisioningIds());
         memcached = new ElastiCacheMemcachedService(mock(ElastiCacheMemcachedContainerManager.class), factory,
                 config, new ElastiCacheProvisioningIds(), resolver);
         service = new ElastiCacheServerlessService(factory, resolver, runtime, memcached);
@@ -390,7 +391,7 @@ class ElastiCacheServerlessServiceTest {
 
     private ElastiCacheService newRuntime(StorageFactory activeFactory) {
         return new ElastiCacheService(containers, proxies, mock(ValkeyClusterFormation.class), activeFactory,
-                config, ec2, resolver, kms, new ElastiCacheProvisioningIds());
+                config, ec2, resolver, kms, mock(CloudWatchLogsService.class), new ElastiCacheProvisioningIds());
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.floci.aws.services.iot;
 
+import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -16,10 +17,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(LazyMqttTestProfile.class)
+@TestProfile(ServicesOffSettingsProfile.class)
 class IotMqttLazyStartupIntegrationTest {
 
-    private static final int PORT = LazyMqttTestProfile.PORT;
+    private static final int PORT = ServicesOffSettingsProfile.MQTT_PORT;
 
     @Inject
     IotMqttBrokerService mqttBrokerService;

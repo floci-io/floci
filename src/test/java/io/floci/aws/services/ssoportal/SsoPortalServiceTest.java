@@ -59,7 +59,7 @@ class SsoPortalServiceTest {
                 Instant.now().plusSeconds(3600).getEpochSecond(), Instant.now().plusSeconds(7200).getEpochSecond(), principalId));
         when(ssoAdminService.portalAssignmentsForUser(principalId)).thenReturn(List.of(
                 new Assignment(accountId, permissionSetArn, principalId, "USER")));
-        when(organizationsService.findAccountForPortal(accountId)).thenReturn(Optional.empty());
+        when(organizationsService.findAccount(accountId)).thenReturn(Optional.empty());
         when(ssoAdminService.permissionSetForPortal(permissionSetArn)).thenReturn(new PermissionSet(
                 permissionSetArn, "PlatformAdmins", null, "PT1H", Map.of(), Map.of(), null, null, Map.of(), null));
 

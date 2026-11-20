@@ -1,13 +1,11 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -16,9 +14,10 @@ import static org.hamcrest.Matchers.containsString;
  * The guard is only as good as the catalog's scope list, so it has an off switch: if Floci
  * serves a route whose signing scope is not enumerated, rejecting it is a 404 with no
  * workaround. Disabling restores the pre-#1754 fall-through rather than failing the request.
+ * {@link RdsMockProfile} turns the guard off.
  */
 @QuarkusTest
-@TestProfile(UnknownServiceScopeGuardDisabledIntegrationTest.GuardDisabledProfile.class)
+@TestProfile(RdsMockProfile.class)
 class UnknownServiceScopeGuardDisabledIntegrationTest {
 
     @BeforeAll
@@ -65,12 +64,5 @@ class UnknownServiceScopeGuardDisabledIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>InvalidArgument</Code>"));
-    }
-
-    public static final class GuardDisabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.protocols.reject-unknown-service-scope", "false");
-        }
     }
 }

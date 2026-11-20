@@ -422,7 +422,8 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .post("/v2/email/configuration-sets/" + cs + "/event-destinations")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid Event Bridge destination, must be default bus."));
 
         // The rejected destination must not have been stored.
         given()
@@ -478,7 +479,8 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .put("/v2/email/configuration-sets/" + cs + "/event-destinations/ed-eb-default")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid Event Bridge destination, must be default bus."));
 
         // The stored destination must still point at the default event bus.
         given()

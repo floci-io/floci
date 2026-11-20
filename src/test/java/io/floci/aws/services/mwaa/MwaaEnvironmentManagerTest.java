@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
@@ -106,7 +107,7 @@ class MwaaEnvironmentManagerTest {
             return null;
         }).when(ec2Service).runWithSubnetReferencesHeld(any(), any());
         manager = new MwaaEnvironmentManager(containerBuilder, lifecycleManager, containerDetector, config,
-                awsEnv, ec2Service);
+                new RegionResolver("us-east-1", "000000000000"), awsEnv, ec2Service);
     }
 
     /** Docker answers an inspect of the container: present, or gone once it has been removed. */
@@ -154,13 +155,13 @@ class MwaaEnvironmentManagerTest {
     void anEnvironmentInAVpcJoinsItsNetworkBeforeAirflowStartsAndGivesTheAddressBackOnDelete() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.20"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.20"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         Environment environment = environmentInSubnets("subnet-a", "subnet-b");
 
         manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
         assertTrue(manager.holdsVpc("000000000000", "us-east-1", "vpc-1"));
         assertFalse(manager.holdsSubnet("111111111111", "us-east-1", "subnet-a"));
@@ -170,25 +171,25 @@ class MwaaEnvironmentManagerTest {
 
         InOrder order = Mockito.inOrder(lifecycleManager, ec2Service);
         order.verify(lifecycleManager).create(any());
-        order.verify(ec2Service).attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id",
+        order.verify(ec2Service).attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id",
                 "172.31.0.20");
         order.verify(lifecycleManager).startCreated(eq("airflow-container-id"), any());
         order.verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.20");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.20");
     }
 
     @Test
     void anAddressTheVpcNetworkRefusesIsGivenBackAndAirflowStillStarts() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.21"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.21"))
                 .thenReturn(Optional.empty());
 
         manager.startAirflowContainer(environmentInSubnets("subnet-a"), "2.10.5", "172.18.0.9", "db-secret-pw",
                 null, null);
 
-        verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.21");
+        verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.21");
         verify(lifecycleManager).startCreated(eq("airflow-container-id"), any());
     }
 
@@ -196,8 +197,8 @@ class MwaaEnvironmentManagerTest {
     void aFailedStartGivesTheVpcAddressBackAfterRemovingTheContainer() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.22"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.22"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         when(lifecycleManager.startCreated(eq("airflow-container-id"), any()))
                 .thenThrow(new RuntimeException("start failed"));
@@ -208,15 +209,15 @@ class MwaaEnvironmentManagerTest {
 
         InOrder order = Mockito.inOrder(lifecycleManager, ec2Service);
         order.verify(lifecycleManager).removeIfExists("airflow-container-id");
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.22");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.22");
     }
 
     @Test
     void aContainerDockerFailedToRemoveKeepsItsVpcAddress() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.24"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.24"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         Environment environment = environmentInSubnets("subnet-a");
         manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
@@ -224,7 +225,7 @@ class MwaaEnvironmentManagerTest {
 
         manager.stopEnvironment(environment);
 
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
     }
 
@@ -238,7 +239,7 @@ class MwaaEnvironmentManagerTest {
         InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
         InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
         NetworkSettings settings = Mockito.mock(NetworkSettings.class);
-        when(dockerClient.inspectContainerCmd(MwaaEnvironmentManager.airflowContainerName(config, environment)))
+        when(dockerClient.inspectContainerCmd(manager.airflowContainerName(environment)))
                 .thenReturn(inspect);
         when(inspect.exec()).thenReturn(response);
         when(response.getId()).thenReturn("kept-container-id");
@@ -246,12 +247,12 @@ class MwaaEnvironmentManagerTest {
         when(settings.getNetworks()).thenReturn(Map.of(
                 "floci-mwaa", new ContainerNetwork().withIpv4Address("172.18.0.5"),
                 "floci-vpc-1", new ContainerNetwork().withIpv4Address("172.31.0.30")));
-        when(ec2Service.reserveVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.30")).thenReturn(true);
+        when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.30")).thenReturn(true);
 
         manager.reclaimVpcAddress(environment);
 
-        verify(ec2Service).reserveVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.30");
-        verify(ec2Service, never()).reserveVpcPrivateIp("us-east-1", "subnet-a", "172.18.0.5");
+        verify(ec2Service).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.30");
+        verify(ec2Service, never()).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.18.0.5");
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
     }
 
@@ -266,8 +267,8 @@ class MwaaEnvironmentManagerTest {
         withoutNetwork.setName("no-vpc-env");
         manager.startAirflowContainer(withoutNetwork, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
 
-        verify(ec2Service, never()).allocateVpcPrivateIp(any(), any());
-        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any());
+        verify(ec2Service, never()).allocateVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any(), any());
     }
 
     @SuppressWarnings("unchecked")
@@ -608,11 +609,13 @@ class MwaaEnvironmentManagerTest {
         environment.setName("my-env");
         environment.setAccountId("000000000000");
         environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/my-env");
+        MwaaEnvironmentManager namespaced = namingManager(namespacedConfig,
+                new RegionResolver("us-east-1", "000000000000"));
 
         assertEquals("floci-aws-ns1-mwaa-000000000000.us-east-1.my-env-db",
-                MwaaEnvironmentManager.dbContainerName(namespacedConfig, environment));
+                namespaced.dbContainerName(environment));
         assertEquals("floci-aws-ns1-mwaa-000000000000.us-east-1.my-env-airflow",
-                MwaaEnvironmentManager.airflowContainerName(namespacedConfig, environment));
+                namespaced.airflowContainerName(environment));
     }
 
     @Test
@@ -621,17 +624,21 @@ class MwaaEnvironmentManagerTest {
         when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
         EmulatorConfig chinaConfig = Mockito.mock(EmulatorConfig.class);
         when(chinaConfig.docker()).thenReturn(dockerConfig);
-        when(chinaConfig.defaultRegion()).thenReturn("cn-north-1");
+        MwaaEnvironmentManager china = namingManager(chinaConfig, new RegionResolver("cn-north-1", "000000000000"));
 
         Environment environment = new Environment();
         environment.setName("my-env");
         environment.setAccountId("000000000000");
 
-        assertEquals("floci-aws-mwaa-000000000000.cn-north-1.my-env-db",
-                MwaaEnvironmentManager.dbContainerName(chinaConfig, environment));
-        assertEquals("cn-north-1", MwaaEnvironmentManager.environmentRegion(environment, "cn-north-1"));
+        assertEquals("floci-aws-mwaa-000000000000.cn-north-1.my-env-db", china.dbContainerName(environment));
         environment.setArn("arn:aws:airflow:eu-west-1:000000000000:environment/my-env");
-        assertEquals("eu-west-1", MwaaEnvironmentManager.environmentRegion(environment, "cn-north-1"));
+        assertEquals("floci-aws-mwaa-000000000000.eu-west-1.my-env-db", china.dbContainerName(environment));
+    }
+
+    /** A manager over {@code namingConfig} and {@code regionResolver}, for naming its containers. */
+    private MwaaEnvironmentManager namingManager(EmulatorConfig namingConfig, RegionResolver regionResolver) {
+        return new MwaaEnvironmentManager(null, lifecycleManager, containerDetector, namingConfig, regionResolver,
+                null, ec2Service);
     }
 
     @Test
@@ -646,10 +653,8 @@ class MwaaEnvironmentManagerTest {
         westEnvironment.setAccountId("222222222222");
         westEnvironment.setArn("arn:aws:airflow:eu-west-1:222222222222:environment/shared-name");
 
-        assertNotEquals(MwaaEnvironmentManager.dbContainerName(null, eastEnvironment),
-                MwaaEnvironmentManager.dbContainerName(null, westEnvironment));
-        assertNotEquals(MwaaEnvironmentManager.airflowContainerName(null, eastEnvironment),
-                MwaaEnvironmentManager.airflowContainerName(null, westEnvironment));
+        assertNotEquals(manager.dbContainerName(eastEnvironment), manager.dbContainerName(westEnvironment));
+        assertNotEquals(manager.airflowContainerName(eastEnvironment), manager.airflowContainerName(westEnvironment));
     }
 
     @Test

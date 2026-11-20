@@ -2,7 +2,6 @@ package io.floci.aws.services.apigatewayv2;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpsServer;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.services.apigateway.AwsServiceRouter;
 import io.floci.aws.services.apigateway.VtlTemplateEngine;
@@ -14,6 +13,7 @@ import io.floci.aws.services.apigatewayv2.proxy.RequestContext;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketIntegrationInvoker;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketIntegrationInvoker.IntegrationResult;
 import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,9 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.floci.aws.testing.LocalHttpsServer.hookUrl;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * HTTP and HTTP_PROXY integrations reach an https:// backend through Floci's outbound trust, so a certificate from
@@ -128,13 +126,14 @@ class ApiGatewayHttpsBackendTrustTest {
         integration.setIntegrationMethod("GET");
         RequestContext ctx = new RequestContext("api1", "$default", "GET", "/hook", null, "GET /hook",
                 "req-test", "127.0.0.1", Map.of(), Map.of(), Map.of(), null, Map.of(), Map.of());
-        return new HttpProxyInvoker(config(extraCaPath)).invoke(integration, ctx, options);
+        return new HttpProxyInvoker(ExtraCaConfigs.config(false, extraCaPath)).invoke(integration, ctx, options);
     }
 
     // Calls the backend as a WebSocket integration of integrationType, through an invoker built the way CDI builds it.
     private IntegrationResult webSocket(String integrationType, Optional<String> extraCaPath) {
         WebSocketIntegrationInvoker invoker = new WebSocketIntegrationInvoker(mock(LambdaService.class),
-                mock(AwsServiceRouter.class), new ObjectMapper(), mock(VtlTemplateEngine.class), config(extraCaPath));
+                mock(AwsServiceRouter.class), new ObjectMapper(), mock(VtlTemplateEngine.class),
+                ExtraCaConfigs.config(false, extraCaPath));
         return invoker.invoke("us-east-1", integration(integrationType), "{}", Map.of(), Map.of(), Map.of());
     }
 
@@ -143,14 +142,6 @@ class ApiGatewayHttpsBackendTrustTest {
         integration.setIntegrationType(integrationType);
         integration.setIntegrationUri(hookUrl(backend));
         return integration;
-    }
-
-    // TLS off, with extraCaPath as the extra CA setting.
-    private static EmulatorConfig config(Optional<String> extraCaPath) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.tls().enabled()).thenReturn(false);
-        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
-        return config;
     }
 
     private Optional<String> privateCaPath() {

@@ -35,10 +35,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -55,6 +57,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -89,8 +92,12 @@ class PipesPollerTest {
     }
 
     private PipesPoller pollerOver(DynamoDbStreamReader streamReader) {
+        return pollerOver(streamReader, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private PipesPoller pollerOver(DynamoDbStreamReader streamReader, RegionResolver regionResolver) {
         return new PipesPoller(vertx, sqsService, kinesisService, streamReader,
-                kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config);
+                kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config, regionResolver);
     }
 
     /**
@@ -134,12 +141,21 @@ class PipesPollerTest {
     }
 
     @Test
-    void aSourceWithoutAnArnRegionPollsInTheDeploymentDefaultRegion() {
-        when(config.defaultRegion()).thenReturn("cn-north-1");
-        PipesPoller chinaPoller = pollerOver(streams);
+    void aSourceWithoutAnArnRegionPollsInTheDeploymentDefaultRegion() throws Exception {
+        PipesPoller chinaPoller = pollerOver(streams, new RegionResolver("cn-north-1", "000000000000"));
+        Pipe pipe = selfManagedKafkaPipe();
+        pipe.setDesiredState(DesiredState.RUNNING);
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(kafkaRecord("orders", 0, 42L,
+                "customer-123".getBytes(StandardCharsets.UTF_8),
+                "{\"status\":\"active\"}".getBytes(StandardCharsets.UTF_8))));
+        chinaPoller.startPolling(pipe);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Handler<Long>> tick = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(eq(1000L), tick.capture());
 
-        assertEquals("cn-north-1", chinaPoller.extractRegionFromArn("smk://broker.internal:9092"));
-        assertEquals("eu-west-1", chinaPoller.extractRegionFromArn("arn:aws:sqs:eu-west-1:000000000000:orders"));
+        tick.getValue().handle(1L);
+
+        verify(targetInvoker, timeout(5000)).invoke(eq(pipe), anyString(), eq("cn-north-1"));
     }
 
     @Test
@@ -181,6 +197,85 @@ class PipesPollerTest {
                 .thenReturn(List.of());
         poller.pollSqs(pipe, "us-east-1");
         verify(sqsService).receiveMessage(anyString(), eq(10), anyInt(), anyInt(), eq("us-east-1"));
+    }
+
+    @Test
+    void sqsDeliveryIncludesFifoSystemAttributes() throws Exception {
+        Message message = new Message("fifo-body");
+        message.setSequenceNumber(27);
+        message.setMessageGroupId("orders");
+        message.setMessageDeduplicationId("order-42");
+
+        JsonNode record = deliveredSqsRecord(message);
+
+        assertEquals("27", record.at("/attributes/SequenceNumber").asText());
+        assertEquals("orders", record.at("/attributes/MessageGroupId").asText());
+        assertEquals("order-42", record.at("/attributes/MessageDeduplicationId").asText());
+        assertEquals("fifo-body", record.path("body").asText());
+        assertEquals("aws:sqs", record.path("eventSource").asText());
+        assertEquals("us-east-1", record.path("awsRegion").asText());
+    }
+
+    @Test
+    void sqsDeliveryOmitsAbsentFifoSystemAttributes() throws Exception {
+        JsonNode record = deliveredSqsRecord(new Message("standard-body"));
+
+        assertFalse(record.path("attributes").has("SequenceNumber"));
+        assertFalse(record.path("attributes").has("MessageGroupId"));
+        assertFalse(record.path("attributes").has("MessageDeduplicationId"));
+    }
+
+    @Test
+    void missingSqsReceiveTimestampUsesThePollerClockWithoutMutatingTheMessage() throws Exception {
+        AtomicLong clock = new AtomicLong(1000);
+        poller.setClockForTest(clock::get);
+        Message message = new Message("body");
+        message.setFirstReceiveTimestamp(null);
+        Pipe pipe = sqsDeliveryPipe(message);
+
+        poller.pollSqs(pipe, "us-east-1");
+        clock.addAndGet(10);
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, times(2)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        assertEquals("1000", MAPPER.readTree(payload.getAllValues().get(0))
+                .at("/Records/0/attributes/ApproximateFirstReceiveTimestamp").asText());
+        assertEquals("1010", MAPPER.readTree(payload.getAllValues().get(1))
+                .at("/Records/0/attributes/ApproximateFirstReceiveTimestamp").asText());
+        assertNull(message.getFirstReceiveTimestamp());
+    }
+
+    @Test
+    void storedSqsReceiveTimestampDoesNotReadTheFallbackClock() throws Exception {
+        poller.setClockForTest(() -> {
+            throw new AssertionError("A stored timestamp must not read the fallback clock");
+        });
+        Message message = new Message("body");
+        message.setFirstReceiveTimestamp(Instant.ofEpochMilli(7));
+
+        JsonNode record = deliveredSqsRecord(message);
+
+        assertEquals("7", record.at("/attributes/ApproximateFirstReceiveTimestamp").asText());
+        assertEquals(Instant.ofEpochMilli(7), message.getFirstReceiveTimestamp());
+    }
+
+    private Pipe sqsDeliveryPipe(Message message) {
+        Pipe pipe = new Pipe();
+        pipe.setName("sqs-record");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:orders.fifo");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:target");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(message));
+        return pipe;
+    }
+
+    private JsonNode deliveredSqsRecord(Message message) throws Exception {
+        Pipe pipe = sqsDeliveryPipe(message);
+        poller.pollSqs(pipe, "us-east-1");
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        return MAPPER.readTree(payload.getValue()).path("Records").get(0);
     }
 
     @Test

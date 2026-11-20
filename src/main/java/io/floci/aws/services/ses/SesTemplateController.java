@@ -66,7 +66,7 @@ public class SesTemplateController {
         try {
             JsonNode request = readOptionBody(objectMapper, body);
             String templateName = request.path("TemplateName").asText(null);
-            if (templateName == null || templateName.isBlank()) {
+            if (templateName == null || templateName.isEmpty()) {
                 throw new AwsException("BadRequestException", "TemplateName is required.", 400);
             }
             EmailTemplate template = parseTemplateContent(templateName, request.path("TemplateContent"));
@@ -74,7 +74,7 @@ public class SesTemplateController {
             if (parsedTags != null) {
                 template.setTags(parsedTags);
             }
-            templateService.createTemplate(template, region);
+            templateService.createTemplate(template, region, regionResolver.getAccountId());
             LOG.infov("SES V2 CreateEmailTemplate: {0}", templateName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -165,7 +165,7 @@ public class SesTemplateController {
             }
             String templateDataRaw = templateDataNode.asText("");
             String rendered = templateService.renderTestTemplate(templateName, templateDataRaw,
-                    region);
+                    region, regionResolver.getAccountId());
             ObjectNode result = objectMapper.createObjectNode();
             result.put("RenderedTemplate", rendered);
             return Response.ok(result).build();

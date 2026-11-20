@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -152,6 +154,46 @@ class CostAnomalyServiceTest {
         assertEquals(0, service.getSubscriptions(mapper.createObjectNode()).path("AnomalySubscriptions").size());
     }
 
+    /**
+     * IAM's lookup reads the tags of the monitor or subscription the ARN names, as the tag calls leave them, and
+     * nothing for another account's, an unknown or another service's ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheMonitorOrSubscriptionTheArnNames() {
+        String monitorArn = service.createMonitor(customMonitor("tagged")).path("MonitorArn").asText();
+        String subscriptionArn = service.createSubscription(subscriptionRequest(monitorArn))
+                .path("SubscriptionArn").asText();
+        service.tagResource(tagRequest(monitorArn, "team", "data"));
+        service.tagResource(tagRequest(monitorArn, "env", "dev"));
+        ObjectNode untag = mapper.createObjectNode().put("ResourceArn", monitorArn);
+        untag.putArray("ResourceTagKeys").add("env");
+        service.untagResource(untag);
+        service.tagResource(tagRequest(subscriptionArn, "team", "web"));
+
+        assertEquals("ce", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(monitorArn));
+        assertEquals(Map.of("team", "web"), service.storedTags(subscriptionArn));
+        assertTrue(service.storedTags(monitorArn.replace(ACCOUNT, "222222222222")).isEmpty());
+        assertTrue(service.storedTags(monitorArn.substring(0, monitorArn.lastIndexOf('/') + 1) + "missing").isEmpty());
+        assertTrue(service.storedTags("arn:aws:budgets::" + ACCOUNT + ":budget/tagged").isEmpty());
+    }
+
+    /** A monitor stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareMonitorInPlace() {
+        InMemoryStorage<String, ObjectNode> raw = new InMemoryStorage<>();
+        CostAnomalyService legacyState = new CostAnomalyService(new AccountAwareStorageBackend<>(raw, null, ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT), mapper, new RegionResolver("us-east-1", ACCOUNT));
+        String arn = "arn:aws:ce::" + ACCOUNT + ":anomalymonitor/legacy";
+        ObjectNode record = mapper.createObjectNode();
+        record.putObject("definition").put("MonitorArn", arn);
+        record.putObject("tags").put("team", "data");
+        raw.put(arn, record);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(arn));
+        assertEquals(Set.of(arn), raw.keys());
+    }
+
     @Test
     void tagQuotaFailurePreservesExistingTagsAndKeepsThemOutOfDefinitions() {
         ObjectNode request = customMonitor("tags");
@@ -228,6 +270,12 @@ class CostAnomalyServiceTest {
         return new CostAnomalyService(new AccountAwareStorageBackend<>(monitors, null, ACCOUNT),
                 new AccountAwareStorageBackend<>(subscriptions, null, ACCOUNT), mapper,
                 new RegionResolver("us-east-1", ACCOUNT));
+    }
+
+    private ObjectNode tagRequest(String arn, String key, String value) {
+        ObjectNode request = mapper.createObjectNode().put("ResourceArn", arn);
+        request.putArray("ResourceTags").addObject().put("Key", key).put("Value", value);
+        return request;
     }
 
     private ObjectNode customMonitor(String name) {

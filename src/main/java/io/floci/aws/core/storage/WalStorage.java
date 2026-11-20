@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.jboss.logging.Logger;
 
 import java.io.BufferedInputStream;
@@ -90,14 +89,9 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         this.walPath = walPath;
         this.typeReference = typeReference;
 
-        this.snapshotMapper = new ObjectMapper();
-        this.snapshotMapper.registerModule(new JavaTimeModule());
-        this.snapshotMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.snapshotMapper.enable(SerializationFeature.INDENT_OUTPUT);
+        this.snapshotMapper = StorageJson.mapper().enable(SerializationFeature.INDENT_OUTPUT);
 
-        this.walMapper = new ObjectMapper(new CBORFactory());
-        this.walMapper.registerModule(new JavaTimeModule());
-        this.walMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        this.walMapper = StorageJson.mapper(new CBORFactory());
 
         this.scheduler = StorageFiles.scheduleEvery("wal-storage-compaction", compactionIntervalMs, this::compact);
     }

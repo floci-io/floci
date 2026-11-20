@@ -22,6 +22,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -110,7 +111,7 @@ import java.util.regex.Pattern;
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
 
 @ApplicationScoped
-public class CognitoService implements ResourceProvider {
+public class CognitoService implements ResourceProvider, StoredResourceArns {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
     private static final Duration MIN_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofMinutes(5);
     private static final Duration MAX_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofDays(1);
@@ -269,7 +270,7 @@ public class CognitoService implements ResourceProvider {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
+                new CognitoMessageDispatcher(sesService, snsService, regionResolver),
                 certificateManager,
                 clock,
                 emulatorConfig.services().cognito().enforceTokenValidityLimits(),
@@ -1134,6 +1135,41 @@ public class CognitoService implements ResourceProvider {
     public Map<String, String> listTagsForResource(String resourceArn) {
         UserPool pool = describeUserPoolByArn(resourceArn);
         return new HashMap<>(pool.getUserPoolTags() != null ? pool.getUserPoolTags() : Map.of());
+    }
+
+    @Override
+    public String namespace() {
+        return "cognito-idp";
+    }
+
+    /** A request names a user pool by the id Cognito minted, which its ARN ends in, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the user pool whose ARN is {@code arn}, in the request's account, where the handlers read: an ARN of
+     * another account names none. Read in place under the pool's id, a pool stored before storage was account-aware
+     * included, and matched on the whole ARN, or on the id for a pool stored before pools recorded their ARN, as
+     * {@link #describeUserPoolByArn} matches it. Tag calls store a new map under the pool's lock, so the read is of
+     * one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cognito-idp")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId()) || !parsed.resource().startsWith("userpool/")) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(poolStore, parsed.accountId(),
+                        parsed.resource().substring("userpool/".length()))
+                .filter(pool -> pool.getArn() == null || arn.equals(pool.getArn()))
+                .map(UserPool::getUserPoolTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     private static String extractUserPoolIdFromArn(String resourceArn) {
@@ -4302,7 +4338,7 @@ public class CognitoService implements ResourceProvider {
         }
         if (!domains.isEmpty()) {
             // A prefix domain is <prefix>.auth.<region>.amazoncognito.<partition suffix>.
-            String region = AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(pool.getArn());
             return domains.get(0).getDomain() + ".auth." + region + "."
                     + AwsRegions.dnsSuffixFor(region).replaceFirst("^amazonaws", "amazoncognito");
         }
@@ -6674,7 +6710,7 @@ public class CognitoService implements ResourceProvider {
         String encryptedCode;
         try {
             encryptedCode = customSenderCodeEncryptor.encrypt((String) pool.getLambdaConfig().get("KMSKeyID"),
-                    pool.getId(), code, AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion()));
+                    pool.getId(), code, regionResolver.regionOf(pool.getArn()));
         } catch (AwsException e) {
             // Measured (eu-west-1, 2026-10-16): a disabled key and one pending deletion fail the
             // request, sign-in included, with these CodeDeliveryFailureExceptions.

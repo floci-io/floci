@@ -1,6 +1,9 @@
 package io.floci.aws.services.ec2.portforward;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -12,9 +15,10 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.IpRange;
-import io.floci.aws.services.ec2.model.Ipv6Range;
+import io.floci.aws.services.ec2.model.PublishedPortFamily;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.UserIdGroupPair;
+import io.floci.aws.testing.IpPermissions;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -23,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -67,13 +73,7 @@ class Ec2PortForwardManagerTest {
 
     @Test
     void publishesIpv6SourcedRules() {
-        IpPermission perm = new IpPermission();
-        perm.setIpProtocol("tcp");
-        perm.setFromPort(80);
-        perm.setToPort(80);
-        perm.getIpv6Ranges().add(new Ipv6Range("::/0"));
-
-        assertEquals(Set.of(80), extract(sg(perm)));
+        assertEquals(Set.of(80), extract(sg(IpPermissions.tcp(80, "::/0"))));
     }
 
     @Test
@@ -205,7 +205,7 @@ class Ec2PortForwardManagerTest {
         instance.setDockerContainerId("c1");
         instance.setState(InstanceState.shuttingDown());
 
-        manager.reconcileNow(instance, Set.of(80));
+        manager.reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.anyFamily(Set.of(80)));
 
         assertTrue(instance.getPublishedPorts().isEmpty(),
                 "a reconcile racing a terminate must not republish against the removed container");
@@ -236,7 +236,7 @@ class Ec2PortForwardManagerTest {
         instance.setDockerContainerId("c1");
         instance.setState(InstanceState.running());
 
-        manager.reconcileNow(instance, Set.of(80));
+        manager.reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.anyFamily(Set.of(80)));
 
         verify(portAllocator).allocate(30000, 30999);
     }
@@ -245,6 +245,124 @@ class Ec2PortForwardManagerTest {
     void publishedForwardDisablesNagleAndBindsABurstTolerantAcceptBacklog() {
         DockerClient dockerClient = mock(DockerClient.class);
         when(dockerClient.inspectContainerCmd(anyString())).thenThrow(new RuntimeException("docker down"));
+        Forwarding forwarding = forwarding(dockerClient);
+        Instance instance = running();
+        instance.setContainerBridgeIp("172.17.0.3");
+
+        forwarding.manager().reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.anyFamily(Set.of(80)));
+
+        ContainerSpec spec = forwarding.created().getFirst();
+        assertEquals("alpine/socat", spec.image());
+        assertEquals(List.of("socat"), spec.entrypoint());
+        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:172.17.0.3:80,nodelay"), spec.cmd());
+        assertEquals(Map.of(80, 30000), spec.portBindings());
+    }
+
+    // Catches: enforcement publishing a port only a narrower CIDR, a group reference or SSH opens, judged on a host
+    // client address Docker may have replaced; each port admits the family whose world-open rule opens it.
+    @Test
+    void underEnforcementOnlyPortsOpenToEveryAddressArePublished() {
+        IpPermission groupOnly = new IpPermission();
+        groupOnly.setIpProtocol("tcp");
+        groupOnly.setFromPort(9000);
+        groupOnly.setToPort(9000);
+        UserIdGroupPair pair = new UserIdGroupPair();
+        pair.setGroupId("sg-web");
+        groupOnly.getUserIdGroupPairs().add(pair);
+        SecurityGroup sg = sg(IpPermissions.tcp(80, "0.0.0.0/0"), IpPermissions.tcp(80, "::/0"),
+                IpPermissions.tcp(8000, "0.0.0.0/0"), IpPermissions.tcp(8080, "10.0.0.0/8"),
+                IpPermissions.tcp(443, "::/0"), IpPermissions.tcp(8443, "2600:1f18::/56"),
+                IpPermissions.tcp(22, "0.0.0.0/0"), groupOnly);
+
+        Ec2PortForwardManager.DesiredPorts desired = Ec2PortForwardManager.extractWorldOpenPorts(List.of(sg), MAX);
+
+        assertEquals(Map.of(80, PublishedPortFamily.ANY, 8000, PublishedPortFamily.IPV4,
+                443, PublishedPortFamily.IPV6), desired.ports());
+    }
+
+    // Catches: the publisher still refusing to run while enforcement is on.
+    @Test
+    void thePublisherRunsWithEnforcementOn() {
+        Forwarding forwarding = forwarding(mock(DockerClient.class));
+        when(forwarding.config().services().ec2().publishSecurityGroupPorts()).thenReturn(true);
+        when(forwarding.config().network().securityGroupEnforcement().enabled()).thenReturn(true);
+
+        assertTrue(forwarding.manager().enabled());
+    }
+
+    // Catches: a sidecar dialling the instance container, which under enforcement holds no address of its own, rather
+    // than its namespace's helper on the helper's network; a port only ::/0 opens dialled over IPv4, which that rule
+    // never admits; and a port bound on every host address, which lets a client of the other family through.
+    @Test
+    void underEnforcementTheSidecarBindsAndDialsTheFamilyItsRuleOpens() {
+        Forwarding forwarding = forwarding(protectedNamespace("172.18.0.5", "fd00:d0c::5"));
+        Instance instance = running();
+
+        forwarding.manager().reconcileNow(instance, new Ec2PortForwardManager.DesiredPorts(Map.of(
+                80, PublishedPortFamily.IPV4, 443, PublishedPortFamily.IPV6, 8080, PublishedPortFamily.ANY)));
+
+        Map<Integer, ContainerSpec> specs = forwarding.created().stream()
+                .collect(Collectors.toMap(spec -> spec.portBindings().keySet().iterator().next(), spec -> spec));
+        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay,backlog=4096", "TCP:172.18.0.5:80,nodelay"),
+                specs.get(80).cmd());
+        assertEquals(Map.of(80, "0.0.0.0"), specs.get(80).portBindingHostIps());
+        assertEquals(List.of("TCP6-LISTEN:443,ipv6only=0,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP6:[fd00:d0c::5]:443,nodelay"), specs.get(443).cmd());
+        assertEquals(Map.of(443, "::"), specs.get(443).portBindingHostIps());
+        assertEquals("TCP:172.18.0.5:8080,nodelay", specs.get(8080).cmd().get(1));
+        assertEquals(Map.of(), specs.get(8080).portBindingHostIps());
+        assertEquals(Set.of("floci-net"), specs.values().stream().map(ContainerSpec::networkMode)
+                .collect(Collectors.toSet()));
+        assertEquals(Map.of(80, PublishedPortFamily.IPV4, 443, PublishedPortFamily.IPV6),
+                instance.getPublishedPortFamilies());
+    }
+
+    // Catches: a port whose opening rules moved family keeping a sidecar that binds or dials the old one, which
+    // admits the wrong clients or which the firewall now drops.
+    @Test
+    void aPortWhoseRulesMoveFamilyIsRepublished() {
+        Forwarding forwarding = forwarding(protectedNamespace("172.18.0.5", "fd00:d0c::5"));
+        Instance instance = running();
+        forwarding.manager().reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.anyFamily(Set.of(80)));
+
+        forwarding.manager().reconcileNow(instance,
+                new Ec2PortForwardManager.DesiredPorts(Map.of(80, PublishedPortFamily.IPV6)));
+        forwarding.manager().reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.anyFamily(Set.of(80)));
+
+        assertEquals(List.of("TCP:172.18.0.5:80,nodelay", "TCP6:[fd00:d0c::5]:80,nodelay", "TCP:172.18.0.5:80,nodelay"),
+                forwarding.created().stream().map(spec -> spec.cmd().get(1)).toList());
+        assertEquals(Map.of(80, 30000), instance.getPublishedPorts());
+        assertEquals(Map.of(), instance.getPublishedPortFamilies());
+    }
+
+    // Catches: a port only ::/0 opens published on a Docker network without IPv6, where its rule admits nothing, or
+    // dialled on the stored IPv4 address instead.
+    @Test
+    void aPortOnlyIpv6OpensIsNotPublishedWithoutAnIpv6Address() {
+        Forwarding forwarding = forwarding(protectedNamespace("172.18.0.5", null));
+        Instance instance = running();
+        instance.setContainerBridgeIp("172.18.0.5");
+
+        forwarding.manager().reconcileNow(instance,
+                new Ec2PortForwardManager.DesiredPorts(Map.of(443, PublishedPortFamily.IPV6)));
+
+        assertTrue(forwarding.created().isEmpty());
+        assertTrue(instance.getPublishedPorts().isEmpty());
+        verify(forwarding.portAllocator()).release(30000);
+    }
+
+    /** A manager that builds real sidecar specs, allocating host port 30000 for every forward. */
+    private record Forwarding(Ec2PortForwardManager manager, ContainerLifecycleManager lifecycle,
+                              PortAllocator portAllocator, EmulatorConfig config) {
+        List<ContainerSpec> created() {
+            ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+            verify(lifecycle, atLeast(0)).create(spec.capture());
+            return spec.getAllValues();
+        }
+    }
+
+    private static Forwarding forwarding(DockerClient dockerClient) {
         PortAllocator portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(30000);
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
@@ -261,22 +379,34 @@ class Ec2PortForwardManagerTest {
                 dockerClient,
                 new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
                 lifecycleManager, portAllocator, config);
+        return new Forwarding(manager, lifecycleManager, portAllocator, config);
+    }
 
+    private static Instance running() {
         Instance instance = new Instance();
         instance.setInstanceId("i-1");
         instance.setDockerContainerId("c1");
         instance.setState(InstanceState.running());
-        instance.setContainerBridgeIp("172.17.0.3");
+        return instance;
+    }
 
-        manager.reconcileNow(instance, Set.of(80));
-
-        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(spec.capture());
-        assertEquals("alpine/socat", spec.getValue().image());
-        assertEquals(List.of("socat"), spec.getValue().entrypoint());
-        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay,backlog=4096",
-                "TCP:172.17.0.3:80,nodelay"), spec.getValue().cmd());
-        assertEquals(Map.of(80, 30000), spec.getValue().portBindings());
+    /** Instance container {@code c1} joins {@code helper-1}'s namespace, which holds the addresses on floci-net. */
+    private static DockerClient protectedNamespace(String ipv4, String ipv6) {
+        InspectContainerResponse instance = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+        when(instance.getHostConfig().getNetworkMode()).thenReturn("container:helper-1");
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn(ipv4);
+        when(network.getGlobalIPv6Address()).thenReturn(ipv6);
+        InspectContainerResponse helper = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+        when(helper.getNetworkSettings().getNetworks()).thenReturn(Map.of("floci-net", network));
+        DockerClient docker = mock(DockerClient.class);
+        InspectContainerCmd instanceCmd = mock(InspectContainerCmd.class);
+        when(instanceCmd.exec()).thenReturn(instance);
+        when(docker.inspectContainerCmd("c1")).thenReturn(instanceCmd);
+        InspectContainerCmd helperCmd = mock(InspectContainerCmd.class);
+        when(helperCmd.exec()).thenReturn(helper);
+        when(docker.inspectContainerCmd("helper-1")).thenReturn(helperCmd);
+        return docker;
     }
 
     private static Set<Integer> extract(SecurityGroup sg) {

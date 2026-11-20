@@ -208,7 +208,34 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * {@code context} with the condition keys {@link #resourceTags} read from a resource's stored tags, each in place of
+     * The condition keys the table reads from the record of the resource {@code resource} names for
+     * {@code action}: what the service holding that resource keeps in the member the table asks for
+     * ({@link StoredResourceArns#recorded}), by key. Null when the action takes none, the ARN is of no type the
+     * table gives such a key, or the record holds nothing there, which is every resource a request names before
+     * the value is set on it. Read for each ARN on its own, as the stored tags are, and
+     * {@link #withResourceTags} puts them in that ARN's context.
+     */
+    public Map<String, List<String>> resourceKeys(String action, String resource) {
+        Map<String, IamConditionKeys.Resource> keys = IamConditionKeys.resources(action);
+        if (keys.isEmpty() || !AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        StoredResourceArns stored = storedResourceArns(AwsArnUtils.parse(resource).service());
+        if (stored == null) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        keys.forEach((key, held) -> {
+            if (held.arn().matcher(resource).matches()) {
+                stored.recorded(resource, held.member()).ifPresent(value -> conditions.put(key, List.of(value)));
+            }
+        });
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /**
+     * {@code context} with the condition keys read from a resource itself, its stored tags through
+     * {@link #resourceTags} or its record through {@link #resourceKeys}, each in place of
      * any key of the same name, case aside, the context held; {@code context} itself when there are none.
      */
     public static Map<String, List<String>> withResourceTags(Map<String, List<String>> context,
@@ -563,7 +590,21 @@ public class IamConditionContextResolver {
         conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
         // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
         conditions.put("aws:PrincipalIsAWSService", List.of("false"));
+        putRequestTime(conditions);
         return conditions;
+    }
+
+    /**
+     * The time of the request, which the IAM User Guide says "is always included in the request
+     * context" under two keys: {@code aws:CurrentTime}, a Date, and {@code aws:EpochTime}, "the
+     * date and time of the request in epoch or Unix time", a Date and a Numeric, so whole seconds.
+     * Every context a request is evaluated against carries them, including those built outside
+     * {@link #withGlobalContext}, such as S3's own bucket-policy check.
+     */
+    public static void putRequestTime(Map<String, List<String>> conditions) {
+        Instant now = Instant.now();
+        conditions.put("aws:CurrentTime", List.of(now.toString()));
+        conditions.put("aws:EpochTime", List.of(Long.toString(now.getEpochSecond())));
     }
 
     private static void putResourceAccount(Map<String, List<String>> conditions, String resourceArn,
@@ -586,7 +627,8 @@ public class IamConditionContextResolver {
      * {@code true}; {@code aws:PrincipalServiceName} and {@code aws:PrincipalServiceNamesList} name the
      * service; {@code aws:SourceArn} and {@code aws:SourceAccount} name the resource whose
      * configuration triggered the call, when it has them; and {@code aws:ResourceAccount} and
-     * {@code aws:RequestedRegion} describe the target. The keys that describe an IAM principal,
+     * {@code aws:RequestedRegion} describe the target; {@code aws:CurrentTime} and
+     * {@code aws:EpochTime} carry the time of the request, as on every request. The keys that describe an IAM principal,
      * {@code aws:PrincipalArn} and {@code aws:PrincipalAccount} among them, are left out: no IAM
      * principal makes the call. A call to an SNS topic from a service SNS lists as setting it also
      * carries {@code aws:SourceOwner}, the source account, which is what the default topic policy
@@ -614,6 +656,7 @@ public class IamConditionContextResolver {
         }
         putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
+        putRequestTime(conditions);
         return conditions;
     }
 
@@ -1084,7 +1127,10 @@ public class IamConditionContextResolver {
             return context;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
-        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+        // A snapshot's and an image's ARN carries no account (arn:aws:ec2:<region>::snapshot/<id>), which is not a
+        // foreign one: EC2 reads the id in the caller's account, as it reads every other one.
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region())
+                || AwsArnUtils.isForeignAccount(arn, accountId)) {
             return context;
         }
         String[] parts = arn.resource().split("/", 2);

@@ -156,13 +156,13 @@ class ApplicationDefaultsTest {
 
         assertFalse(streamingMaxConnections.isMissingNode(),
                 "streaming-max-connections should be declared in application.yml");
-        assertEquals(2048, streamingMaxConnections.asInt());
+        assertEquals(3072, streamingMaxConnections.asInt());
 
         WithDefault fallback = EmulatorConfig.DockerConfig.class
                 .getMethod("streamingMaxConnections")
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "streamingMaxConnections should declare a fallback default");
-        assertEquals("2048", fallback.value(),
+        assertEquals("3072", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
 
@@ -200,6 +200,24 @@ class ApplicationDefaultsTest {
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "apiTimeoutSeconds should declare a fallback default");
         assertEquals("300", fallback.value(),
+                "the @WithDefault must match application.yml, which wins over it");
+    }
+
+    // Catches: pool-gauge-interval-seconds missing from the shipped application.yml, or a yml value
+    // that silently disagrees with the @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheDockerPoolGaugeIntervalAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode interval = productionConfig()
+                .path("floci").path("docker").path("pool-gauge-interval-seconds");
+
+        assertFalse(interval.isMissingNode(), "pool-gauge-interval-seconds should be declared in application.yml");
+        assertEquals(60, interval.asInt());
+
+        WithDefault fallback = EmulatorConfig.DockerConfig.class
+                .getMethod("poolGaugeIntervalSeconds")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "poolGaugeIntervalSeconds should declare a fallback default");
+        assertEquals("60", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
 }

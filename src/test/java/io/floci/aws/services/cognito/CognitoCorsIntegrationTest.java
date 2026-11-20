@@ -2,7 +2,7 @@ package io.floci.aws.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.testing.ExtraCorsOriginProfile;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -24,7 +24,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
-@TestProfile(ExtraCorsOriginProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class CognitoCorsIntegrationTest {
 
     private static final String ORIGIN = "http://localhost:3000";

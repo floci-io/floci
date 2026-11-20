@@ -77,6 +77,7 @@ on:
       - 'tools/aws/regen_partitions.py'
       - 'tools/aws/regen_query_services.py'
       - '.github/workflows/iam-data-drift.yml'
+      - 'tools/aws/test_iam_data_verify.py'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.
     - cron: '0 6 * * 1'
@@ -110,6 +111,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Test IAM verification selection
+        run: python3 -m unittest discover -s tools/aws -p test_iam_data_verify.py
+
       # IAM role-tag coverage also depends on which operations name a role in pinned botocore.
       - name: Install the pinned botocore
         run: pip install -r tools/aws/requirements.txt
@@ -121,7 +125,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
-            make iam-data-verify CHANGED="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+            changed_file="$RUNNER_TEMP/iam-changed-paths.txt"
+            if ! git diff --name-only HEAD^1 HEAD > "$changed_file"; then
+              : > "$changed_file"
+            fi
+            make iam-data-verify CHANGED_FILE="$changed_file"
           else
             make iam-data-verify
           fi

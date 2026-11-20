@@ -177,6 +177,35 @@ class GlueViewDdlBuilderTest {
     }
 
     /**
+     * Reading a Parquet timestamp converts in the session's time zone, so a batch holding such a view pins Athena's,
+     * UTC, whether the table is read whole, through its registered partitions, or is empty; others leave it alone.
+     */
+    @Test
+    void viewsReadingParquetTimestampsRunInAUtcSession() {
+        Table plain = projectingParquetTable("s3://b/data/", Map.of());
+        plain.setPartitionKeys(List.of());
+        plain.getStorageDescriptor().setColumns(List.of(column("id"), column("created_at", "timestamp")));
+        Table registered = projectingParquetTable("s3://b/data/", Map.of());
+        registered.getStorageDescriptor().setColumns(List.of(column("id"), column("created_at", "timestamp")));
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "a", "b")));
+        Table empty = projectingParquetTable("s3://empty/data/", Map.of());
+        empty.setPartitionKeys(List.of());
+        empty.getStorageDescriptor().setColumns(List.of(column("created_at", "timestamp")));
+        holds("empty", "data/");
+
+        Map<Table, String> paths = Map.of(plain, "FROM read_parquet('s3://b/data/**'", registered, "JOIN (VALUES",
+                empty, "LIMIT 0");
+        for (Table table : List.of(plain, registered, empty)) {
+            String ddl = ddlFor(table);
+            assertTrue(ddl.contains(paths.get(table)), ddl);
+            assertTrue(ddl.startsWith("SET TimeZone = 'UTC';\nCREATE SCHEMA"), ddl);
+            assertEquals(1, ddl.split("TimeZone", -1).length - 1, ddl);
+        }
+        assertTrue(ddlFor(plain).contains("ELSE CAST(\"created_at\" AS TIMESTAMP) END) AS \"created_at\""));
+        assertFalse(ddlFor(projectingParquetTable("s3://b/data/", Map.of())).contains("TimeZone"));
+    }
+
+    /**
      * A template of bare values, one folder per key. The files hold no partition columns, so each
      * value comes from the object's path, through the template, as Athena maps it; without this the
      * view selects columns nothing defines and DuckDB rejects it.
@@ -246,15 +275,39 @@ class GlueViewDdlBuilderTest {
                 ddl);
     }
 
-    /** The default column=value layout is left to DuckDB's Hive partitioning, as before. */
+    /**
+     * The default column=value layout takes its values from DuckDB's Hive partitioning, read as text and given each
+     * key's declared type rather than the one DuckDB would guess; a folder whose value the type cannot hold is one
+     * no projected query addresses, so its rows are not read.
+     */
     @Test
-    void defaultLayoutStillReadsPartitionValuesThroughHivePartitioning() {
+    void defaultLayoutTypesEachPartitionValueAsItsKeyDeclares() {
         String ddl = ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")));
 
         assertEquals("CREATE SCHEMA IF NOT EXISTS \"audit\";\n"
                 + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
-                + "\"region\" AS \"region\", \"dt\" AS \"dt\" "
-                + "FROM read_parquet('s3://b/hive/region=*/dt=*/**', union_by_name = true);\n", ddl);
+                + "\"region\" AS \"region\", TRY_CAST(\"dt\" AS DATE) AS \"dt\" "
+                + "FROM read_parquet('s3://b/hive/region=*/dt=*/**', union_by_name = true, hive_types_autocast = false) "
+                + "WHERE TRY_CAST(\"dt\" AS DATE) IS NOT NULL;\n", ddl);
+    }
+
+    /**
+     * A date key projected with a format is parsed with that format, in either layout, as Athena reads the value it
+     * generated: {@code dt=20261116} for {@code yyyyMMdd} is a date, not a value the key's type cannot hold.
+     */
+    @Test
+    void aFormattedDateProjectionParsesItsValuesWithTheFormat() {
+        String parsed = "TRY_CAST(try_strptime(\"dt\", '%Y%m%d') AS DATE)";
+        String hive = ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true",
+                "projection.dt.type", "date", "projection.dt.format", "yyyyMMdd")));
+        assertTrue(hive.contains(parsed + " AS \"dt\""), hive);
+        assertTrue(hive.contains("WHERE " + parsed + " IS NOT NULL"), hive);
+
+        String templated = ddlFor(projectingParquetTable("s3://b/data/", Map.of("projection.enabled", "true",
+                "projection.dt.type", "date", "projection.dt.format", "yyyyMMdd",
+                "storage.location.template", "s3://b/data/${region}/${dt}/")));
+        assertTrue(templated.contains("TRY_CAST(try_strptime(regexp_extract(\"$path\", "
+                + "'^s3://b/data/([^/]+)/([^/]+)/', 2), '%Y%m%d') AS DATE) AS \"dt\""), templated);
     }
 
     /**

@@ -237,6 +237,17 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void anAssumeRoleRequestCarriesItsSessionNameAndExternalId() {
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice"), "sts:ExternalId", List.of("partner-42")),
+                resolver.resolve("sts", "sts:AssumeRole", formRequest(
+                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A111111111111%3Arole%2Fr"
+                                + "&RoleSessionName=alice&ExternalId=partner-42")));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), resolver.resolve("sts", "sts:AssumeRole",
+                formRequest("Action=AssumeRole&RoleSessionName=alice")), "no ExternalId, no sts:ExternalId");
+        assertNull(resolver.resolve("sts", "sts:GetCallerIdentity", formRequest("Action=GetCallerIdentity")));
+    }
+
+    @Test
     void logStreamTagsUseRawParentNameAndRequestRegion() throws Exception {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         when(request.getProperty("floci.bufferedJsonBody"))
@@ -1537,6 +1548,12 @@ class IamConditionContextResolverTest {
                 "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
                 "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
 
+        // The time of the request is on a service call as on every request; the rest is exact.
+        assertTrue(conditions.containsKey("aws:CurrentTime"));
+        assertTrue(conditions.containsKey("aws:EpochTime"));
+        Map<String, List<String>> rest = new HashMap<>(conditions);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
         assertEquals(Map.of(
                 "aws:PrincipalIsAWSService", List.of("true"),
                 "aws:ViaAWSService", List.of("false"),
@@ -1546,7 +1563,7 @@ class IamConditionContextResolverTest {
                 "aws:SourceAccount", List.of("444455556666"),
                 "aws:SourceOwner", List.of("444455556666"),
                 "aws:ResourceAccount", List.of("111122223333"),
-                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+                "aws:RequestedRegion", List.of("eu-west-2")), rest);
     }
 
     @Test

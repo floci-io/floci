@@ -25,7 +25,7 @@ public class Repository {
     private String kmsKey;
     private String lifecyclePolicyText;
     private String repositoryPolicyText;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public Repository() {}
 

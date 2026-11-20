@@ -1,6 +1,7 @@
 package io.floci.aws.services.iot;
 
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -60,6 +61,7 @@ public class IotMqttWebSocketIntegrationTest {
     private static final int PLAIN_PORT = IotMqttTlsProfile.PLAIN_PORT;
     private static final short CLOSE_UNSUPPORTED_DATA = 1003;
     private static final int CHURN_THREADS = 10;
+    private static final String SIGNED_MQTT = "/mqtt" + IotWebSocketSigV4.QUERY;
 
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
     int testSslPort;
@@ -75,9 +77,9 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/roundtrip/" + System.nanoTime();
         byte[] payload = "over websocket".getBytes(StandardCharsets.UTF_8);
 
-        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-sub-" + System.nanoTime(), null, null)) {
+        try (WsClient subscriber = WsClient.connect(wss(SIGNED_MQTT), "ws-sub-" + System.nanoTime(), null, null)) {
             subscriber.subscribe(topic);
-            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-pub-" + System.nanoTime(), null, null)) {
+            try (WsClient publisher = WsClient.connect(wss(SIGNED_MQTT), "ws-pub-" + System.nanoTime(), null, null)) {
                 publisher.publish(topic, payload, 1);
             }
             assertArrayEquals(payload, subscriber.takePayload());
@@ -89,7 +91,7 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/plain/" + System.nanoTime();
         byte[] payload = "plain websocket".getBytes(StandardCharsets.UTF_8);
 
-        try (WsClient client = WsClient.connect(ws("/mqtt"), "ws-plain-" + System.nanoTime(), null, null)) {
+        try (WsClient client = WsClient.connect(ws(SIGNED_MQTT), "ws-plain-" + System.nanoTime(), null, null)) {
             assertTrue(client.isConnected());
             client.subscribe(topic);
             client.publish(topic, payload, 0);
@@ -102,7 +104,7 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/shared/" + System.nanoTime();
         byte[] payload = "from tcp".getBytes(StandardCharsets.UTF_8);
 
-        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-shared-" + System.nanoTime(), null, null)) {
+        try (WsClient subscriber = WsClient.connect(wss(SIGNED_MQTT), "ws-shared-" + System.nanoTime(), null, null)) {
             subscriber.subscribe(topic);
             MqttClient tcp = new MqttClient("tcp://127.0.0.1:" + PLAIN_PORT, "tcp-pub-" + System.nanoTime(), new MemoryPersistence());
             tcp.connect();
@@ -123,12 +125,15 @@ public class IotMqttWebSocketIntegrationTest {
     }
 
     @Test
+    void unsignedConnectNamingNoAuthorizerIsRefused() {
+        MqttException refused = assertThrows(MqttException.class,
+                () -> WsClient.connect(wss("/mqtt"), "ws-unsigned-" + System.nanoTime(), null, null));
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+    }
+
+    @Test
     void sigV4QueryStringOnTheMqttPathIsAccepted() throws Exception {
-        String query = "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
-                + "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260906%2Fus-east-1%2Fiotdevicegateway%2Faws4_request"
-                + "&X-Amz-Date=20260906T120000Z&X-Amz-SignedHeaders=host"
-                + "&X-Amz-Signature=0000000000000000000000000000000000000000000000000000000000000000";
-        try (WsClient client = WsClient.connect(wss("/mqtt" + query), "ws-sigv4-" + System.nanoTime(), null, null)) {
+        try (WsClient client = WsClient.connect(wss(SIGNED_MQTT), "ws-sigv4-" + System.nanoTime(), null, null)) {
             assertTrue(client.isConnected());
         }
     }
@@ -152,7 +157,7 @@ public class IotMqttWebSocketIntegrationTest {
         CompletableFuture<Integer> closeCode = new CompletableFuture<>();
         WebSocket socket = HttpClient.newHttpClient().newWebSocketBuilder()
                 .subprotocols("mqtt")
-                .buildAsync(URI.create(ws("/mqtt")), new WebSocket.Listener() {
+                .buildAsync(URI.create(ws(SIGNED_MQTT)), new WebSocket.Listener() {
                     @Override
                     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
                         closeCode.complete(statusCode);
@@ -175,7 +180,7 @@ public class IotMqttWebSocketIntegrationTest {
     @Test
     void brokerSideDisconnectDropsTheWebSocket() throws Exception {
         String clientId = "ws-dropped-" + System.nanoTime();
-        try (WsClient client = WsClient.connect(ws("/mqtt"), clientId, null, null)) {
+        try (WsClient client = WsClient.connect(ws(SIGNED_MQTT), clientId, null, null)) {
             assertTrue(broker.getConnection(clientId).isPresent(), "the bridged session is a broker session");
 
             assertTrue(broker.disconnectClient(clientId, true));
@@ -187,7 +192,7 @@ public class IotMqttWebSocketIntegrationTest {
     @Test
     void clientDisconnectFreesTheBrokerSession() throws Exception {
         String clientId = "ws-leaving-" + System.nanoTime();
-        WsClient client = WsClient.connect(ws("/mqtt"), clientId, null, null);
+        WsClient client = WsClient.connect(ws(SIGNED_MQTT), clientId, null, null);
         assertTrue(broker.getConnection(clientId).isPresent());
 
         client.close();
@@ -205,9 +210,9 @@ public class IotMqttWebSocketIntegrationTest {
         int count = 1000;
         byte[] filler = new byte[4096];
 
-        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-burst-sub-" + System.nanoTime(), null, null)) {
+        try (WsClient subscriber = WsClient.connect(wss(SIGNED_MQTT), "ws-burst-sub-" + System.nanoTime(), null, null)) {
             subscriber.subscribe(topic);
-            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-burst-pub-" + System.nanoTime(), null, null)) {
+            try (WsClient publisher = WsClient.connect(wss(SIGNED_MQTT), "ws-burst-pub-" + System.nanoTime(), null, null)) {
                 for (int i = 0; i < count; i++) {
                     byte[] payload = ByteBuffer.allocate(4 + filler.length).putInt(i).put(filler).array();
                     publisher.publish(topic, payload, 0);
@@ -226,9 +231,9 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/limit/" + System.nanoTime();
         byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
 
-        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-limit-sub-" + System.nanoTime(), null, null)) {
+        try (WsClient subscriber = WsClient.connect(wss(SIGNED_MQTT), "ws-limit-sub-" + System.nanoTime(), null, null)) {
             subscriber.subscribe(topic);
-            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-limit-pub-" + System.nanoTime(), null, null)) {
+            try (WsClient publisher = WsClient.connect(wss(SIGNED_MQTT), "ws-limit-pub-" + System.nanoTime(), null, null)) {
                 publisher.publish(topic, payload, 1);
             }
             assertArrayEquals(payload, subscriber.takePayload());
@@ -240,13 +245,13 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/over-limit/" + System.nanoTime();
         byte[] after = "after".getBytes(StandardCharsets.UTF_8);
 
-        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-over-sub-" + System.nanoTime(), null, null)) {
+        try (WsClient subscriber = WsClient.connect(wss(SIGNED_MQTT), "ws-over-sub-" + System.nanoTime(), null, null)) {
             subscriber.subscribe(topic);
-            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-over-pub-" + System.nanoTime(), null, null)) {
+            try (WsClient publisher = WsClient.connect(wss(SIGNED_MQTT), "ws-over-pub-" + System.nanoTime(), null, null)) {
                 assertThrows(MqttException.class, () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD + 1), 1));
                 assertTrue(publisher.awaitConnectionLost(10, TimeUnit.SECONDS));
             }
-            try (WsClient next = WsClient.connect(wss("/mqtt"), "ws-over-next-" + System.nanoTime(), null, null)) {
+            try (WsClient next = WsClient.connect(wss(SIGNED_MQTT), "ws-over-next-" + System.nanoTime(), null, null)) {
                 next.publish(topic, after, 0);
             }
             assertArrayEquals(after, subscriber.takePayload(), "the oversized publish is never delivered");
@@ -268,7 +273,7 @@ public class IotMqttWebSocketIntegrationTest {
                 Thread thread = new Thread(() -> {
                     WsClient subscriber = null;
                     try {
-                        subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
+                        subscriber = WsClient.connect(ws(SIGNED_MQTT), clientId, null, null);
                         subscribers.add(subscriber);
                         subscriber.subscribe(topic);
                     } catch (Exception e) {
@@ -284,7 +289,7 @@ public class IotMqttWebSocketIntegrationTest {
             assertTrue(failures.isEmpty(), "every concurrent handshake succeeds: " + failures);
             assertEquals(clients, subscribers.size());
 
-            try (WsClient publisher = WsClient.connect(ws("/mqtt"), "ws-fanout-pub-" + System.nanoTime(), null, null)) {
+            try (WsClient publisher = WsClient.connect(ws(SIGNED_MQTT), "ws-fanout-pub-" + System.nanoTime(), null, null)) {
                 publisher.publish(topic, payload, 1);
             }
             for (WsClient subscriber : subscribers) {
@@ -324,7 +329,7 @@ public class IotMqttWebSocketIntegrationTest {
             for (int i = 0; i < 30; i++) {
                 String clientId = "churn-" + i + "-" + System.nanoTime();
                 clientIds.add(clientId);
-                String url = i % 2 == 0 ? ws("/mqtt") : wss("/mqtt");
+                String url = i % 2 == 0 ? ws(SIGNED_MQTT) : wss(SIGNED_MQTT);
                 cycles.add(pool.submit(() -> {
                     try (WsClient client = WsClient.connect(url, clientId, null, null)) {
                         assertTrue(client.isConnected());

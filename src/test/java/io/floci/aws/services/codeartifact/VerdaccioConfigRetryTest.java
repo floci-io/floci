@@ -44,7 +44,8 @@ class VerdaccioConfigRetryTest {
 
     @BeforeEach
     void setUp() {
-        manager = new VerdaccioSidecarManager(mock(ContainerBuilder.class), lifecycle, mock(EmulatorConfig.class));
+        manager = new VerdaccioSidecarManager(mock(ContainerBuilder.class), lifecycle, mock(EmulatorConfig.class),
+                new CodeArtifactContainerRuns(lifecycle, mock(EmulatorConfig.class)).containers());
         when(lifecycle.getDockerClient()).thenReturn(docker);
     }
 
@@ -102,7 +103,8 @@ class VerdaccioConfigRetryTest {
         when(config.docker().logMaxFile()).thenReturn("3");
         ContainerBuilder builder = new ContainerBuilder(config,
                 mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
-        manager = new VerdaccioSidecarManager(builder, lifecycle, config);
+        manager = new VerdaccioSidecarManager(builder, lifecycle, config,
+                new CodeArtifactContainerRuns(lifecycle, config).containers());
         when(lifecycle.create(any(ContainerSpec.class))).thenReturn("container");
         uploads.failures = 1;
         uploads.failure = new NotFoundException("container missing");

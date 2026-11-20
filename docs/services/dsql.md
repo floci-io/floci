@@ -4,9 +4,10 @@
 
 **Endpoint:** `http://localhost:4566` (control plane), `<cluster-id>.dsql.<region>.localhost.floci.io:5432` (clusters)
 
-Floci runs each Aurora DSQL cluster as a real PostgreSQL 16 database in a Docker container, behind one
-endpoint that admits clients the way DSQL does: TLS, an IAM token as the password, and DSQL's
-dialect and limits. The answers, messages and SQLSTATEs below were measured on AWS.
+Floci runs each Aurora DSQL cluster as a real PostgreSQL 16 database in a Docker container, or, with
+the [external backend](#external-postgresql-backend), in a PostgreSQL server that already runs,
+behind one endpoint that admits clients the way DSQL does: TLS, an IAM token as the password, and
+DSQL's dialect and limits. The answers, messages and SQLSTATEs below were measured on AWS.
 
 ## Supported Actions
 
@@ -206,6 +207,152 @@ deletion protection included, but removes the tags and the policy it no longer s
 template does not change keeps its version. A protected cluster makes the stack's deletion fail, as
 on AWS.
 
+## External PostgreSQL backend
+
+With `FLOCI_SERVICES_DSQL_BACKEND=external`, every cluster lives in one PostgreSQL server that
+already runs, such as a sidecar, and Floci makes no Docker calls for DSQL. Clients see no change:
+TLS, IAM tokens, `admin` and `DbConnect`, and the dialect work as above. `FLOCI_SERVICES_DSQL_MOCK`
+still wins over the backend.
+
+The server must:
+
+- run PostgreSQL 16 or later. Floci checks the version when a cluster starts and fails the cluster,
+  creating nothing, on an older server, whose `CREATEROLE` would let one cluster's `admin` alter
+  the roles of every other cluster;
+- let the configured user in as a superuser: Floci installs event triggers, reads `pg_authid`,
+  runs `CREATE DATABASE ... OWNER` and ends sessions on a cluster's database when it is deleted;
+- be reachable over plain TCP. Floci does not use TLS to the server, so run both on a private
+  network or on localhost;
+- authenticate the cluster roles' TCP logins with SCRAM-SHA-256 (`scram-sha-256`, or `md5`, which
+  uses SCRAM for a role whose password is a SCRAM verifier, in `pg_hba.conf`), or trust them
+  (`trust`, as the official image does for `127.0.0.1` and `::1`), so a sidecar on `localhost`
+  works. Floci never sends a password any other way: a server that asks for a cleartext or MD5
+  password is refused, and the client gets `08006`.
+
+Use a PostgreSQL server dedicated to Floci: clusters share its catalogs, and Floci's superuser
+manages roles and databases on it.
+
+A cluster's start waits up to 90 seconds for the server to let Floci's superuser in, as a server
+started alongside Floci may still be starting; a login the server refuses, such as a wrong
+password, fails the cluster at once. Each login to the server may take up to 10 seconds and each
+call up to 120 seconds, so a server that accepts connections but never answers, such as a paused
+sidecar, fails the start, deletion or shutdown that waits for it instead of holding it.
+
+Each cluster gets a database `dsql_<cluster-id>`, a role `d<cluster-id>_<name>` for each of its
+roles (`d<cluster-id>_admin` for `admin`), a hidden owner role `dsqlowner_<cluster-id>`, and a
+hidden role `dsqlconnect_<cluster-id>` that holds `CONNECT` on the database. `PUBLIC` may not
+connect to it; each of the cluster's roles is a member of `dsqlconnect_<cluster-id>`, which no
+client role can revoke. Clusters cannot connect to or read one another's data, and the same role
+name can exist in each.
+Floci signs in to the server for each client itself: role passwords are stored as SCRAM verifiers
+derived from a per-cluster secret that Floci keeps with the cluster and clients never see.
+
+What differs from the Docker backend, each because many clusters share one server, where a
+Docker cluster has a server of its own. Databases and roles are named server-wide in PostgreSQL,
+so each cluster's must carry its identifier to be kept apart from the others':
+
+- `current_user`, `session_user`, `pg_roles` and PostgreSQL's own error messages show the backend
+  names (`d<cluster-id>_app`); `sys.roles` and `sys.iam_pg_role_mappings` show the DSQL names.
+  Floci translates the names in the statements a client sends, but not in the values PostgreSQL
+  computes and returns.
+- `current_database()`, the `*_catalog` columns of `information_schema` (`table_catalog` and the
+  like) and `pg_database` show the cluster's database as `dsql_<cluster-id>`, while clients still
+  connect to `postgres`, as on DSQL. Each cluster needs a database of its own on the shared server,
+  and only one there can be called `postgres`. A tool that compares the catalog with the database
+  it was configured with should read `current_database()`.
+- `admin` cannot create databases (no `CREATEDB`): a database it created would sit outside the
+  cluster's own, where neither the cluster's isolation nor its deletion reaches. A DSQL cluster
+  has the one database `postgres` in any case.
+- A role name is at most 35 bytes in UTF-8, so that with the 28-byte prefix it fits PostgreSQL's
+  63-byte identifier; a longer one is refused with `42602`. PostgreSQL would cut a longer name
+  short, and two names cut short could become the same role, so it is refused instead. A name of
+  multi-byte characters reaches the limit with fewer than 35 characters. The Docker backend needs
+  no prefix and keeps PostgreSQL's own limit.
+- Floci translates role names where the SQL syntax names a role (`CREATE ROLE`, `GRANT ... TO`,
+  `OWNER TO`, `SET ROLE app` or `SET ROLE 'app'`, `AWS IAM GRANT` and so on), not in `LANGUAGE sql`
+  function bodies or in other string literals: `has_table_privilege('app', ...)`, `pg_has_role`,
+  `set_config('role', ...)` and `information_schema` filters on a grantee need the backend name.
+- Floci's own role procedures (`sys.run_role_ddl`, `sys.drop_roles`, `sys.aws_iam_grant`,
+  `sys.aws_iam_revoke`) and every `sys._*` routine cannot be called by a client: a statement that
+  names one with `sys.`, spelled plainly or with `U&` escapes, fails with `42883`, as for a routine
+  that does not exist. Floci sends a client's role DDL through these routines once it has
+  translated the names and checked that they are the cluster's; a client calling one itself would
+  skip both. A call through a `search_path` that names `sys`, or from a function body,
+  is not caught; the role DDL it runs is not translated, but a role it makes outside the cluster's
+  prefix is not counted as the cluster's, and it cannot take over another cluster's roles.
+- A cluster counts as its own only the roles its `admin`, or a role it created, created or granted
+  to it. A role with its prefix that another cluster's `admin` made, in a `LANGUAGE sql` function
+  body where Floci translates no name, stays out of its `sys.roles` and its deletion.
+- Some errors the server sends while a connection starts may name a backend role or database.
+- Clients can see the other clusters' databases, roles and sessions in `pg_database`, `pg_roles`
+  and `pg_stat_activity`: their names only, not their data or queries.
+- A role that owns objects in another database of the same server cannot be dropped, so the
+  cluster stays `DELETING` until those objects are gone; Floci retries on its next start.
+
+Floci marks the database, owner, admin and connect role it creates for a cluster with the comment
+`floci:dsql:<cluster ARN>`. A cluster whose database, owner, admin or connect role is already on the server
+without that comment fails to start, `FAILED`, and Floci changes nothing on the server; the log
+names the object in the way. The one exception is a database with no comment owned by the
+cluster's marked owner, which a start interrupted before it could comment the database left:
+Floci comments it and goes on.
+
+When Floci restarts with persistent storage, each cluster keeps its database and data. Deleting a
+cluster drops its database and the roles it recorded, nothing else on the server: never a
+database, owner, admin or connect role without the cluster's comment. A `FAILED`
+cluster is deleted even when the server cannot be cleaned up; Floci then logs the database and
+roles that may remain. With in-memory storage, Floci deletes its external clusters when it stops.
+A cluster still starting or being deleted then is waited for, up to 3 minutes, and goes as the
+others do; one still starting is never served once Floci has begun to stop.
+
+Docker Compose, with the server as another service:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+      - "5432:5432"
+    environment:
+      FLOCI_SERVICES_DSQL_BACKEND: external
+      FLOCI_SERVICES_DSQL_EXTERNAL_HOST: postgres
+      FLOCI_SERVICES_DSQL_EXTERNAL_PASSWORD: postgres
+    depends_on:
+      - postgres
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+```
+
+An ECS task on Fargate, where there is no Docker socket, with PostgreSQL as a sidecar on
+`localhost` (excerpt of `containerDefinitions`; give the PostgreSQL container its own port, since
+Floci serves clusters on `5432`):
+
+```json
+[
+  {
+    "name": "postgres",
+    "image": "postgres:17",
+    "essential": true,
+    "command": ["postgres", "-p", "5433"],
+    "environment": [{ "name": "POSTGRES_PASSWORD", "value": "postgres" }]
+  },
+  {
+    "name": "floci",
+    "image": "floci/floci:latest",
+    "essential": true,
+    "dependsOn": [{ "containerName": "postgres", "condition": "START" }],
+    "environment": [
+      { "name": "FLOCI_SERVICES_DSQL_BACKEND", "value": "external" },
+      { "name": "FLOCI_SERVICES_DSQL_EXTERNAL_HOST", "value": "localhost" },
+      { "name": "FLOCI_SERVICES_DSQL_EXTERNAL_PORT", "value": "5433" },
+      { "name": "FLOCI_SERVICES_DSQL_EXTERNAL_PASSWORD", "value": "postgres" }
+    ]
+  }
+]
+```
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -216,10 +363,17 @@ on AWS.
 | `FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX` | `localhost.floci.io` | Domain the endpoints are named under, `<cluster-id>.dsql.<region>.<suffix>` |
 | `FLOCI_SERVICES_DSQL_IMAGE` | `postgres:16-alpine` | Image each cluster's database runs in |
 | `FLOCI_SERVICES_DSQL_DOCKER_NETWORK` | Floci's network | Docker network for the databases |
+| `FLOCI_SERVICES_DSQL_BACKEND` | `docker` | `docker` (a container per cluster) or `external` (a server that already runs, see [External PostgreSQL backend](#external-postgresql-backend)) |
+| `FLOCI_SERVICES_DSQL_EXTERNAL_HOST` | none | Host of the external server; required with `external` |
+| `FLOCI_SERVICES_DSQL_EXTERNAL_PORT` | `5432` | Port of the external server |
+| `FLOCI_SERVICES_DSQL_EXTERNAL_DATABASE` | `postgres` | Database Floci connects to on the external server to manage the clusters' databases and roles |
+| `FLOCI_SERVICES_DSQL_EXTERNAL_USERNAME` | `postgres` | Superuser Floci signs in as |
+| `FLOCI_SERVICES_DSQL_EXTERNAL_PASSWORD` | none | Its password, if the server asks for one |
 
-A cluster's data lives in a Docker volume of its own, or under the host persistent path, and is
-removed with the cluster under the same policy as RDS's (`prune-volumes-on-delete`). With
-persistent storage a cluster comes back, with its data, when Floci restarts.
+With the Docker backend, a cluster's data lives in a Docker volume of its own, or under the host
+persistent path, and is removed with the cluster under the same policy as RDS's
+(`prune-volumes-on-delete`). With persistent storage a cluster comes back, with its data, when
+Floci restarts.
 
 See the [Aurora DSQL API Reference](https://docs.aws.amazon.com/aurora-dsql/latest/APIReference/Welcome.html)
 and the [Aurora DSQL User Guide](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/what-is-aurora-dsql.html).

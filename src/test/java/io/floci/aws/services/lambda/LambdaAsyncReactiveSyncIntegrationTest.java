@@ -1,7 +1,7 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.floci.aws.testing.LambdaCodeFixtures;
-import io.floci.aws.testing.LambdaCodeSourcesProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
@@ -19,7 +19,7 @@ import static org.hamcrest.Matchers.equalTo;
  * its own, so it must read the object in the uploader's account rather than the default one.
  */
 @QuarkusTest
-@TestProfile(LambdaCodeSourcesProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class LambdaAsyncReactiveSyncIntegrationTest {
 
     private static final String ACCOUNT = "000000000021";
