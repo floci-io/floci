@@ -78,6 +78,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SnsService implements Resettable, ResourceProvider {
@@ -106,8 +107,10 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final int SANDBOX_PAGE_SIZE = 100;
     /**
      * The actions a topic policy statement can grant, which are SNS's actions in AWS's service
-     * reference (https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json).
-     * {@code AddPermission} refuses any other name.
+     * reference (https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json), plus
+     * {@code Receive}, which AWS's former default topic policy granted and AWS still accepts.
+     * {@code AddPermission} refuses any other name, and a policy set on a topic any other
+     * {@code sns:} action.
      */
     private static final Set<String> SNS_POLICY_ACTIONS = Set.of(
             "AddPermission", "CheckIfPhoneNumberIsOptedOut", "ConfirmSubscription",
@@ -121,7 +124,11 @@ public class SnsService implements Resettable, ResourceProvider {
             "ListTagsForResource", "ListTopics", "OptInPhoneNumber", "Publish", "PutDataProtectionPolicy",
             "RemovePermission", "SetEndpointAttributes", "SetPlatformApplicationAttributes",
             "SetSMSAttributes", "SetSubscriptionAttributes", "SetTopicAttributes", "Subscribe",
-            "TagResource", "Unsubscribe", "UntagResource", "VerifySMSSandboxPhoneNumber");
+            "TagResource", "Unsubscribe", "UntagResource", "VerifySMSSandboxPhoneNumber", "Receive");
+    /** {@link #SNS_POLICY_ACTIONS} in lower case: a policy's action names are matched ignoring case. */
+    private static final Set<String> SNS_POLICY_ACTIONS_LOWER_CASE = SNS_POLICY_ACTIONS.stream()
+            .map(action -> action.toLowerCase(Locale.ROOT))
+            .collect(Collectors.toUnmodifiableSet());
     /** What the default statement of a topic's policy grants its owner. */
     private static final List<String> DEFAULT_TOPIC_POLICY_ACTIONS = List.of(
             "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission",
@@ -611,6 +618,9 @@ public class SnsService implements Resettable, ResourceProvider {
         if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
             validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
         }
+        if (attributes != null) {
+            requireSnsPolicyActions(attributes.get("Policy"));
+        }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
 
@@ -735,8 +745,40 @@ public class SnsService implements Resettable, ResourceProvider {
                 && validateMaximumMessageSize(attributeValue, false) > DEFAULT_MAX_MESSAGE_SIZE) {
             requireLargePayloadSubscriptions(topicArn, region);
         }
+        if ("Policy".equals(attributeName)) {
+            requireSnsPolicyActions(attributeValue);
+        }
         topic.getAttributes().put(attributeName, attributeValue);
         topicStore.put(key, topic);
+    }
+
+    /**
+     * Refuses a topic policy whose statements grant an {@code sns:} action SNS does not have, as
+     * AWS does. Wildcards, {@code NotAction}, actions of other services and a value that is not
+     * JSON are left alone.
+     */
+    private void requireSnsPolicyActions(String policy) {
+        if (policy == null || policy.isBlank()) {
+            return;
+        }
+        JsonNode statements;
+        try {
+            statements = objectMapper.readTree(policy).path("Statement");
+        } catch (JsonProcessingException ignored) {
+            // Not JSON: this check only reads the actions of a policy that parses.
+            return;
+        }
+        for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
+            JsonNode actions = statement.path("Action");
+            for (JsonNode action : actions.isArray() ? actions : List.of(actions)) {
+                String name = action.asText("").toLowerCase(Locale.ROOT);
+                if (name.startsWith("sns:") && !name.contains("*") && !name.contains("?")
+                        && !SNS_POLICY_ACTIONS_LOWER_CASE.contains(name.substring(4))) {
+                    throw new AwsException("InvalidParameter",
+                            "Invalid parameter: Policy statement action out of service scope!", 400);
+                }
+            }
+        }
     }
 
     /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
