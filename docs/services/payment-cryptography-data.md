@@ -223,22 +223,23 @@ client that talks to the control plane does not reach it by accident.
   two nodes whose keys differ do not agree. The random number is enciphered a block at a
   time, in the cipher the key's own algorithm names, and it is sixteen bytes long when the
   request does not name a length.
-- **The key of a KEK validation is a key encryption key.** It is the one AS2805 calls the
-  terminal major key, the usage `TR31_K0_KEY_ENCRYPTION_KEY`. The reference does not name
-  the usage the key must have for this operation, so the one the service's own AS2805
-  import gives that key is the one it asks for. The request form enciphers, so the key must
-  allow `Encrypt`; the response form deciphers, so it must allow `Decrypt`.
+- **The key of a KEK validation is a Triple DES key encryption key.** It is the one AS2805
+  calls the terminal major key, the usage `TR31_K0_KEY_ENCRYPTION_KEY`. The reference does
+  not name the usage the key must have for this operation, so the one the service's own
+  AS2805 import gives that key is the one it asks for. AS2805's cryptography is all TDES,
+  so a key of another family is refused. The request form enciphers, so the key must allow
+  `Encrypt`; the response form deciphers and enciphers the inverted number, so it must
+  allow `Decrypt` and `Encrypt`.
 - **The two variant masks are the standard's two forms of the ceremony.** The `82` form is
   the one an independent implementation of the ceremony confirms, byte for byte. The `82C0`
   form is the same ceremony under the longer of the two masks the reference names, and the
   mask of its inverted number is that form's `84C0`: two nodes validating under it agree
   with each other, but not with the reference.
-- **The requests the ceremony does not fit are refused.** A key of a family the ceremony is
-  not made with is refused rather than read as a key of one it is. The derived key is the
-  variant of the key the request names, so the algorithm the request names has to be the
-  algorithm of that key, and a request that names another one is refused. The random number
-  is enciphered in whole blocks, so under an AES key the sixteen byte one is the only length
-  that fills them, and the eight and twenty-four byte ones are refused.
+- **The requests the ceremony does not fit are refused.** The derived key is the variant of
+  the key the request names, so the algorithm the request names has to be the algorithm of
+  that key, and a request that names another one is refused. The random number is
+  enciphered in whole Triple DES blocks, and the three lengths the model names are whole
+  numbers of them.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
   sequence number is two: the EMV ones, as the model states them. A formatted account
