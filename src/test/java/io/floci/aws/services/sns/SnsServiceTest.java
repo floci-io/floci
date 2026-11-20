@@ -23,6 +23,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,6 +44,7 @@ class SnsServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
+    private static final String GRANTEE_ACCOUNT = "111122223333";
     private static final String BASE_URL = "http://localhost:4566";
     private static final String FIREHOSE_ROLE_ARN = "arn:aws:iam::000000000000:role/firehose-role";
 
@@ -151,6 +153,80 @@ class SnsServiceTest {
     void createTopic_requiresName() {
         assertThrows(AwsException.class, () -> snsService.createTopic(null, null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.createTopic("", null, null, REGION));
+    }
+
+    @Test
+    void createTopicRefusesAPolicyGrantingAnActionSnsDoesNotHave() {
+        AwsException e = assertThrows(AwsException.class, () -> snsService.createTopic("scope-topic",
+                Map.of("Policy", topicPolicyGranting("sns:Publish", "sns:PublishBatch")), Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals("Invalid parameter: Policy statement action out of service scope!", e.getMessage());
+        assertTrue(snsService.listTopics(REGION).isEmpty());
+    }
+
+    @Test
+    void createTopicAcceptsActionsWithinTheServiceScopeIgnoringCase() {
+        snsService.createTopic("scope-topic",
+                Map.of("Policy", topicPolicyGranting("sns:Publish", "sns:publish")), Map.of(), REGION);
+        assertEquals(1, snsService.listTopics(REGION).size());
+    }
+
+    @Test
+    void createTopicKeepsAcceptingPoliciesItDoesNotCheck() {
+        snsService.createTopic("wildcard-topic",
+                Map.of("Policy", topicPolicyGranting("sns:*", "Publish")), Map.of(), REGION);
+        snsService.createTopic("notaction-topic", Map.of("Policy", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "NotAction":"sns:PublishBatch","Resource":"*"}]}"""), Map.of(), REGION);
+        assertEquals(2, snsService.listTopics(REGION).size());
+    }
+
+    @Test
+    void setTopicAttributesRefusesAnActionOutsideTheServiceScopeAndKeepsTheOldPolicy() {
+        Topic topic = snsService.createTopic("policy-topic", null, null, REGION);
+        String old = topicPolicyGranting("sns:Publish");
+        snsService.setTopicAttributes(topic.getTopicArn(), "Policy", old, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.setTopicAttributes(
+                topic.getTopicArn(), "Policy", topicPolicyGranting("sns:PublishBatch"), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals("Invalid parameter: Policy statement action out of service scope!", e.getMessage());
+        assertEquals(old, snsService.getTopicAttributes(topic.getTopicArn(), REGION).get("Policy"));
+    }
+
+    @Test
+    void setTopicAttributesAcceptsActionsWithinTheServiceScopeIgnoringCase() {
+        Topic topic = snsService.createTopic("policy-topic", null, null, REGION);
+        snsService.setTopicAttributes(topic.getTopicArn(), "Policy",
+                topicPolicyGranting("sns:Publish", "sns:publish"), REGION);
+        snsService.setTopicAttributes(topic.getTopicArn(), "Policy", topicPolicyGranting("Receive"), REGION);
+    }
+
+    @Test
+    void setTopicAttributesKeepsAcceptingAPolicyValueItDoesNotCheck() {
+        Topic topic = snsService.createTopic("policy-topic", null, null, REGION);
+        snsService.setTopicAttributes(topic.getTopicArn(), "Policy", "not json", REGION);
+        assertEquals("not json", snsService.getTopicAttributes(topic.getTopicArn(), REGION).get("Policy"));
+    }
+
+    @Test
+    void addPermissionAcceptsReceive() {
+        Topic topic = snsService.createTopic("receive-topic", null, null, REGION);
+        snsService.addPermission(topic.getTopicArn(), "receive-grant",
+                List.of(GRANTEE_ACCOUNT), List.of("Receive"), REGION);
+        String policy = snsService.getTopicAttributes(topic.getTopicArn(), REGION).get("Policy");
+        assertTrue(policy.contains("SNS:Receive"));
+    }
+
+    @Test
+    void addPermissionKeepsRefusingActionsOutsideTheServiceScope() {
+        Topic topic = snsService.createTopic("scope-topic", null, null, REGION);
+        assertThrows(AwsException.class, () -> snsService.addPermission(
+                topic.getTopicArn(), "bogus", List.of(GRANTEE_ACCOUNT), List.of("PublishBatch"), REGION));
+        assertThrows(AwsException.class, () -> snsService.addPermission(
+                topic.getTopicArn(), "bogus", List.of(GRANTEE_ACCOUNT), List.of("sns:Publish"), REGION));
+        assertTrue(snsService.getTopicAttributes(topic.getTopicArn(), REGION).get("Policy")
+                .contains("__default_statement_ID"));
     }
 
     @Test
@@ -1615,5 +1691,15 @@ class SnsServiceTest {
         // Delivery error is logged and tolerated; publisher receives message ID
         String messageId = service.publish(topic.getTopicArn(), null, "msg", null, REGION);
         assertNotNull(messageId);
+    }
+
+    private static String topicPolicyGranting(String... actions) {
+        List<String> quoted = new ArrayList<>();
+        for (String action : actions) {
+            quoted.add("\"" + action + "\"");
+        }
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\","
+                + "\"Action\":[" + String.join(",", quoted) + "],"
+                + "\"Resource\":\"arn:aws:sns:us-east-1:000000000000:policy-topic\"}]}";
     }
 }

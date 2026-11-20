@@ -183,7 +183,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private final SnsMessageSigner messageSigner;
     private final Map<String, Instant> fifoDeduplicationCache = new ConcurrentHashMap<>();
     private static final HexFormat HEX = HexFormat.of();
-    
+
     @Inject
     public SnsService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, SqsService sqsService,
@@ -611,6 +611,9 @@ public class SnsService implements Resettable, ResourceProvider {
         if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
             validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
         }
+        if (attributes != null && attributes.containsKey("Policy")) {
+            requirePolicyActionsInServiceScope(attributes.get("Policy"));
+        }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
 
@@ -735,6 +738,9 @@ public class SnsService implements Resettable, ResourceProvider {
                 && validateMaximumMessageSize(attributeValue, false) > DEFAULT_MAX_MESSAGE_SIZE) {
             requireLargePayloadSubscriptions(topicArn, region);
         }
+        if ("Policy".equals(attributeName)) {
+            requirePolicyActionsInServiceScope(attributeValue);
+        }
         topic.getAttributes().put(attributeName, attributeValue);
         topicStore.put(key, topic);
     }
@@ -771,10 +777,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key).orElseThrow(SnsService::permissionTopicNotFound);
         for (String action : actionNames) {
-            if (!SNS_POLICY_ACTIONS.contains(action)) {
-                throw new AwsException("InvalidParameter",
-                        "Invalid parameter: Policy statement action out of service scope!", 400);
-            }
+            requireActionInServiceScope("SNS:" + action);
         }
         ObjectNode policy = topicPolicy(topic, topicArn);
         ArrayNode statements = (ArrayNode) policy.get("Statement");
@@ -846,6 +849,70 @@ public class SnsService implements Resettable, ResourceProvider {
             policy.set("Statement", statements);
         }
         return policy;
+    }
+
+    /**
+     * Refuses an Action string that names an action SNS does not have, with the error AWS
+     * answers for it. In scope is, compared ignoring case, {@code Receive} on its own, which
+     * AWS's former default topic policy granted, or {@code sns:} plus one of {@link
+     * #SNS_POLICY_ACTIONS}; {@code AddPermission} qualifies the bare names it takes with the
+     * prefix, so the same check serves it.
+     */
+    private static void requireActionInServiceScope(String action) {
+        String lowered = action.toLowerCase(Locale.ROOT);
+        if (lowered.equals("receive")) {
+            return;
+        }
+        int separator = lowered.indexOf(':');
+        String name = separator < 0 ? "" : lowered.substring(separator + 1);
+        boolean known = name.equals("receive") || SNS_POLICY_ACTIONS.stream()
+                .anyMatch(candidate -> candidate.toLowerCase(Locale.ROOT).equals(name));
+        if (separator < 0 || !lowered.substring(0, separator).equals("sns") || !known) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Policy statement action out of service scope!", 400);
+        }
+    }
+
+    /**
+     * Refuses a topic policy granting an action SNS does not have, as AWS answers {@code
+     * CreateTopic} and {@code SetTopicAttributes} for it: every {@code Action} of every
+     * statement goes through {@link #requireActionInServiceScope}. A statement may hold
+     * {@code NotAction} instead, an action may carry a wildcard or no service prefix, and a
+     * value that is not JSON names no concrete action to refuse; none of those are checked.
+     */
+    private void requirePolicyActionsInServiceScope(String policyJson) {
+        if (policyJson == null || policyJson.isBlank()) {
+            return;
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(policyJson);
+        } catch (JsonProcessingException ignored) {
+            return;
+        }
+        JsonNode statement = root.get("Statement");
+        List<JsonNode> statements = new ArrayList<>();
+        if (statement instanceof ArrayNode array) {
+            array.forEach(statements::add);
+        } else if (statement instanceof ObjectNode) {
+            statements.add(statement);
+        }
+        for (JsonNode one : statements) {
+            JsonNode action = one.get("Action");
+            if (action == null || action.isNull()) {
+                continue;
+            }
+            for (JsonNode value : action) {
+                if (!value.isTextual()) {
+                    continue;
+                }
+                String name = value.asText();
+                if (name.indexOf(':') < 0 || name.indexOf('*') >= 0) {
+                    continue;
+                }
+                requireActionInServiceScope(name);
+            }
+        }
     }
 
     private static void putOneOrMany(ObjectNode node, String field, List<String> values) {

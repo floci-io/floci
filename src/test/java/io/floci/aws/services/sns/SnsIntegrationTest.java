@@ -1416,4 +1416,137 @@ class SnsIntegrationTest {
             .statusCode(200)
             .body(containsString("<MessageId>"));
     }
+
+    @Test
+    @Order(160)
+    void policyActionScope_setTopicAttributes_rejectsAnActionOutsideTheServiceScope() {
+        String topicArn = policyScopeTopicArn();
+        String granted = """
+                {"Version":"2012-10-17","Statement":[{"Sid":"AllowPublish","Effect":"Allow",
+                "Principal":"*","Action":["sns:Publish"],"Resource":"%s"}]}""".formatted(topicArn);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+            .formParam("AttributeName", "Policy")
+            .formParam("AttributeValue", granted)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String refused = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":["sns:Publish","sns:PublishBatch"],"Resource":"%s"}]}""".formatted(topicArn);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+            .formParam("AttributeName", "Policy")
+            .formParam("AttributeValue", refused)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameter"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Invalid parameter: Policy statement action out of service scope!"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("AllowPublish"))
+            .body(containsString("sns:Publish"))
+            .body(not(containsString("PublishBatch")));
+
+        deletePolicyScopeTopic(topicArn);
+    }
+
+    @Test
+    @Order(161)
+    void policyActionScope_setTopicAttributes_acceptsAnActionWithinTheServiceScope() {
+        String topicArn = policyScopeTopicArn();
+        String granted = """
+                {"Version":"2012-10-17","Statement":[{"Sid":"AllowLowercasePublish","Effect":"Allow",
+                "Principal":"*","Action":["sns:publish","Receive"],"Resource":"%s"}]}""".formatted(topicArn);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+            .formParam("AttributeName", "Policy")
+            .formParam("AttributeValue", granted)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("AllowLowercasePublish"));
+
+        deletePolicyScopeTopic(topicArn);
+    }
+
+    @Test
+    @Order(162)
+    void policyActionScope_createTopic_rejectsAPolicyAttributeOutsideTheServiceScope() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "policy-scope-rejected-topic")
+            .formParam("Attributes.entry.1.key", "Policy")
+            .formParam("Attributes.entry.1.value", """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                    "Action":["sns:PublishBatch"],"Resource":"*"}]}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameter"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Invalid parameter: Policy statement action out of service scope!"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListTopics")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("policy-scope-rejected-topic")));
+    }
+
+    private static String policyScopeTopicArn() {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "policy-scope-" + UUID.randomUUID())
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+    }
+
+    private static void deletePolicyScopeTopic(String topicArn) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteTopic")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }
