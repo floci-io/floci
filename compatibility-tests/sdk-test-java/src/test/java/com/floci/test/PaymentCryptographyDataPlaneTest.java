@@ -303,14 +303,19 @@ class PaymentCryptographyDataPlaneTest {
     @Test
     @DisplayName("A key encryption key answers a KEK validation of itself")
     void aKeyEncryptionKeyAnswersAKeyEncryptionKeyValidationOfItself() {
-        String kekArn = TestFixtures.paymentCryptographyClient().createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true))
-                .key().keyArn();
+        String kekArn;
+        try (PaymentCryptographyClient control = TestFixtures.paymentCryptographyClient()) {
+            kekArn = control.createKey(r -> r
+                    .keyAttributes(a -> a
+                            .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
+                            .keyClass(KeyClass.SYMMETRIC_KEY)
+                            .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                            .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                    .exportable(true))
+                    .key().keyArn();
+        }
+        // Every key the test made is deleted when the class is done with it.
+        keyArns.add(kekArn);
 
         // The node that starts the exchange makes a random number and answers with the two
         // numbers the ceremony is made of.
