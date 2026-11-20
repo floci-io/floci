@@ -269,6 +269,22 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
         deleteStack(stack);
     }
 
+    @Test
+    void onDemandWithOnlyAnIndexCapacityFailsTheCreate() {
+        String stack = "cfn-ddb-tp-ondemand-gsi-" + suffix();
+        String table = "tp-ondemand-gsi-" + suffix();
+
+        cloudFormation(stack, "CreateStack", template(table, capacity(1, 1),
+                ",\n\"BillingMode\": \"PAY_PER_REQUEST\""));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        assertTrue(CfnStackWaits.failedResourceReason(stack, CFN_AUTH)
+                .contains("Property ProvisionedThroughput can't be used with PAY_PER_REQUEST BillingMode."));
+
+        describe(table).statusCode(400).body("__type", containsString("ResourceNotFoundException"));
+
+        deleteStack(stack);
+    }
+
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
     }

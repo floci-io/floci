@@ -232,6 +232,88 @@ class DynamoDbThroughputCfnProvisionerTest {
     }
 
     @Test
+    void onDemandWithOnlyAnIndexCapacityFailsBeforeTheTableIsCreated() throws Exception {
+        String template = "{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\","
+                + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"gix1\","
+                + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":1}}]}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Property ProvisionedThroughput can't be used with PAY_PER_REQUEST BillingMode.",
+                e.getMessage());
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void aCapacityAbove32BitsFailsBeforeTheTableIsCreated() throws Exception {
+        String template = "{\"TableName\":\"orders\",\"ProvisionedThroughput\":"
+                + "{\"ReadCapacityUnits\":2147483648,\"WriteCapacityUnits\":1}}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertEquals("Model validation failed (#/ProvisionedThroughput/ReadCapacityUnits: expected type: Integer,"
+                + " found: String. This may occur when a numeric value exceeds 32-bit integer max (2147483647)."
+                + " Consider using 'number' type or ensure value fits in integer range.)", e.getMessage());
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void anIndexWarmThroughputAbove64BitsFailsWithTheIndexPath() throws Exception {
+        String template = "{\"TableName\":\"orders\",\"GlobalSecondaryIndexes\":[{\"IndexName\":\"gix0\"},"
+                + "{\"IndexName\":\"gix1\",\"WarmThroughput\":{\"WriteUnitsPerSecond\":18446744073709551617}}]}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertTrue(e.getMessage().startsWith(
+                "Model validation failed (#/GlobalSecondaryIndexes/1/WarmThroughput/WriteUnitsPerSecond:"));
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void theLargest32BitCapacityIsPassedToTheTable() throws Exception {
+        newTable();
+        String template = "{\"TableName\":\"orders\",\"ProvisionedThroughput\":"
+                + "{\"ReadCapacityUnits\":2147483647,\"WriteCapacityUnits\":1}}";
+
+        provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx());
+
+        ArgumentCaptor<ThroughputSpec> table = ArgumentCaptor.forClass(ThroughputSpec.class);
+        verify(tableService).createTable(eq(TABLE_NAME), anyList(), anyList(), eq(false), table.capture(),
+                anyList(), anyList(), eq(REGION));
+        assertEquals(new CapacityUnits(2147483647L, 1), table.getValue().capacity());
+    }
+
+    @Test
+    void aWarmThroughputMemberThatIsAnArrayFailsBeforeTheTableIsCreated() throws Exception {
+        String template = "{\"TableName\":\"orders\",\"WarmThroughput\":"
+                + "{\"ReadUnitsPerSecond\":[],\"WriteUnitsPerSecond\":1}}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertEquals("Property [ReadUnitsPerSecond] expected type: Integer, found: JSONArray", e.getMessage());
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void aCreateThatFindsAnExistingTableDoesNotChangeItsThroughput() throws Exception {
+        existingTable(table(9, 9, false));
+
+        provisioner.provision(resource("AWS::DynamoDB::Table"), props(RAISED), ctx());
+
+        verify(tableService, never()).updateThroughput(anyString(), any(), anyString());
+    }
+
+    private void verifyNoTableCreated() {
+        verify(tableService, never()).createTable(anyString(), anyList(), anyList(), anyBoolean(), any(),
+                anyList(), anyList(), anyString());
+    }
+
+    @Test
     void anEmptyWarmThroughputFailsBeforeTheTableIsCreated() throws Exception {
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(EMPTY_WARM), ctx()));

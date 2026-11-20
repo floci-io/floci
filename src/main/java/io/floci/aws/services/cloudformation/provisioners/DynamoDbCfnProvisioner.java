@@ -183,7 +183,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
         // GlobalTable and the replica resource carry their own throughput settings, which are not read here.
         boolean plainTable = TABLE.equals(r.getResourceType());
-        ThroughputSpec tableThroughput = plainTable ? declaredThroughput(props, ctx) : NO_THROUGHPUT;
+        ThroughputSpec tableThroughput = plainTable ? declaredThroughput(props, "#", ctx) : NO_THROUGHPUT;
         Map<String, ThroughputSpec> indexThroughput = new LinkedHashMap<>();
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
@@ -207,6 +207,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         if (props != null && props.has("GlobalSecondaryIndexes")) {
+            int indexPosition = 0;
             for (JsonNode gsiNode : props.get("GlobalSecondaryIndexes")) {
                 String indexName = engine.resolve(gsiNode.get("IndexName"));
                 List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
@@ -232,7 +233,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType,
                         nonKeyAttributes);
                 if (plainTable) {
-                    ThroughputSpec declared = declaredThroughput(gsiNode, ctx);
+                    ThroughputSpec declared = declaredThroughput(gsiNode, "#/GlobalSecondaryIndexes/" + indexPosition, ctx);
                     if (declared.capacity() != null) {
                         gsi.setProvisionedThroughput(new ProvisionedThroughput(
                                 declared.capacity().readCapacityUnits(), declared.capacity().writeCapacityUnits()));
@@ -244,6 +245,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                     indexThroughput.put(indexName, declared);
                 }
                 gsis.add(gsi);
+                indexPosition++;
             }
         }
 
@@ -274,7 +276,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
         Scope scope = new Scope(ctx.accountId(), region);
         boolean onDemand = PAY_PER_REQUEST.equals(ctx.resolveOptional(props, "BillingMode"));
-        if (onDemand && tableThroughput.capacity() != null) {
+        boolean declaresCapacity = tableThroughput.capacity() != null
+                || indexThroughput.values().stream().anyMatch(spec -> spec.capacity() != null);
+        if (onDemand && declaresCapacity) {
             throw new AwsException("InvalidRequest",
                     "Property ProvisionedThroughput can't be used with PAY_PER_REQUEST BillingMode.", 400);
         }
@@ -318,7 +322,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             reconcileTags(scope, table.getTableArn(), currentTags,
                     parseCfnTags(props != null ? props.get("Tags") : null, engine));
 
-            if (!created && plainTable) {
+            if (inPlaceUpdate && plainTable) {
                 JsonNode priorProperties = ctx.isUpdate() ? ctx.priorProperties() : null;
                 Map<String, ThroughputSpec> changedIndexes = new LinkedHashMap<>();
                 indexThroughput.forEach((indexName, spec) -> changedIndexes.put(indexName,
@@ -391,21 +395,23 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
      * object needs its members, as CloudFormation requires: both capacity units, and at least one
      * warm member, so an empty {@code WarmThroughput} object fails.
      */
-    private static ThroughputSpec declaredThroughput(JsonNode owner, ProvisionContext ctx) {
+    private static ThroughputSpec declaredThroughput(JsonNode owner, String pointer, ProvisionContext ctx) {
         CloudFormationTemplateEngine engine = ctx.engine();
         CapacityUnits capacity = null;
         JsonNode provisioned = owner == null ? null : engine.resolveNode(owner.get("ProvisionedThroughput"));
         if (provisioned != null && !provisioned.isNull()) {
             CfnPropertyTypes.requireType("ProvisionedThroughput", provisioned, JsonNodeType.OBJECT);
-            capacity = new CapacityUnits(requiredUnits(provisioned, "ReadCapacityUnits", ctx),
-                    requiredUnits(provisioned, "WriteCapacityUnits", ctx));
+            String capacityPointer = pointer + "/ProvisionedThroughput";
+            capacity = new CapacityUnits(requiredUnits(provisioned, "ReadCapacityUnits", capacityPointer, ctx),
+                    requiredUnits(provisioned, "WriteCapacityUnits", capacityPointer, ctx));
         }
         WarmUnits warm = null;
         JsonNode warmNode = owner == null ? null : engine.resolveNode(owner.get("WarmThroughput"));
         if (warmNode != null && !warmNode.isNull()) {
             CfnPropertyTypes.requireType("WarmThroughput", warmNode, JsonNodeType.OBJECT);
-            Long read = optionalUnits(warmNode, "ReadUnitsPerSecond", ctx);
-            Long write = optionalUnits(warmNode, "WriteUnitsPerSecond", ctx);
+            String warmPointer = pointer + "/WarmThroughput";
+            Long read = optionalUnits(warmNode, "ReadUnitsPerSecond", warmPointer, ctx);
+            Long write = optionalUnits(warmNode, "WriteUnitsPerSecond", warmPointer, ctx);
             if (read == null && write == null) {
                 throw requiredProperty("ReadUnitsPerSecond");
             }
@@ -414,8 +420,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         return new ThroughputSpec(capacity, warm);
     }
 
-    private static long requiredUnits(JsonNode owner, String member, ProvisionContext ctx) {
-        Long units = optionalUnits(owner, member, ctx);
+    private static long requiredUnits(JsonNode owner, String member, String pointer, ProvisionContext ctx) {
+        Long units = optionalUnits(owner, member, pointer, ctx);
         if (units == null) {
             throw requiredProperty(member);
         }
@@ -464,8 +470,19 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         return null;
     }
 
-    private static Long optionalUnits(JsonNode owner, String member, ProvisionContext ctx) {
+    private static Long optionalUnits(JsonNode owner, String member, String pointer, ProvisionContext ctx) {
+        JsonNode declared = owner.get(member);
+        if (declared != null && declared.isArray()) {
+            throw new AwsException("InvalidRequest",
+                    "Property [" + member + "] expected type: Integer, found: JSONArray", 400);
+        }
         BigInteger units = ctx.resolveOptionalBigInteger(owner, member);
+        if (units != null && units.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) {
+            throw new AwsException("InvalidRequest", "Model validation failed (" + pointer + "/" + member
+                    + ": expected type: Integer, found: String. This may occur when a numeric value exceeds"
+                    + " 32-bit integer max (2147483647). Consider using 'number' type or ensure value fits in"
+                    + " integer range.)", 400);
+        }
         return units == null ? null : units.longValue();
     }
 
