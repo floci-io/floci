@@ -760,11 +760,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 try {
                     cluster = rdsService.addRolesToNewDbCluster(region, id, roles);
                 } catch (AwsException e) {
-                    if (cluster.isDeletionProtection()) {
-                        rdsService.setDeletionProtection(region, id, false);
-                    }
-                    CfnDeletes.safeDelete("DB cluster", id, () -> rdsService.deleteDbCluster(id, region),
-                            "DBClusterNotFoundFault");
+                    rdsService.discardCreatedCluster(region, id, cluster.isDeletionProtection(), e);
                     throw e;
                 }
             }

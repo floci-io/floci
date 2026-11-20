@@ -8063,6 +8063,22 @@ class RdsServiceTest {
     }
 
     @Test
+    void failedProtectedClusterRestoreLeavesNoCluster() {
+        clusterSnapshotOfNewCluster("csnap");
+        doThrow(new RuntimeException("failed restore"))
+                .when(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("CLUSTER_DUMP"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> rdsService.restoreDbClusterFromSnapshot("restored-cluster", "csnap", "aurora-postgresql",
+                        null, null, null, null, null, null, null, null, true, null, "us-east-1"));
+
+        assertEquals("InvalidDBClusterSnapshotStateFault", failure.getErrorCode());
+        assertEquals(0, failure.getCause().getSuppressed().length);
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.getDbCluster("restored-cluster")).getErrorCode());
+    }
+
+    @Test
     void restoreClusterFromSnapshotUsesRequestedPortAndReleasesItOnDelete() {
         clusterSnapshotOfNewCluster("csnap");
 

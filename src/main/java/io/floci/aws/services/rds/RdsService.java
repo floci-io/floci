@@ -2808,14 +2808,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 containerManager.restorePostgresSnapshot(cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
-                try {
-                    if (deletionProtection) {
-                        setDeletionProtection(effectiveRegion, clusterId, false);
-                    }
-                    deleteDbCluster(clusterId, effectiveRegion);
-                } catch (Exception cleanupError) {
-                    e.addSuppressed(cleanupError);
-                }
+                discardCreatedCluster(effectiveRegion, clusterId, deletionProtection, e);
                 AwsException awsEx = new AwsException("InvalidDBClusterSnapshotStateFault",
                         "Failed to restore snapshot: " + e.getMessage(), 400);
                 awsEx.initCause(e);
@@ -2920,14 +2913,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 containerManager.restorePostgresSnapshot(
                         cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
-                try {
-                    if (deletionProtection) {
-                        setDeletionProtection(effectiveRegion, clusterId, false);
-                    }
-                    deleteDbCluster(clusterId, effectiveRegion);
-                } catch (Exception cleanupError) {
-                    e.addSuppressed(cleanupError);
-                }
+                discardCreatedCluster(effectiveRegion, clusterId, deletionProtection, e);
                 AwsException failure = new AwsException("InvalidDBClusterStateFault",
                         "Failed to restore DB cluster " + sourceId + " to " + clusterId + ": "
                         + e.getMessage(), 400);
@@ -2937,6 +2923,21 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         LOG.infov("DB cluster {0} restored to point in time as {1}", sourceId, clusterId);
         return cluster;
+    }
+
+    public void discardCreatedCluster(String region, String clusterId, boolean deletionProtection, Exception cause) {
+        if (deletionProtection) {
+            try {
+                setDeletionProtection(region, clusterId, false);
+            } catch (Exception unprotectError) {
+                cause.addSuppressed(unprotectError);
+            }
+        }
+        try {
+            deleteDbCluster(clusterId, region);
+        } catch (Exception deleteError) {
+            cause.addSuppressed(deleteError);
+        }
     }
 
     private DbClusterSnapshot clusterSnapshotOf(DbCluster cluster, String snapshotId, String region) {
