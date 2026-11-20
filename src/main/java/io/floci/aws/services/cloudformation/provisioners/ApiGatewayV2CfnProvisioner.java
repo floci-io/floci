@@ -329,6 +329,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                                 objectMapper.convertValue(requestParameters,
                                                         new TypeReference<Map<String, Object>>() {})));
                             }
+                            JsonNode responseParameters = integration.path("responseParameters");
+                            if (responseParameters.isObject() && !responseParameters.isEmpty()) {
+                                integrationRequest.put("responseParameters", objectMapper.convertValue(
+                                        responseParameters, new TypeReference<Map<String, Object>>() {}));
+                            }
                             Integration createdIntegration = apiGatewayV2Service.createIntegration(region, apiId,
                                     integrationRequest);
                             integrationIds.add(createdIntegration.getIntegrationId());
@@ -947,6 +952,10 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         if (requestParameters != null) {
             req.put("requestParameters", requestParameters);
         }
+        Map<String, Map<String, String>> responseParameters = resolveResponseParameters(props, ctx.engine());
+        if (responseParameters != null) {
+            req.put("responseParameters", responseParameters);
+        }
         Map<String, String> requestTemplates = resolveStringMap(props, "RequestTemplates", ctx.engine());
         if (requestTemplates != null) {
             req.put("requestTemplates", requestTemplates);
@@ -972,7 +981,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 apiGatewayV2Service.replaceIntegrationSettings(region, apiId, r.getPhysicalId(),
                         (String) req.get("integrationMethod"),
                         (String) req.get("templateSelectionExpression"), timeoutInMillis,
-                        requestParameters, requestTemplates);
+                        requestParameters, responseParameters, requestTemplates);
                 if (integrationSubtype == null && prior.getIntegrationSubtype() != null) {
                     apiGatewayV2Service.replaceIntegrationSubtype(region, apiId, r.getPhysicalId(), null);
                 }
@@ -1015,6 +1024,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("templateSelectionExpression", prior.getTemplateSelectionExpression());
         snapshot.put("timeoutInMillis", prior.getTimeoutInMillis());
         snapshot.set("requestParameters", objectMapper.valueToTree(prior.getRequestParameters()));
+        snapshot.set("responseParameters", objectMapper.valueToTree(prior.getResponseParameters()));
         snapshot.set("requestTemplates", objectMapper.valueToTree(prior.getRequestTemplates()));
         snapshot.put("integrationSubtype", prior.getIntegrationSubtype());
         snapshot.put("otherFieldChanged", otherFieldChanged);
@@ -1050,6 +1060,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 snapshot.path("apiId").asText(), resource.getPhysicalId(),
                 textOrNull(snapshot, "integrationMethod"), textOrNull(snapshot, "templateSelectionExpression"),
                 snapshot.path("timeoutInMillis").asInt(), stringMapOrNull(snapshot.path("requestParameters")),
+                responseParametersOrNull(snapshot.path("responseParameters")),
                 stringMapOrNull(snapshot.path("requestTemplates")));
         if (snapshot.has("integrationSubtype")) {
             apiGatewayV2Service.replaceIntegrationSubtype(snapshot.path("region").asText(),
@@ -1068,6 +1079,13 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> out = new LinkedHashMap<>();
         node.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
         return out;
+    }
+
+    private Map<String, Map<String, String>> responseParametersOrNull(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return objectMapper.convertValue(node, new TypeReference<Map<String, Map<String, String>>>() {});
     }
 
     // ── Stage ────────────────────────────────────────────────────────────────
@@ -1295,6 +1313,30 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> out = new LinkedHashMap<>();
         resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
+    }
+
+    /**
+     * Resolves ResponseParameters from its template shape, a {@code ResponseParameters} list of
+     * Destination and Source pairs under each status code, to the API's map of status code to
+     * mappings, or null when absent or not an object.
+     */
+    private static Map<String, Map<String, String>> resolveResponseParameters(JsonNode props,
+                                                                           CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("ResponseParameters") || props.get("ResponseParameters").isNull()) {
+            return null;
+        }
+        JsonNode resolved = engine.resolveNodeOmittingNoValue(props.get("ResponseParameters"));
+        if (resolved == null || !resolved.isObject()) {
+            return null;
+        }
+        Map<String, Map<String, String>> out = new LinkedHashMap<>();
+        resolved.fields().forEachRemaining(statusCode -> {
+            Map<String, String> mappings = new LinkedHashMap<>();
+            statusCode.getValue().path("ResponseParameters").forEach(parameter ->
+                    mappings.put(parameter.path("Destination").asText(), parameter.path("Source").asText()));
+            out.put(statusCode.getKey(), mappings);
+        });
         return out;
     }
 }

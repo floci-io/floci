@@ -788,9 +788,10 @@ public class ApiGatewayV2Service {
         String payloadFormatVersion = request.get("payloadFormatVersion") != null
                 ? (String) request.get("payloadFormatVersion")
                 : defaultPayloadFormatVersion(integrationSubtype);
-        Map<String, String> requestParameters = stringParameters(request.get("requestParameters"));
+        Map<String, String> requestParameters = stringParameters(request.get("requestParameters"), "RequestParameters");
         validateIntegrationSubtype(api.getProtocolType(), (String) request.get("integrationType"),
                 integrationSubtype, payloadFormatVersion, requestParameters);
+        Map<String, Map<String, String>> responseParameters = responseParameters(request.get("responseParameters"));
 
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
@@ -817,6 +818,7 @@ public class ApiGatewayV2Service {
         integration.setResponseTemplates(responseTemplates);
 
         integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
 
         integration.setConnectionId((String) request.get("connectionId"));
 
@@ -851,7 +853,9 @@ public class ApiGatewayV2Service {
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
         Map<String, String> requestParameters = mergedParameters(integration.getRequestParameters(),
-                stringParameters(request.get("requestParameters")));
+                stringParameters(request.get("requestParameters"), "RequestParameters"));
+        Map<String, Map<String, String>> responseParameters = mergedResponseParameters(
+                integration.getResponseParameters(), responseParameters(request.get("responseParameters")));
         String payloadFormatVersion = (String) request.get("payloadFormatVersion");
         if (payloadFormatVersion == null) {
             payloadFormatVersion = request.get("integrationSubtype") != null
@@ -904,6 +908,7 @@ public class ApiGatewayV2Service {
             integration.setResponseTemplates(responseTemplates);
         }
         integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
         if (request.containsKey("connectionId") && request.get("connectionId") != null) {
             integration.setConnectionId((String) request.get("connectionId"));
         }
@@ -956,22 +961,83 @@ public class ApiGatewayV2Service {
     }
 
     /**
-     * RequestParameters with every number or boolean value read as its text. An object or array
-     * value is a {@code BadRequestException}.
+     * The stored ResponseParameters with the update's status codes merged in: a status code whose
+     * mappings are empty is removed, and any other replaces that status code's mappings. An update
+     * without ResponseParameters keeps the stored map, and a merge that removes every status code
+     * leaves none.
      */
-    private static Map<String, String> stringParameters(Object requestParameters) {
-        if (!(requestParameters instanceof Map<?, ?> map)) {
+    private static Map<String, Map<String, String>> mergedResponseParameters(
+            Map<String, Map<String, String>> stored, Map<String, Map<String, String>> update) {
+        if (update == null) {
+            return stored;
+        }
+        Map<String, Map<String, String>> merged = stored != null ? new LinkedHashMap<>(stored) : new LinkedHashMap<>();
+        update.forEach((statusCode, mappings) -> {
+            if (mappings.isEmpty()) {
+                merged.remove(statusCode);
+            } else {
+                merged.put(statusCode, mappings);
+            }
+        });
+        return merged.isEmpty() ? null : merged;
+    }
+
+    /**
+     * Parameters with every number or boolean value read as its text. An object or array value is a
+     * {@code BadRequestException} naming {@code member}.
+     */
+    private static Map<String, String> stringParameters(Object parameters, String member) {
+        if (!(parameters instanceof Map<?, ?> map)) {
             return null;
         }
-        Map<String, String> parameters = new LinkedHashMap<>();
+        Map<String, String> strings = new LinkedHashMap<>();
         map.forEach((key, value) -> {
             if (value instanceof Map<?, ?> || value instanceof Collection<?>) {
                 throw new AwsException("BadRequestException",
-                        "RequestParameters value for " + key + " must be a string.", 400);
+                        member + " value for " + key + " must be a string.", 400);
             }
-            parameters.put(String.valueOf(key), value == null ? null : String.valueOf(value));
+            strings.put(String.valueOf(key), value == null ? null : String.valueOf(value));
         });
-        return parameters;
+        return strings;
+    }
+
+    private static final Pattern RESPONSE_STATUS_CODE = Pattern.compile("[2-5][0-9]{2}");
+    private static final Pattern RESPONSE_PARAMETER_KEY =
+            Pattern.compile("overwrite:statuscode|(?:append|overwrite|remove):header\\..+");
+
+    /**
+     * ResponseParameters as CreateIntegration and UpdateIntegration accept them: each key a status
+     * code from 200 to 599, and each of its mappings {@code overwrite:statuscode} or an
+     * {@code append}, {@code overwrite} or {@code remove} of {@code header.<name>}. Anything else is a
+     * {@code BadRequestException}.
+     */
+    static Map<String, Map<String, String>> responseParameters(Object responseParameters) {
+        if (!(responseParameters instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Map<String, Map<String, String>> parsed = new LinkedHashMap<>();
+        map.forEach((key, value) -> {
+            String statusCode = String.valueOf(key);
+            if (!RESPONSE_STATUS_CODE.matcher(statusCode).matches()) {
+                throw new AwsException("BadRequestException",
+                        "ResponseParameters key " + statusCode + " must be a status code from 200 to 599.", 400);
+            }
+            if (!(value instanceof Map<?, ?>)) {
+                throw new AwsException("BadRequestException",
+                        "ResponseParameters value for " + statusCode + " must be a map.", 400);
+            }
+            Map<String, String> mappings = stringParameters(value, "ResponseParameters");
+            for (String mapping : mappings.keySet()) {
+                if (!RESPONSE_PARAMETER_KEY.matcher(mapping).matches()) {
+                    throw new AwsException("BadRequestException",
+                            "ResponseParameters key " + mapping + " for status code " + statusCode
+                                    + " must be overwrite:statuscode or append, overwrite or remove of header.<name>.",
+                            400);
+                }
+            }
+            parsed.put(statusCode, mappings);
+        });
+        return parsed;
     }
 
     /**
@@ -1057,19 +1123,21 @@ public class ApiGatewayV2Service {
     }
 
     /**
-     * Sets the method, template selection expression, timeout and the two mapping tables exactly as
+     * Sets the method, template selection expression, timeout and the three mapping tables exactly as
      * given, null included. A timeout of 0 is the unset value. UpdateIntegration keeps a field the
      * request leaves out, so it cannot remove one that CloudFormation dropped.
      */
     public Integration replaceIntegrationSettings(String region, String apiId, String integrationId,
                                                   String integrationMethod, String templateSelectionExpression,
                                                   int timeoutInMillis, Map<String, String> requestParameters,
+                                                  Map<String, Map<String, String>> responseParameters,
                                                   Map<String, String> requestTemplates) {
         Integration integration = getIntegration(region, apiId, integrationId);
         integration.setIntegrationMethod(integrationMethod);
         integration.setTemplateSelectionExpression(templateSelectionExpression);
         integration.setTimeoutInMillis(timeoutInMillis);
         integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
         integration.setRequestTemplates(requestTemplates);
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;

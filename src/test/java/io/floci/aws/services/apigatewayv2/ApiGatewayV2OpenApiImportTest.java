@@ -693,4 +693,48 @@ class ApiGatewayV2OpenApiImportTest {
         assertEquals(1, authorizers.size());
         assertEquals(300, authorizers.get(0).get("authorizerResultTtlInSeconds").asInt());
     }
+
+    @Test
+    @Order(20)
+    void importedResponseParametersAreStoredAndAnInvalidOneLeavesThePreviousDefinitionIntact() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "ResponseParametersImport", "version": "1.0"},
+                  "paths": {
+                    "/orders": {
+                      "get": {
+                        "x-amazon-apigateway-integration": {
+                          "type": "http_proxy",
+                          "httpMethod": "ANY",
+                          "uri": "https://api.example.com/orders",
+                          "payloadFormatVersion": "1.0",
+                          "responseParameters": {
+                            "500": {"overwrite:statuscode": "403", "append:header.header1": "$context.requestId"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String created = given().contentType(ContentType.JSON)
+                .body(envelope(spec))
+                .when().put("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(created).get("apiId").asText();
+
+        JsonNode responseParameters = get("/v2/apis/" + apiId + "/integrations")
+                .get("items").get(0).get("responseParameters");
+        assertEquals("403", responseParameters.path("500").path("overwrite:statuscode").asText());
+        assertEquals("$context.requestId", responseParameters.path("500").path("append:header.header1").asText());
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(spec.replace("\"500\":", "\"700\":")))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
+
+        assertEquals("403", get("/v2/apis/" + apiId + "/integrations").get("items").get(0)
+                .path("responseParameters").path("500").path("overwrite:statuscode").asText());
+    }
 }
