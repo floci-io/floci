@@ -15,6 +15,7 @@ import io.floci.aws.services.ecs.model.Deployment;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import io.floci.aws.services.ecs.model.ServiceRevision;
 import io.floci.aws.services.ecs.model.TaskDefinition;
@@ -61,6 +62,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
     private boolean healthy;
     /** When set, the next launch is stopped by a user while its image is still pulling. */
     private boolean stopDuringPull;
+    /** The Cloud Map side a service is built with; none unless a test sets one first. */
+    private EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private EcsService service;
 
     @Test
@@ -349,6 +352,80 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("COMPLETED", liveDeployment(service, "cb-rollback").getRolloutState());
         verify(publisher, times(2)).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
                 argThat(reason -> reason.contains(successfulDeploymentId)), eq(REGION));
+    }
+
+    /**
+     * A rollback restores the Service Connect configuration of the revision it returns to, and with
+     * it the namespace ListServicesByNamespace lists the service under and the Cloud Map services
+     * behind its endpoints. When another service took a discovery name meanwhile, the rollback goes
+     * through without endpoints and drops the failed deployment's.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rollbackRestoresTheServiceConnectEndpoints(boolean namesStillFree) {
+        discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
+        String first = cloudMapNamespaceArn("first");
+        String second = cloudMapNamespaceArn("second");
+        when(discoveryRegistrar.namespaceArn("first", REGION)).thenReturn(first);
+        when(discoveryRegistrar.namespaceArn("second", REGION)).thenReturn(second);
+        List<ServiceConnectServiceResource> web = List.of(new ServiceConnectServiceResource("web",
+                "arn:aws:servicediscovery:" + REGION + ":000000000000:service/srv-web"));
+        List<ServiceConnectServiceResource> admin = List.of(new ServiceConnectServiceResource("admin",
+                "arn:aws:servicediscovery:" + REGION + ":000000000000:service/srv-admin"));
+        if (namesStillFree) {
+            when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("web")), eq(first),
+                    eq(REGION), any(), any())).thenReturn(web);
+        } else {
+            when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("web")), eq(first),
+                    eq(REGION), any(), any())).thenReturn(web).thenThrow(new AwsException(
+                    "InvalidParameterException", "SC service is already used by " + first, 400));
+        }
+        when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("admin")), eq(second),
+                eq(REGION), any(), any())).thenReturn(admin);
+        EcsService service = newService();
+        healthy = true;
+        service.createCluster("cb-connect-cluster", REGION);
+        registerTaskDef(service, "cb-connect-fam", "app:1");
+        CreateServiceRequest request = new CreateServiceRequest();
+        request.setCluster("cb-connect-cluster");
+        request.setServiceName("cb-connect");
+        request.setTaskDefinition("cb-connect-fam");
+        request.setDesiredCount(1);
+        request.setLaunchType(LaunchType.FARGATE);
+        request.setDeploymentConfiguration(Map.of("deploymentCircuitBreaker", breaker(true, true)));
+        request.setServiceConnectConfiguration(Map.of("enabled", true, "namespace", "first",
+                "services", List.of(Map.of("portName", "web"))));
+        String serviceArn = service.createService(request, REGION).getServiceArn();
+        service.reconcileServices();
+        service.reconcileServices();
+
+        healthy = false;
+        TaskDefinition broken = registerTaskDef(service, "cb-connect-fam", "app:broken");
+        String failedId = service.updateService("cb-connect-cluster", "cb-connect",
+                "cb-connect-fam:" + broken.getRevision(), null, null, null, false,
+                Map.of("enabled", true, "namespace", "second", "services", List.of(Map.of("portName", "admin"))),
+                REGION).getDeploymentId();
+        assertEquals(List.of(serviceArn), service.listServicesByNamespace("second", null, null, REGION).arns());
+        assertEquals(List.of(), service.listServicesByNamespace("first", null, null, REGION).arns());
+        assertEquals(admin, liveDeployment(service, "cb-connect").getServiceConnectResources());
+        for (int i = 0; i < 3; i++) {
+            service.reconcileServices();
+        }
+
+        assertEquals("ROLLBACK_IN_PROGRESS", deploymentOf(service, "cb-connect", failedId).getStatus());
+        assertEquals(List.of(serviceArn), service.listServicesByNamespace("first", null, null, REGION).arns());
+        assertEquals(List.of(), service.listServicesByNamespace("second", null, null, REGION).arns());
+        if (namesStillFree) {
+            assertEquals(web, liveDeployment(service, "cb-connect").getServiceConnectResources());
+        } else {
+            assertEquals(List.of(), liveDeployment(service, "cb-connect").getServiceConnectResources());
+            verify(discoveryRegistrar).syncServiceConnectServices(admin, List.of(), null, REGION, serviceArn,
+                    "InvalidParameterException");
+        }
+    }
+
+    private static String cloudMapNamespaceArn(String name) {
+        return "arn:aws:servicediscovery:" + REGION + ":" + EcsServiceFixtures.ACCOUNT + ":namespace/ns-" + name;
     }
 
     @Test
@@ -817,6 +894,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 .storageFactory(storage)
                 .cloudWatchMetricsService(metricsService)
                 .eventPublisher(eventPublisher)
+                .discoveryRegistrar(discoveryRegistrar)
                 .dockerMode()
                 .build();
         return service;

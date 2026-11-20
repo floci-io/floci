@@ -177,11 +177,18 @@ pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (defau
 unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). As in AWS, the
 first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` sets the
 first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
-past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
-function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
-five minutes. Deleting the function drops its pending retries without delivering a record, as AWS does.
+past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. Deleting the function
+drops its pending retries without delivering a record, as AWS does.
 
-When retries are exhausted or event age is exceeded:
+An event invoked while the function's concurrency is in use is still accepted with `202` and queued, as AWS
+does. An attempt that finds the concurrency in use waits for a permit without spending an attempt: it asks again
+after 1 second, and each further wait doubles, up to 30 seconds, until the event expires. The waits start over at
+1 second once an attempt runs. AWS backs off the same way up to 5 minutes; the lower cap notices a freed permit
+sooner locally. Under a reserved concurrency of `0`, an event is sent to the `OnFailure` destination or the
+dead-letter queue at once, without an attempt, as AWS does. Its failure record carries status `429` and a
+`TooManyRequestsException` response payload, which is Floci's own: AWS documents no content for it.
+
+When retries are exhausted, event age is exceeded, or the reserved concurrency is `0`:
 
 - If an `OnFailure` destination is configured, the failure record is delivered to the destination.
 - Otherwise, if a `DeadLetterConfig` (`TargetArn`) is configured on the function, the original request payload
@@ -482,8 +489,11 @@ disabled fails with Lambda's error as the resource status reason.
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced function-wide: invocations of every
     version and alias count against the function's reservation, and
-    invocations beyond the reserved value return `TooManyRequestsException`
-    (HTTP 429). Functions without a reserved value share a **per-region**
+    synchronous invocations beyond the reserved value return
+    `TooManyRequestsException` (HTTP 429). Asynchronous invocations beyond it
+    are accepted and queued until a permit frees; under a reservation of zero
+    they go to the failure destination without an attempt (see above).
+    Functions without a reserved value share a **per-region**
     pool. AWS Lambda's "account-level" limit is in fact a
     per-account-per-region quota, and Floci mirrors that by partitioning
     counters on the ARN's region segment. The pool size (default 1000) is

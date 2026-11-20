@@ -34,6 +34,7 @@ import io.floci.aws.services.ecs.model.PortMapping;
 import io.floci.aws.services.ecs.model.ProtectedTask;
 import io.floci.aws.services.ecs.model.RuntimePlatform;
 import io.floci.aws.services.ecs.model.Secret;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import io.floci.aws.services.ecs.model.ServiceEvent;
 import io.floci.aws.services.ecs.model.ServiceRevision;
@@ -785,6 +786,14 @@ public class EcsResponseWriter {
         putInstant(n, "updatedAt", d.getUpdatedAt());
         if (d.getServiceConnectConfiguration() != null) {
             n.set("serviceConnectConfiguration", objectMapper.valueToTree(d.getServiceConnectConfiguration()));
+        }
+        if (d.getServiceConnectResources() != null && !d.getServiceConnectResources().isEmpty()) {
+            ArrayNode resources = n.putArray("serviceConnectResources");
+            for (ServiceConnectServiceResource resource : d.getServiceConnectResources()) {
+                resources.addObject()
+                        .put("discoveryName", resource.discoveryName())
+                        .put("discoveryArn", resource.discoveryArn());
+            }
         }
         return n;
     }

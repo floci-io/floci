@@ -44,6 +44,7 @@ final class EcsServiceFixtures {
         private EcsEventPublisher eventPublisher;
         private StorageFactory storageFactory;
         private CloudWatchMetricsService cloudWatchMetricsService;
+        private EcsServiceDiscoveryRegistrar discoveryRegistrar;
         private Clock clock = Clock.systemUTC();
         private boolean dockerMode;
 
@@ -76,6 +77,12 @@ final class EcsServiceFixtures {
             return this;
         }
 
+        /** The Cloud Map side; none unless the test gives one. */
+        Builder discoveryRegistrar(EcsServiceDiscoveryRegistrar discoveryRegistrar) {
+            this.discoveryRegistrar = discoveryRegistrar;
+            return this;
+        }
+
         Builder clock(Clock clock) {
             this.clock = clock;
             return this;
@@ -94,7 +101,7 @@ final class EcsServiceFixtures {
             EcsService service = new EcsService(new RegionResolver(REGION, ACCOUNT), containerManager, config,
                     loadBalancerRegistrar,
                     storageFactory != null ? storageFactory : new InMemoryStorageFactory(ACCOUNT), eventPublisher,
-                    new EcsExecSessionRegistry(), null, cloudWatchMetricsService, clock);
+                    new EcsExecSessionRegistry(), discoveryRegistrar, cloudWatchMetricsService, clock);
             service.initializeStorage();
             return service;
         }

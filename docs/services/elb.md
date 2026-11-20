@@ -212,12 +212,13 @@ on the listener socket.
 
 ### Health checks
 
-For non-Lambda targets, the checker sends an HTTP or HTTPS GET to `HealthCheckPath`
-on `HealthCheckPort`, or the target's traffic port when configured as `traffic-port`.
+For non-Lambda targets, the checker probes `HealthCheckPort`, or the target's traffic
+port when configured as `traffic-port`. With `HealthCheckProtocol=TCP` it opens a
+connection and passes once the target accepts it; `HealthCheckPath` and the matcher are
+not used. Otherwise it sends an HTTP or HTTPS GET to `HealthCheckPath`, and
 `HealthCheckProtocol` selects TLS independently of the target's application protocol.
-The response-code matcher and healthy/unhealthy thresholds affect target health.
-`HealthCheckProtocol=TCP` does not perform a TCP-only probe: it sends the same GET with the
-stored path and matcher, which `DescribeTargetGroups` omits for TCP checks, as AWS does.
+The response-code matcher (HTTP and HTTPS checks) and healthy/unhealthy thresholds
+affect target health.
 Lambda targets are not actively probed. In ELBv2 mock mode, sockets
 and active monitoring are disabled. While a target group has a `healthy` target, the
 proxy routes only to its `healthy` targets, so a newly registered target in `initial`
