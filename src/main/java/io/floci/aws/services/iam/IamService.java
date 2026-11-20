@@ -1887,19 +1887,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * The two sentences IAM answers for a managed policy ARN it cannot resolve. They are not
+     * The three sentences IAM answers for a managed policy ARN it cannot resolve. They are not
      * interchangeable and the operation decides which it answers, each recorded against a real
      * account: {@code GetPolicy} and {@code TagPolicy} answer {@link #PLAIN}, recorded 2026-10-26,
      * as do the three detach operations, recorded 2026-10-29, while the attach family answers
      * {@link #ATTACHABLE}, recorded on {@code ListEntitiesForPolicy} 2026-10-25 and on
      * {@code CreatePolicyVersion}, {@code GetPolicyVersion} and {@code ListPolicyVersions}
-     * 2026-10-29. The clause is what tells the two apart: one says the ARN names nothing, the
-     * other that it names nothing this call could attach, and AWS answers the second for both of
-     * its own cases deliberately, so a caller cannot tell them apart either.
+     * 2026-10-29. The clause is what tells the first two apart: one says the ARN names nothing,
+     * the other that it names nothing this call could attach, and AWS answers the second for both
+     * of its own cases deliberately, so a caller cannot tell them apart either. {@link #BOUNDARY}
+     * is the third, answered for a permissions boundary on a user or role, and a version id that
+     * names nothing on a policy that exists is named inside {@link #ATTACHABLE}; the AWS Emulator
+     * Evaluation Suite asserts both wordings.
      *
      * <p>The operations no recording covers answer with their own family, which is this emulator's
-     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the remaining
-     * version operations and a permissions boundary with the attach family.
+     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the version
+     * operations that take a version id, {@code GetPolicyVersion}, {@code DeletePolicyVersion} and
+     * {@code SetDefaultPolicyVersion}, with the attach family.
      * {@code docs/services/iam.md} records which is which and what a later recording moves.
      */
     private enum PolicyNotFound {
