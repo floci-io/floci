@@ -254,6 +254,35 @@ class SpectrumMskSchemaPreparationTest {
     }
 
     @Test
+    void refusesAMixedKinesisAndMskMaterializedViewBeforeTouchingKinesisOrTheBackend() {
+        preparation.prepare(CREATE, SESSION, backend);
+        kinesisSchemas.bind(new KinesisSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "kds", null, ROLE));
+        String mixed = "CREATE MATERIALIZED VIEW mv AS SELECT * FROM kds.events WHERE EXISTS (SELECT 1 FROM msk.orders)";
+
+        assertThat(preparation.handlesDdl(mixed, SESSION), equalTo(true));
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(mixed, SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("0A000"));
+        assertThat(error.getMessage(), containsString("Streaming materialized views over MSK"));
+        verify(backend, never()).execute(argThat(sql -> sql.contains("CREATE TABLE")));
+    }
+
+    @Test
+    void refusesRenamingAnMskSchemaAndLeavesItsBindingIntact() {
+        preparation.prepare(CREATE, SESSION, backend);
+        String rename = "ALTER SCHEMA msk RENAME TO other";
+
+        assertThat(preparation.referencesExternal(rename, SESSION), equalTo(true));
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(rename, SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("0A000"));
+        verify(backend, never()).execute(rename);
+        assertThat(bound("msk").isPresent(), equalTo(true));
+    }
+
+    @Test
     void refusesToReadATopicOutsideAMaterializedView() {
         preparation.prepare(CREATE, SESSION, backend);
         String read = "SELECT * FROM msk.orders";

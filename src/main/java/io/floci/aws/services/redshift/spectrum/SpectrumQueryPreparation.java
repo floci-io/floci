@@ -228,14 +228,14 @@ public class SpectrumQueryPreparation {
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
-                && streamSource(view.select(), session).isPresent()) {
-            createStreamingView(view, kinesis, session, backend);
-            return true;
-        }
-        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
                 && !ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
             throw new SpectrumSqlException("0A000",
                     "Streaming materialized views over MSK external schemas are not supported");
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
+                && streamSource(view.select(), session).isPresent()) {
+            createStreamingView(view, kinesis, session, backend);
+            return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.RefreshView refresh) {
             Optional<KinesisViewBinding> view = views.find(session, refresh.viewSchema(), refresh.viewName());

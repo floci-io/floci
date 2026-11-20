@@ -118,6 +118,20 @@ class ExternalReferenceScannerTest {
     }
 
     @Test
+    void detectsRenamingAnExternalSchemaOrRenamingOntoOne() {
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER SCHEMA analytics RENAME TO other", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", ""))));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER SCHEMA \"Mixed\" RENAME TO other", SCHEMAS),
+                equalTo(Optional.of(new Reference("Mixed", ""))));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER SCHEMA local_schema RENAME TO analytics", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", ""))));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER SCHEMA local_schema RENAME TO other", SCHEMAS),
+                equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER SCHEMA analytics OWNER TO admin", SCHEMAS),
+                equalTo(Optional.empty()));
+    }
+
+    @Test
     void ddlOnNativeObjectsIsNotAnExternalWrite() {
         assertThat(ExternalReferenceScanner.writeTarget("DROP TABLE public.a, public.b", SCHEMAS), equalTo(Optional.empty()));
         assertThat(ExternalReferenceScanner.writeTarget("DROP SCHEMA local_schema", SCHEMAS), equalTo(Optional.empty()));
