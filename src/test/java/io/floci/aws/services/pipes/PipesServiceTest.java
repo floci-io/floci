@@ -167,12 +167,13 @@ class PipesServiceTest {
 
     @Test
     void failedUpdateDoesNotMutateThePreviouslyStoredPipe() {
-        Pipe original = pipesService.createPipe("durable-pipe",
+        pipesService.createPipe("durable-pipe",
                 "arn:aws:sqs:us-east-1:000000000000:source",
                 "arn:aws:sqs:us-east-1:000000000000:target",
                 "arn:aws:iam::000000000000:role/role",
                 "original description", DesiredState.STOPPED, null,
                 null, null, null, null, "us-east-1");
+        Pipe originalStored = storage.get("us-east-1::durable-pipe").orElseThrow();
         doThrow(new UncheckedIOException(new IOException("disk full")))
                 .when(storage).put(eq("us-east-1::durable-pipe"), any(Pipe.class));
 
@@ -181,7 +182,7 @@ class PipesServiceTest {
                 null, null, null, null, null, "us-east-1"));
 
         Pipe retained = storage.get("us-east-1::durable-pipe").orElseThrow();
-        assertSame(original, retained);
+        assertSame(originalStored, retained);
         assertEquals("original description", retained.getDescription());
         assertEquals("arn:aws:sqs:us-east-1:000000000000:target", retained.getTarget());
     }

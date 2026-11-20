@@ -323,7 +323,7 @@ public class PipesService implements TagHandler, ResourceProvider {
                     arn, "pipes:pipe", "pipes",
                     parsed.region(), parsed.accountId(),
                     pipe.getCreationTime() != null ? pipe.getCreationTime() : Instant.now(),
-                    pipe.getTags() != null ? pipe.getTags() : Map.of()));
+                    pipe.getTags() != null ? Map.copyOf(pipe.getTags()) : Map.of()));
         }
         return resources;
     }
