@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.codedeploy.CodeDeployService;
 import io.floci.aws.services.codedeploy.model.Application;
@@ -45,14 +44,8 @@ class CodeDeployCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId,
-                event -> { }, priorProperties);
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(), "us-east-1", "000000000000", "my-stack",
+                priorPhysicalId, event -> { }, priorProperties);
     }
 
     private static StackResource resource() {
