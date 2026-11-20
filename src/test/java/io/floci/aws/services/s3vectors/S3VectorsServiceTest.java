@@ -12,12 +12,15 @@ import io.floci.aws.services.s3vectors.model.VectorIndex;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,6 +48,71 @@ class S3VectorsServiceTest {
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void invalidTagsAreRejectedBeforeCreatingOrReplacingResources(boolean index) {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, Map.of("original", "value"), REGION);
+        VectorIndex vectorIndex = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(),
+                null, Map.of("original", "value"), REGION);
+        String arn = index ? vectorIndex.getIndexArn() : bucket.getVectorBucketArn();
+        for (Map<String, String> tags : List.of(
+                Map.of("", "value"), Map.of("invalid!", "value"), Map.of("aws:reserved", "value"),
+                Map.of("x".repeat(129), "value"), Map.of("key", "x".repeat(257)),
+                Map.of("key", "invalid!"), numberedTags(51))) {
+            AwsException createError = assertThrows(AwsException.class, () -> {
+                if (index) {
+                    service.createIndex("bucket", "new-index", 2, "float32", "euclidean", List.of(), null, tags, REGION);
+                } else {
+                    service.createVectorBucket("new-bucket", null, tags, REGION);
+                }
+            });
+            assertEquals("ValidationException", createError.getErrorCode());
+            assertEquals(1, service.listVectorBuckets(REGION).size());
+            assertEquals(1, service.listIndexes("bucket", REGION).size());
+            AwsException replaceError = assertThrows(AwsException.class, () -> {
+                if (index) {
+                    service.replaceIndexTags("bucket", "index", tags, REGION);
+                } else {
+                    service.replaceBucketTags("bucket", tags, REGION);
+                }
+            });
+            assertEquals("ValidationException", replaceError.getErrorCode());
+            assertEquals(Map.of("original", "value"), service.listTagsForResource(arn, REGION));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void legacyOverLimitTagsCanBeRemovedBeforeFurtherUpdates(boolean index) {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
+        VectorIndex vectorIndex = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(), REGION);
+        // Seed an old stored record that predates tag validation.
+        if (index) {
+            vectorIndex.setTags(numberedTags(52));
+        } else {
+            bucket.setTags(numberedTags(52));
+        }
+        String arn = index ? vectorIndex.getIndexArn() : bucket.getVectorBucketArn();
+        assertEquals(52, service.listTagsForResource(arn, REGION).size());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.tagResource(arn, Map.of("key0", "changed"), REGION)).getErrorCode());
+        assertEquals("value", service.listTagsForResource(arn, REGION).get("key0"));
+        service.untagResource(arn, List.of("key51"), REGION);
+        assertEquals(51, service.listTagsForResource(arn, REGION).size());
+        service.untagResource(arn, List.of("key50"), REGION);
+        service.tagResource(arn, Map.of("key0", "changed"), REGION);
+        assertEquals(50, service.listTagsForResource(arn, REGION).size());
+        assertEquals("changed", service.listTagsForResource(arn, REGION).get("key0"));
+    }
+
+    private static Map<String, String> numberedTags(int count) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 0; i < count; i++) {
+            tags.put("key" + i, "value");
+        }
+        return tags;
     }
 
     /**

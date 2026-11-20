@@ -9,14 +9,25 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
+import software.amazon.awssdk.services.s3vectors.model.AccessDeniedException;
 
 import java.net.URI;
+import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * S3 Vectors requests are checked against the caller's policies through its generated routes: a vector bucket call
@@ -31,6 +42,50 @@ class S3VectorsIamIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tagOperationsRequireTheirOwnPermissionsOnTheExactResource(boolean index) throws Exception {
+        String name = bucketName();
+        String bucketArn = createBucket(name, "{\"team\":\"data\"}");
+        try {
+            String indexArn = createIndex(name, "events", "{\"team\":\"web\"}");
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3v-tags-", "access",
+                    allow("\"s3vectors:ListTagsForResource\"", index ? indexArn : bucketArn));
+                    S3VectorsClient client = S3VectorsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                            .credentialsProvider(StaticCredentialsProvider.create(
+                                    AwsBasicCredentials.create(user.accessKeyId(), user.secretAccessKey())))
+                            .httpClientBuilder(UrlConnectionHttpClient.builder()).build()) {
+                String arn = index ? indexArn : bucketArn;
+                String otherArn = index ? bucketArn : indexArn;
+                Map<String, String> original = Map.of("team", index ? "web" : "data");
+                assertEquals(original, client.listTagsForResource(request -> request.resourceArn(arn)).tags());
+                assertThrows(AccessDeniedException.class, () -> client.tagResource(request -> request
+                        .resourceArn(arn).tags(Map.of("team", "changed"))));
+                assertThrows(AccessDeniedException.class, () -> client.untagResource(request -> request
+                        .resourceArn(arn).tagKeys("team")));
+                assertEquals(original, client.listTagsForResource(request -> request.resourceArn(arn)).tags());
+
+                SignedIamUsers.iam(endpoint, "PutUserPolicy", Map.of("UserName", user.name(), "PolicyName", "access",
+                        "PolicyDocument", allow("[\"s3vectors:ListTagsForResource\",\"s3vectors:TagResource\","
+                                + "\"s3vectors:UntagResource\"]", arn))).then().statusCode(200);
+                client.tagResource(request -> request.resourceArn(arn).tags(Map.of("owner", "allowed")));
+                assertEquals("allowed", client.listTagsForResource(request -> request.resourceArn(arn)).tags().get("owner"));
+                client.untagResource(request -> request.resourceArn(arn).tagKeys("owner"));
+                assertEquals(original, client.listTagsForResource(request -> request.resourceArn(arn)).tags());
+                assertThrows(AccessDeniedException.class, () -> client.listTagsForResource(request -> request
+                        .resourceArn(otherArn)));
+                assertThrows(AccessDeniedException.class, () -> client.tagResource(request -> request
+                        .resourceArn(otherArn).tags(Map.of("team", "changed"))));
+                assertThrows(AccessDeniedException.class, () -> client.untagResource(request -> request
+                        .resourceArn(otherArn).tagKeys("team")));
+            } finally {
+                send(admin, "/DeleteIndex", index(name, "events")).then().statusCode(200);
+            }
+        } finally {
+            deleteBucket(name);
+        }
+    }
 
     @Test
     void callerWithoutPermissionsIsRefusedBeforeAVectorBucketIsCreated() throws Exception {
