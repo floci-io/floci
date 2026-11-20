@@ -570,4 +570,65 @@ class EmrIntegrationTest {
                     .then().statusCode(200);
         }
     }
+
+    @Test
+    @Order(21)
+    void aClusterGivenAsItsInstanceTypesAndCountGetsAMasterGroupAndACoreGroupOfTheRest() {
+        String uniform = emr("RunJobFlow", "{\"Name\":\"uniform\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"SlaveInstanceType\":\"m5.large\",\"InstanceCount\":3}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        // One instance serves as both the master and the core node.
+        String single = emr("RunJobFlow", "{\"Name\":\"single\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"InstanceCount\":1}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        // Instance groups given are the cluster's, whatever else it names.
+        String grouped = emr("RunJobFlow", "{\"Name\":\"grouped\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"SlaveInstanceType\":\"m5.large\",\"InstanceCount\":3,"
+                + "\"InstanceGroups\":[{\"Name\":\"only\",\"InstanceRole\":\"MASTER\","
+                + "\"InstanceType\":\"m5.2xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String master = "InstanceGroups.find { it.InstanceGroupType == 'MASTER' }.";
+        String core = "InstanceGroups.find { it.InstanceGroupType == 'CORE' }.";
+        // Core nodes need their instance type: "all three must be present".
+        emr("RunJobFlow", "{\"Name\":\"no-core-type\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"InstanceCount\":3}}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("SlaveInstanceType is required when InstanceCount is greater than 1."));
+        emr("ListClusters", "{}")
+                .then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'no-core-type' }", hasSize(0));
+        try {
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(2))
+                    .body(master + "Name", equalTo("Master InstanceGroup"))
+                    .body(master + "InstanceType", equalTo("m5.xlarge"))
+                    .body(master + "Market", equalTo("ON_DEMAND"))
+                    .body(master + "RequestedInstanceCount", equalTo(1))
+                    .body(core + "Name", equalTo("Core InstanceGroup"))
+                    .body(core + "InstanceType", equalTo("m5.large"))
+                    .body(core + "Market", equalTo("ON_DEMAND"))
+                    .body(core + "RequestedInstanceCount", equalTo(2));
+            emr("ListInstances", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("Instances", hasSize(3));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.InstanceCollectionType", equalTo("INSTANCE_GROUP"));
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + single + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(1))
+                    .body(master + "Name", equalTo("Master InstanceGroup"))
+                    .body(master + "RequestedInstanceCount", equalTo(1));
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + grouped + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(1))
+                    .body(master + "Name", equalTo("only"))
+                    .body(master + "InstanceType", equalTo("m5.2xlarge"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + uniform + "\",\"" + single + "\",\"" + grouped
+                    + "\"]}").then().statusCode(200);
+        }
+    }
 }
