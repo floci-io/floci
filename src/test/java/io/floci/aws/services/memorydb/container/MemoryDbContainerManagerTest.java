@@ -262,12 +262,12 @@ class MemoryDbContainerManagerTest {
                 assertEquals(List.of("floci-aws-memorydb-cache",
                         "floci-aws-memorydb-111111111111-eu-west-1-same",
                         "floci-aws-memorydb-111111111111_eu-west-1_same"), names.getAllValues());
-                verify(logs).attach("default-cid", "/aws/memorydb/cluster/cache/engine-log", "engine",
+                verify(logs).attachPolled("default-cid", "/aws/memorydb/cluster/cache/engine-log", "engine",
                         "us-east-1", "memorydb:" + defaultIdentity);
-                verify(logs).attach("collision-cid",
+                verify(logs).attachPolled("collision-cid",
                         "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
                         "us-east-1", "memorydb:" + collisionIdentity);
-                verify(logs).attach("foreign-cid",
+                verify(logs).attachPolled("foreign-cid",
                         "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
                         "eu-west-1", "memorydb:" + foreignIdentity);
                 responder.get(5, TimeUnit.SECONDS);
