@@ -198,7 +198,7 @@ default security group.
 default security group. `ModifyDBCluster` leaves the groups alone unless it names them.
 A CloudFormation update that drops `VpcSecurityGroupIds` the previous template declared puts the
 cluster back on its VPC's default security group, as AWS does; groups the stack never declared are left
-alone, and the two windows keep their stored values.
+alone, and `DeletionProtection` and the two windows keep their stored values.
 
 !!! note "Stopping and starting"
 

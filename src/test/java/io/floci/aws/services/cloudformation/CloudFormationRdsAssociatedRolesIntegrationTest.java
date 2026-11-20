@@ -300,7 +300,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
     }
 
     @Test
-    void anUpdateLeavesGroupsSetOutsideTheStackAndDroppedWindowsKeepTheirValues() {
+    void anUpdateLeavesGroupsSetOutsideTheStackAndDroppedSettingsKeepTheirValues() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-rds-sg-out-" + suffix;
         String clusterId = "cfn-sg-out-" + suffix;
@@ -311,7 +311,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                 """;
         try {
             stack("CreateStack", stackName, cluster.formatted(clusterId, "password123",
-                    ", \"PreferredBackupWindow\": \"03:00-04:00\","
+                    ", \"DeletionProtection\": true, \"PreferredBackupWindow\": \"03:00-04:00\","
                     + " \"PreferredMaintenanceWindow\": \"mon:05:00-mon:06:00\""));
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             rds("ModifyDBCluster").formParam("DBClusterIdentifier", clusterId)
@@ -323,6 +323,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             assertEquals(List.of("sg-outside"), clusterGroups(clusterId));
             XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
                     .when().post("/").then().statusCode(200).extract().xmlPath();
+            assertEquals("true", xml.getString("**.find { it.name() == 'DeletionProtection' }"));
             assertEquals("03:00-04:00", xml.getString("**.find { it.name() == 'PreferredBackupWindow' }"));
             assertEquals("mon:05:00-mon:06:00",
                     xml.getString("**.find { it.name() == 'PreferredMaintenanceWindow' }"));

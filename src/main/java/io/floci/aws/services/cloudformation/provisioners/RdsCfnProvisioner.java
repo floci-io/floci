@@ -662,7 +662,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             // Refused before a new cluster exists, rather than leaving one behind.
             RdsService.requireDataApiEngine(resolveOptional(props, "Engine", engine));
         }
-        boolean deletionProtection = parseStrictBoolProp(props, "DeletionProtection", engine);
+        // null when the template drops it: an update then keeps the stored value, as AWS's null does
+        Boolean requestedDeletionProtection = parseOptionalStrictBoolProp(props, "DeletionProtection", engine);
+        boolean deletionProtection = Boolean.TRUE.equals(requestedDeletionProtection);
         boolean created = cluster == null;
         String backupWindow = resolveOptional(props, "PreferredBackupWindow", engine);
         String maintenanceWindow = resolveOptional(props, "PreferredMaintenanceWindow", engine);
@@ -726,7 +728,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (httpEndpoint != cluster.isHttpEndpointEnabled()) {
             cluster = rdsService.setHttpEndpoint(region, cluster.getDbClusterIdentifier(), httpEndpoint);
         }
-        if (deletionProtection != cluster.isDeletionProtection()) {
+        if (requestedDeletionProtection != null && deletionProtection != cluster.isDeletionProtection()) {
             cluster = rdsService.setDeletionProtection(region, cluster.getDbClusterIdentifier(), deletionProtection);
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
