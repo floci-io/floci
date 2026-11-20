@@ -70,8 +70,8 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `RemoveAutoTerminationPolicy` | Removes a cluster's auto termination policy |
 | `PutAutoScalingPolicy` | Attaches an automatic scaling policy to a core or task instance group |
 | `RemoveAutoScalingPolicy` | Removes an instance group's automatic scaling policy |
-| `ListReleaseLabels` | List release labels, newest first, by prefix or application; see [Release catalogue](#release-catalogue) |
-| `DescribeReleaseLabel` | A release's applications and Amazon Linux releases (the latest release without a label) |
+| `ListReleaseLabels` | List release labels, in AWS's order, by prefix or application; see [Release catalogue](#release-catalogue) |
+| `DescribeReleaseLabel` | A release's applications and Amazon Linux releases (the first one listed without a label) |
 | `ListSupportedInstanceTypes` | The instance types a release supports, with vCPU, memory, storage and architecture |
 | `GetBlockPublicAccessConfiguration` | Returns the account's block public access configuration for the Region |
 | `PutBlockPublicAccessConfiguration` | Sets the account's block public access configuration for the Region |
@@ -1019,20 +1019,31 @@ its `STARTING` event, has its events sent after the rest of that call's.
 ## Release catalogue
 
 `ListReleaseLabels`, `DescribeReleaseLabel` and `ListSupportedInstanceTypes` read a curated catalogue,
-not AWS's full list: `emr-7.5.0` (Floci's default), `emr-7.4.0`, `emr-6.15.0`, `emr-6.14.0` and
-`emr-5.36.2`. Each release's applications and versions come from its page in the Amazon EMR Release
-Guide, with names lowercased and AWS's `-amzn-N` build suffix dropped, as the API reports them, and
-its two most recent Amazon Linux releases. A `floci.services.emr.default-release-label` outside the
-catalogue is still listed, with no applications.
+not AWS's full list: every `emr-7.x` release, `emr-7.0.0` to `emr-7.14.0` (`emr-7.5.0` is Floci's
+default), then `emr-6.15.0`, `emr-6.14.0` and `emr-5.36.2`, and the AWS runtime for Apache Spark's
+`emr-spark-8.0.0`, `emr-spark-8.1.0` and `emr-spark-8.2.0`. Each release's applications and versions
+come from its page in the Amazon EMR Release Guide. Names are spelled as that page's list of
+applications spells them, which is how AWS answers them (`Spark`, `HBase`, `ZooKeeper`), with `Trino`
+for "Trino (PrestoSQL)". Versions drop AWS's `-amzn-N` build suffix, as the API gives "the concise
+version of the application". Each release has the two most recent Amazon Linux releases its page lists;
+the `emr-7.14.0`, `emr-spark-8.1.0` and `emr-spark-8.2.0` pages list none, so those report none. A
+`floci.services.emr.default-release-label` outside the catalogue is still listed, with no applications.
 
-`ListReleaseLabels` filters by `Prefix` (such as `emr-6`) and `Application` (`spark` or
-`spark@3.4.1`, matched without regard to case) and pages with `MaxResults` (1 to 100) /
-`NextToken`; a token only works with the filters it was issued for. `DescribeReleaseLabel` answers
-every application at once, since AWS reserves its `MaxResults` and `NextToken` for future use.
-`ListSupportedInstanceTypes` reports common families (c5, m5, m5d, m6g, r5, r6g) with
-their EC2 sizes. An unknown release label, a bad token or an out-of-range `MaxResults` is
-`InvalidRequestException`. `RunJobFlow` does not check its release label or instance types against
-the catalogue.
+`ListReleaseLabels` lists the numbered releases newest first, as AWS does. The `emr-spark-*` releases
+come after them, oldest first, as AWS answered for that family; where AWS puts them among the numbered
+releases is not recorded. It filters by `Prefix` (such as `emr-6`) and `Application` (`spark` or
+`spark@3.4.1`, matched without regard to case) and pages with `MaxResults` (1 to 100) / `NextToken`; a
+token only works with the filters it was issued for. `DescribeReleaseLabel` answers every application
+at once, since AWS reserves its `MaxResults` and `NextToken` for future use, and describes the first
+release listed, `emr-7.14.0`, when given no label. `ListSupportedInstanceTypes` reports common
+families (c5, m5, m5d, m6g, r5, r6g) with their EC2 sizes.
+
+An unknown release label is `InvalidRequestException` in AWS's recorded wording, which differs between
+the two operations. `DescribeReleaseLabel` answers "The release label isn't valid." with `ErrorCode`
+`InvalidInputParameter`. `ListSupportedInstanceTypes` names the label, as in "The supplied release label
+is invalid: emr-1.0.0.", with `ErrorCode` `INVALID_RELEASE_LABEL`, and a missing one reads `null`. A bad token
+or an out-of-range `MaxResults` is `InvalidRequestException` too. `RunJobFlow` does not check its
+release label or instance types against the catalogue.
 
 ## Example
 

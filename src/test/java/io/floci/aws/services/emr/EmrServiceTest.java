@@ -852,6 +852,17 @@ class EmrServiceTest {
 
     /** ListSteps' states, newest step first, as it lists them. */
 
+    @Test
+    void aBlankDefaultReleaseLabelIsNoReleaseAndAnEmptyLabelIsRefused() {
+        EmrService blank = new EmrServiceFixture().withDefaultReleaseLabel("");
+        List<String> catalogue = EmrReleaseCatalog.RELEASES.stream().map(EmrReleaseCatalog.Release::label).toList();
+        assertEquals(catalogue, blank.listReleaseLabels(null, null, null, null).items());
+        AwsException refused = assertThrows(AwsException.class, () -> blank.listSupportedInstanceTypes("", null));
+        assertEquals("InvalidRequestException", refused.getErrorCode());
+        assertEquals("The supplied release label is invalid: .", refused.getMessage());
+        assertEquals(Map.of("ErrorCode", "INVALID_RELEASE_LABEL"), refused.getExtendedData());
+    }
+
     private static List<String> ids(List<EmrStep> steps) {
         return steps.stream().map(EmrStep::getId).toList();
     }

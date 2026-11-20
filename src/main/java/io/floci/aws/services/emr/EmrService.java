@@ -1717,22 +1717,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int INSTANCE_TYPE_PAGE = 50;
 
     /**
-     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * The catalogue's releases, in ListReleaseLabels' order. Floci's configured default release label is always
      * among them, with no applications when the catalogue does not describe it, so a non-default
-     * setting never makes Floci's own default unknown.
+     * setting never makes Floci's own default unknown. A blank setting names no release, so it adds none.
      */
     List<EmrReleaseCatalog.Release> releases() {
-        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+        if (defaultReleaseLabel == null || defaultReleaseLabel.isBlank()
+                || EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
             return EmrReleaseCatalog.RELEASES;
         }
         List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
         all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
-        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        all.sort((a, b) -> EmrReleaseCatalog.LISTING_ORDER.compare(a.label(), b.label()));
         return all;
     }
 
     /**
-     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * Release labels, in the catalogue's order, narrowed by {@code prefix} (such as {@code emr-6}) and by
      * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
      * without regard to case. A token belongs to the filters it was issued for, so one replayed
      * with other filters, or altered, is refused.
@@ -1763,32 +1764,35 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 nextToken, namespace, EmrService::invalidToken);
     }
 
-    /** A release's applications and OS releases; no label means the latest release. */
+    /** A release's applications and OS releases; no label means the newest numbered release, the first listed. */
     public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
-        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+        if (label == null || label.isBlank()) {
+            return releases().get(0);
+        }
+        // AWS's recorded answer: InvalidRequestException with this ErrorCode and a message naming no label.
+        return findRelease(label).orElseThrow(() -> new AwsException("InvalidRequestException",
+                "The release label isn't valid.", 400, Map.of("ErrorCode", "InvalidInputParameter")));
     }
 
     public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
-        if (label == null || label.isBlank()) {
-            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        // AWS's recorded answer, a missing label reading "null"; its ErrorCode and wording differ from
+        // DescribeReleaseLabel's.
+        if (label == null || label.isBlank() || findRelease(label).isEmpty()) {
+            throw new AwsException("InvalidRequestException", "The supplied release label is invalid: " + label + ".",
+                    400, Map.of("ErrorCode", "INVALID_RELEASE_LABEL"));
         }
-        requireRelease(label);
         List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
         return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
                 "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
     }
 
-    private EmrReleaseCatalog.Release requireRelease(String label) {
-        return releases().stream()
-                .filter(r -> r.label().equals(label))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "The specified release label " + label + " is not valid.", 400));
+    private Optional<EmrReleaseCatalog.Release> findRelease(String label) {
+        return releases().stream().filter(r -> r.label().equals(label)).findFirst();
     }
 
     /**
      * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
-     * catalogue is newest first rather than alphabetical.
+     * catalogue is in ListReleaseLabels' order rather than alphabetical.
      */
     private static <T> Function<T, String> positionIn(List<T> items) {
         Map<T, String> positions = new HashMap<>();
