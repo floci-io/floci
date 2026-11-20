@@ -3703,11 +3703,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The tags of the cluster, task definition, service, capacity provider, task or container instance whose ARN is
-     * {@code arn}, among the resources of the request's account, where every ECS handler reads: an ARN of another
-     * account names none of them. Each is read under the key its ARN gives: a stored one in place, one saved before
-     * storage was account-aware or before a definition's key named its Region included, and matched on the whole
-     * ARN. Reads only.
+     * The tags of the cluster, task definition, service, capacity provider, task set, task or container instance
+     * whose ARN is {@code arn}, among the resources of the request's account, where every ECS handler reads: an ARN
+     * of another account names none of them. Each is read under the key its ARN gives: a stored one in place, one
+     * saved before storage was account-aware or before a definition's key named its Region included, and matched on
+     * the whole ARN. Reads only.
      */
     @Override
     public Map<String, String> storedTags(String arn) {
@@ -3739,6 +3739,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             case "capacity-provider" -> readStored(capacityProvidersStore, capacityProviders, account, id)
                     .filter(cp -> arn.equals(cp.getCapacityProviderArn())).map(CapacityProvider::getTags);
             case "task" -> Optional.ofNullable(tasks.get(arn)).map(EcsTask::getTags);
+            case "task-set" -> Optional.ofNullable(taskSets.get(arn))
+                    .filter(ts -> arn.equals(ts.getTaskSetArn())).map(TaskSet::getTags);
             // Kept under its cluster's ARN, which the instance's names: the cluster's name, in the same coordinates.
             case "container-instance" -> idSlash < 0 ? Optional.empty()
                     : Optional.ofNullable(containerInstances.get(containerInstanceKey(new AwsArnUtils.Arn(

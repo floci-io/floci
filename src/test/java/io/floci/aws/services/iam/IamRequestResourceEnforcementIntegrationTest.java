@@ -805,6 +805,61 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "\"}"), "ecs:ListTagsForResource");
     }
 
+    /** An {@code aws:ResourceTag} condition reads the tags attached to the task set a delete names. */
+    @Test
+    void anEcsTaskSetResourceTagConditionReadsTheTagsOfTheTaskSet() {
+        String cluster = "res-tag-task-set-" + suffix();
+        String family = cluster + "-td";
+        String service = cluster + "-svc";
+        adminJson("ecs", ECS_API + "CreateCluster").body("{\"clusterName\":\"" + cluster + "\"}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteCluster")
+                .body("{\"cluster\":\"" + cluster + "\"}").post("/"));
+
+        String taskDefinitionArn = adminJson("ecs", ECS_API + "RegisterTaskDefinition")
+                .body("{\"family\":\"" + family + "\",\"containerDefinitions\":[{\"name\":\"web\","
+                        + "\"image\":\"nginx\",\"memory\":128}]}")
+                .post("/").then().statusCode(200).extract().path("taskDefinition.taskDefinitionArn");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeregisterTaskDefinition")
+                .body("{\"taskDefinition\":\"" + taskDefinitionArn + "\"}").post("/"));
+
+        adminJson("ecs", ECS_API + "CreateService")
+                .body("{\"cluster\":\"" + cluster + "\",\"serviceName\":\"" + service
+                        + "\",\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,"
+                        + "\"deploymentController\":{\"type\":\"EXTERNAL\"}}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteService")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\",\"force\":true}")
+                .post("/"));
+
+        String tagged = adminJson("ecs", ECS_API + "CreateTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\","
+                        + "\"taskDefinition\":\"" + family + "\",\"scale\":{\"value\":0,\"unit\":\"PERCENT\"},"
+                        + "\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .post("/").then().statusCode(200).extract().path("taskSet.id");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service
+                        + "\",\"taskSet\":\"" + tagged + "\",\"force\":true}").post("/"));
+        String other = adminJson("ecs", ECS_API + "CreateTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\","
+                        + "\"taskDefinition\":\"" + family + "\",\"scale\":{\"value\":0,\"unit\":\"PERCENT\"},"
+                        + "\"tags\":[{\"key\":\"team\",\"value\":\"web\"}]}")
+                .post("/").then().statusCode(200).extract().path("taskSet.id");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service
+                        + "\",\"taskSet\":\"" + other + "\",\"force\":true}").post("/"));
+
+        User user = user("res-ecs-task-set-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + tagged + "\",\"force\":true}")
+                .statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + other + "\",\"force\":true}"),
+                "ecs:DeleteTaskSet");
+    }
+
     /**
      * An {@code ssm:resourceTag} or {@code aws:ResourceTag} condition reads the tags SSM holds on the parameter or the
      * document a request names, so an allow on one team's tag lets the caller read that team's and not another's.
