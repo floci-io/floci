@@ -29,6 +29,7 @@ import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.Record;
+import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.sns.model.PlatformApplication;
@@ -761,24 +762,28 @@ public class SnsService implements Resettable, ResourceProvider {
         if (policy == null || policy.isBlank()) {
             return;
         }
-        JsonNode statements;
+        JsonNode document;
         try {
-            statements = objectMapper.readTree(policy).path("Statement");
+            document = objectMapper.readTree(policy);
         } catch (JsonProcessingException ignored) {
             // Not JSON: this check only reads the actions of a policy that parses.
             return;
         }
-        for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
+        for (JsonNode statement : PolicyDocument.statementsOf(document)) {
             JsonNode actions = statement.path("Action");
             for (JsonNode action : actions.isArray() ? actions : List.of(actions)) {
                 String name = action.asText("").toLowerCase(Locale.ROOT);
                 if (name.startsWith("sns:") && !name.contains("*") && !name.contains("?")
                         && !SNS_POLICY_ACTIONS_LOWER_CASE.contains(name.substring(4))) {
-                    throw new AwsException("InvalidParameter",
-                            "Invalid parameter: Policy statement action out of service scope!", 400);
+                    throw actionOutOfServiceScope();
                 }
             }
         }
+    }
+
+    private static AwsException actionOutOfServiceScope() {
+        return new AwsException("InvalidParameter",
+                "Invalid parameter: Policy statement action out of service scope!", 400);
     }
 
     /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
@@ -814,8 +819,7 @@ public class SnsService implements Resettable, ResourceProvider {
         Topic topic = topicStore.get(key).orElseThrow(SnsService::permissionTopicNotFound);
         for (String action : actionNames) {
             if (!SNS_POLICY_ACTIONS.contains(action)) {
-                throw new AwsException("InvalidParameter",
-                        "Invalid parameter: Policy statement action out of service scope!", 400);
+                throw actionOutOfServiceScope();
             }
         }
         ObjectNode policy = topicPolicy(topic, topicArn);
