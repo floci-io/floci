@@ -1,6 +1,7 @@
 package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
@@ -12,7 +13,8 @@ import java.util.Set;
 
 /** Bounded JSON Schema traversal shared by the API Gateway sample and mapping template APIs. */
 public final class ModelTemplateGenerator {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final int MAX_SCHEMA_CHARACTERS = 1_048_576;
     private static final int MAX_NODES = 4_096;
     private static final int MAX_DEPTH = 32;

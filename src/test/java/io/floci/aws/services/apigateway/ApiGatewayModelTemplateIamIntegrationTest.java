@@ -1,5 +1,6 @@
 package io.floci.aws.services.apigateway;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -9,8 +10,6 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -69,17 +68,14 @@ class ApiGatewayModelTemplateIamIntegrationTest {
     }
 
     private String read(boolean websocket, String key, String api, String model) {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(AwsBasicCredentials.create(key, "test"));
         if (websocket) {
-            try (ApiGatewayV2Client client = ApiGatewayV2Client.builder().endpointOverride(endpoint)
-                    .region(Region.US_EAST_1).credentialsProvider(credentials)
-                    .httpClientBuilder(Apache5HttpClient.builder()).build()) {
+            try (ApiGatewayV2Client client = AwsTestClients.create(ApiGatewayV2Client.builder(), key, "test",
+                    Region.US_EAST_1, Apache5HttpClient.builder(), endpoint)) {
                 return client.getModelTemplate(request -> request.apiId(api).modelId(model)).value();
             }
         }
-        try (ApiGatewayClient client = ApiGatewayClient.builder().endpointOverride(endpoint)
-                .region(Region.US_EAST_1).credentialsProvider(credentials)
-                .httpClientBuilder(Apache5HttpClient.builder()).build()) {
+        try (ApiGatewayClient client = AwsTestClients.create(ApiGatewayClient.builder(), key, "test",
+                Region.US_EAST_1, Apache5HttpClient.builder(), endpoint)) {
             return client.getModelTemplate(request -> request.restApiId(api).modelName(model)).value();
         }
     }

@@ -2,14 +2,16 @@ package io.floci.aws.services.apigateway;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -21,6 +23,9 @@ import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -115,6 +120,11 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
     @TestHTTPResource("/")
     URI endpoint;
 
+    @BeforeAll
+    static void configureJsonCompatibilityContentType() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void generatedTemplatesRenderTypedNestedAndEscapedJson(boolean websocket) throws Exception {
@@ -196,6 +206,23 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
     }
 
     @Test
+    void websocketJsonPathMatchesSdkTemplatesAndErrors() {
+        try (Fixture fixture = new Fixture(true)) {
+            String model = fixture.createModel("JsonPathModel", SCHEMA);
+            assertEquals(fixture.template(model), jsonTemplate(fixture.apiId, model).statusCode(200)
+                    .extract().path("Value"));
+            fixture.update(model, "{\"type\":\"boolean\"}");
+            assertEquals(fixture.template(model), jsonTemplate(fixture.apiId, model).statusCode(200)
+                    .extract().path("Value"));
+            fixture.update(model, "{\"allOf\":[{\"type\":\"object\"}]}");
+            jsonTemplate(fixture.apiId, model).statusCode(501).body(containsString("UnsupportedOperation"));
+            fixture.deleteModel(model);
+            jsonTemplate(fixture.apiId, model).statusCode(404).body(containsString("NotFoundException"));
+            jsonTemplate("missing-api", model).statusCode(404).body(containsString("NotFoundException"));
+        }
+    }
+
+    @Test
     void httpApiTemplatesRemainOutsideTheWebSocketScope() {
         try (ApiGatewayV2Client client = v2("test", Region.US_EAST_1)) {
             String api = client.createApi(request -> request.name("http-template-boundary").protocolType("HTTP")).apiId();
@@ -203,6 +230,7 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
                 String model = client.createModel(request -> request.apiId(api).name("HttpModel")
                         .contentType("application/json").schema("{\"type\":\"string\"}")).modelId();
                 assertStatus(400, () -> client.getModelTemplate(request -> request.apiId(api).modelId(model)));
+                jsonTemplate(api, model).statusCode(400).body(containsString("BadRequestException"));
             } finally {
                 client.deleteApi(request -> request.apiId(api));
             }
@@ -220,15 +248,20 @@ class ApiGatewayModelTemplateSdkIntegrationTest {
     }
 
     private ApiGatewayClient v1(String key, Region region) {
-        return ApiGatewayClient.builder().endpointOverride(endpoint).region(region)
-                .httpClientBuilder(Apache5HttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, "test"))).build();
+        return AwsTestClients.create(ApiGatewayClient.builder(), key, "test", region,
+                Apache5HttpClient.builder(), endpoint);
     }
 
     private ApiGatewayV2Client v2(String key, Region region) {
-        return ApiGatewayV2Client.builder().endpointOverride(endpoint).region(region)
-                .httpClientBuilder(Apache5HttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, "test"))).build();
+        return AwsTestClients.create(ApiGatewayV2Client.builder(), key, "test", region,
+                Apache5HttpClient.builder(), endpoint);
+    }
+
+    private ValidatableResponse jsonTemplate(String api, String model) {
+        return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonApiGatewayV2.GetModelTemplate")
+                .header("Authorization", auth("test", "apigatewayv2"))
+                .body(Map.of("ApiId", api, "ModelId", model)).post("/").then();
     }
 
     private final class Fixture implements AutoCloseable {

@@ -83,6 +83,7 @@ public class ApiGatewayV2JsonHandler {
                 case "DeleteIntegrationResponse" -> handleDeleteIntegrationResponse(request, region);
                 case "CreateModel" -> handleCreateModel(request, region);
                 case "GetModel" -> handleGetModel(request, region);
+                case "GetModelTemplate" -> handleGetModelTemplate(request, region);
                 case "GetModels" -> handleGetModels(request, region);
                 case "UpdateModel" -> handleUpdateModel(request, region);
                 case "DeleteModel" -> handleDeleteModel(request, region);
@@ -485,6 +486,14 @@ public class ApiGatewayV2JsonHandler {
         ArrayNode items = root.putArray("Items");
         models.forEach(m -> items.add(toModelNode(m)));
         return Response.ok(root.toString()).build();
+    }
+
+    private Response handleGetModelTemplate(JsonNode request, String region) {
+        String apiId = request.path("ApiId").asText();
+        String modelId = request.path("ModelId").asText();
+        String template = service.getModelTemplate(region, apiId, modelId);
+        ObjectNode response = objectMapper.createObjectNode().put("Value", template);
+        return Response.ok(response.toString()).build();
     }
 
     private Response handleUpdateModel(JsonNode request, String region) {

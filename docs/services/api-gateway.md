@@ -132,6 +132,10 @@ newlines and apostrophes. Nested objects, typed arrays and finite local JSON Poi
 references (`#/definitions/...`) are supported. Updating the model changes the next generated
 template; no generated-template cache or additional persistent state is used.
 
+Floci's existing `AmazonApiGatewayV2` JSON compatibility target also accepts
+`GetModelTemplate`, with `ApiId` and `ModelId` inputs and a `Value` response. It uses the
+same WebSocket generation and error handling as the canonical REST route.
+
 This is a bounded JSON-schema subset for `application/json` models. Schema composition
 (`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types, tuple/untyped arrays,
 external or cyclic references, and property names containing VTL delimiters (`'`, `"`, `\`,
@@ -142,6 +146,10 @@ The WebSocket mapping projects declared properties; undeclared input fields are 
 and missing or null declared values become JSON null. Mapping inputs must match the declared
 scalar and container types; templates do not validate or coerce payloads. HTTP API templates
 remain unsupported.
+
+Template reads reject malformed JSON, including extra tokens after the schema, with
+`BadRequestException` (HTTP 400). Model creation and update validation are unchanged;
+valid schemas outside this template generator's subset remain usable for other purposes.
 
 Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes, 32 levels
 of nesting and 262,144 output characters. These are Floci limits, not AWS service quotas.

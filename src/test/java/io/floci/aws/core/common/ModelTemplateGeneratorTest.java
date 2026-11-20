@@ -38,6 +38,24 @@ class ModelTemplateGeneratorTest {
                 () -> ModelTemplateGenerator.generate(null, "application/json", false)).getHttpStatus());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"type\":\"string\"} garbage", "{\"type\":\"string\"} {\"type\":\"number\"}"})
+    void rejectsTrailingTokensInEitherTemplateMode(String schema) {
+        for (boolean mapping : new boolean[]{false, true}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> ModelTemplateGenerator.generate(schema, "application/json", mapping));
+            assertEquals(400, error.getHttpStatus());
+            assertEquals("The model schema is not valid JSON.", error.getMessage());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptsWhitespaceAfterTheSchema(boolean mapping) {
+        assertTrue(ModelTemplateGenerator.generate("{\"type\":\"string\"} \n\t", "application/json", mapping)
+                .startsWith("#set($inputRoot"));
+    }
+
     @Test
     void refusesNonJsonContent() {
         assertEquals(501, assertThrows(AwsException.class,
