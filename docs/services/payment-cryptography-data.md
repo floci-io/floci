@@ -146,10 +146,6 @@ client that talks to the control plane does not reach it by accident.
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
-- **The AS2805 key validation is not served.** The reference publishes the operation
-  `GenerateAs2805KekValidation`, which answers with the two random numbers the AS2805
-  ceremony makes of one, and this service has no route for it: a request for it does not
-  reach a payment cryptography operation at all.
 - **The UnionPay session key derivation is not made.** The reference's model names six ways
   of deriving the session key of an authorization request, and this service makes three of
   them: the EMV common session key, the Mastercard one and the Visa one, which derives none.
