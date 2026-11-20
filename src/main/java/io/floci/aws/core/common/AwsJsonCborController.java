@@ -11,6 +11,7 @@ import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
 import com.google.gson.JsonParseException;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
+import io.floci.aws.services.dynamodb.DynamoDbRequestShapes;
 import io.floci.aws.services.dynamodb.DynamoDbStreamsJsonHandler;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Handler;
 import io.floci.aws.services.kinesis.KinesisJsonHandler;
@@ -446,6 +447,7 @@ public class AwsJsonCborController {
                     if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
                         yield dynamoDbStreamsJsonHandler.handle(action, request, region);
                     }
+                    DynamoDbRequestShapes.check(action, request);
                     yield dynamoDbJsonHandler.handle(action, request, region);
                 }
                 case "sqs" -> sqsJsonHandler.handle(action, request, region);
@@ -518,6 +520,7 @@ public class AwsJsonCborController {
                 if ("DynamoDB Streams".equals(serviceId) || serviceId.startsWith("DynamoDBStreams")) {
                     yield dynamoDbStreamsJsonHandler.handle(operation, request, region);
                 }
+                DynamoDbRequestShapes.check(operation, request);
                 yield dynamoDbJsonHandler.handle(operation, request, region);
             }
             case "sqs" -> sqsJsonHandler.handle(operation, request, region);

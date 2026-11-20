@@ -144,14 +144,13 @@ public class NativeDynamoDbTableService {
                     + "disabled, UpdateViewType should not be specified", 400);
         }
 
-        requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode));
-
         TableDefinition table = dynamoDbService.createTable(tableName, request.keySchema(),
                 request.attributeDefinitions(),
                 throughput != null ? throughput.readCapacityUnits() : null,
                 throughput != null ? throughput.writeCapacityUnits() : null,
                 request.globalSecondaryIndexes(), request.localSecondaryIndexes(), request.vectorIndexes(),
-                billingMode, region);
+                billingMode, region,
+                () -> requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode)));
         table.setTableStatus(initialStatus);
 
         table.setDeletionProtectionEnabled(Boolean.TRUE.equals(settings.deletionProtectionEnabled()));
@@ -459,6 +458,9 @@ public class NativeDynamoDbTableService {
             GlobalSecondaryIndex gsi = table.findGsi(update.indexName()).orElseThrow();
             Throughput gsiThroughput = update.provisionedThroughput();
             if (gsiThroughput != null) {
+                // A capacity cut leaves the index's warm throughput where it was.
+                gsi.setWarmReadUnitsPerSecond(table.gsiWarmReadUnits(gsi));
+                gsi.setWarmWriteUnitsPerSecond(table.gsiWarmWriteUnits(gsi));
                 if (gsiThroughput.readCapacityUnits() != null) {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiThroughput.readCapacityUnits());
                 }
@@ -539,6 +541,13 @@ public class NativeDynamoDbTableService {
      */
     public KinesisDestination enableKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return enableKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination enableKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -558,9 +567,6 @@ public class NativeDynamoDbTableService {
         KinesisStreamingDestination destination;
         if (existing.isPresent()) {
             destination = existing.get();
-            // The precision goes in before the status. A concurrent Disable gets past its
-            // already-disabled check only once the status reads ACTIVE, so writing the status last
-            // means that call can no longer read the precision this one is replacing.
             destination.setApproximateCreationDateTimePrecision(precision);
             destination.setDestinationStatusDescription("Kinesis streaming is enabled for this table");
             destination.setDestinationStatus("ACTIVE");
@@ -582,6 +588,12 @@ public class NativeDynamoDbTableService {
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return disableKinesisStreamingDestinationLocked(tableName, streamArn, region);
+        }
+    }
+
+    private KinesisDestination disableKinesisStreamingDestinationLocked(String tableName, String streamArn, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -613,12 +625,22 @@ public class NativeDynamoDbTableService {
      * does. Forwarding never stops: records already captured are still delivered, and the forwarder
      * stamps each later write with the new precision.
      *
-     * @param precision an already validated ApproximateCreationDateTimePrecision
+     * @param precision an already validated ApproximateCreationDateTimePrecision, or null to retain it
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination updateKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return updateKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination updateKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        if (AwsArnUtils.looksLikeArn(tableName) && !tableName.equals(table.getTableArn())) {
+            throw DynamoDbService.resourceNotFoundException(table.getTableName());
+        }
         String resolvedTableName = table.getTableName();
 
         Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
@@ -631,8 +653,10 @@ public class NativeDynamoDbTableService {
                     "Kinesis streaming destination is not active for stream: " + streamArn, 400);
         }
 
-        existing.get().setApproximateCreationDateTimePrecision(precision);
-        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
+        KinesisStreamingDestination destination = existing.get();
+        String effectivePrecision = precision != null ? precision : destination.getApproximateCreationDateTimePrecision();
+        destination.setApproximateCreationDateTimePrecision(effectivePrecision);
+        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", effectivePrecision);
         dynamoDbService.persistTable(resolvedTableName, table, region);
         return updated;
     }
@@ -659,7 +683,11 @@ public class NativeDynamoDbTableService {
                     onDemand, provisioned != null ? provisioned.readCapacityUnits() : null,
                     provisioned != null ? provisioned.writeCapacityUnits() : null);
         }
-        for (GlobalSecondaryIndex gsi : request.globalSecondaryIndexes()) {
+        requireNewIndexWarmThroughput(request.globalSecondaryIndexes(), onDemand);
+    }
+
+    private static void requireNewIndexWarmThroughput(List<GlobalSecondaryIndex> indexes, boolean onDemand) {
+        for (GlobalSecondaryIndex gsi : indexes) {
             requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
                     gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
                     gsi.getProvisionedThroughput().getWriteCapacityUnits());
@@ -712,12 +740,7 @@ public class NativeDynamoDbTableService {
                     warm.writeUnitsPerSecond(), table.gsiWarmReadUnits(gsi), table.gsiWarmWriteUnits(gsi),
                     CURRENT_WARM_REASON, CURRENT_WARM_REASON);
         }
-        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
-        for (GlobalSecondaryIndex gsi : request.gsiCreates()) {
-            requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
-                    gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
-                    gsi.getProvisionedThroughput().getWriteCapacityUnits());
-        }
+        requireNewIndexWarmThroughput(request.gsiCreates(), "PAY_PER_REQUEST".equals(table.getBillingMode()));
     }
 
     private static void requireWarmThroughputAtLeast(String target, Long read, Long write, long minimumRead,

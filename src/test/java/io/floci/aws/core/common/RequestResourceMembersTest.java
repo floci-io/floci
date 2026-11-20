@@ -559,7 +559,8 @@ class RequestResourceMembersTest {
 
     /**
      * Each resource a create whose action acts on no type, or on other types alone, makes, from a request naming it,
-     * is where its tags go, and a create acting on no type names nothing itself.
+     * is where its tags go, and a create acting on no type names nothing itself, unless {@code MEASURED} gives it the
+     * resource AWS checks (EKS's {@code CreateCluster}).
      */
     @TestFactory
     Stream<DynamicTest> everyResourceACreateMakesIsWhereItsTagsGo() {
@@ -582,7 +583,8 @@ class RequestResourceMembersTest {
                     "000000000000");
             assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
                     "aws", "us-east-1", "000000000000", labels), body + " " + labels);
-            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
+            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()
+                    && table.operations().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
                 assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
                         "us-east-1", "000000000000", null, labels));
             }
@@ -676,6 +678,10 @@ class RequestResourceMembersTest {
      * {@code ""}).
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
+        // A resource its service finds by several members is found only from a request giving every one of them.
+        if (!resource.find().isEmpty() && !given.keySet().containsAll(resource.find())) {
+            return false;
+        }
         if (resource.arn() != null || Stream.concat(resource.fill().values().stream(), resource.find().stream())
                 .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
                         || !AwsArnUtils.isArn(given.get(member))))) {

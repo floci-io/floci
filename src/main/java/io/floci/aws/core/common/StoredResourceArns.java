@@ -60,9 +60,10 @@ import java.util.Optional;
  * Map, for the tags of a namespace or a service; Elastic Load Balancing, for the tags of a load balancer, a target
  * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
  * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
- * for the tags of a cluster); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
- * through {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on
- * that service directly.</p>
+ * for the tags of a cluster; EKS, for the tags of a cluster, a node group, a Fargate profile, an add-on, a Pod Identity
+ * association or an access entry; Resource Groups, for the tags of a group); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

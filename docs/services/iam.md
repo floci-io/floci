@@ -2332,7 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-DynamoDB, SSM, KMS, IAM, Resource Groups, EKS, API Gateway
+DynamoDB, SSM, KMS, IAM, API Gateway
 and CloudWatch Logs. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL and STS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS and AWS Resource Groups they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2560,26 +2560,24 @@ came from. `ListQueues`, and `CancelMessageMoveTask`, whose `TaskHandle` names n
 `*`, so a grant scoped to a queue, or to the account's queues, does not allow cancelling a move task: it
 takes a grant on `*`.
 
-An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
-checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
-a cluster it does not hold, and `CreateCluster` against the cluster its body names, as the EKS user
-guide's example policy for creating a cluster grants it. A node group, Fargate profile, add-on,
-access entry or Pod Identity association route is checked against the ARN EKS holds that resource
-under, which ends in an id the request does not carry, so a policy names it with a wildcard, such as
-`nodegroup/<cluster>/<name>/*`; listing or creating them, and the other routes under a cluster, are
-checked against the cluster. A name holding an encoded `/` is read as one name, as EKS reads it.
-`DescribeUpdate` is checked against the add-on the update was made to, since the updates Floci keeps
-are its add-ons' and EKS returns one whether or not the request names its add-on, and otherwise
-against the cluster. An EKS tagging request is checked against the caller's own cluster named after
-the ARN's last `/`, whatever the ARN names before it, as EKS looks it up.
+An EKS request is checked on what the generated table reads from it, in the caller's account, where
+EKS looks everything up. A cluster route is checked against `cluster/<name>`, the name its path gives,
+and `CreateCluster` against the cluster its body names, from a measured entry quoting the EKS user
+guide's example policy for creating a cluster, as the Service Reference lists no resource type for it.
+A node group, add-on or Fargate profile, whose ARN ends in an id EKS minted, is checked against the ARN
+EKS holds it under, found by the names its path gives in the request's Region, or with its names open
+when EKS holds none; an access entry, Pod Identity association, identity provider config or capability
+is checked with the parts of its ARN the request does not give open, so a policy names it with a
+wildcard, such as `access-entry/<cluster>/*`. Listing or creating them, and the other routes under a
+cluster, are checked against the cluster. An EKS tagging request is checked against the ARN its
+`/tags/{resourceArn}` carries, and EKS tags the resource whose ARN is that whole ARN.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
-and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
-it is signed with. The ARN is
+and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
 whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
-serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty, Security Hub and EKS tag only on
 `/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
 encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
@@ -3538,8 +3536,10 @@ floci populates:
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
   Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
-  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes and
-  Aurora DSQL for its clusters. Tag keys differing only in case are one condition key holding every value.
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
+  Aurora DSQL for its clusters, EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
+  associations and access entries and Resource Groups for its groups. Tag keys differing only in case are one condition
+  key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

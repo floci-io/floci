@@ -496,10 +496,6 @@ public class SesQueryHandler {
     private Response handleSetIdentityMailFromDomain(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
         String mailFromDomain = getParam(params, "MailFromDomain");
-        if (mailFromDomain == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "MailFromDomain is required (use an empty string to clear the existing setting).", 400);
-        }
         String behaviorOnMxFailure = getParam(params, "BehaviorOnMXFailure");
         identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure,
                 region);
@@ -517,20 +513,26 @@ public class SesQueryHandler {
         return raw != null && AwsQueryBooleans.parse(raw);
     }
 
+    /**
+     * Probed: an identity the account does not hold gets no entry, and one without a MAIL FROM
+     * domain reports {@code BehaviorOnMXFailure} alone, although the model requires all three.
+     */
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
         XmlBuilder xml = new XmlBuilder().start("MailFromDomainAttributes");
         for (String identityValue : identities) {
             Identity identity = identityService.getMailFromAttributes(identityValue, region);
+            if (identity == null) {
+                continue;
+            }
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            xml.elem("MailFromDomain", identity != null && identity.getMailFromDomain() != null
-                    ? identity.getMailFromDomain() : "");
-            xml.elem("MailFromDomainStatus", identity != null
-                    ? identity.getMailFromDomainStatus() : "Pending");
-            xml.elem("BehaviorOnMXFailure", identity != null
-                    ? identity.getBehaviorOnMxFailure() : "UseDefaultValue");
+            xml.elem("BehaviorOnMXFailure", identity.getBehaviorOnMxFailure());
+            if (identity.getMailFromDomain() != null) {
+                xml.elem("MailFromDomain", identity.getMailFromDomain());
+                xml.elem("MailFromDomainStatus", identity.getMailFromDomainStatus());
+            }
             xml.end("value");
             xml.end("entry");
         }

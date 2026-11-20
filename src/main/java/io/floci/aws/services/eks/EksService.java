@@ -131,6 +131,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
     // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
     private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
+    /** Held by every tag change, so two of them on one resource cannot lose one another's tags. */
+    private final Object tagLock = new Object();
     private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
     /** {@code <account>/<cluster key>} of each cluster a CreateCluster call is building. */
     private final Set<String> clustersBeingCreated = ConcurrentHashMap.newKeySet();
@@ -1839,9 +1841,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     /**
      * Applies {@code edit} to the tags of the resource {@code resourceArn} names and returns them.
      * TagResource takes a cluster, node group, Fargate profile, add-on, pod identity association or
-     * access entry ARN; each child ARN names its cluster as the segment after the resource type.
+     * access entry ARN; each child ARN names its cluster as the segment after the resource type, and the
+     * resource found is the one whose ARN is the whole of {@code resourceArn}. One change at a time, each
+     * giving the resource a new map, so a lookup that takes no lock reads one whole set.
      */
     private Map<String, String> retag(String resourceArn, UnaryOperator<Map<String, String>> edit) {
+        synchronized (tagLock) {
+            return retagHoldingLock(resourceArn, edit);
+        }
+    }
+
+    private Map<String, String> retagHoldingLock(String resourceArn, UnaryOperator<Map<String, String>> edit) {
         String resource = AwsArnUtils.isArnFor(resourceArn, "eks") ? AwsArnUtils.parse(resourceArn).resource() : "";
         String[] parts = resource.split("/", -1);
         boolean child = !"cluster".equals(parts[0]);
@@ -1859,23 +1869,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return next;
         };
+        TaggableReads reads = new TaggableReads(storage::get, nodeGroupStorage::get, fargateProfileStorage::get);
         Optional<Map<String, String>> tags = switch (parts[0]) {
-            case "cluster" -> storage.get(clusterKey).map(cluster -> applyTags(cluster.getTags(), change, next -> {
-                cluster.setTags(new HashMap<>(next));
-                storage.put(clusterKey, cluster);
-            }));
-            case "nodegroup" -> nodeGroupStorage.get(nodeGroupKey(clusterKey, childName))
-                    .filter(nodegroup -> resourceArn.equals(nodegroup.getNodegroupArn()))
-                    .map(nodegroup -> applyTags(nodegroup.getTags(), change, next -> {
-                        nodegroup.setTags(new HashMap<>(next));
-                        nodeGroupStorage.put(nodeGroupKey(clusterKey, childName), nodegroup);
-                    }));
-            case "fargateprofile" -> fargateProfileStorage.get(fargateProfileKey(clusterKey, childName))
-                    .filter(profile -> resourceArn.equals(profile.getFargateProfileArn()))
-                    .map(profile -> applyTags(profile.getTags(), change, next -> {
-                        profile.setTags(new HashMap<>(next));
-                        fargateProfileStorage.put(fargateProfileKey(clusterKey, childName), profile);
-                    }));
+            case "cluster", "nodegroup", "fargateprofile" ->
+                    taggable(parts[0], clusterKey, childName, resourceArn, reads)
+                            .map(found -> applyTags(found.tags(), change, found.retag()));
             case "addon" -> addons == null ? Optional.empty() : storage.get(clusterKey)
                     .flatMap(cluster -> addons.retag(cluster, childName, resourceArn, change));
             case "podidentityassociation" -> podIdentityAssociations == null ? Optional.empty()
@@ -1887,6 +1885,74 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         };
         return tags.orElseThrow(() -> new AwsException("NotFoundException",
                 "Resource not found: " + resourceArn, 404));
+    }
+
+    /**
+     * The tags of the cluster, node group, Fargate profile, add-on, Pod Identity association or access entry whose
+     * ARN is {@code arn} in {@code account}, read in place where the tag handlers read them and matched on the whole
+     * ARN each records; none when there is no such resource.
+     */
+    Map<String, String> tagsInAccount(String account, String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        if (parts.length < 2 || parts[1].isEmpty()) {
+            return Map.of();
+        }
+        String clusterKey = clusterKey(parsed.region(), parts[1]);
+        String child = parts.length > 2 ? parts[2] : "";
+        TaggableReads reads = new TaggableReads(
+                key -> AccountAwareStorageBackend.readInAccount(storage, account, key),
+                key -> AccountAwareStorageBackend.readInAccount(nodeGroupStorage, account, key),
+                key -> AccountAwareStorageBackend.readInAccount(fargateProfileStorage, account, key));
+        Optional<Cluster> cluster = reads.cluster().apply(clusterKey);
+        Optional<Map<String, String>> tags = switch (parts[0]) {
+            case "cluster", "nodegroup", "fargateprofile" -> taggable(parts[0], clusterKey, child, arn, reads)
+                    .map(Taggable::tags);
+            case "addon" -> addons == null ? Optional.empty()
+                    : cluster.flatMap(found -> addons.tagsInAccount(account, found, child, arn));
+            case "podidentityassociation" -> podIdentityAssociations == null ? Optional.empty()
+                    : cluster.flatMap(found -> podIdentityAssociations.tagsInAccount(account, found, child, arn));
+            case "access-entry" -> accessEntries == null ? Optional.empty()
+                    : cluster.flatMap(found -> accessEntries.tagsInAccount(account, found, arn));
+            default -> Optional.empty();
+        };
+        return tags.orElse(Map.of());
+    }
+
+    /** How a cluster, node group or Fargate profile is read by its key: in the request's account, or in a given one. */
+    private record TaggableReads(Function<String, Optional<Cluster>> cluster,
+                                 Function<String, Optional<Nodegroup>> nodegroup,
+                                 Function<String, Optional<FargateProfile>> fargateProfile) {}
+
+    /** A cluster, node group or Fargate profile found for its tags: the tags it holds, and how to store new ones. */
+    private record Taggable(Map<String, String> tags, Consumer<Map<String, String>> retag) {}
+
+    /**
+     * The cluster, node group or Fargate profile of {@code type} whose ARN is the whole of {@code arn}, read through
+     * {@code reads} by its cluster's key and its own name. Tag changes and tag reads both find it here, so they agree
+     * on which resource an ARN names.
+     */
+    private Optional<Taggable> taggable(String type, String clusterKey, String name, String arn, TaggableReads reads) {
+        return switch (type) {
+            case "cluster" -> reads.cluster().apply(clusterKey).filter(cluster -> arn.equals(cluster.getArn()))
+                    .map(cluster -> new Taggable(cluster.getTags(), next -> {
+                        cluster.setTags(new HashMap<>(next));
+                        storage.put(clusterKey, cluster);
+                    }));
+            case "nodegroup" -> reads.nodegroup().apply(nodeGroupKey(clusterKey, name))
+                    .filter(nodegroup -> arn.equals(nodegroup.getNodegroupArn()))
+                    .map(nodegroup -> new Taggable(nodegroup.getTags(), next -> {
+                        nodegroup.setTags(new HashMap<>(next));
+                        nodeGroupStorage.put(nodeGroupKey(clusterKey, name), nodegroup);
+                    }));
+            case "fargateprofile" -> reads.fargateProfile().apply(fargateProfileKey(clusterKey, name))
+                    .filter(profile -> arn.equals(profile.getFargateProfileArn()))
+                    .map(profile -> new Taggable(profile.getTags(), next -> {
+                        profile.setTags(new HashMap<>(next));
+                        fargateProfileStorage.put(fargateProfileKey(clusterKey, name), profile);
+                    }));
+            default -> Optional.empty();
+        };
     }
 
     /** The TagMap limits: at most 50 tags, keys of 1 to 128 characters and values of at most 256. */
