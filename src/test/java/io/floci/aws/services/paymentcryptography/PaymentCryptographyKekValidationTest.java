@@ -9,6 +9,8 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Map;
 
@@ -120,12 +122,13 @@ class PaymentCryptographyKekValidationTest {
 
     // ---- the operation -------------------------------------------------------
 
-    @Test
-    void theAnswerOfTheRequestFormIsTheAnswerOfTheResponseForm() {
+    @ParameterizedTest
+    @ValueSource(strings = {"VARIANT_MASK_82", "VARIANT_MASK_82C0"})
+    void theAnswerOfTheRequestFormIsTheAnswerOfTheResponseForm(String mask) {
         PaymentCryptographyKey kek = kek();
 
         Map<String, Object> asked = validation.generate(request(kek.getArn(), null,
-                "BYTES_16"), "us-east-1");
+                "BYTES_16", mask), "us-east-1");
         String send = (String) asked.get("RandomKeySend");
         String receive = (String) asked.get("RandomKeyReceive");
 
@@ -133,7 +136,7 @@ class PaymentCryptographyKekValidationTest {
         assertTrue(send.matches("[0-9A-F]{32}"), send);
         assertTrue(receive.matches("[0-9A-F]{32}"), receive);
 
-        Map<String, Object> answered = validation.generate(request(kek.getArn(), send, null),
+        Map<String, Object> answered = validation.generate(request(kek.getArn(), send, null, mask),
                 "us-east-1");
 
         assertEquals(send, answered.get("RandomKeySend"));
@@ -247,10 +250,18 @@ class PaymentCryptographyKekValidationTest {
      * number is given.
      */
     private static JsonNode request(String keyIdentifier, String incoming, String length) {
+        return request(keyIdentifier, incoming, length, "VARIANT_MASK_82");
+    }
+
+    /**
+     * A request of the operation under one of the masks the model names.
+     */
+    private static JsonNode request(String keyIdentifier, String incoming, String length,
+                                    String mask) {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode body = mapper.createObjectNode();
         body.put("KeyIdentifier", keyIdentifier);
-        body.put("RandomKeySendVariantMask", "VARIANT_MASK_82");
+        body.put("RandomKeySendVariantMask", mask);
         ObjectNode type = mapper.createObjectNode();
         if (incoming == null) {
             ObjectNode attributes = mapper.createObjectNode();
