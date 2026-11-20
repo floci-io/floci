@@ -71,6 +71,42 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void mskSchemaListsAsKindTenWithItsOptionsAndNoTables() throws Exception {
+        String clusterArn = "arn:aws:kafka:us-east-1:000000000000:cluster/orders/abc-123";
+        MskSchemaBinding msk = new MskSchemaBinding("000000000000", "000000000000:c", "dev", "msk",
+                "aws", "arn:aws:iam::000000000000:role/R", "IAM", clusterArn);
+
+        String sql = writer.refreshMskSql(msk);
+        JsonNode payload = refreshPayload("msk", sql);
+        JsonNode options = new ObjectMapper().readTree(payload.path("esoptions").asText());
+
+        assertEquals(10, payload.path("eskind").asInt());
+        assertEquals("", payload.path("databasename").asText());
+        assertEquals("arn:aws:iam::000000000000:role/R", options.path("IAM_ROLE").asText());
+        assertEquals("IAM", options.path("AUTHENTICATION").asText());
+        assertEquals(clusterArn, options.path("CLUSTER_ARN").asText());
+        assertEquals("aws", options.path("PARTITION").asText());
+        assertEquals(0, payload.path("tables").size());
+        assertEquals(0, payload.path("columns").size());
+        assertEquals(0, payload.path("partitions").size());
+    }
+
+    @Test
+    void mskSchemaWithoutPartitionOmitsPartitionFromEsoptions() throws Exception {
+        MskSchemaBinding msk = new MskSchemaBinding("000000000000", "000000000000:c", "dev", "msk",
+                null, "arn:aws:iam::000000000000:role/R", "NONE",
+                "arn:aws:kafka:us-east-1:000000000000:cluster/orders/abc-123");
+
+        String sql = writer.refreshMskSql(msk);
+        JsonNode payload = refreshPayload("msk", sql);
+        JsonNode options = new ObjectMapper().readTree(payload.path("esoptions").asText());
+
+        assertEquals(10, payload.path("eskind").asInt());
+        assertEquals("NONE", options.path("AUTHENTICATION").asText());
+        assertThat(options.has("PARTITION"), equalTo(false));
+    }
+
+    @Test
     void glueSchemaPayloadLeavesTheKindToTheViewDefault() {
         String sql = writer.refreshSql(BINDING, List.of(), Map.of());
 
@@ -219,7 +255,11 @@ class ExternalMetadataWriterTest {
     }
 
     private JsonNode refreshPayload(String sql) throws Exception {
-        String prefix = "SELECT floci_internal.refresh_external_catalog(E'analytics', E'";
+        return refreshPayload("analytics", sql);
+    }
+
+    private JsonNode refreshPayload(String schemaName, String sql) throws Exception {
+        String prefix = "SELECT floci_internal.refresh_external_catalog(E'" + schemaName + "', E'";
         String payloadEnd = "'::jsonb)";
         String escapedJson = sql.substring(prefix.length(), sql.lastIndexOf(payloadEnd));
         return new ObjectMapper().readTree(escapedJson.replace("''", "'").replace("\\\\", "\\"));

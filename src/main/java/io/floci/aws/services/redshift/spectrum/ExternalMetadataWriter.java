@@ -23,6 +23,8 @@ public class ExternalMetadataWriter {
     private static final Logger LOG = Logger.getLogger(ExternalMetadataWriter.class);
     /** The {@code eskind} that SVV_EXTERNAL_SCHEMAS gives a schema over an Amazon Kinesis data stream. */
     private static final int KINESIS_SCHEMA_KIND = 9;
+    /** The {@code eskind} that SVV_EXTERNAL_SCHEMAS gives a schema over an Amazon MSK cluster. */
+    private static final int MSK_SCHEMA_KIND = 10;
     private final GlueService glueService;
     private final ObjectMapper objectMapper;
 
@@ -43,6 +45,10 @@ public class ExternalMetadataWriter {
 
     public void refreshKinesis(BackendSql backend, KinesisSchemaBinding binding) {
         run(backend, refreshKinesisSql(binding), false);
+    }
+
+    public void refreshMsk(BackendSql backend, MskSchemaBinding binding) {
+        run(backend, refreshMskSql(binding), false);
     }
 
     public void purge(BackendSql backend, String schemaName) {
@@ -74,6 +80,29 @@ public class ExternalMetadataWriter {
                 "eskind", KINESIS_SCHEMA_KIND,
                 "databasename", "",
                 "esoptions", json(Map.of("IAM_ROLE", binding.iamRoleArn())),
+                "tables", List.of(),
+                "columns", List.of(),
+                "partitions", List.of());
+        return "SELECT floci_internal.refresh_external_catalog(" + literal(binding.schemaName()) + ", "
+                + literal(json(payload)) + "::jsonb)";
+    }
+
+    /**
+     * A schema over an Amazon MSK cluster lists as kind 10 with no tables. Its topics are read only through a
+     * streaming materialized view, and Redshift documents no external database name for it.
+     */
+    String refreshMskSql(MskSchemaBinding binding) {
+        Map<String, Object> options = new LinkedHashMap<>();
+        options.put("IAM_ROLE", binding.iamRoleArn());
+        options.put("AUTHENTICATION", binding.authentication());
+        options.put("CLUSTER_ARN", binding.clusterArn());
+        if (binding.partition() != null) {
+            options.put("PARTITION", binding.partition());
+        }
+        Map<String, Object> payload = row(
+                "eskind", MSK_SCHEMA_KIND,
+                "databasename", "",
+                "esoptions", json(options),
                 "tables", List.of(),
                 "columns", List.of(),
                 "partitions", List.of());

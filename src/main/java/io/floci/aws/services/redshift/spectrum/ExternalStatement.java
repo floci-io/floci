@@ -6,9 +6,9 @@ import java.util.List;
 import java.util.Map;
 
 public sealed interface ExternalStatement permits ExternalStatement.CreateSchema, ExternalStatement.CreateKinesisSchema,
-        ExternalStatement.CreateTable, ExternalStatement.AddPartitions, ExternalStatement.DropSchema,
-        ExternalStatement.DropTable, ExternalStatement.CreateStreamingView, ExternalStatement.RefreshView,
-        ExternalStatement.DropView {
+        ExternalStatement.CreateMskSchema, ExternalStatement.CreateTable, ExternalStatement.AddPartitions,
+        ExternalStatement.DropSchema, ExternalStatement.DropTable, ExternalStatement.CreateStreamingView,
+        ExternalStatement.RefreshView, ExternalStatement.DropView {
     /** Read-only copy that keeps statement order, so Glue payloads are stable across runs. */
     private static <V> Map<String, V> ordered(Map<String, V> source) {
         return Collections.unmodifiableMap(new LinkedHashMap<>(source));
@@ -24,6 +24,9 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     /** {@code region} is null when the statement names none, which leaves the cluster's own Region. */
     record CreateKinesisSchema(String schemaName, String region, String iamRoleArn,
                                boolean ifNotExists) implements ExternalStatement { }
+    /** {@code partition} is null when the statement omits {@code PARTITION}. */
+    record CreateMskSchema(String schemaName, String partition, String iamRoleArn, String authentication,
+                           String clusterArn, boolean ifNotExists) implements ExternalStatement { }
     record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
                        List<ColumnDefinition> partitionColumns, TableFormat format, String location,
                        String delimiter, String serde, Map<String, String> properties,
