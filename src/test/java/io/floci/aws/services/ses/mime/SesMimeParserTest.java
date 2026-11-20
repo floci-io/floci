@@ -22,9 +22,7 @@ class SesMimeParserTest {
 
     @Test
     void nestingThatOverflowsTheParserIsNullNotAnError() {
-        // mime4j nests a reader per forwarded message and overflows the stack at this depth.
-        String layer = "Content-Type: message/rfc822\r\n\r\n";
-        byte[] mime = (layer.repeat(100_000) + "Content-Type: text/plain\r\n\r\nbody\r\n")
+        byte[] mime = NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_PARSER)
                 .getBytes(StandardCharsets.US_ASCII);
 
         assertNull(SesMimeParser.parse(mime));

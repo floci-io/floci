@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.NestedMime;
 import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
@@ -323,6 +324,28 @@ class SmtpRelayTest {
 
         assertDoesNotThrow(() -> relay.relayRaw(raw("from@example.com",
                 List.of("to@example.com"), "Subject: X\r\n\r\nBody")));
+    }
+
+    @Test
+    void relayRaw_nestingThatOverflowsTheParser_isSkippedNotThrown() {
+        SmtpRelay relay = new SmtpRelay(mailClient, true);
+        String rawMime = NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_PARSER);
+
+        assertDoesNotThrow(() -> relay.relayRaw(raw("from@example.com", List.of("to@example.com"), rawMime)));
+
+        verify(mailClient, never()).sendMail(any(MailMessage.class));
+    }
+
+    @Test
+    void relayRaw_nestingThatParsesButOverflowsTheWriter_isSkippedNotThrown() {
+        SmtpRelay relay = new SmtpRelay(mailClient, true);
+        SmtpRelay.RawRelayMessage nested = raw("from@example.com", List.of("to@example.com"),
+                NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_WRITER));
+        assertNotNull(nested.message());
+
+        assertDoesNotThrow(() -> relay.relayRaw(nested));
+
+        verify(mailClient, never()).sendMail(any(MailMessage.class));
     }
 
     @Test
