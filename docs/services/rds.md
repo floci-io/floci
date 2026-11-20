@@ -241,6 +241,19 @@ false snapshot-copy flag. Create, modify and describe return the stored settings
 `RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` also set `DeletionProtection`
 on the new cluster, defaulting to false.
 
+They also retain `PreferredBackupWindow`, `PreferredMaintenanceWindow`, `VpcSecurityGroupIds`,
+`MonitoringInterval`, `MonitoringRoleArn`, `EnablePerformanceInsights`,
+`PerformanceInsightsRetentionPeriod` and `DatabaseInsightsMode`, and `DescribeDBClusters` returns
+them. On create, a cluster that names no windows gets `04:00-06:00` and `mon:00:00-mon:03:00` (or a
+30-minute window next to the one it names, as for a DB instance), a cluster that names no groups
+gets the default security group of its DB subnet group's VPC, and `DatabaseInsightsMode` defaults to
+`standard`. The checks are those of a DB instance: windows may not overlap, `MonitoringInterval` is
+one of 0, 1, 5, 10, 15, 30 or 60 and needs a `MonitoringRoleArn` when it is not 0, the retention
+period is 7, 731 or a multiple of 31 up to 713, and each security group must exist in the cluster's
+VPC. `advanced` Database Insights needs Performance Insights with a retention period of at least
+465 days. A refused create leaves no cluster behind. Floci collects no Enhanced Monitoring or
+Performance Insights data.
+
 Aurora member instances retain `PromotionTier` from create and modify, defaulting
 to 1 and accepting 0 through 15. Both the instance response and the cluster member
 list report that value. Invalid tiers are rejected before other requested changes
@@ -525,7 +538,7 @@ RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-R
 otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
 default group. A modify that moves an instance to another VPC without naming groups puts it on the
 new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
-its cluster's, which Floci does not keep, so it keeps none. `DescribeDBInstances` reports the VPC's
+its cluster's (see [Cluster settings read-back](#cluster-settings-read-back)), so the member keeps none. `DescribeDBInstances` reports the VPC's
 default group for an instance that keeps none, such as a cluster member or an instance stored before
 these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
 before it changes anything, and a rollback leaves the groups of an instance the update moved to

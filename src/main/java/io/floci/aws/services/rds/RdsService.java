@@ -41,6 +41,7 @@ import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
 import io.floci.aws.services.rds.model.DbClusterEndpoint;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
+import io.floci.aws.services.rds.model.DbClusterSettings;
 import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
@@ -12056,6 +12057,93 @@ public class RdsService implements Resettable, ResourceProvider {
         if (changes != null) {
             cluster.setEnabledCloudwatchLogsExports(changes.applyTo(cluster.getEnabledCloudwatchLogsExports()));
         }
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Applies the maintenance windows, VPC security groups and monitoring settings a CreateDBCluster
+     * ({@code create} true) or ModifyDBCluster request names. On create a member left out takes the
+     * AWS default (the VPC's default security group, the default windows, no monitoring); on modify
+     * it keeps the cluster's value. The windows and the monitoring pair are judged on the values in
+     * effect after the request.
+     */
+    public synchronized DbCluster setClusterSettings(String region, String clusterId,
+                                                     DbClusterSettings settings, boolean create) {
+        settings.validate();
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+
+        String backup = settings.preferredBackupWindow() != null
+                ? BackupWindows.lowerCase(settings.preferredBackupWindow())
+                : cluster.getPreferredBackupWindow() != null
+                        ? cluster.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW;
+        String maintenance = settings.preferredMaintenanceWindow() != null
+                ? BackupWindows.lowerCase(settings.preferredMaintenanceWindow())
+                : cluster.getPreferredMaintenanceWindow() != null
+                        ? cluster.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+        if (create && settings.preferredBackupWindow() == null && settings.preferredMaintenanceWindow() != null
+                && BackupWindows.overlap(backup, maintenance)) {
+            backup = BackupWindows.backupWindowAfter(maintenance);
+        }
+        if (create && settings.preferredMaintenanceWindow() == null && settings.preferredBackupWindow() != null
+                && BackupWindows.overlap(backup, maintenance)) {
+            maintenance = BackupWindows.maintenanceWindowAfter(backup);
+        }
+        if (BackupWindows.overlap(backup, maintenance)) {
+            throw BackupWindows.overlapping();
+        }
+
+        List<String> securityGroups = settings.vpcSecurityGroupIds();
+        if (securityGroups != null && !securityGroups.isEmpty()) {
+            RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, securityGroups, cluster.getVpcId());
+        } else if (create) {
+            securityGroups = RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion, cluster.getVpcId());
+        } else {
+            securityGroups = null;
+        }
+
+        int interval = settings.monitoringInterval() != null
+                ? settings.monitoringInterval() : cluster.getMonitoringInterval();
+        String role = settings.monitoringRoleArn() != null
+                ? settings.monitoringRoleArn() : cluster.getMonitoringRoleArn();
+        if (create) {
+            DbInstanceSettings.validateMonitoringPairOnCreate(interval, role);
+        } else if (interval != 0 && (role == null || role.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A MonitoringRoleArn value is required if you specify a MonitoringInterval value "
+                            + "other than 0.", 400);
+        }
+
+        boolean piEnabled = settings.performanceInsightsEnabled() != null
+                ? settings.performanceInsightsEnabled() : cluster.isPerformanceInsightsEnabled();
+        Integer piRetention = settings.performanceInsightsRetentionPeriod() != null
+                ? settings.performanceInsightsRetentionPeriod() : cluster.getPerformanceInsightsRetentionPeriod();
+        if (piEnabled && piRetention == null) {
+            piRetention = 7;
+        }
+        String insightsMode = settings.databaseInsightsMode() != null
+                ? settings.databaseInsightsMode() : cluster.getDatabaseInsightsMode();
+        if (create && insightsMode == null) {
+            insightsMode = DbClusterSettings.DATABASE_INSIGHTS_STANDARD;
+        }
+        if (DbClusterSettings.DATABASE_INSIGHTS_ADVANCED.equals(insightsMode)
+                && (!piEnabled || piRetention == null || piRetention < 465)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Database Insights advanced mode requires Performance Insights to be enabled "
+                            + "with a retention period of at least 465 days.", 400);
+        }
+
+        cluster.setPreferredBackupWindow(backup);
+        cluster.setPreferredMaintenanceWindow(maintenance);
+        if (securityGroups != null) {
+            cluster.setVpcSecurityGroupIds(securityGroups);
+        }
+        cluster.setMonitoringInterval(interval);
+        cluster.setMonitoringRoleArn(role);
+        cluster.setPerformanceInsightsEnabled(piEnabled);
+        cluster.setPerformanceInsightsRetentionPeriod(piEnabled ? piRetention : null);
+        cluster.setDatabaseInsightsMode(insightsMode);
         putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }

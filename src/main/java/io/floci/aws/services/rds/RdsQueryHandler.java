@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.XmlBuilder;
@@ -21,6 +22,7 @@ import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
 import io.floci.aws.services.rds.model.DbClusterEndpoint;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
+import io.floci.aws.services.rds.model.DbClusterSettings;
 import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
@@ -1461,6 +1463,8 @@ public class RdsQueryHandler {
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Integer requestedPort = parseIntegerParam(params, "Port");
+            DbClusterSettings clusterSettings = clusterSettings(params);
+            clusterSettings.validate();
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
             boolean protectedCluster = Boolean.TRUE.equals(deletionProtection);
             DbCluster cluster;
@@ -1500,6 +1504,15 @@ public class RdsQueryHandler {
                     throw e;
                 }
             }
+            try {
+                cluster = service.setClusterSettings(region, id, clusterSettings, true);
+            } catch (AwsException e) {
+                if (protectedCluster) {
+                    service.setDeletionProtection(region, id, false);
+                }
+                service.deleteDbCluster(id, region);
+                throw e;
+            }
             if (enableHttpEndpoint) {
                 cluster = service.setHttpEndpoint(region, id, true);
             }
@@ -1514,6 +1527,19 @@ public class RdsQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    /** The maintenance, security group and monitoring members of a Create/ModifyDBCluster request. */
+    private static DbClusterSettings clusterSettings(MultivaluedMap<String, String> params) {
+        return new DbClusterSettings(
+                params.getFirst("PreferredBackupWindow"),
+                params.getFirst("PreferredMaintenanceWindow"),
+                hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                parseIntegerParam(params, "MonitoringInterval"),
+                params.getFirst("MonitoringRoleArn"),
+                parseOptionalBoolean(params, "EnablePerformanceInsights"),
+                parseIntegerParam(params, "PerformanceInsightsRetentionPeriod"),
+                params.getFirst("DatabaseInsightsMode"));
     }
 
     private static Double parseDoubleParam(MultivaluedMap<String, String> params, String name) {
@@ -1626,6 +1652,8 @@ public class RdsQueryHandler {
                 RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
             Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
+            DbClusterSettings clusterSettings = clusterSettings(params);
+            clusterSettings.validate();
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
@@ -1646,6 +1674,9 @@ public class RdsQueryHandler {
             }
             if (deletionProtection != null) {
                 cluster = service.setDeletionProtection(region, id, deletionProtection);
+            }
+            if (!clusterSettings.isEmpty()) {
+                cluster = service.setClusterSettings(region, id, clusterSettings, false);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3696,15 +3727,30 @@ public class RdsQueryHandler {
            .elem("CopyTagsToSnapshot", c.isCopyTagsToSnapshot())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+           .start("VpcSecurityGroups");
+        for (String securityGroupId : c.getVpcSecurityGroupIds()) {
+            xml.start("VpcSecurityGroupMembership")
+               .elem("VpcSecurityGroupId", securityGroupId)
                .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
-           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
+               .end("VpcSecurityGroupMembership");
+        }
+        xml.end("VpcSecurityGroups")
+           .elem("MonitoringInterval", c.getMonitoringInterval());
+        if (c.getMonitoringRoleArn() != null && !c.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", c.getMonitoringRoleArn());
+        }
+        xml.elem("PerformanceInsightsEnabled", c.isPerformanceInsightsEnabled());
+        if (c.isPerformanceInsightsEnabled() && c.getPerformanceInsightsRetentionPeriod() != null) {
+            xml.elem("PerformanceInsightsRetentionPeriod", c.getPerformanceInsightsRetentionPeriod());
+        }
+        if (c.getDatabaseInsightsMode() != null) {
+            xml.elem("DatabaseInsightsMode", c.getDatabaseInsightsMode());
+        }
+        xml.elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
         if (clusterParameterGroup != null) {
             xml.elem("DBClusterParameterGroup", clusterParameterGroup);
