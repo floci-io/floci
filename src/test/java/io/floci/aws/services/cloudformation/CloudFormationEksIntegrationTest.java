@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -148,8 +150,8 @@ class CloudFormationEksIntegrationTest {
             List<String> names = given().get(base).jsonPath().getList("nodegroups");
             assertEquals(1, names.size());
             String arn = given().get(base + "/" + names.getFirst()).jsonPath().getString("nodegroup.nodegroupArn");
-            given().contentType("application/json").body(Map.of("tags", Map.of("ext", "1")))
-                    .post("/tags/" + arn).then().statusCode(200);
+            given().urlEncodingEnabled(false).contentType("application/json").body(Map.of("tags", Map.of("ext", "1")))
+                    .post("/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8)).then().statusCode(200);
 
             createUpdateChangeSet(client, stack, "tags", nodegroup("two", ""));
             executeAndAwaitUpdate(client, stack, "tags");

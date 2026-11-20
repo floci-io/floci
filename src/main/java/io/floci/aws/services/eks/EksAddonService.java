@@ -541,6 +541,17 @@ public class EksAddonService {
         return Optional.of(tags);
     }
 
+    /**
+     * The tags of the add-on {@code addonName} of {@code cluster} in {@code account}, read in place, if its ARN is
+     * {@code addonArn}.
+     */
+    Optional<Map<String, String>> tagsInAccount(String account, Cluster cluster, String addonName, String addonArn) {
+        return AccountAwareStorageBackend.readInAccount(storage, account,
+                        prefix(cluster) + addonName.toLowerCase(Locale.ROOT))
+                .filter(stored -> addonArn.equals(stored.addon().addonArn()))
+                .map(stored -> stored.addon().tags());
+    }
+
     private static String prefix(Cluster cluster) {
         return cluster.getArn() + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
     }

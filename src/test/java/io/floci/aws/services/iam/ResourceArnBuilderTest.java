@@ -15,6 +15,7 @@ import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
 import io.floci.aws.services.eks.EksService;
+import io.floci.aws.services.eks.EksStoredResourceArns;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.IamGroup;
 import io.floci.aws.services.iam.model.IamRole;
@@ -186,14 +187,6 @@ class ResourceArnBuilderTest {
         Instance<IamService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(service);
         return new ResourceArnBuilder(new ObjectMapper(), instance);
-    }
-
-    /** A builder reading {@code eks}, for an EKS route naming a cluster or what it holds. */
-    private static ResourceArnBuilder backedBy(EksService eks) {
-        @SuppressWarnings("unchecked")
-        Instance<EksService> instance = mock(Instance.class);
-        when(instance.get()).thenReturn(eks);
-        return new ResourceArnBuilder(new ObjectMapper(), null, instance);
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -1459,7 +1452,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<KmsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(kms);
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), null, instance);
     }
 
     /** A builder reading the stored ARNs of a namespace, for every request of that namespace. */
@@ -1467,7 +1460,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
     }
 
     /** The finder of the stored ARNs of a namespace, answering one name of one type with one ARN. */
@@ -2683,138 +2676,70 @@ class ResourceArnBuilderTest {
 
     // ── EKS ──────────────────────────────────────────────────────────────────────
 
-    /** The cluster {@code held}, which EKS keeps in the request's Region (us-east-1), and what it holds. */
-    private static final String HELD_CLUSTER = "arn:aws:eks:us-east-1:000000000000:cluster/held";
-    private static final String WORKER = "arn:aws:iam::000000000000:role/team/worker";
-    private static final String RUNNER = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
+    /** The node group and add-on EKS holds in the cluster {@code held}, in the request's Region (us-east-1). */
+    private static final String HELD_NODEGROUP = "arn:aws:eks:us-east-1:000000000000:nodegroup/held/ng/1";
+    private static final String HELD_ADDON = "arn:aws:eks:us-east-1:000000000000:addon/held/vpc-cni/4";
 
+    /** A builder reading what EKS holds through its lookup, which the table asks to find what ends in an id. */
     private static ResourceArnBuilder eksHolding() {
         EksService eks = mock(EksService.class);
         when(eks.findResourceArn(any(), any(), any())).thenReturn(Optional.empty());
-        when(eks.findResourceArn("held", null, null)).thenReturn(Optional.of(HELD_CLUSTER));
-        for (String[] held : new String[][] {
-            {"node-groups", "ng", "nodegroup/held/ng/1"}, {"node-groups", "a/b", "nodegroup/held/a/b/2"},
-            {"fargate-profiles", "fp", "fargateprofile/held/fp/3"}, {"addons", "vpc-cni", "addon/held/vpc-cni/4"},
-            {"updates", "u-1", "addon/held/vpc-cni/4"},
-            {"pod-identity-associations", "a-1", "podidentityassociation/held/a-1"},
-            {"access-entries", WORKER, "access-entry/held/role/000000000000/worker/5"},
-            {"access-entries", WORKER + "/access-policies", "access-entry/held/role/000000000000/access-policies/6"},
-            {"access-entries", RUNNER, "access-entry/held/role/000000000000/runner/7"},
-        }) {
-            when(eks.findResourceArn("held", held[0], held[1]))
-                    .thenReturn(Optional.of("arn:aws:eks:us-east-1:000000000000:" + held[2]));
-        }
-        return backedBy(eks);
-    }
-
-    private String eksResource(ResourceArnBuilder eks, String method, String sent) {
-        when(ctx.getMethod()).thenReturn(method);
-        request(sent);
-        return eks.build("eks", ctx, "us-east-1", ACCOUNT);
-    }
-
-    @Test
-    void anEksClusterRouteActsOnTheClusterEksHoldsOrTheOneACreateMints() {
-        ResourceArnBuilder eks = eksHolding();
-        String minted = "arn:aws:eks:us-east-1:000000000000:cluster/";
-        assertEquals(HELD_CLUSTER, eksResource(eks, "GET", "/clusters/held"));
-        assertEquals(minted + "gone", eksResource(eks, "DELETE", "/clusters/gone"));
-        for (String route : List.of("/node-groups", "/addons", "/access-entries", "/pod-identity-associations",
-                "/update-config", "/updates", "/updates/u-1/cancel-update", "/insights/i-1",
-                "/certificate-authorities/ca-1/activate", "/identity-provider-configs/associate")) {
-            assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/clusters/held" + route), route);
-        }
-        assertEquals(HELD_CLUSTER, eksResource(eks, "DELETE", "/cluster-registrations/held"));
-
-        // A create is checked against the cluster its body names; listing clusters names none.
-        setJsonBody("{\"name\":\"fresh\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}");
-        assertEquals(minted + "fresh", eksResource(eks, "POST", "/clusters"));
-        assertEquals("*", eksResource(eks, "GET", "/clusters"));
-    }
-
-    @Test
-    void anEksRouteOnWhatAClusterHoldsActsOnTheArnEksHoldsItUnder() {
-        ResourceArnBuilder eks = eksHolding();
-        String held = "arn:aws:eks:us-east-1:000000000000:";
-        assertEquals(held + "nodegroup/held/ng/1", eksResource(eks, "GET", "/clusters/held/node-groups/ng"));
-        assertEquals(held + "nodegroup/held/ng/1",
-                eksResource(eks, "POST", "/clusters/held/node-groups/ng/update-version"));
-        // The router keeps an encoded / inside the name, and EKS looks the node group up by it.
-        assertEquals(held + "nodegroup/held/a/b/2", eksResource(eks, "GET", "/clusters/held/node-groups/a%2Fb"));
-        assertEquals(held + "fargateprofile/held/fp/3", eksResource(eks, "DELETE", "/clusters/held/fargate-profiles/fp"));
-        assertEquals(held + "addon/held/vpc-cni/4", eksResource(eks, "POST", "/clusters/held/addons/vpc-cni/update"));
-        assertEquals(held + "podidentityassociation/held/a-1",
-                eksResource(eks, "POST", "/clusters/held/pod-identity-associations/a-1"));
-        // An access entry's principal is the rest of the path, encoded or not.
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5", eksResource(eks, "GET",
-                "/clusters/held/access-entries/arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fteam%2Fworker"));
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
-                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER));
-        // An entry's access policy routes act on the entry, as the router serves them.
-        String admin = "/access-policies/arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
-                eksResource(eks, "GET", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
-                eksResource(eks, "POST", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
-                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER + admin));
-        assertEquals(held + "access-entry/held/role/000000000000/worker/5", eksResource(eks, "DELETE",
-                "/clusters/held/access-entries/" + WORKER
-                        + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin"));
-        // Any other route under the entry takes the rest of the path as its principal, an IAM path holding
-        // access-policies included.
-        assertEquals(held + "access-entry/held/role/000000000000/runner/7",
-                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + RUNNER));
-        assertEquals(held + "access-entry/held/role/000000000000/access-policies/6",
-                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
-        // What EKS does not hold names no resource, nor do what Floci keeps no id for.
-        assertEquals("*", eksResource(eks, "GET", "/clusters/held/node-groups/other"));
-        assertEquals("*", eksResource(eks, "GET", "/clusters/gone/addons/vpc-cni"));
-        assertEquals("*", eksResource(eks, "POST", "/clusters/held/identity-provider-configs/describe"));
-        assertEquals("*", eksResource(eks, "GET", "/clusters/held/capabilities/argocd"));
-    }
-
-    @Test
-    void anEksUpdateActsOnItsAddonAndATagOnTheCallersClusterOfThatName() {
-        ResourceArnBuilder eks = eksHolding();
-        // EKS returns an add-on's update whatever add-on the request names, if any, so it acts on its own add-on.
-        String addon = "arn:aws:eks:us-east-1:000000000000:addon/held/vpc-cni/4";
-        assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
-        queryParams.putSingle("addonName", "coredns");
-        assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
-        queryParams.clear();
-        assertEquals(HELD_CLUSTER, eksResource(eks, "GET", "/clusters/held/updates/u-2"));
-        assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/clusters/held/updates/u-1/cancel-update"));
-
-        // EKS tags the caller's cluster named after the ARN's last /, whatever account or Region it names.
-        assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/tags/arn:aws:eks:eu-west-1:111122223333:cluster/held"));
-        queryParams.putSingle("resourceArn", "arn:aws:eks:eu-west-1:111122223333:cluster/held");
-        assertEquals(HELD_CLUSTER, eksResource(eks, "DELETE", "/tags"));
-        queryParams.clear();
-        assertEquals("*", eksResource(eks, "GET", "/tags/no-slash"));
-
-        assertEquals("arn:aws:eks:us-east-1:000000000000:eks-anywhere-subscription/sub-1",
-                eksResource(eks, "GET", "/eks-anywhere-subscriptions/sub-1"));
-        for (String route : List.of("/addons/supported-versions", "/access-policies", "/cluster-versions",
-                "/cluster-registrations", "/eks-anywhere-subscriptions")) {
-            assertEquals("*", eksResource(eks, "GET", route), route);
-        }
-    }
-
-    @Test
-    void anEksRouteOnAClusterHeldInAnotherRegionActsOnTheRequestsRegion() {
-        // EKS clusters are Regional: a request signed for us-east-1 does not reach a cluster EKS keeps in us-west-2,
-        // so it acts on the cluster of that name a create would mint in us-east-1, and on nothing the other holds.
-        EksService eks = mock(EksService.class);
-        when(eks.findResourceArn(any(), any(), any())).thenReturn(Optional.empty());
-        when(eks.findResourceArn("west", null, null))
-                .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:cluster/west"));
+        when(eks.findResourceArn("held", "node-groups", "ng")).thenReturn(Optional.of(HELD_NODEGROUP));
+        when(eks.findResourceArn("held", "addons", "vpc-cni")).thenReturn(Optional.of(HELD_ADDON));
         when(eks.findResourceArn("west", "node-groups", "ng"))
                 .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:nodegroup/west/ng/1"));
-        ResourceArnBuilder builder = backedBy(eks);
+        return reading(new EksStoredResourceArns(eks, new RegionResolver("us-east-1", ACCOUNT)));
+    }
 
-        assertEquals("arn:aws:eks:us-east-1:000000000000:cluster/west", eksResource(builder, "GET", "/clusters/west"));
-        assertEquals("*", eksResource(builder, "GET", "/clusters/west/node-groups/ng"));
+    private List<String> eks(ResourceArnBuilder eks, String method, String sent, String operation) {
+        when(ctx.getMethod()).thenReturn(method);
+        request(sent);
+        return eks.buildResources("eks", operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /** A cluster route is checked on the cluster its path names, from the table. */
+    @Test
+    void anEksClusterRouteIsCheckedOnTheClusterItsPathNames() {
+        ResourceArnBuilder eks = eksHolding();
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/held"),
+                eks(eks, "GET", "/clusters/held", "eks:DescribeCluster"));
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/held"),
+                eks(eks, "GET", "/clusters/held/node-groups", "eks:ListNodegroups"));
+        assertEquals(List.of("*"), eks(eks, "GET", "/clusters", "eks:ListClusters"));
+    }
+
+    /** CreateCluster is checked on the cluster its body names, as the EKS user guide's example policy grants it. */
+    @Test
+    void anEksCreateClusterIsCheckedOnTheClusterItsBodyNames() {
+        setJsonBody("{\"name\":\"new\",\"roleArn\":\"arn:aws:iam::000000000000:role/eks\"}");
+        assertEquals(List.of("arn:aws:eks:us-east-1:000000000000:cluster/new"),
+                eks(eksHolding(), "POST", "/clusters", "eks:CreateCluster"));
+    }
+
+    /**
+     * A node group or an add-on, whose ARN ends in an id EKS minted, is checked on the one EKS holds under the names
+     * its path gives, found in the request's Region; one EKS holds none of, or holds in another Region, has its ARN's
+     * names open.
+     */
+    @Test
+    void anEksNodegroupOrAddonIsCheckedOnTheOneEksHolds() {
+        ResourceArnBuilder eks = eksHolding();
+        assertEquals(List.of(HELD_NODEGROUP),
+                eks(eks, "GET", "/clusters/held/node-groups/ng", "eks:DescribeNodegroup"));
+        assertEquals(List.of(HELD_ADDON), eks(eks, "GET", "/clusters/held/addons/vpc-cni", "eks:DescribeAddon"));
+        List<String> missing = eks(eks, "GET", "/clusters/held/node-groups/gone", "eks:DescribeNodegroup");
+        assertEquals(1, missing.size());
+        assertTrue(missing.getFirst().startsWith("arn:aws:eks:us-east-1:000000000000:nodegroup/"), missing.toString());
+        assertTrue(missing.getFirst().endsWith("*"), missing.toString());
+        assertEquals(missing, eks(eks, "GET", "/clusters/west/node-groups/ng", "eks:DescribeNodegroup"));
+    }
+
+    /** A tagging route is checked on the ARN its modeled path carries. */
+    @Test
+    void anEksTaggingRouteIsCheckedOnTheArnItCarries() {
+        String cluster = "arn:aws:eks:us-east-1:000000000000:cluster/held";
+        String encoded = cluster.replace(":", "%3A").replace("/", "%2F");
+        assertEquals(List.of(cluster), eks(eksHolding(), "GET", "/tags/" + encoded, "eks:ListTagsForResource"));
     }
 
     /** Stubs the request path as sent and, decoded, as {@link UriInfo#getPath()} gives it. */
