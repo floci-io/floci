@@ -3823,6 +3823,18 @@ public interface EmulatorConfig {
              */
             @WithDefault("busybox:1.36")
             String initImage();
+
+            /**
+             * Seconds a Lambda pod the scheduler marks Unschedulable may stay that way before
+             * its cold start is failed, so a cluster autoscaler has time to add a node. The
+             * grace is measured from the PodScheduled condition's lastTransitionTime, and
+             * {@code 0}, the default, keeps failing the cold start the moment the pod is
+             * reported Unschedulable.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS
+             */
+            @WithDefault("0")
+            int unschedulableGraceSeconds();
         }
 
         HotReload hotReload();
