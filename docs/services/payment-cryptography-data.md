@@ -221,8 +221,8 @@ client that talks to the control plane does not reach it by accident.
   that number, inverts every bit of it, and enciphers the inverted value under the other
   variant of its own key. The first node compares the answer with the one it computed, so
   two nodes whose keys differ do not agree. The random number is enciphered a block at a
-  time, in the cipher the key's own algorithm names, and it is sixteen bytes long when the
-  request does not name a length.
+  time, in Triple DES, the cipher AS2805's cryptography is made of, and it is sixteen bytes
+  long when the request does not name a length.
 - **The key of a KEK validation is a Triple DES key encryption key.** It is the one AS2805
   calls the terminal major key, the usage `TR31_K0_KEY_ENCRYPTION_KEY`. The reference does
   not name the usage the key must have for this operation, so the one the service's own
