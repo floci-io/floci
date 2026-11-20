@@ -15,6 +15,8 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.apigatewayv2.model.*;
 import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
+import io.floci.aws.services.apigatewayv2.proxy.PinnedHttpClient;
+import io.floci.aws.services.apigatewayv2.proxy.ResponseParameterMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -1002,18 +1004,22 @@ public class ApiGatewayV2Service {
     }
 
     private static final Pattern RESPONSE_STATUS_CODE = Pattern.compile("[2-5][0-9]{2}");
-    private static final Pattern RESPONSE_PARAMETER_KEY =
-            Pattern.compile("overwrite:statuscode|(?:append|overwrite|remove):header\\..+");
+    private static final String STATUS_CODE_OVERWRITE = "overwrite:statuscode";
+    private static final Pattern RESPONSE_HEADER_KEY = Pattern.compile("(?:append|overwrite|remove):header\\.(.+)");
 
     /**
-     * ResponseParameters as CreateIntegration and UpdateIntegration accept them: each key a status
-     * code from 200 to 599, and each of its mappings {@code overwrite:statuscode} or an
-     * {@code append}, {@code overwrite} or {@code remove} of {@code header.<name>}. Anything else is a
-     * {@code BadRequestException}.
+     * ResponseParameters as CreateIntegration and UpdateIntegration accept them: a map whose keys
+     * are status codes from 200 to 599, and each of its mappings {@code overwrite:statuscode} or an
+     * {@code append}, {@code overwrite} or {@code remove} of {@code header.<name>} with a valid
+     * header name. A static {@code overwrite:statuscode} value must be a status code from 100 to
+     * 599. Anything else is a {@code BadRequestException}.
      */
     static Map<String, Map<String, String>> responseParameters(Object responseParameters) {
-        if (!(responseParameters instanceof Map<?, ?> map)) {
+        if (responseParameters == null) {
             return null;
+        }
+        if (!(responseParameters instanceof Map<?, ?> map)) {
+            throw new AwsException("BadRequestException", "ResponseParameters must be a map.", 400);
         }
         Map<String, Map<String, String>> parsed = new LinkedHashMap<>();
         map.forEach((key, value) -> {
@@ -1027,14 +1033,23 @@ public class ApiGatewayV2Service {
                         "ResponseParameters value for " + statusCode + " must be a map.", 400);
             }
             Map<String, String> mappings = stringParameters(value, "ResponseParameters");
-            for (String mapping : mappings.keySet()) {
-                if (!RESPONSE_PARAMETER_KEY.matcher(mapping).matches()) {
+            mappings.forEach((mapping, source) -> {
+                if (STATUS_CODE_OVERWRITE.equals(mapping)) {
+                    if ((source == null || !source.startsWith("$")) && ResponseParameterMapper.statusCode(source) == null) {
+                        throw new AwsException("BadRequestException",
+                                "ResponseParameters overwrite:statuscode value for status code " + statusCode
+                                        + " must be a status code from 100 to 599.", 400);
+                    }
+                    return;
+                }
+                Matcher header = RESPONSE_HEADER_KEY.matcher(mapping);
+                if (!header.matches() || !PinnedHttpClient.isValidHeaderName(header.group(1))) {
                     throw new AwsException("BadRequestException",
                             "ResponseParameters key " + mapping + " for status code " + statusCode
                                     + " must be overwrite:statuscode or append, overwrite or remove of header.<name>.",
                             400);
                 }
-            }
+            });
             parsed.put(statusCode, mappings);
         });
         return parsed;

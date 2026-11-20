@@ -713,9 +713,8 @@ public class ApiGatewayV2OpenApiImporter {
         }
 
         copyStringMap(definition, request, "requestParameters");
-        if (definition.get("responseParameters") instanceof Map<?, ?> responseParameters
-                && !responseParameters.isEmpty()) {
-            request.put("responseParameters", responseParameters);
+        if (definition.get("responseParameters") != null) {
+            request.put("responseParameters", definition.get("responseParameters"));
         }
         copyStringMap(definition, request, "requestTemplates");
         copyStringMap(definition, request, "responseTemplates");

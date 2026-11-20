@@ -1,5 +1,7 @@
 package io.floci.aws.services.apigatewayv2.proxy;
 
+import org.jboss.logging.Logger;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -23,10 +25,11 @@ import java.util.Map;
  * </ul>
  *
  * <p>As for RequestParameters, an overwrite or append whose source resolves to {@code null} is
- * skipped, and so is an {@code overwrite:statuscode} whose value is not a status code from 100 to
- * 599.
+ * skipped. So is an {@code overwrite:statuscode} whose value is not a status code from 100 to 599,
+ * and a header whose value {@link PinnedHttpClient#requireValidHeader} rejects.
  */
 public class ResponseParameterMapper {
+    private static final Logger LOG = Logger.getLogger(ResponseParameterMapper.class);
     private static final String RESPONSE_HEADER = "$response.header.";
     private static final String RESPONSE_BODY = "$response.body";
 
@@ -64,6 +67,12 @@ public class ResponseParameterMapper {
             }
             String value = resolve(mapping.getValue(), result, ctx);
             if (value == null) continue;
+            try {
+                PinnedHttpClient.requireValidHeader(headerName, value);
+            } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
+                LOG.warnv("HTTP_PROXY: skipping response mapping {0}: its value is not a valid header value", key);
+                continue;
+            }
             if (action.equals("overwrite")) {
                 removeHeader(headers, headerName);
             }
@@ -94,7 +103,8 @@ public class ResponseParameterMapper {
                 ? null : new String(result.body(), StandardCharsets.UTF_8);
     }
 
-    private static Integer statusCode(String value) {
+    /** The status code {@code value} spells, from 100 to 599, or null when it spells none. */
+    public static Integer statusCode(String value) {
         if (value == null || !value.matches("[0-9]{3}")) return null;
         int status = Integer.parseInt(value);
         return status >= 100 && status <= 599 ? status : null;

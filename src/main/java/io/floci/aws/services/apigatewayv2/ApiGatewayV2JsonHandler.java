@@ -269,7 +269,8 @@ public class ApiGatewayV2JsonHandler {
     /**
      * The integration request with lower-camel-case member names. RequestParameters and
      * ResponseParameters keys keep their case, since an integration subtype's parameters are named
-     * by its action's members and a response mapping key is validated as sent.
+     * by its action's members and a response mapping key is validated as sent. ResponseParameters
+     * of any JSON type reaches the service, which rejects anything but an object.
      */
     private Map<String, Object> integrationRequest(JsonNode request) {
         @SuppressWarnings("unchecked")
@@ -279,10 +280,8 @@ public class ApiGatewayV2JsonHandler {
             map.put("requestParameters",
                     objectMapper.convertValue(requestParameters, new TypeReference<Map<String, Object>>() {}));
         }
-        JsonNode responseParameters = request.get("ResponseParameters");
-        if (responseParameters != null && responseParameters.isObject()) {
-            map.put("responseParameters",
-                    objectMapper.convertValue(responseParameters, new TypeReference<Map<String, Object>>() {}));
+        if (request.has("ResponseParameters")) {
+            map.put("responseParameters", objectMapper.convertValue(request.get("ResponseParameters"), Object.class));
         }
         return map;
     }

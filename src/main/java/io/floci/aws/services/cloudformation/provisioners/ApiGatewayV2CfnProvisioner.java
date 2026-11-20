@@ -330,9 +330,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                                         new TypeReference<Map<String, Object>>() {})));
                             }
                             JsonNode responseParameters = integration.path("responseParameters");
-                            if (responseParameters.isObject() && !responseParameters.isEmpty()) {
-                                integrationRequest.put("responseParameters", objectMapper.convertValue(
-                                        responseParameters, new TypeReference<Map<String, Object>>() {}));
+                            if (!responseParameters.isMissingNode() && !responseParameters.isNull()) {
+                                integrationRequest.put("responseParameters",
+                                        objectMapper.convertValue(responseParameters, Object.class));
                             }
                             Integration createdIntegration = apiGatewayV2Service.createIntegration(region, apiId,
                                     integrationRequest);

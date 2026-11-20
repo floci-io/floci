@@ -733,6 +733,11 @@ class ApiGatewayV2OpenApiImportTest {
                 .body(envelope(spec.replace("\"500\":", "\"700\":")))
                 .when().put("/v2/apis/" + apiId)
                 .then().statusCode(400);
+        given().contentType(ContentType.JSON)
+                .body(envelope(spec.replace("\"responseParameters\": {",
+                        "\"responseParameters\": [\"500\"], \"unused\": {")))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
 
         assertEquals("403", get("/v2/apis/" + apiId + "/integrations").get("items").get(0)
                 .path("responseParameters").path("500").path("overwrite:statuscode").asText());
