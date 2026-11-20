@@ -127,6 +127,28 @@ final class PaymentCryptographyKeyRules {
     }
 
     /**
+     * The key a request names, and the rules it has to satisfy before it does any work.
+     *
+     * <p>The key is the one the request names in the region the request is for, and it has
+     * to be there and enabled: a key the service does not hold is the not-found error, and
+     * a key that is disabled does no work.
+     *
+     * @param service the service the key is held by
+     * @param identifier the key the request names
+     * @param region the region the request is for
+     * @return the key
+     */
+    static PaymentCryptographyKey requiredKey(PaymentCryptographyService service, String identifier,
+                                              String region) {
+        PaymentCryptographyKey key = service.findKey(region, identifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
+        }
+        requireEnabled(key);
+        return key;
+    }
+
+    /**
      * The Triple DES algorithm an AS2805 key has to have.
      *
      * <p>AS2805's cryptography is all TDES: the ceremony runs over Single DES blocks, the

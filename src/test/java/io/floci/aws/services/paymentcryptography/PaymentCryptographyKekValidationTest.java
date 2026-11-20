@@ -76,8 +76,7 @@ class PaymentCryptographyKekValidationTest {
 
         assertArrayEquals(PaymentCryptographyCrypto.fromHex(SEND),
                 PaymentCryptographyKekValidation.encrypt(
-                        PaymentCryptographyCrypto.fromHex(RN), variant,
-                        PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+                        PaymentCryptographyCrypto.fromHex(RN), variant));
     }
 
     @Test
@@ -89,7 +88,7 @@ class PaymentCryptographyKekValidationTest {
                 PaymentCryptographyKekValidation.encrypt(
                         PaymentCryptographyKekValidation.invert(
                                 PaymentCryptographyCrypto.fromHex(RN)),
-                        variant, PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+                        variant));
     }
 
     @Test
@@ -101,13 +100,12 @@ class PaymentCryptographyKekValidationTest {
 
         assertArrayEquals(PaymentCryptographyCrypto.fromHex(LONG_SEND),
                 PaymentCryptographyKekValidation.encrypt(
-                        PaymentCryptographyCrypto.fromHex(LONG_RN), variant,
-                        PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+                        PaymentCryptographyCrypto.fromHex(LONG_RN), variant));
         assertArrayEquals(PaymentCryptographyCrypto.fromHex(LONG_RECEIVE),
                 PaymentCryptographyKekValidation.encrypt(
                         PaymentCryptographyKekValidation.invert(
                                 PaymentCryptographyCrypto.fromHex(LONG_RN)),
-                        other, PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+                        other));
     }
 
     @Test

@@ -101,9 +101,9 @@ public class PaymentCryptographyKekValidationOperations {
             requireAlgorithm(key, algorithm, text(attributes, "DeriveKeyAlgorithm"));
             byte[] rn = PaymentCryptographyKekValidation.oddParity(
                     randomBytes(randomLength(text(attributes, "RandomKeyMaxLength"))));
-            send = PaymentCryptographyKekValidation.encrypt(rn, variantRn, algorithm);
+            send = PaymentCryptographyKekValidation.encrypt(rn, variantRn);
             receive = PaymentCryptographyKekValidation.encrypt(
-                    PaymentCryptographyKekValidation.invert(rn), variantNotRn, algorithm);
+                    PaymentCryptographyKekValidation.invert(rn), variantNotRn);
         } else {
             // The node that answers deciphers the number and enciphers the inverted one.
             PaymentCryptographyKeyRules.requireMode(key, "Decrypt",
@@ -111,9 +111,9 @@ public class PaymentCryptographyKekValidationOperations {
             PaymentCryptographyKeyRules.requireMode(key, "Encrypt",
                     "enciphering the inverted number for a KEK validation");
             send = HEX.parseHex(text(type.get("KekValidationResponse"), "RandomKeySend"));
-            byte[] rn = PaymentCryptographyKekValidation.decrypt(send, variantRn, algorithm);
+            byte[] rn = PaymentCryptographyKekValidation.decrypt(send, variantRn);
             receive = PaymentCryptographyKekValidation.encrypt(
-                    PaymentCryptographyKekValidation.invert(rn), variantNotRn, algorithm);
+                    PaymentCryptographyKekValidation.invert(rn), variantNotRn);
         }
         out.put("RandomKeySend", HEX.formatHex(send));
         out.put("RandomKeyReceive", HEX.formatHex(receive));
@@ -191,14 +191,8 @@ public class PaymentCryptographyKekValidationOperations {
     }
 
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        if (identifier.isEmpty()) {
-            throw validation("KeyIdentifier is required");
-        }
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
-        }
-        PaymentCryptographyKeyRules.requireEnabled(key);
+        PaymentCryptographyKey key =
+                PaymentCryptographyKeyRules.requiredKey(service, identifier, region);
         PaymentCryptographyKeyRules.requireUsage(key, KEK_USAGES, "validating a key encryption key");
         return key;
     }

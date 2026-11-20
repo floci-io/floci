@@ -1,10 +1,9 @@
 package io.floci.aws.services.paymentcryptography;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.paymentcryptography.crypto.BlockMode;
 import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 import io.floci.aws.services.paymentcryptography.crypto.EmvCrypto;
-
-import java.util.Arrays;
 
 /**
  * The AS2805 KEK validation: the ceremony two nodes use to prove they hold the same key.
@@ -22,7 +21,7 @@ import java.util.Arrays;
  *
  * <p>The random number is eight, sixteen or twenty-four bytes, and every byte of it carries
  * the odd parity the standard's Single DES asks for. It is enciphered a block at a time
- * under the variant, in the cipher the key's own algorithm names.
+ * under the variant, in Triple DES, the cipher AS2805's cryptography is made of.
  */
 final class PaymentCryptographyKekValidation {
 
@@ -132,18 +131,17 @@ final class PaymentCryptographyKekValidation {
     /**
      * The enciphering of the number under a variant, a block at a time.
      *
-     * <p>The cipher is the one the key's algorithm names, and it is the cipher's own ECB
-     * mode: every block stands alone, so the number is enciphered without a vector and
-     * without a chain.
+     * <p>The cipher is Triple DES, the one AS2805's cryptography is made of, and it is the
+     * cipher's own ECB mode: every block stands alone, so the number is enciphered without
+     * a vector and without a chain.
      *
      * @param data the number to encipher
      * @param variantKey the variant key
-     * @param algorithm the algorithm of the key
      * @return the enciphered number
      */
-    static byte[] encrypt(byte[] data, byte[] variantKey,
-                          PaymentCryptographyKeyAlgorithm algorithm) {
-        return blocks(data, variantKey, algorithm, true);
+    static byte[] encrypt(byte[] data, byte[] variantKey) {
+        requireWholeBlocks(data);
+        return Ciphers.tdesEncrypt(data, variantKey, null, BlockMode.ECB);
     }
 
     /**
@@ -151,49 +149,27 @@ final class PaymentCryptographyKekValidation {
      *
      * @param data the enciphered number
      * @param variantKey the variant key
-     * @param algorithm the algorithm of the key
      * @return the number
      */
-    static byte[] decrypt(byte[] data, byte[] variantKey,
-                          PaymentCryptographyKeyAlgorithm algorithm) {
-        return blocks(data, variantKey, algorithm, false);
+    static byte[] decrypt(byte[] data, byte[] variantKey) {
+        requireWholeBlocks(data);
+        return Ciphers.tdesDecrypt(data, variantKey, null, BlockMode.ECB);
     }
 
     /**
-     * The cipher's own mode over whole blocks.
+     * The number fills whole Triple DES blocks.
      *
      * <p>The block is the Triple DES block of eight bytes, and the lengths the model names
-     * for the random number are whole numbers of them, so the refusal is a guard on the
-     * cipher rather than a refusal the model settles.
+     * for the random number are whole numbers of them, so this is a guard on the cipher
+     * rather than a refusal the model settles.
+     *
+     * @param data the number
      */
-    private static byte[] blocks(byte[] data, byte[] variantKey,
-                                 PaymentCryptographyKeyAlgorithm algorithm, boolean encrypt) {
+    private static void requireWholeBlocks(byte[] data) {
         if (data.length % BLOCK != 0) {
             throw new AwsException("ValidationException",
                     "the number is " + data.length + " bytes; it is a whole number of "
                             + BLOCK + "-byte blocks", 400);
         }
-        byte[] out = new byte[data.length];
-        for (int offset = 0; offset < data.length; offset += BLOCK) {
-            byte[] block = Arrays.copyOfRange(data, offset, offset + BLOCK);
-            byte[] ciphered = encrypt
-                    ? encryptBlock(block, variantKey, algorithm)
-                    : decryptBlock(block, variantKey);
-            System.arraycopy(ciphered, 0, out, offset, BLOCK);
-        }
-        return out;
-    }
-
-    /** One block enciphered. */
-    private static byte[] encryptBlock(byte[] block, byte[] key,
-                                       PaymentCryptographyKeyAlgorithm algorithm) {
-        return PaymentCryptographyKeyAlgorithm.TDES_2KEY.equals(algorithm)
-                ? Ciphers.tdes2Encrypt(block, key)
-                : Ciphers.tdes3Encrypt(block, key);
-    }
-
-    /** One block deciphered. */
-    private static byte[] decryptBlock(byte[] block, byte[] key) {
-        return Ciphers.tdesEcbDecrypt(block, key);
     }
 }
