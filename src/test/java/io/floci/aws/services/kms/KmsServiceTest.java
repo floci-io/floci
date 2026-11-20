@@ -2827,6 +2827,24 @@ class KmsServiceTest {
         }
 
         @Test
+        void reimportingOnADisabledKeyLeavesItDisabled() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrapOAEP(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 3));
+            kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            KmsKey again = kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+
+            assertEquals("Disabled", again.getKeyState());
+            assertEquals("Disabled", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+            assertFalse(kmsService.describeKey(key.getKeyId(), REGION).isEnabled());
+        }
+
+        @Test
         void anImportTokenStaysValidForIdenticalMaterialUntilItExpires() throws Exception {
             KmsKey key = externalSymmetricKey();
             KmsService.ImportParameters parameters =

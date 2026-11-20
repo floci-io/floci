@@ -1108,8 +1108,11 @@ public class KmsService implements ResourceProvider {
             key.setKeyMaterialId(keyMaterialId);
             key.setExpirationModel(effectiveExpirationModel);
             key.setValidTo(KEY_MATERIAL_EXPIRES.equals(effectiveExpirationModel) ? validTo : 0L);
-            key.setKeyState("Enabled");
-            key.setEnabled(true);
+            // A key that already had material keeps its state: a re-import does not re-enable a disabled key.
+            if (PENDING_IMPORT.equals(key.getKeyState())) {
+                key.setKeyState("Enabled");
+                key.setEnabled(true);
+            }
             keyStore.put(region + "::" + key.getKeyId(), key);
 
             LOG.infov("Imported key material into KMS key {0} in {1} ({2})",
