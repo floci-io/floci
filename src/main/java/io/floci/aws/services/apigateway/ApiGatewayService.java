@@ -1267,18 +1267,16 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public PaginatedResult<Authorizer> getAuthorizerPage(String region, String apiId, Integer limit,
                                                          String position) {
-        List<Authorizer> authorizers = getAuthorizers(region, apiId).stream()
-                .sorted(Comparator.comparing(Authorizer::getId))
-                .toList();
-        return pageById(authorizers, Authorizer::getId, limit, position);
+        return pageById(getAuthorizers(region, apiId), Authorizer::getId, limit, position);
     }
 
     /**
-     * One page of a list already sorted by id. The token is the id of the last item returned, and
+     * One page of a list, sorted by id here. The token is the id of the last item returned, and
      * an unrecognised token is a {@code BadRequestException}, as on AWS.
      */
-    private static <T> PaginatedResult<T> pageById(List<T> sorted, Function<T, String> idOf, Integer limit,
+    private static <T> PaginatedResult<T> pageById(List<T> items, Function<T, String> idOf, Integer limit,
                                                    String position) {
+        List<T> sorted = items.stream().sorted(Comparator.comparing(idOf)).toList();
         int pageSize = resolvePageSize(limit);
         int start = 0;
         if (position != null && !position.isBlank()) {
@@ -2373,10 +2371,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public PaginatedResult<RequestValidator> getRequestValidatorPage(String region, String apiId, Integer limit,
                                                                      String position) {
-        List<RequestValidator> validators = getRequestValidators(region, apiId).stream()
-                .sorted(Comparator.comparing(RequestValidator::getId))
-                .toList();
-        return pageById(validators, RequestValidator::getId, limit, position);
+        return pageById(getRequestValidators(region, apiId), RequestValidator::getId, limit, position);
     }
 
     public void deleteRequestValidator(String region, String apiId, String validatorId) {
@@ -2590,7 +2585,6 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .filter(part -> name == null || name.equals(part.getLocation().get("name")))
                 .filter(part -> path == null || path.equals(part.getLocation().get("path")))
                 .filter(part -> !"UNDOCUMENTED".equals(locationStatus))
-                .sorted(Comparator.comparing(DocumentationPart::getId))
                 .toList();
 
         return pageById(parts, DocumentationPart::getId, limit, position);
