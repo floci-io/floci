@@ -78,14 +78,14 @@ SERVICE_SUFFIX = ".amazonaws.com"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "application-autoscaling", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
+    "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
     "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
     "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
-    "transcribe", "transfer", "translate",
+    "transcribe", "transfer", "translate", "wafv2",
 )
 
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
@@ -96,7 +96,6 @@ NOT_COVERED = {
     "airflow": "REST routes no rule maps yet",
     "appconfig": "REST routes no rule maps yet",
     "appsync": "REST routes no rule maps yet",
-    "aps": "REST routes no rule maps yet",
     "aws-marketplace": "REST routes no rule maps yet",
     "backup": "REST routes no rule maps yet",
     "batch": "REST routes no rule maps yet",
@@ -285,6 +284,8 @@ NOT_READ = {
     "ssm:StartChangeRequestExecution": RUNBOOK_PARAMETER,
     "ssm:UpdateDocument": NO_ROLE_MEMBER,
     "ssm:UpdateServiceSetting": "a role is only ever a setting's value, which the request names by SettingId",
+    "wafv2:CreateWebACL": NO_ROLE_MEMBER,
+    "wafv2:UpdateWebACL": NO_ROLE_MEMBER,
 }
 
 # A member the rule reads that passes no role, by operation, or by namespace for all its operations.
