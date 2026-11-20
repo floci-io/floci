@@ -13,17 +13,23 @@ import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.CapacityUnits;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputChange;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputSpec;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.WarmUnits;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.KinesisStreamingDestination;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
+import io.floci.aws.services.dynamodb.model.ProvisionedThroughput;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -63,6 +69,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(DynamoDbCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TimeToLive TIME_TO_LIVE_OFF = new TimeToLive(false, null);
+    private static final ThroughputSpec NO_THROUGHPUT = new ThroughputSpec(null, null);
+    private static final String PAY_PER_REQUEST = "PAY_PER_REQUEST";
 
     private static final String REPLICA_TABLE_NAME_ATTR = "TableName";
     private static final String REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
@@ -173,6 +181,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 ? List.of(declaredKinesisDestination(kinesisSpec, engine))
                 : List.of();
 
+        // GlobalTable and the replica resource carry their own throughput settings, which are not read here.
+        boolean plainTable = TABLE.equals(r.getResourceType());
+        ThroughputSpec tableThroughput = plainTable ? declaredThroughput(props, ctx) : NO_THROUGHPUT;
+        Map<String, ThroughputSpec> indexThroughput = new LinkedHashMap<>();
+
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();
         List<GlobalSecondaryIndex> gsis = new ArrayList<>();
@@ -216,7 +229,21 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                         }
                     }
                 }
-                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes));
+                GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType,
+                        nonKeyAttributes);
+                if (plainTable) {
+                    ThroughputSpec declared = declaredThroughput(gsiNode, ctx);
+                    if (declared.capacity() != null) {
+                        gsi.setProvisionedThroughput(new ProvisionedThroughput(
+                                declared.capacity().readCapacityUnits(), declared.capacity().writeCapacityUnits()));
+                    }
+                    if (declared.warm() != null) {
+                        gsi.setWarmReadUnitsPerSecond(declared.warm().readUnitsPerSecond());
+                        gsi.setWarmWriteUnitsPerSecond(declared.warm().writeUnitsPerSecond());
+                    }
+                    indexThroughput.put(indexName, declared);
+                }
+                gsis.add(gsi);
             }
         }
 
@@ -246,13 +273,24 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Scope scope = new Scope(ctx.accountId(), region);
-        boolean onDemand = "PAY_PER_REQUEST".equals(ctx.resolveOptional(props, "BillingMode"));
+        boolean onDemand = PAY_PER_REQUEST.equals(ctx.resolveOptional(props, "BillingMode"));
+        if (onDemand && tableThroughput.capacity() != null) {
+            throw new AwsException("InvalidRequest",
+                    "Property ProvisionedThroughput can't be used with PAY_PER_REQUEST BillingMode.", 400);
+        }
+        boolean throughputDeclared = isDeclared(tableThroughput) || indexThroughput.values().stream()
+                .anyMatch(DynamoDbCfnProvisioner::isDeclared);
         TableDefinition table;
         boolean created = false;
         try {
-            table = onDemand
-                    ? dynamoDb.tables().createOnDemandTable(scope, tableName, keySchema, attrDefs, gsis, lsis)
-                    : dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            if (throughputDeclared) {
+                table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, onDemand,
+                        tableThroughput, gsis, lsis);
+            } else {
+                table = onDemand
+                        ? dynamoDb.tables().createOnDemandTable(scope, tableName, keySchema, attrDefs, gsis, lsis)
+                        : dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            }
             created = true;
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {
@@ -279,6 +317,15 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
             reconcileTags(scope, table.getTableArn(), currentTags,
                     parseCfnTags(props != null ? props.get("Tags") : null, engine));
+
+            if (!created && plainTable) {
+                JsonNode priorProperties = ctx.isUpdate() ? ctx.priorProperties() : null;
+                Map<String, ThroughputSpec> changedIndexes = new LinkedHashMap<>();
+                indexThroughput.forEach((indexName, spec) -> changedIndexes.put(indexName,
+                        withChangedWarm(spec, priorIndex(priorProperties, indexName, ctx), ctx)));
+                table = reconcileThroughput(scope, tableName, table,
+                        withChangedWarm(tableThroughput, priorProperties, ctx), changedIndexes);
+            }
 
             // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
             // the CloudFormation property carries no StreamEnabled flag: declaring the block IS the
@@ -337,6 +384,141 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
             throw failure;
         }
+    }
+
+    /**
+     * Reads the {@code ProvisionedThroughput} and {@code WarmThroughput} of a table or an index. Each
+     * object needs its members, as CloudFormation requires: both capacity units, and at least one
+     * warm member, so an empty {@code WarmThroughput} object fails.
+     */
+    private static ThroughputSpec declaredThroughput(JsonNode owner, ProvisionContext ctx) {
+        CloudFormationTemplateEngine engine = ctx.engine();
+        CapacityUnits capacity = null;
+        JsonNode provisioned = owner == null ? null : engine.resolveNode(owner.get("ProvisionedThroughput"));
+        if (provisioned != null && !provisioned.isNull()) {
+            CfnPropertyTypes.requireType("ProvisionedThroughput", provisioned, JsonNodeType.OBJECT);
+            capacity = new CapacityUnits(requiredUnits(provisioned, "ReadCapacityUnits", ctx),
+                    requiredUnits(provisioned, "WriteCapacityUnits", ctx));
+        }
+        WarmUnits warm = null;
+        JsonNode warmNode = owner == null ? null : engine.resolveNode(owner.get("WarmThroughput"));
+        if (warmNode != null && !warmNode.isNull()) {
+            CfnPropertyTypes.requireType("WarmThroughput", warmNode, JsonNodeType.OBJECT);
+            Long read = optionalUnits(warmNode, "ReadUnitsPerSecond", ctx);
+            Long write = optionalUnits(warmNode, "WriteUnitsPerSecond", ctx);
+            if (read == null && write == null) {
+                throw requiredProperty("ReadUnitsPerSecond");
+            }
+            warm = new WarmUnits(read, write);
+        }
+        return new ThroughputSpec(capacity, warm);
+    }
+
+    private static long requiredUnits(JsonNode owner, String member, ProvisionContext ctx) {
+        Long units = optionalUnits(owner, member, ctx);
+        if (units == null) {
+            throw requiredProperty(member);
+        }
+        return units;
+    }
+
+    private static AwsException requiredProperty(String member) {
+        return new AwsException("InvalidRequest", "Required property [" + member + "] not found", 400);
+    }
+
+    /**
+     * CloudFormation sends WarmThroughput in an UpdateTable only when the template's value changed
+     * from the previous template, so a value the template kept is dropped here even when the table
+     * has since grown past it.
+     */
+    private static ThroughputSpec withChangedWarm(ThroughputSpec desired, JsonNode priorOwner,
+                                                  ProvisionContext ctx) {
+        if (desired.warm() == null) {
+            return desired;
+        }
+        JsonNode prior = priorOwner == null ? null : ctx.priorEngine().resolveNode(priorOwner.get("WarmThroughput"));
+        if (prior == null || !prior.isObject() || !sameUnits(desired.warm().readUnitsPerSecond(),
+                prior.get("ReadUnitsPerSecond")) || !sameUnits(desired.warm().writeUnitsPerSecond(),
+                prior.get("WriteUnitsPerSecond"))) {
+            return desired;
+        }
+        return new ThroughputSpec(desired.capacity(), null);
+    }
+
+    private static boolean sameUnits(Long desired, JsonNode prior) {
+        boolean priorDeclared = prior != null && !prior.isNull();
+        return desired == null ? !priorDeclared : priorDeclared && prior.asLong() == desired;
+    }
+
+    private static JsonNode priorIndex(JsonNode priorProperties, String indexName, ProvisionContext ctx) {
+        JsonNode indexes = priorProperties == null ? null
+                : ctx.priorEngine().resolveNode(priorProperties.get("GlobalSecondaryIndexes"));
+        if (indexes == null || !indexes.isArray()) {
+            return null;
+        }
+        for (JsonNode index : indexes) {
+            if (indexName.equals(ctx.priorEngine().resolve(index.get("IndexName")))) {
+                return index;
+            }
+        }
+        return null;
+    }
+
+    private static Long optionalUnits(JsonNode owner, String member, ProvisionContext ctx) {
+        BigInteger units = ctx.resolveOptionalBigInteger(owner, member);
+        return units == null ? null : units.longValue();
+    }
+
+    private static boolean isDeclared(ThroughputSpec spec) {
+        return spec.capacity() != null || spec.warm() != null;
+    }
+
+    /**
+     * Changes the capacity and warm throughput of the table and of its existing indexes that differ
+     * from what the template declares, in one UpdateTable. A declared warm value equal to the current
+     * one is not sent, and a lower one is left for the API to refuse. An on-demand table has no
+     * capacity to change.
+     */
+    private TableDefinition reconcileThroughput(Scope scope, String tableName, TableDefinition table,
+                                                ThroughputSpec tableDesired,
+                                                Map<String, ThroughputSpec> indexesDesired) {
+        boolean provisioned = !PAY_PER_REQUEST.equals(table.getBillingMode());
+        ThroughputSpec tableChange = changedThroughput(tableDesired, table.getProvisionedThroughput(),
+                table.getWarmReadUnitsPerSecond(), table.getWarmWriteUnitsPerSecond(), provisioned);
+        Map<String, ThroughputSpec> indexChanges = new LinkedHashMap<>();
+        for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+            ThroughputSpec desired = indexesDesired.get(gsi.getIndexName());
+            if (desired == null) {
+                continue;
+            }
+            ThroughputSpec change = changedThroughput(desired, gsi.getProvisionedThroughput(),
+                    table.gsiWarmReadUnits(gsi), table.gsiWarmWriteUnits(gsi), provisioned);
+            if (change != null) {
+                indexChanges.put(gsi.getIndexName(), change);
+            }
+        }
+        if (tableChange == null && indexChanges.isEmpty()) {
+            return table;
+        }
+        return dynamoDb.tables().updateThroughput(scope, tableName,
+                new ThroughputChange(tableChange != null ? tableChange : NO_THROUGHPUT, indexChanges));
+    }
+
+    private static ThroughputSpec changedThroughput(ThroughputSpec desired, ProvisionedThroughput current,
+                                                    long currentWarmRead, long currentWarmWrite,
+                                                    boolean provisioned) {
+        CapacityUnits capacity = desired.capacity();
+        if (!provisioned || capacity == null || current != null
+                && capacity.readCapacityUnits() == current.getReadCapacityUnits()
+                && capacity.writeCapacityUnits() == current.getWriteCapacityUnits()) {
+            capacity = null;
+        }
+        WarmUnits warm = desired.warm();
+        if (warm != null && (warm.readUnitsPerSecond() == null || warm.readUnitsPerSecond() == currentWarmRead)
+                && (warm.writeUnitsPerSecond() == null || warm.writeUnitsPerSecond() == currentWarmWrite)) {
+            warm = null;
+        }
+        return capacity == null && warm == null ? null : new ThroughputSpec(capacity, warm);
     }
 
     /**
@@ -550,9 +732,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Keeps the tags, stream setting, TTL setting and active Kinesis streaming destinations the table
-     * has before an in-place update changes them, with the account and region that address it, so
-     * {@link #rollbackUpdate} can put all four back.
+     * Keeps the tags, stream setting, TTL setting, active Kinesis streaming destinations and the
+     * capacity of the table and its indexes the table has before an in-place update changes them, with
+     * the account and region that address it, so {@link #rollbackUpdate} can put them back. Warm
+     * throughput is not kept, as it cannot be lowered.
      */
     private static void snapshotBeforeUpdate(StackResource r, Scope scope, String tableName, TableDefinition table,
                                              Map<String, String> tags, TimeToLive ttl, boolean kinesisManaged) {
@@ -566,6 +749,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("streamViewType", table.getStreamViewType());
         snapshot.put("ttlEnabled", ttl.enabled());
         snapshot.put("ttlAttributeName", ttl.attributeName());
+        if (!PAY_PER_REQUEST.equals(table.getBillingMode()) && table.getProvisionedThroughput() != null) {
+            snapshot.set("tableCapacity", capacityNode(table.getProvisionedThroughput()));
+            ObjectNode indexCapacities = snapshot.putObject("indexCapacities");
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                indexCapacities.set(gsi.getIndexName(), capacityNode(gsi.getProvisionedThroughput()));
+            }
+        }
         if (kinesisManaged) {
             ArrayNode destinations = snapshot.putArray("kinesisDestinations");
             for (KinesisDestinationSpec destination : activeKinesisDestinations(table)) {
@@ -575,6 +765,16 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    private static ObjectNode capacityNode(ProvisionedThroughput throughput) {
+        return MAPPER.createObjectNode()
+                .put("read", throughput.getReadCapacityUnits())
+                .put("write", throughput.getWriteCapacityUnits());
+    }
+
+    private static CapacityUnits capacityUnits(JsonNode node) {
+        return new CapacityUnits(node.path("read").asLong(), node.path("write").asLong());
     }
 
     /**
@@ -614,8 +814,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts back the tags, stream setting, TTL setting and Kinesis streaming destinations an in-place
-     * table update changed. All four go back or none is claimed: restoring one alone would report a
+     * Puts back the tags, capacity, stream setting, TTL setting and Kinesis streaming destinations an
+     * in-place table update changed. All of them go back or none is claimed: restoring one alone would report a
      * rollback while the others stayed changed. A snapshot without destinations leaves them as they
      * are. Only an in-place {@code AWS::DynamoDB::Table} update takes the snapshot; a replacing update is
      * undone by its recorded replacement and a global table reports that rollback is not implemented. The
@@ -643,6 +843,14 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
         reconcileTags(scope, table.getTableArn(),
                 dynamoDb.tables().listTagsOfResource(scope, table.getTableArn()), tags);
+
+        if (snapshot.has("tableCapacity")) {
+            Map<String, ThroughputSpec> priorIndexes = new LinkedHashMap<>();
+            snapshot.path("indexCapacities").properties().forEach(index -> priorIndexes.put(index.getKey(),
+                    new ThroughputSpec(capacityUnits(index.getValue()), null)));
+            table = reconcileThroughput(scope, tableName, table,
+                    new ThroughputSpec(capacityUnits(snapshot.get("tableCapacity")), null), priorIndexes);
+        }
 
         if (snapshot.path("streamEnabled").asBoolean()) {
             table = dynamoDb.tables().enableStream(scope, tableName, snapshot.path("streamViewType").textValue());

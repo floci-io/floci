@@ -3,6 +3,10 @@ package io.floci.aws.services.dynamodb;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.CapacityUnits;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputChange;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.ThroughputSpec;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess.WarmUnits;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
@@ -406,6 +410,37 @@ public class NativeDynamoDbTableService {
 
     private static AwsException invalidRestore(String message) {
         return new AwsException("ValidationException", "Invalid Request: " + message, 400);
+    }
+
+    /** The CreateTable a template's declared throughput asks for, with the checks of the API. */
+    public TableDefinition createTable(String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes, String region) {
+        TableSettings settings = new TableSettings(onDemand ? "PAY_PER_REQUEST" : null, null, null, null, null,
+                null, null, null, null);
+        return createTable(new CreateTableRequest(tableName, keySchema, attributeDefinitions,
+                throughput(throughput.capacity()), globalSecondaryIndexes, localSecondaryIndexes, List.of(),
+                Map.of(), settings, warm(throughput.warm())), "ACTIVE", region);
+    }
+
+    /** The one UpdateTable a template's declared throughput asks for, with the checks of the API. */
+    public TableDefinition updateThroughput(String tableName, ThroughputChange change, String region) {
+        List<GsiThroughputUpdate> indexUpdates = new ArrayList<>();
+        change.indexes().forEach((indexName, spec) -> indexUpdates.add(new GsiThroughputUpdate(indexName,
+                throughput(spec.capacity()), null, warm(spec.warm()))));
+        TableSettings settings = new TableSettings(null, null, null, null, null, null, null, null, null);
+        return updateTable(new UpdateTableRequest(tableName, throughput(change.table().capacity()), List.of(),
+                List.of(), List.of(), indexUpdates, List.of(), List.of(), List.of(), List.of(), List.of(), settings,
+                warm(change.table().warm())), region);
+    }
+
+    private static Throughput throughput(CapacityUnits capacity) {
+        return capacity == null ? null : new Throughput(capacity.readCapacityUnits(), capacity.writeCapacityUnits());
+    }
+
+    private static WarmThroughput warm(WarmUnits warm) {
+        return warm == null ? null : new WarmThroughput(warm.readUnitsPerSecond(), warm.writeUnitsPerSecond());
     }
 
     /**
