@@ -651,7 +651,8 @@ class CodeArtifactAssetPersistenceTest {
                 format, null, null, null, null, "BLOCK", "BLOCK");
         assertEquals(List.of(normalized), listed.packages().stream()
                 .map(CodeArtifactService.PackageSummaryEntry::packageName).toList());
-        assertTrue(upgraded.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+        assertTrue(upgraded.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized,
+                "EXTERNAL_UPSTREAM"));
         AccountAwareStorageBackend<PackageOriginConfig> migrated = accountAware(dir, file,
                 new TypeReference<Map<String, PackageOriginConfig>>() {});
         assertTrue(migrated.getForAccount(ACCOUNT_ID, prefix + original).isEmpty());

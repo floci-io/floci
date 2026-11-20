@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.services.dynamodb.DynamoDbTtlIdentity;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader;
@@ -15,9 +16,9 @@ import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.pipes.model.DesiredState;
 import io.floci.aws.services.pipes.model.Pipe;
+import io.floci.aws.services.sqs.SqsEventRecordBuilder;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Message;
-import io.floci.aws.services.sqs.model.MessageAttributeValue;
 import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -35,6 +36,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.LongSupplier;
 
 @ApplicationScoped
 public class PipesPoller implements Resettable {
@@ -57,7 +59,8 @@ public class PipesPoller implements Resettable {
     private final PipesFilterMatcher filterMatcher;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
-    private final String defaultRegion;
+    private final RegionResolver regionResolver;
+    private volatile LongSupplier clockMs = System::currentTimeMillis;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> kinesisIterators = new ConcurrentHashMap<>();
@@ -78,7 +81,8 @@ public class PipesPoller implements Resettable {
                        PipesTargetInvoker targetInvoker,
                        PipesFilterMatcher filterMatcher,
                        ObjectMapper objectMapper,
-                       EmulatorConfig config) {
+                       EmulatorConfig config,
+                       RegionResolver regionResolver) {
         this.vertx = vertx;
         this.sqsService = sqsService;
         this.kinesisService = kinesisService;
@@ -88,7 +92,11 @@ public class PipesPoller implements Resettable {
         this.filterMatcher = filterMatcher;
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
-        this.defaultRegion = config.defaultRegion();
+        this.regionResolver = regionResolver;
+    }
+
+    void setClockForTest(LongSupplier clockMs) {
+        this.clockMs = clockMs;
     }
 
     @PreDestroy
@@ -148,7 +156,8 @@ public class PipesPoller implements Resettable {
                     return;
                 }
                 String sourceArn = pipe.getSource();
-                String region = extractRegionFromArn(sourceArn);
+                // A source that names no Region, such as a self-managed Kafka URI, polls in the default Region.
+                String region = regionResolver.regionOf(sourceArn);
                 if (sourceArn.contains(":sqs:")) {
                     pollSqs(pipe, region);
                 } else if (sourceArn.contains(":kinesis:")) {
@@ -750,36 +759,8 @@ public class PipesPoller implements Resettable {
     private List<ObjectNode> buildSqsRecordNodes(List<Message> messages, Pipe pipe) {
         List<ObjectNode> nodes = new ArrayList<>();
         for (Message msg : messages) {
-            ObjectNode record = objectMapper.createObjectNode();
-            record.put("messageId", msg.getMessageId());
-            record.put("receiptHandle", msg.getReceiptHandle());
-            record.put("body", msg.getBody());
-            ObjectNode attrs = record.putObject("attributes");
-            attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-            attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
-            attrs.put("SenderId", AwsArnUtils.accountOrDefault(pipe.getSource(), "000000000000"));
-            attrs.put("ApproximateFirstReceiveTimestamp",
-                    String.valueOf(msg.getFirstReceiveTimestamp() != null
-                            ? msg.getFirstReceiveTimestamp().toEpochMilli()
-                            : System.currentTimeMillis()));
-            ObjectNode msgAttrs = record.putObject("messageAttributes");
-            for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
-                ObjectNode attrNode = msgAttrs.putObject(entry.getKey());
-                MessageAttributeValue val = entry.getValue();
-                if (val.getBinaryValue() != null) {
-                    attrNode.put("binaryValue", Base64.getEncoder().encodeToString(val.getBinaryValue()));
-                } else if (val.getStringValue() != null) {
-                    attrNode.put("stringValue", val.getStringValue());
-                }
-                attrNode.putArray("stringListValues");
-                attrNode.putArray("binaryListValues");
-                attrNode.put("dataType", val.getDataType());
-            }
-            record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
-            record.put("eventSource", "aws:sqs");
-            record.put("eventSourceARN", pipe.getSource());
-            record.put("awsRegion", extractRegionFromArn(pipe.getSource()));
-            nodes.add(record);
+            nodes.add(SqsEventRecordBuilder.build(objectMapper, msg, pipe.getSource(),
+                    regionResolver.regionOf(pipe.getSource()), clockMs));
         }
         return nodes;
     }
@@ -959,11 +940,6 @@ public class PipesPoller implements Resettable {
     /** Keys polling state by pipe lifetime, so a pipe recreated under the same ARN starts afresh. */
     private static String pipeKey(Pipe pipe) {
         return pipe.getArn() + "@" + pipe.getCreationTime();
-    }
-
-    /** The region a source ARN names; a source with none, such as a self-managed Kafka URI, polls in the default. */
-    String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
     /**

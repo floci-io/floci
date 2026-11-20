@@ -7,12 +7,15 @@ import io.floci.aws.services.glue.model.Table;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -93,6 +96,185 @@ class PartitionProjectionTest {
                 List.of(column("tenant")));
 
         assertEquals(BUCKET + "/tenant=*", PartitionProjection.readPath(t, BUCKET));
+    }
+
+    // ---- location template ----
+
+    private static Table templated(String template, String... keys) {
+        return table("audit_events", projecting("storage.location.template", template),
+                Arrays.stream(keys).map(PartitionProjectionTest::column).toList());
+    }
+
+    /** Bare values, one folder per placeholder. */
+    @Test
+    void templateWithBareValuesCapturesOneSegmentPerKey() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated(BUCKET + "/data/${region}/${dt}/", "region", "dt"));
+
+        assertEquals("^s3://audit-logs/data/([^/]+)/([^/]+)/", template.regex());
+        assertEquals(Map.of("region", List.of(1), "dt", List.of(2)), template.groups());
+    }
+
+    /** From the AWS docs' examples: literal {@code col=} prefixes and static folders around placeholders. */
+    @Test
+    void templateKeepsLiteralSegmentsAroundThePlaceholders() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated(BUCKET + "/table_root/a=${a}/${b}/some_static_subdirectory/", "a", "b"));
+
+        assertEquals("^s3://audit-logs/table_root/a=([^/]+)/([^/]+)/some_static_subdirectory/", template.regex());
+        assertEquals(Map.of("a", List.of(1), "b", List.of(2)), template.groups());
+    }
+
+    /** Also from the AWS docs: a placeholder may repeat, and every occurrence is reported. */
+    @Test
+    void repeatedPlaceholderReportsEachOfItsGroups() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated(BUCKET + "/${region}/${dt}/${region}/", "region", "dt"));
+
+        assertEquals("^s3://audit-logs/([^/]+)/([^/]+)/([^/]+)/", template.regex());
+        assertEquals(Map.of("region", List.of(1, 3), "dt", List.of(2)), template.groups());
+    }
+
+    /** Without a trailing slash the last placeholder still ends at a folder boundary, as readPath reads it. */
+    @Test
+    void templateWithoutTrailingSlashStillEndsAtAFolder() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated(BUCKET + "/events/${dt}", "dt"));
+
+        assertEquals("^s3://audit-logs/events/([^/]+)/", template.regex());
+    }
+
+    @Test
+    void regexMetacharactersInTheTemplateAreLiteral() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated("s3://data.lake/v1+(beta)/${region}/", "region"));
+
+        assertEquals("^s3://data\\.lake/v1\\+\\(beta\\)/([^/]+)/", template.regex());
+    }
+
+    /**
+     * A placeholder naming no partition key is still a wildcard in the read path, so it keeps its
+     * group and the keys after it are numbered past it. Placeholder names match keys case-insensitively.
+     */
+    @Test
+    void placeholderNamingNoKeyStillTakesAGroup() {
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(
+                templated(BUCKET + "/${zone}/${Region}/", "region"));
+
+        assertEquals("^s3://audit-logs/([^/]+)/([^/]+)/", template.regex());
+        assertEquals(Map.of("region", List.of(2)), template.groups());
+    }
+
+    @Test
+    void noLocationTemplateWithoutATemplateProjectionOrAKeyItNames() {
+        assertNull(PartitionProjection.locationTemplate(table("t", projecting(), List.of(column("region")))));
+        assertNull(PartitionProjection.locationTemplate(table("t",
+                Map.of("storage.location.template", BUCKET + "/${region}/"), List.of(column("region")))));
+        assertNull(PartitionProjection.locationTemplate(templated(BUCKET + "/${zone}/", "region")));
+        assertNull(PartitionProjection.locationTemplate(templated(BUCKET + "/${region}/")));
+    }
+
+    /**
+     * The Firehose layout AWS documents: a date projection whose format holds slashes stands for that
+     * many more folders behind one placeholder, and the group spans them all.
+     */
+    @Test
+    void dateFormatWithSlashesWidensItsGroupToEveryFolderItSpans() {
+        Table t = table("firehose", projecting(
+                        "storage.location.template", BUCKET + "/prefix/${datehour}/",
+                        "projection.datehour.type", "date",
+                        "projection.datehour.format", "yyyy/MM/dd/HH"),
+                List.of(column("datehour")));
+
+        PartitionProjection.LocationTemplate template = PartitionProjection.locationTemplate(t);
+
+        assertEquals("^s3://audit-logs/prefix/([^/]+(?:/[^/]+)(?:/[^/]+)(?:/[^/]+))/", template.regex());
+        assertEquals(Map.of("datehour", List.of(1)), template.groups());
+    }
+
+    /**
+     * A multi-folder date followed by more of the template: the read path needs a wildcard per folder
+     * the date spans, or it looks for {@code region=} right after the year and matches no object.
+     */
+    @Test
+    void readPathAndRegexGiveAMultiFolderDateTheSameFolders() {
+        Table t = table("orders", projecting(
+                        "storage.location.template", BUCKET + "/orders/${dt}/region=${region}/",
+                        "projection.dt.type", "date",
+                        "projection.dt.format", "yyyy/MM/dd"),
+                List.of(column("dt"), column("region")));
+
+        assertEquals(BUCKET + "/orders/*/*/*/region=*", PartitionProjection.readPath(t, BUCKET));
+        assertEquals("^s3://audit-logs/orders/([^/]+(?:/[^/]+)(?:/[^/]+))/region=([^/]+)/",
+                PartitionProjection.locationTemplate(t).regex());
+    }
+
+    /** Only a date projection's format describes the value's shape; other types keep one folder. */
+    @Test
+    void slashesInTheFormatOfANonDateProjectionDoNotWidenItsGroup() {
+        Table t = table("t", projecting(
+                        "storage.location.template", BUCKET + "/${region}/",
+                        "projection.region.type", "enum",
+                        "projection.region.format", "a/b"),
+                List.of(column("region")));
+
+        assertEquals("^s3://audit-logs/([^/]+)/", PartitionProjection.locationTemplate(t).regex());
+    }
+
+    // ---- incomplete location template ----
+
+    @Test
+    void templateOmittingAPartitionKeyIsIncompleteAndHasNoLocationTemplate() {
+        Table t = templated(BUCKET + "/missing/${tenant}/", "tenant", "dt");
+
+        assertTrue(PartitionProjection.hasIncompleteLocationTemplate(t));
+        assertNull(PartitionProjection.locationTemplate(t));
+    }
+
+    @Test
+    void templateNamingEveryKeyOrNoTemplateAtAllIsNotIncomplete() {
+        assertFalse(PartitionProjection.hasIncompleteLocationTemplate(
+                templated(BUCKET + "/${Tenant}/${dt}/", "tenant", "DT")));
+        assertFalse(PartitionProjection.hasIncompleteLocationTemplate(
+                table("t", projecting(), List.of(column("tenant")))));
+        assertFalse(PartitionProjection.hasIncompleteLocationTemplate(
+                table("t", Map.of("storage.location.template", BUCKET + "/x/"), List.of(column("tenant")))));
+    }
+
+    /** An Iceberg table is read through its metadata, so a template it carries is never checked. */
+    @Test
+    void icebergTableWithAnIncompleteTemplateIsNotIncomplete() {
+        Map<String, String> params = projecting("storage.location.template", BUCKET + "/missing/${tenant}/");
+        params.put("table_type", "ICEBERG");
+        Table t = table("audit_events", params, List.of(column("tenant"), column("dt")));
+
+        assertFalse(PartitionProjection.hasIncompleteLocationTemplate(t));
+        assertDoesNotThrow(() -> PartitionProjection.assertLocationTemplatesComplete(
+                "SELECT * FROM audit_events", List.of(t)));
+    }
+
+    /** Athena's message, as captured from engine v3, for a query reading the table. */
+    @Test
+    void queryReadingATableWithAnIncompleteTemplateFailsAsAthenaDoes() {
+        Table t = templated(BUCKET + "/missing/${tenant}/", "tenant", "dt");
+        t.setDatabaseName("audit");
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                PartitionProjection.assertLocationTemplatesComplete(
+                        "SELECT * FROM audit_events WHERE tenant = 'a'", List.of(t)));
+
+        assertEquals("INVALID_TABLE_PROPERTY: The 'storage.location.template' table property must contain "
+                + "templates for all partition columns! Table: audit.audit_events Template: "
+                + BUCKET + "/missing/${tenant}/", e.getMessage());
+    }
+
+    /** Athena keeps the database's other tables queryable, so a query not reading the table passes. */
+    @Test
+    void queryNotReadingTheTableWithAnIncompleteTemplateIsAccepted() {
+        Table t = templated(BUCKET + "/missing/${tenant}/", "tenant", "dt");
+
+        assertDoesNotThrow(() -> PartitionProjection.assertLocationTemplatesComplete(
+                "SELECT * FROM other_events WHERE note = 'audit_events'", List.of(t)));
     }
 
     // ---- injected columns ----

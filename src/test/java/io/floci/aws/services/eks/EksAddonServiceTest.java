@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eks.model.Addon;
 import io.floci.aws.services.eks.model.AddonInfo;
@@ -16,6 +18,7 @@ import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateAddonRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.IamRole;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -258,6 +261,59 @@ class EksAddonServiceTest {
                 fixture.service.delete(fixture.cluster, "kube-proxy", false));
     }
 
+    /** The node asks whether the agent is stored when it starts, which can be while the cluster is not ACTIVE. */
+    @Test
+    void anAddonIsInstalledWhileItIsStoredWhateverTheClustersStatus() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        fixture.service.create(fixture.cluster, new CreateAddonRequest(
+                "eks-pod-identity-agent", null, null, null, null, null, null, null));
+        Cluster sameName = new Cluster();
+        sameName.setName("test-cluster");
+        sameName.setArn(fixture.cluster.getArn());
+        sameName.setCreatedAt(Instant.parse("2026-09-21T12:00:00Z"));
+
+        assertTrue(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+        assertTrue(fixture.service.isInstalled(fixture.cluster, " EKS-Pod-Identity-Agent "));
+        assertFalse(fixture.service.isInstalled(fixture.cluster, "coredns"));
+        assertFalse(fixture.service.isInstalled(fixture.cluster, null));
+        assertFalse(fixture.service.isInstalled(null, "eks-pod-identity-agent"));
+        // A cluster recreated under the same name starts without the earlier one's add-ons.
+        assertFalse(fixture.service.isInstalled(sameName, "eks-pod-identity-agent"));
+
+        fixture.cluster.setStatus(ClusterStatus.UPDATING);
+        assertTrue(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+
+        fixture.cluster.setStatus(ClusterStatus.ACTIVE);
+        fixture.service.delete(fixture.cluster, "eks-pod-identity-agent", false);
+        assertFalse(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+    }
+
+    /**
+     * Restoring a cluster at startup asks whether an add-on is installed with no request, so the request context
+     * holds the default account; the add-on is still found in the cluster's account.
+     */
+    @Test
+    void anAddonIsFoundInTheClustersAccountWhateverTheRequestsAccount() {
+        RequestContext request = new RequestContext();
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> context = mock(Instance.class);
+        when(context.get()).thenReturn(request);
+        AccountAwareStorageBackend<EksAddonService.StoredAddon> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, "000000000000");
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        EksAddonService service = new EksAddonService(storage, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                fixture.catalog(), fixture.iam(), fixture.podIdentityAssociations());
+
+        request.setAccountId(ACCOUNT);
+        service.create(fixture.cluster(), new CreateAddonRequest(
+                "eks-pod-identity-agent", null, null, null, null, null, null, null));
+        request.setAccountId("000000000000");
+
+        assertTrue(service.isInstalled(fixture.cluster(), "eks-pod-identity-agent"));
+    }
+
     @Test
     void listAddonsWithPagination() {
         Fixture fixture = fixture();
@@ -313,6 +369,28 @@ class EksAddonServiceTest {
 
         fixture.cluster.setCreatedAt(fixture.cluster.getCreatedAt().plusSeconds(10));
         assertTrue(fixture.service.list(fixture.cluster, null, null).addons().isEmpty());
+    }
+
+    @Test
+    void deletedAuthorizationArnIsHiddenFromReadsReplacedOnRecreationAndPurgedWithCluster() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        CreateAddonRequest request = new CreateAddonRequest("vpc-cni", null, null, null, null, null, null, null);
+        String original = fixture.service.create(fixture.cluster, request).addonArn();
+        fixture.service.delete(fixture.cluster, "vpc-cni", false);
+        assertEquals(Optional.of(original), fixture.service.authorizationArn(fixture.cluster, "vpc-cni"));
+        assertTrue(fixture.service.list(fixture.cluster, null, null).addons().isEmpty());
+        assertThrows(AwsException.class, () -> fixture.service.describe(fixture.cluster, "vpc-cni"));
+        String replacement = fixture.service.create(fixture.cluster, request).addonArn();
+        assertNotEquals(original, replacement);
+        assertEquals(Optional.of(replacement), fixture.service.authorizationArn(fixture.cluster, "vpc-cni"));
+        fixture.service.delete(fixture.cluster, "vpc-cni", false);
+        Instant previousCreation = fixture.cluster.getCreatedAt();
+        fixture.cluster.setCreatedAt(previousCreation.plusSeconds(10));
+        assertTrue(fixture.service.authorizationArn(fixture.cluster, "vpc-cni").isEmpty());
+        fixture.cluster.setCreatedAt(previousCreation);
+        fixture.service.deleteClusterAddons(fixture.cluster);
+        assertTrue(fixture.service.authorizationArn(fixture.cluster, "vpc-cni").isEmpty());
     }
 
     @Test
@@ -732,7 +810,7 @@ class EksAddonServiceTest {
         InMemoryStorage<String, EksPodIdentityAssociationService.StoredAssociation> assocStorage = new InMemoryStorage<>();
         EksPodIdentityAssociationService podIdentityAssociations = new EksPodIdentityAssociationService(
                 assocStorage, iam, new RegionResolver("us-east-1", "000000000000"));
-        EksAddonService service = new EksAddonService(storage, updatesStorage, catalog, iam, podIdentityAssociations);
+        EksAddonService service = new EksAddonService(storage, updatesStorage, new InMemoryStorage<>(), catalog, iam, podIdentityAssociations);
 
         return new Fixture(cluster, iam, role, storage, updatesStorage, catalog, podIdentityAssociations, service);
     }

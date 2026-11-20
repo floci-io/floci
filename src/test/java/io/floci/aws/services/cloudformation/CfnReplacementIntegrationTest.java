@@ -11,13 +11,19 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
+import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.ParameterType;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,13 +49,14 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * An update replaces a resource exactly when its change set said {@code Replacement: True}, and the
  * change set's {@code Replacement} is the one AWS documents for the changed property ("Update
- * requires"). Covered: AppConfig profiles and ElastiCache clusters changed in a create-only and in
- * another property; a create-only value that is not plain template text (a dynamic reference
+ * requires"). Covered: AppConfig profiles, ElastiCache clusters and Route53 hosted zones changed in a
+ * create-only and in another property; a create-only value that is not plain template text (a dynamic reference
  * rewritten as the literal it resolves to, a value known only during the update, a value read from
  * a resource replaced in the same update, an attribute another resource moves while the update
  * runs); and a stack that holds no record of what its dynamic references resolved to.
@@ -91,6 +98,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String PROFILE = profileProperties(APP_REF, "");
 
+    /** The two topics the SNS subscription rows point at. */
+    private static final String SNS_TOPICS = json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}");
+
     /** The cluster names a subnet group whose own name comes from a parameter that changes in the update. */
     private static final Row SUBNET_GROUP_REPLACED = createOnlyRow("ElastiCache cluster in a replaced subnet group",
             json(vpcAndSubnet("10.73")
@@ -102,6 +112,27 @@ class CfnReplacementIntegrationTest {
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             "True", true, "repl-sng-b");
+
+    private static final String EKS_CLUSTER = "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\", ";
+    private static final String EKS_NODEGROUP_CLUSTER = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\","
+            + " \"Properties\": {\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\"}}";
+    private static final String EKS_NODEGROUP = "\"ClusterName\": {\"Ref\": \"Cluster\"},"
+            + " \"Subnets\": [\"subnet-aaaa1111\"], ";
+    private static final String SQS_TYPE = "AWS::SQS::Queue";
+    private static final String S3_TYPE = "AWS::S3::Bucket";
+    private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
+            + " \"KeySchema\": [{\"AttributeName\": \"id\", \"KeyType\": \"HASH\"}],"
+            + " \"AttributeDefinitions\": [{\"AttributeName\": \"id\", \"AttributeType\": \"S\"}]";
+
+    /**
+     * A {@code type} whose {@code nameProperty} is {@code name} by {@code Fn::If} on {@code Named}, which is
+     * {@code Fn::Equals} of {@code equalsArgs}, and {@code AWS::NoValue} otherwise.
+     */
+    private static String namedByCondition(String type, String nameProperty, String name, String equalsArgs) {
+        return subjectStack("", "", type, "\"" + nameProperty + "\": {\"Fn::If\": [\"Named\", \"" + name
+                + "\", {\"Ref\": \"AWS::NoValue\"}]}").replace("\"Resources\"",
+                "\"Conditions\": {\"Named\": {\"Fn::Equals\": " + equalsArgs + "}}, \"Resources\"");
+    }
 
     static Stream<Row> rows() {
         String app = appConfigApplication("replacement-orders");
@@ -123,7 +154,118 @@ class CfnReplacementIntegrationTest {
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\"",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.small\"",
                         "False", true, null),
+                createOnlyRow("Route53 zone Name", "", "", "AWS::Route53::HostedZone",
+                        "\"Name\": \"replacement-before.example.test\"",
+                        "\"Name\": \"replacement-after.example.test\"",
+                        "True", false, null),
+                createOnlyRow("Route53 zone HostedZoneConfig", "", "", "AWS::Route53::HostedZone",
+                        "\"Name\": \"replacement-comment.example.test\","
+                                + " \"HostedZoneConfig\": {\"Comment\": \"first\"}",
+                        "\"Name\": \"replacement-comment.example.test\","
+                                + " \"HostedZoneConfig\": {\"Comment\": \"second\"}",
+                        "False", false, null),
                 SUBNET_GROUP_REPLACED,
+                createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
+                        "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
+                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"x\"]"),
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
+                createOnlyRow("S3 bucket explicit BucketName removed", "", "", S3_TYPE,
+                        "\"BucketName\": \"repl-s3-removed\"", "", "True", false, null),
+                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
+                new Row("log group whose whole Properties block is dropped",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-dropped-properties\"}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "Subject", "True", true, null),
+                createOnlyRow("ECR repository RepositoryName removed", "", "", "AWS::ECR::Repository",
+                        "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
+                createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
+                        DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
+                new Row("log group given a Properties block that sets its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-added-properties\"}}}}",
+                        "Subject", "True", true, null),
+                new Row("log group given a Properties block with only an updatable property",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "Subject", "False", false, null),
+                new Row("log group whose existing Properties block gains its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7,"
+                                + " \"LogGroupName\": \"repl-added-name\"}}}}",
+                        "Subject", "True", true, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue, beside an updatable change",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-novalue\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue while a tag reads another stack's output",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"Tags\": [{\"Key\": \"source\", \"Value\": {\"Fn::GetStackOutput\":"
+                                + " {\"StackName\": \"" + OUTPUT_SOURCE + "\", \"OutputName\": \"Out\"}}}],"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-output\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, stack -> createOutputSource()),
+                createOnlyRow("SNS topic TopicName removed", "", "", "AWS::SNS::Topic",
+                        "\"TopicName\": \"repl-sns-named\"", "\"DisplayName\": \"unnamed\"",
+                        "True", false, null),
+                createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
+                        "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
+                createOnlyRow("SNS subscription Endpoint", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription Protocol", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email-json\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription TopicArn", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
+                createOnlyRow("EKS cluster Tags", "", "", "AWS::EKS::Cluster",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS cluster RoleArn", "", "", "AWS::EKS::Cluster",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "True", false, null),
+                createOnlyRow("EKS nodegroup Tags", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS nodegroup NodeRole", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
+                        "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
@@ -139,6 +281,7 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null));
     }
 
+    private static final String OUTPUT_SOURCE = "repl-output-source";
     private static final String HOSTED = "hosted";
     private static final String REF_A = "{\"Ref\": \"NameA\"}";
     private static final String REF_B = "{\"Ref\": \"NameB\"}";
@@ -154,6 +297,9 @@ class CfnReplacementIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             CfnStackWaits.createStack(client, stack, row.before(), "CREATE_COMPLETE");
             String before = physicalId(client, stack, "Subject");
+            if (row.afterCreate() != null) {
+                row.afterCreate().accept(stack);
+            }
 
             createUpdateChangeSet(client, stack, "change", row.after());
             assertEquals(List.of(row.preview()), replacement(client, stack, "change", "Subject"), row.label());
@@ -172,6 +318,18 @@ class CfnReplacementIntegrationTest {
             }
         } finally {
             CfnStackWaits.deleteStack(stack);
+            if (row.afterCreate() != null) {
+                CfnStackWaits.deleteStack(OUTPUT_SOURCE);
+            }
+        }
+    }
+
+    private static void createOutputSource() {
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, OUTPUT_SOURCE, "{\"Resources\": {\"Source\": {\"Type\":"
+                    + " \"AWS::SSM::Parameter\", \"Properties\": {\"Type\": \"String\", \"Value\": \"v\"}}},"
+                    + " \"Outputs\": {\"Out\": {\"Value\": \"output-value\"}}}", "CREATE_COMPLETE");
         }
     }
 
@@ -493,6 +651,75 @@ class CfnReplacementIntegrationTest {
             } else {
                 assertEquals(before, after, row.label() + ": the update keeps the resource");
             }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aRenamedEcrRepositoryLeavesNoRepositoryUnderTheOldName() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-ecr-" + suffix;
+        String first = "repl-ecr-a-" + suffix;
+        String second = "repl-ecr-b-" + suffix;
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+             EcrClient ecr = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack,
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + first + "\""),
+                    "CREATE_COMPLETE");
+            assertEquals(first, ecr.describeRepositories(request -> request.repositoryNames(first))
+                    .repositories().getFirst().repositoryName());
+
+            createUpdateChangeSet(client, stack, "rename",
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + second + "\""));
+            assertEquals(List.of("True"), replacement(client, stack, "rename", "Subject"));
+            executeAndAwaitUpdate(client, stack, "rename");
+
+            assertEquals(second, physicalId(client, stack, "Subject"));
+            assertEquals(second, ecr.describeRepositories(request -> request.repositoryNames(second))
+                    .repositories().getFirst().repositoryName());
+            assertThrows(RepositoryNotFoundException.class,
+                    () -> ecr.describeRepositories(request -> request.repositoryNames(first)),
+                    "the old repository is deleted once the update completes");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aRenamedEcrRepositoryThatStillHoldsAnImageIsKept() throws Exception {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the registry data plane");
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-ecr-full-" + suffix;
+        String first = "repl-ecr-full-a-" + suffix;
+        String second = "repl-ecr-full-b-" + suffix;
+        byte[] config = "{\"architecture\":\"amd64\",\"os\":\"linux\"}".getBytes(StandardCharsets.UTF_8);
+        String configDigest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(config));
+        String manifest = "{\"schemaVersion\": 2, \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\","
+                + " \"config\": {\"mediaType\": \"application/vnd.docker.container.image.v1+json\", \"size\": "
+                + config.length + ", \"digest\": \"" + configDigest + "\"}, \"layers\": []}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+             EcrClient ecr = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack,
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + first + "\""),
+                    "CREATE_COMPLETE");
+            String upload = ecr.initiateLayerUpload(request -> request.repositoryName(first)).uploadId();
+            ecr.uploadLayerPart(request -> request.repositoryName(first).uploadId(upload)
+                    .partFirstByte(0L).partLastByte((long) config.length - 1).layerPartBlob(SdkBytes.fromByteArray(config)));
+            ecr.completeLayerUpload(request -> request.repositoryName(first).uploadId(upload)
+                    .layerDigests(configDigest));
+            ecr.putImage(request -> request.repositoryName(first).imageManifest(manifest).imageTag("v1"));
+
+            createUpdateChangeSet(client, stack, "rename",
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + second + "\""));
+            executeAndAwaitUpdate(client, stack, "rename");
+
+            assertEquals(second, physicalId(client, stack, "Subject"));
+            assertEquals(1, ecr.listImages(request -> request.repositoryName(first)).imageIds().size(),
+                    "the old repository still holds its image: ECR refuses to delete a non-empty repository");
         } finally {
             CfnStackWaits.deleteStack(stack);
         }

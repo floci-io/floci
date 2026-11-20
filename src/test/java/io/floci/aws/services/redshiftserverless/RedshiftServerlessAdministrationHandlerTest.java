@@ -100,7 +100,8 @@ class RedshiftServerlessAdministrationHandlerTest {
                         new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, serverlessService),
                         new RedshiftServerlessScheduledActionService(storageFactory, serverlessService,
                                 mock(RedshiftServerlessScheduledActionAuthorizer.class), regionResolver)),
-                customDomains, mock(RedshiftServerlessSharedSnapshots.class));
+                customDomains, mock(RedshiftServerlessSharedSnapshots.class),
+                mock(RedshiftServerlessTableRestoreService.class));
     }
 
     @Test

@@ -1,13 +1,10 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -72,20 +69,14 @@ class LambdaFunctionUrlAccountRoutingTest {
                 .extract().path("FunctionUrl");
     }
 
-    private byte[] lambdaZip() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("""
-                    exports.handler = async (event) => ({
-                      statusCode: 200,
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ accountId: event.requestContext.accountId })
-                    });
-                    """.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+    private byte[] lambdaZip() {
+        return LambdaCodeFixtures.nodeJsZip("""
+                exports.handler = async (event) => ({
+                  statusCode: 200,
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ accountId: event.requestContext.accountId })
+                });
+                """);
     }
 
     private String urlId(String functionUrl) {

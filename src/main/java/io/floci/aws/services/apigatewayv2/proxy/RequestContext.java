@@ -26,6 +26,9 @@ import java.util.Map;
  * tell {@code %2F} from {@code /}. It may be null, lack a parameter that did not come from the
  * request path, or hold a value that does not decode to the parameter's, and
  * {@link #targetPathParams()} encodes the decoded value in those cases.
+ *
+ * <p>{@code stageVariables} and {@code contextVariables} hold what {@code $stageVariables.X} and
+ * {@code $context.X} resolve against. Either may be null when the caller has none to offer.
  */
 public record RequestContext(
         String apiId,
@@ -44,7 +47,22 @@ public record RequestContext(
         Map<String, Object> authorizerContext,
         Map<String, List<String>> multiValueHeaders,
         Map<String, List<String>> multiValueQueryParams,
-        Map<String, String> rawPathParams) {
+        Map<String, String> rawPathParams,
+        Map<String, String> stageVariables,
+        Map<String, String> contextVariables) {
+
+    public RequestContext(String apiId, String stageName, String httpMethod, String path, String proxy,
+                          String routeKey, String requestId, String sourceIp,
+                          Map<String, String> requestHeaders, Map<String, String> queryParams,
+                          Map<String, String> pathParams, byte[] body,
+                          Map<String, Object> authorizerClaims, Map<String, Object> authorizerContext,
+                          Map<String, List<String>> multiValueHeaders,
+                          Map<String, List<String>> multiValueQueryParams,
+                          Map<String, String> rawPathParams) {
+        this(apiId, stageName, httpMethod, path, proxy, routeKey, requestId, sourceIp,
+                requestHeaders, queryParams, pathParams, body, authorizerClaims, authorizerContext,
+                multiValueHeaders, multiValueQueryParams, rawPathParams, null, null);
+    }
 
     public RequestContext(String apiId, String stageName, String httpMethod, String path, String proxy,
                           String routeKey, String requestId, String sourceIp,
@@ -71,6 +89,13 @@ public record RequestContext(
         this(apiId, stageName, httpMethod, path, proxy, routeKey, requestId, sourceIp,
                 requestHeaders, queryParams, pathParams, body, authorizerClaims, authorizerContext,
                 expand(requestHeaders), expand(queryParams));
+    }
+
+    /** A copy of this context carrying the given stage and context variables. */
+    public RequestContext withVariables(Map<String, String> stageVariables, Map<String, String> contextVariables) {
+        return new RequestContext(apiId, stageName, httpMethod, path, proxy, routeKey, requestId, sourceIp,
+                requestHeaders, queryParams, pathParams, body, authorizerClaims, authorizerContext,
+                multiValueHeaders, multiValueQueryParams, rawPathParams, stageVariables, contextVariables);
     }
 
     /** The path parameters as they go into the target URL, every value percent-encoded. */

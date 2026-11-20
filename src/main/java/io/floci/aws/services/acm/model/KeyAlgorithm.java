@@ -68,7 +68,7 @@ public enum KeyAlgorithm {
                 return alg;
             }
         }
-        LOG.warnv("Unknown key algorithm '{0}', defaulting to RSA_2048", name);
+        LOG.warnv("Unknown key algorithm ''{0}'', defaulting to RSA_2048", name);
         return RSA_2048;
     }
 }

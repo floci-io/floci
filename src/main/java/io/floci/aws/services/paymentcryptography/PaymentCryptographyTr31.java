@@ -108,7 +108,7 @@ final class PaymentCryptographyTr31 {
      * @param blockSize the cipher block size in characters
      * @return the blocks, with the padding block appended when one is needed
      */
-    private static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
+    static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
         int total = 0;
         for (String[] block : blocks) {
             total += block[0].length() + 2 + block[1].length();
@@ -196,7 +196,7 @@ final class PaymentCryptographyTr31 {
      * @param blocks the optional blocks, each its identifier and its value
      * @return the optional blocks, as the characters of the key block
      */
-    private static String optionalBlocks(List<String[]> blocks) {
+    static String optionalBlocks(List<String[]> blocks) {
         StringBuilder out = new StringBuilder();
         for (String[] block : blocks) {
             String id = block[0];
@@ -272,6 +272,74 @@ final class PaymentCryptographyTr31 {
     }
 
     /**
+     * The version of the key a block carries, over two characters.
+     *
+     * <p>The version is in the header, so it is read from there and not carried separately.
+     */
+    static String versionOf(String block) {
+        return block.substring(9, 11);
+    }
+
+    /**
+     * The optional blocks a block carries, each its identifier and its value.
+     *
+     * <p>The padding block is not one of them: it is the block that keeps the optional
+     * blocks aligned, and the block that goes out is padded for its own protection, so the
+     * padding of the block that came in is dropped.
+     *
+     * @param block the block
+     * @return the optional blocks, without the padding block
+     */
+    static List<String[]> optionalBlocksOf(String block) {
+        int count = parseInt(block.substring(12, 14), "the number of optional blocks");
+        List<String[]> blocks = new ArrayList<>();
+        int at = HEADER_LENGTH;
+        for (int i = 0; i < count; i++) {
+            if (block.length() < at + 4) {
+                throw new IllegalArgumentException("the key block says it has optional blocks, and "
+                        + "it is too short to hold them");
+            }
+            String id = block.substring(at, at + 2);
+            int length = parseInt(block.substring(at + 2, at + 4),
+                    "the length of an optional block", 16);
+            int valueStart;
+            int valueLength;
+            int total;
+            if (length != 0) {
+                valueStart = at + 4;
+                valueLength = length - 4;
+                total = length;
+            } else {
+                // The length did not fit in its field, so the field says so and the length
+                // follows the number of characters it takes.
+                if (block.length() < at + 6) {
+                    throw new IllegalArgumentException("the key block says it has optional blocks, "
+                            + "and it is too short to hold them");
+                }
+                int digits = parseInt(block.substring(at + 4, at + 6),
+                        "the length of the length of an optional block", 16);
+                if (digits == 0 || block.length() < at + 6 + digits) {
+                    throw new IllegalArgumentException("the key block says it has optional blocks, "
+                            + "and it is too short to hold them");
+                }
+                valueLength = parseInt(block.substring(at + 6, at + 6 + digits),
+                        "the length of an optional block", 16);
+                valueStart = at + 6 + digits;
+                total = 6 + digits + valueLength;
+            }
+            if (valueLength < 0 || block.length() < at + total) {
+                throw new IllegalArgumentException("the key block says it has optional blocks, and "
+                        + "it is too short to hold them");
+            }
+            if (!"PB".equals(id)) {
+                blocks.add(new String[] {id, block.substring(valueStart, valueStart + valueLength)});
+            }
+            at += total;
+        }
+        return blocks;
+    }
+
+    /**
      * Whether a block is a type D one, which is derived with AES.
      *
      * <p>The type is in the block's own header, so it is read from there and not from the
@@ -301,9 +369,9 @@ final class PaymentCryptographyTr31 {
      *
      * @param blockLength the length of the whole block, in characters
      */
-    private static String header16(String type, String usage, String mode, String exportability,
-                                  int blockLength, String algorithm, String version,
-                                  int optionalBlocks) {
+    static String header16(String type, String usage, String mode, String exportability,
+                           int blockLength, String algorithm, String version,
+                           int optionalBlocks) {
         String header = type
                 + pad4(blockLength)
                 + usage
@@ -553,7 +621,7 @@ final class PaymentCryptographyTr31 {
      * @param radix the radix the field is written in
      * @return the number, in two characters
      */
-    private static String two(int value, int radix) {
+    static String two(int value, int radix) {
         String text = Integer.toString(value, radix).toUpperCase(Locale.ROOT);
         if (text.length() > 2) {
             throw new IllegalArgumentException("the number does not fit in two characters: " + value);

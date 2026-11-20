@@ -11,6 +11,7 @@ import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
@@ -82,6 +83,7 @@ class EmrBootstrapRunnerTest {
     void setUp() {
         when(builder.newContainer(anyString())).thenReturn(spec);
         when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(lifecycle.getStreamingDockerClient()).thenReturn(docker);
         when(lifecycle.createAndStart(any()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo(CONTAINER, Map.of()));
         when(roleCredentials.forRole(any(), any(), any())).thenReturn(Optional.empty());
@@ -101,6 +103,20 @@ class EmrBootstrapRunnerTest {
                     }
                     return null;
                 });
+    }
+
+    // Catches: a bootstrap action, a user's script with no timeout, holding a control-plane connection for
+    // as long as it runs instead of a streaming one.
+    @Test
+    void eachActionsOutputStreamsOnTheStreamingClient() {
+        DockerClient streaming = mock(DockerClient.class);
+        when(lifecycle.getStreamingDockerClient()).thenReturn(streaming);
+        ContainerExecStubs.completeEveryExec(docker, streaming, CONTAINER, 0, "installed\n", "");
+
+        runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"),
+                action("s3n://bucket/bootstrap/jars.sh")), () -> false);
+
+        verify(streaming, times(2)).execStartCmd(anyString());
     }
 
     @Test
@@ -123,12 +139,12 @@ class EmrBootstrapRunnerTest {
         verify(s3).getObject("bucket", "bootstrap/install.sh");
         verify(s3).getObject("bucket", "bootstrap/jars.sh");
         assertEquals(List.of("bootstrap-action", "/tmp/floci-bootstrap-action-1-install.sh", "pandas", "2.2"),
-                commands.get(0).subList(3, commands.get(0).size()));
-        assertEquals(List.of("bootstrap-action", "/tmp/floci-bootstrap-action-2-jars.sh"),
                 commands.get(1).subList(3, commands.get(1).size()));
-        assertEquals(List.of("bash", "-c"), commands.get(0).subList(0, 2));
-        assertTrue(commands.get(0).get(2).contains("chown -R hadoop:hadoop /home/hadoop"));
-        assertEquals(3, commands.size());
+        assertEquals(List.of("bootstrap-action", "/tmp/floci-bootstrap-action-2-jars.sh"),
+                commands.get(2).subList(3, commands.get(2).size()));
+        assertEquals(List.of("bash", "-c"), commands.get(1).subList(0, 2));
+        assertTrue(commands.get(1).get(2).contains("chown -R hadoop:hadoop /home/hadoop"));
+        assertEquals(4, commands.size());
         // The credentials go to each action's exec alone, never to the container the image is made of.
         ExecCreateCmd exec = docker.execCreateCmd(CONTAINER);
         verify(exec, times(2)).withEnv(ENV);
@@ -157,22 +173,23 @@ class EmrBootstrapRunnerTest {
 
         // In once the container is up, before the first action runs, which points its JVMs at it.
         assertEquals(List.of(0), execsBeforeTheCopy);
-        assertTrue(commands.get(0).get(2).startsWith(ContainerCaBundle.JAVA_TRUST_SHELL_LINE + "\n"));
+        assertTrue(commands.get(1).get(2).startsWith(ContainerCaBundle.JAVA_TRUST_SHELL_LINE + "\n"));
         // Each step's container gets its own, so the image goes without it.
-        assertEquals(2, commands.size());
-        assertTrue(commands.get(1).get(2).contains("rm -f ") && commands.get(1).get(2).contains(
-                " " + ContainerCaBundle.JAVA_TRUST_STORE_PATH + ";"), commands.get(1).get(2));
+        assertEquals(3, commands.size());
+        assertTrue(commands.get(2).get(2).contains("rm -f ") && commands.get(2).get(2).contains(
+                " " + ContainerCaBundle.JAVA_TRUST_STORE_PATH + " "), commands.get(2).get(2));
     }
 
     @Test
     void aFailingActionEndsTheBootstrapThereAndNothingIsKept() {
-        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, List.of(0L, 3L), "", "");
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, List.of(0L, 0L, 3L), "",
+                "");
 
         BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"),
                 action("s3://bucket/bootstrap/jars.sh"), action("s3://bucket/bootstrap/never.sh")), () -> false);
 
         assertEquals(BootstrapRunner.Outcome.actionFailed(2, 3), outcome);
-        assertEquals(2, commands.size());
+        assertEquals(3, commands.size());
         verify(lifecycle, never()).commit(any(), any(), any(), any(), any());
         assertTrue(uploaded.isEmpty());
         verify(lifecycle).stopAndRemove(CONTAINER, null, 0);
@@ -204,7 +221,8 @@ class EmrBootstrapRunnerTest {
                 () -> false);
 
         assertEquals(BootstrapRunner.Outcome.notDownloaded(1, "The specified key does not exist."), outcome);
-        assertTrue(commands.isEmpty());
+        // The node's files alone.
+        assertEquals(1, commands.size());
     }
 
     @Test
@@ -220,6 +238,76 @@ class EmrBootstrapRunnerTest {
                 action("s3://bucket/bootstrap/jars.sh")), ended::get);
 
         assertEquals(BootstrapRunner.Outcome.halted(), outcome);
+        assertEquals(2, commands.size());
+        verify(lifecycle, never()).commit(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aCoreNodesBootstrapRunsInAContainerOfItsOwnAsThatNodeAndIsKeptAsItsImage() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        String repository = ContainerStorageHelper.dockerName(config, "emr-bootstrap");
+        String nodeImage = "sha256:" + "3".repeat(64);
+        when(docker.inspectImageCmd(repository + ":j-1-1-2").exec().getId()).thenReturn(nodeImage);
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"))
+                .onNode("1-2", "CORE", "s3://logs/j-1/node/i-00000000000000003/bootstrap-actions/"), () -> false);
+
+        // Apart from the primary node's, and from each other node's, with a session of its own.
+        assertEquals(BootstrapRunner.Outcome.succeeded(nodeImage), outcome);
+        verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-j-1-bootstrap-1-2"));
+        verify(roleCredentials).forRole("arn:aws:iam::" + ACCOUNT + ":role/emr-ec2", ACCOUNT, "j-1-1-2-bootstrap");
+        // Its files say which node it is.
+        assertEquals(List.of("env", "FLOCI_INSTANCE_ROLE=CORE", "bash", "-c", EmrServerlessSparkRunner.NODE_INFO),
+                commands.get(0));
+        verify(lifecycle).commit(eq(CONTAINER), eq(repository), eq("j-1-1-2"), eq("hadoop"), any());
+        assertTrue(uploaded.containsKey("logs/j-1/node/i-00000000000000003/bootstrap-actions/1/stdout.gz"),
+                uploaded.toString());
+    }
+
+    @Test
+    void stoppingAClustersBootstrapStopsEachOfItsNodesButNoOtherClusters() {
+        ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        when(s3.getObject("bucket", "bootstrap/install.sh")).thenAnswer(read -> {
+            runner.stop("j-10");
+            runner.stop("j-1-1");
+            verify(lifecycle, never()).stopAndRemove(CONTAINER, null, 0);
+            runner.stop("j-1");
+            return content("#!/bin/bash\n");
+        });
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"))
+                .onNode("1-1", "CORE", null), () -> false);
+
+        assertEquals(BootstrapRunner.Outcome.halted(), outcome);
+        verify(lifecycle).stopAndRemove(CONTAINER, null, 0);
+    }
+
+    @Test
+    void thePrimaryNodesFilesAreWrittenBeforeTheFirstActionAndGoBeforeTheImageIsKept() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+
+        runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh")), () -> false);
+
+        // The actions run as on the primary node, whose files say so.
+        assertEquals(List.of("env", "FLOCI_INSTANCE_ROLE=MASTER", "bash", "-c", EmrServerlessSparkRunner.NODE_INFO),
+                commands.get(0));
+        // A node started from the image writes its own.
+        String cleanup = commands.get(2).get(2);
+        assertTrue(cleanup.contains(" /mnt/var/lib/info/instance.json ")
+                && cleanup.contains(" /mnt/var/lib/instance-controller/extraInstanceData.json;"), cleanup);
+    }
+
+    @Test
+    void filesThatCannotBeWrittenEndTheBootstrapBeforeAnyActionRuns() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 1, "",
+                "mkdir: cannot create directory '/mnt/var': Permission denied\n");
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh")),
+                () -> false);
+
+        assertEquals(BootstrapRunner.Outcome.couldNotRun("Could not write the primary node's "
+                + "/mnt/var/lib/info/instance.json: mkdir: cannot create directory '/mnt/var': Permission denied"),
+                outcome);
         assertEquals(1, commands.size());
         verify(lifecycle, never()).commit(any(), any(), any(), any(), any());
     }
@@ -260,7 +348,7 @@ class EmrBootstrapRunnerTest {
     @Test
     void sudoDropsItsOptionsAndRunsItsCommandAsItIs(@TempDir Path directory) throws Exception {
         Path sudo = directory.resolve("sudo");
-        Files.writeString(sudo, EmrBootstrapRunner.SUDO + "\n");
+        Files.writeString(sudo, EmrServerlessSparkRunner.SUDO + "\n");
 
         BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder("bash", sudo.toString(), "-E", "-u",
                 "root", "--", "GREETING=hello", "sh", "-c", "printf '%s %s|' \"$GREETING\" \"$1\"", "sh", "two words"));

@@ -1,6 +1,6 @@
 package io.floci.aws.services.elbv2;
 
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A listener port carries no credentials, so a load balancer outside the default account must still serve. */
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 class ElbV2OtherAccountDataPlaneIntegrationTest {
 
     private static final String ACCOUNT = "111122223333";

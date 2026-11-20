@@ -11,7 +11,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
- * Pins the exact error codes and messages IAM returns for missing and duplicate entities.
+ * Pins the exact error codes and messages IAM returns for duplicate policies, missing policy versions,
+ * permissions boundaries, inline policies and instance profiles; the not-found wording of managed
+ * policies themselves is pinned in {@link IamPolicyNotFoundWordingIntegrationTest}.
  * RestAssured is used deliberately so the raw wire messages are asserted, not SDK-rewritten ones.
  */
 @QuarkusTest
@@ -59,37 +61,13 @@ class IamEntityMessagesIntegrationTest {
                 "A policy called " + name + " already exists. Duplicate names are not allowed.",
                 "Action", "CreatePolicy", "PolicyName", name, "PolicyDocument", DOC);
         String missing = "arn:aws:iam::" + ACCOUNT + ":policy/missing-" + id();
-        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
-                "Action", "GetPolicy", "PolicyArn", missing);
-        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
-                "Action", "DeletePolicy", "PolicyArn", missing);
-        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
-                "Action", "TagPolicy", "PolicyArn", missing, "Tags.member.1.Key", "k", "Tags.member.1.Value", "v");
-        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
-                "Action", "UntagPolicy", "PolicyArn", missing, "TagKeys.member.1", "k");
-
-        // policy-version and attach messages
         String notAttachable = " does not exist or is not attachable.";
-        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
-                "Action", "GetPolicyVersion", "PolicyArn", arn, "VersionId", "v99");
-        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
-                "Action", "DeletePolicyVersion", "PolicyArn", arn, "VersionId", "v99");
-        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
-                "Action", "SetDefaultPolicyVersion", "PolicyArn", arn, "VersionId", "v99");
-        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
-                "Action", "ListPolicyVersions", "PolicyArn", missing);
-        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
-                "Action", "ListEntitiesForPolicy", "PolicyArn", missing);
+        for (String action : new String[] {"GetPolicyVersion", "DeletePolicyVersion", "SetDefaultPolicyVersion"}) {
+            call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
+                    "Action", action, "PolicyArn", arn, "VersionId", "v99");
+        }
         String user = "u-" + id();
         call(200, null, null, "Action", "CreateUser", "UserName", user);
-        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
-                "Action", "AttachUserPolicy", "UserName", user, "PolicyArn", missing);
-        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
-                "Action", "CreatePolicyVersion", "PolicyArn", missing, "PolicyDocument", DOC);
-        call(404, "NoSuchEntity", "Policy " + missing + " version v1" + notAttachable,
-                "Action", "GetPolicyVersion", "PolicyArn", missing, "VersionId", "v1");
-        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
-                "Action", "ListPolicyTags", "PolicyArn", missing);
 
         // permissions boundary on a missing policy
         String scope = "Scope ARN: " + missing + notAttachable;
@@ -98,19 +76,10 @@ class IamEntityMessagesIntegrationTest {
         call(404, "NoSuchEntity", scope,
                 "Action", "CreateUser", "UserName", "ub-" + id(), "PermissionsBoundary", missing);
 
-        // detach of a policy that is not attached
-        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
-                "Action", "DetachUserPolicy", "UserName", user, "PolicyArn", arn);
-        String group = "g-" + id();
-        call(200, null, null, "Action", "CreateGroup", "GroupName", group);
-        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
-                "Action", "DetachGroupPolicy", "GroupName", group, "PolicyArn", arn);
         String role = "r-" + id();
         call(200, null, null, "Action", "CreateRole", "RoleName", role, "AssumeRolePolicyDocument",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
-        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
-                "Action", "DetachRolePolicy", "RoleName", role, "PolicyArn", arn);
         call(404, "NoSuchEntity", scope,
                 "Action", "PutRolePermissionsBoundary", "RoleName", role, "PermissionsBoundary", missing);
     }

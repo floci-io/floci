@@ -5,7 +5,7 @@ import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.SidecarContainersProfile;
-import io.floci.aws.testing.SidecarS3AuthEnforcedProfile;
+import io.floci.aws.testing.SidecarServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -25,7 +25,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(SidecarS3AuthEnforcedProfile.class)
+@TestProfile(SidecarServiceSettingsProfile.class)
 class RedshiftUnloadParquetS3AuthIntegrationTest {
     @Inject
     RedshiftService redshift;

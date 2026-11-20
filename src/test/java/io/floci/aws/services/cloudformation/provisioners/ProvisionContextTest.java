@@ -10,10 +10,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.lang.reflect.RecordComponent;
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,7 +72,8 @@ class ProvisionContextTest {
         PropertyChanges changes = PropertyChanges.between("AWS::SQS::Queue", true,
                 props("{\"A\":1}"), props("{\"A\":2}"));
         ProvisionContext original = new ProvisionContext(engine, "eu-west-1", "123456789012", "stack",
-                "old-id", event -> {}, props("{\"A\":1}"), changes);
+                "old-id", event -> {}, props("{\"A\":1}"), changes, "boundary-arn",
+                mock(CloudFormationTemplateEngine.class));
 
         for (String replacement : new String[] {"new-id", null}) {
             ProvisionContext copy = original.withPriorPhysicalId(replacement);
@@ -82,6 +85,11 @@ class ProvisionContextTest {
             }
         }
         assertEquals("old-id", original.priorPhysicalId());
+    }
+
+    @Test
+    void aContextWithoutThePreviousDeploymentsEngineResolvesThePreviousPropertiesWithItsOwn() {
+        assertSame(engine, contextWithPriorProperties("{}").priorEngine());
     }
 
     @Test
@@ -283,11 +291,64 @@ class ProvisionContextTest {
         assertNull(ctx.resolveOptionalInt(null, "Port"), "no properties at all");
         assertNull(ctx.resolveOptionalInt(props("{\"Port\": {\"Ref\": \"AWS::NoValue\"}}"), "Port"),
                 "an intrinsic that resolves to blank, as AWS::NoValue does");
-        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true")) {
+        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true", "99999999999")) {
             AwsException e = assertThrows(AwsException.class,
                     () -> ctx.resolveOptionalInt(props("{\"Port\": " + literal + "}"), "Port"), literal);
             assertEquals("ValidationError", e.getErrorCode(), literal);
             assertEquals("Value of property Port must be an integer.", e.getMessage(), literal);
+        }
+    }
+
+    @Test
+    void resolveOptionalBigIntegerReadsAnyWidthAndTakesTheAbsentRuleOfResolveOptionalInt() {
+        ProvisionContext ctx = context(null);
+        JsonNode size = props("{\"Ref\": \"Size\"}");
+        when(engine.resolve(size)).thenReturn("3");
+        Function<String, BigInteger> read = json -> ctx.resolveOptionalBigInteger(props(json), "Port");
+
+        assertEquals(BigInteger.valueOf(42), read.apply("{\"Port\": 42}"), "a number");
+        assertEquals(new BigInteger("99999999999999999999"), read.apply("{\"Port\": \" 99999999999999999999 \"}"),
+                "any width, trimmed");
+        assertEquals(BigInteger.valueOf(3), read.apply("{\"Port\": {\"Ref\": \"Size\"}}"), "an intrinsic's result");
+        assertNull(read.apply("{}"), "absent");
+        assertNull(read.apply("{\"Port\": null}"), "explicitly null");
+        assertNull(ctx.resolveOptionalBigInteger(null, "Port"), "no properties at all");
+        assertNull(read.apply("{\"Port\": {\"Ref\": \"AWS::NoValue\"}}"),
+                "an intrinsic that resolves to blank, as AWS::NoValue does");
+        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true")) {
+            AwsException e = assertThrows(AwsException.class, () -> read.apply("{\"Port\": " + literal + "}"), literal);
+            assertEquals("ValidationError", e.getErrorCode(), literal);
+            assertEquals("Value of property Port must be an integer.", e.getMessage(), literal);
+        }
+    }
+
+    @Test
+    void resolveOptionalBooleanReadsABooleanAndRefusesAnythingElse() {
+        ProvisionContext ctx = context(null);
+        JsonNode flag = props("{\"Ref\": \"Flag\"}");
+        when(engine.resolve(flag)).thenReturn("TRUE");
+
+        assertEquals(true, ctx.resolveOptionalBoolean(props("{\"On\": true}"), "On"), "a boolean");
+        assertEquals(false, ctx.resolveOptionalBoolean(props("{\"On\": \"false\"}"), "On"), "a boolean string");
+        assertEquals(false, ctx.resolveOptionalBoolean(props("{\"On\": \" False \"}"), "On"),
+                "any case, surrounding blanks trimmed");
+        assertEquals(true, ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"Flag\"}}"), "On"),
+                "an intrinsic's result");
+        assertNull(ctx.resolveOptionalBoolean(props("{}"), "On"), "absent");
+        assertNull(ctx.resolveOptionalBoolean(props("{\"On\": null}"), "On"), "explicitly null");
+        assertNull(ctx.resolveOptionalBoolean(null, "On"), "no properties at all");
+        assertNull(ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"AWS::NoValue\"}}"), "On"),
+                "an intrinsic that resolves to empty, as AWS::NoValue does");
+        JsonNode whitespace = props("{\"Ref\": \"Blank\"}");
+        when(engine.resolve(whitespace)).thenReturn(" ");
+        AwsException blank = assertThrows(AwsException.class,
+                () -> ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"Blank\"}}"), "On"));
+        assertEquals("Value of property On must be a boolean.", blank.getMessage(), "a whitespace intrinsic result");
+        for (String literal : List.of("\"\"", "\"yes\"", "1", "0")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ctx.resolveOptionalBoolean(props("{\"On\": " + literal + "}"), "On"), literal);
+            assertEquals("ValidationError", e.getErrorCode(), literal);
+            assertEquals("Value of property On must be a boolean.", e.getMessage(), literal);
         }
     }
 

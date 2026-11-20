@@ -11,6 +11,7 @@ import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.lakeformation.LakeFormationAuthorizer;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -77,6 +78,8 @@ class ExternalTableMaterializerTest {
     private IamService iam;
     private RecordingBackend backend;
     private ExternalTableMaterializer materializer;
+    private EmulatorConfig config;
+    private LakeFormationAuthorizer lakeFormation;
 
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
@@ -115,20 +118,23 @@ class ExternalTableMaterializerTest {
         when(role.getArn()).thenReturn("arn:aws:iam::000000000000:role/R");
         when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
         when(iam.findRole(ACCOUNT, "R")).thenReturn(Optional.of(role));
-        EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        lakeFormation = mock(LakeFormationAuthorizer.class);
         when(config.services().redshift().spectrumMaxRows()).thenReturn(1000L);
         when(config.defaultRegion()).thenReturn("us-east-1");
         when(duck.query(anyString(), any(), anyString())).thenReturn(List.of());
         backend = new RecordingBackend();
-        materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config);
+        materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config, lakeFormation);
         when(s3.openObjectStream(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString(), isNull()))
                 .thenReturn(new ByteArrayInputStream("id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8)));
         S3Object icebergMetadata = new S3Object("bucket", "events/metadata/v1.json",
                 "{\"current-snapshot-id\":\"1\",\"snapshots\":[{\"snapshot-id\":\"1\","
                         .concat("\"manifest-list\":\"s3://bucket/events/metadata/snap*.avro\"}]}")
-                        .getBytes(StandardCharsets.UTF_8), "application/json");
+                        .getBytes(StandardCharsets.UTF_8), "application/json", "metadata-etag");
         when(s3.getObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
                 .thenReturn(icebergMetadata);
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"));
         when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(
                         List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
@@ -137,6 +143,45 @@ class ExternalTableMaterializerTest {
         when(s3.listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET), eq("spectrum-"), eq(""),
                 eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+    }
+
+    @Test
+    void lakeFormationIsNotConsultedWhenEnforcementIsOff() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        verify(lakeFormation, never()).canSelect(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void lakeFormationGrantAllowsTheQuery() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(true);
+        assertEquals(ExternalTableMaterializer.Outcome.LOADED,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+    }
+
+    @Test
+    void lakeFormationRefusalDeniesWithInsufficientPrivilege() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        SpectrumSqlException denied = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        assertEquals("42501", denied.sqlState());
+        assertThat(denied.getMessage(), containsString("Lake Formation"));
+    }
+
+    @Test
+    void revokeDeniesATableAlreadyLoadedIntoTheBackend() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(true);
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        assertEquals(ExternalTableMaterializer.Outcome.CURRENT,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(false);
+        assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
     }
 
     @Test
@@ -233,7 +278,8 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("42501"));
-        verify(duck).query(argThat(sql -> sql.contains("iceberg_metadata('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).query(argThat(sql -> sql.contains(
+                "iceberg_metadata('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), startsWith("ASIA"), anyString(), anyString());
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
     }
@@ -636,8 +682,66 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(duck).execute(argThat(sql -> sql.contains("iceberg_scan('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).execute(argThat(sql -> sql.contains(
+                        "iceberg_scan('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesBeforeTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesDuringTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("metadata-etag"),
+                        metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesAfterTheDataFilesWereListed() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(s3, times(1)).headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/")));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataIsDeletedDuringTheQuery() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+    }
+
+    private static S3Object metadataHead(String eTag) {
+        return new S3Object("bucket", "events/metadata/v1.json", new byte[0], "application/json", eTag);
     }
 
     @Test

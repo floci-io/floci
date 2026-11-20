@@ -69,7 +69,8 @@ class SesTemplateV2IntegrationTest {
             .post("/v2/email/templates")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("AlreadyExistsException"));
+            .body("__type", equalTo("AlreadyExistsException"))
+            .body("message", equalTo("Template v2-welcome already exists for account id 000000000000"));
     }
 
     @Test
@@ -155,7 +156,7 @@ class SesTemplateV2IntegrationTest {
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
-                {"TemplateContent": {"Subject": "x"}}
+                {"TemplateContent": {"Subject": "x", "Text": "x"}}
                 """)
         .when()
             .put("/v2/email/templates/ghost")

@@ -291,7 +291,7 @@ class EmrIntegrationTest {
                 .then().statusCode(200)
                 .body("SecurityConfiguration", equalTo("{\"EncryptionConfiguration\":{}}"));
 
-        emrService.describeSecurityConfiguration("floci-emr-sec")
+        emrService.describeSecurityConfiguration("floci-emr-sec", "us-east-1")
                 .setCreationDateTime(Instant.ofEpochMilli(1_761_000_000_123L));
         try {
             JsonNode describedTime = objectMapper.readTree(emr("DescribeSecurityConfiguration",
@@ -315,6 +315,39 @@ class EmrIntegrationTest {
         } finally {
             emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
                     .then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(19)
+    void aClusterNamesASecurityConfigurationThatExists() {
+        String instances = "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}";
+        emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-missing\"," + instances + "}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Security configuration does not exist: floci-emr-missing"));
+        emr("ListClusters", "{}")
+                .then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'secured' }", hasSize(0));
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200)
+                .body("Cluster", not(hasKey("SecurityConfiguration")));
+
+        emr("CreateSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\","
+                + "\"SecurityConfiguration\":\"{\\\"EncryptionConfiguration\\\":{}}\"}")
+                .then().statusCode(200);
+        String secured = null;
+        try {
+            secured = emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-cluster-sec\","
+                    + instances + "}").then().statusCode(200).extract().path("JobFlowId");
+            emr("DescribeCluster", "{\"ClusterId\":\"" + secured + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.SecurityConfiguration", equalTo("floci-emr-cluster-sec"));
+        } finally {
+            if (secured != null) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + secured + "\"]}").then().statusCode(200);
+            }
+            emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\"}").then().statusCode(200);
         }
     }
 
@@ -515,5 +548,26 @@ class EmrIntegrationTest {
         cluster.setName(name);
         cluster.setKeepJobFlowAliveWhenNoSteps(true);
         return emrService.runJobFlow(cluster, "us-east-1");
+    }
+    @Test
+    @Order(20)
+    void aClustersAvailabilityZoneIsTheOneItsPlacementNamesElseItsRegionsFirst() {
+        String placed = emr("RunJobFlow", "{\"Name\":\"placed\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"Placement\":{\"AvailabilityZone\":\"us-east-1c\"}}}").then().statusCode(200).extract()
+                .path("JobFlowId");
+        String unplaced = emr("RunJobFlow",
+                "{\"Name\":\"unplaced\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            emr("DescribeCluster", "{\"ClusterId\":\"" + placed + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1c"));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + unplaced + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1a"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + placed + "\",\"" + unplaced + "\"]}")
+                    .then().statusCode(200);
+        }
     }
 }

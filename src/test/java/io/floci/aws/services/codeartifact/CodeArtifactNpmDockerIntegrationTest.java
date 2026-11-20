@@ -402,11 +402,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     void deletePackageRemovesTheWholeVerdaccioPackage() {
         String packageName = "delete-me-pkg";
         byte[] tarball = "throwaway tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\""
-                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
-                + "\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball);
 
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
@@ -440,11 +436,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     void nativeNpmUnpublishCleansUpTheByteCountToo() {
         String packageName = "unpublish-me-pkg";
         byte[] tarball = "unpublish throwaway tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\""
-                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
-                + "\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball);
 
         long assetSizeBytesBeforePublish = describeDomainAssetSizeBytes();
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
@@ -480,12 +472,8 @@ class CodeArtifactNpmDockerIntegrationTest {
     void nativeNpmUnpublishCleansUpTheCapturedReadmeToo() {
         String packageName = "unpublish-readme-pkg";
         byte[] tarball = "unpublish readme throwaway tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"readme\":\"# Soon to be unpublished\",\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + packageName + "-1.0.0.tgz\""
-                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
-                + "\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball, null,
+                "\"readme\":\"# Soon to be unpublished\"");
 
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
@@ -534,16 +522,10 @@ class CodeArtifactNpmDockerIntegrationTest {
         String packageName = "multi-version-readme-pkg";
         byte[] tarballV1 = "multi version readme v1".getBytes(StandardCharsets.UTF_8);
         byte[] tarballV2 = "multi version readme v2".getBytes(StandardCharsets.UTF_8);
-        String envelopeV1 = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\""
-                + packageName + "\",\"version\":\"1.0.0\",\"readme\":\"# v1\",\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
-                + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarballV1) + "\",\"length\":" + tarballV1.length + "}}}";
-        String envelopeV2 = "{\"name\":\"" + packageName + "\",\"versions\":{\"2.0.0\":{\"name\":\""
-                + packageName + "\",\"version\":\"2.0.0\",\"readme\":\"# v2\",\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + packageName + "-2.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
-                + "-2.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarballV2) + "\",\"length\":" + tarballV2.length + "}}}";
+        String envelopeV1 = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarballV1, null,
+                "\"readme\":\"# v1\"");
+        String envelopeV2 = npmPublishEnvelope(packageName, "2.0.0", packageName + "-2.0.0.tgz", tarballV2, null,
+                "\"readme\":\"# v2\"");
 
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelopeV1)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
@@ -601,12 +583,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     void publishingWithNoReadmeFieldStillRecordsAnEmptyReadmeRatherThanNothing() {
         String packageName = "no-readme-field-pkg";
         byte[] tarball = "no readme field throwaway tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + packageName + "-1.0.0.tgz\""
-                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
-                + "\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball);
 
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
@@ -634,11 +611,8 @@ class CodeArtifactNpmDockerIntegrationTest {
     void copyPackageVersionsBridgesToTheRealVerdaccioSidecar() {
         String packageName = "copyme-npm-pkg";
         byte[] tarball = "copy-me-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"readme\":\"# Copy Me Readme\",\"dist\":{\"tarball\":\"http://ignored/"
-                + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{"
-                + "\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball, null,
+                "\"readme\":\"# Copy Me Readme\"");
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
                 .then().statusCode(anyOf201Or200());
@@ -681,14 +655,8 @@ class CodeArtifactNpmDockerIntegrationTest {
         String packageName = "copyover-npm-pkg";
         byte[] oldTarball = "old-overwrite-npm-tarball".getBytes(StandardCharsets.UTF_8);
         byte[] newTarball = "new-overwrite-npm-tarball".getBytes(StandardCharsets.UTF_8);
-        String oldEnvelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName
-                + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
-                + "\"application/octet-stream\",\"data\":\"" + Base64.getEncoder().encodeToString(oldTarball)
-                + "\",\"length\":" + oldTarball.length + "}}}";
-        String newEnvelope = oldEnvelope.replace(
-                Base64.getEncoder().encodeToString(oldTarball), Base64.getEncoder().encodeToString(newTarball))
-                .replace(String.valueOf(oldTarball.length), String.valueOf(newTarball.length));
+        String oldEnvelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", oldTarball);
+        String newEnvelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", newTarball);
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(oldEnvelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/other-repo/" + packageName)
                 .then().statusCode(anyOf201Or200());
@@ -724,11 +692,8 @@ class CodeArtifactNpmDockerIntegrationTest {
     void copyPackageVersionsPreservesTheSourceVersionsDependenciesAtTheRealSidecar() throws IOException {
         String packageName = "copydeps-npm-pkg";
         byte[] tarball = "copy-deps-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dependencies\":{\"left-pad\":\"^1.3.0\"},\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
-                + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball, null,
+                "\"dependencies\":{\"left-pad\":\"^1.3.0\"}");
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
                 .then().statusCode(anyOf201Or200());
@@ -751,6 +716,36 @@ class CodeArtifactNpmDockerIntegrationTest {
         assertTrue(copiedVersion.path("dist").path("tarball").asText().contains("other-repo"),
                 "copied dist.tarball must point back at the destination repository, was: "
                         + copiedVersion.path("dist").path("tarball").asText());
+    }
+
+    @Test
+    @Order(25)
+    void listPackageVersionDependenciesReadsAllFourDependencyMapsFromTheRealSidecar() {
+        String packageName = "listdeps-npm-pkg";
+        byte[] tarball = "list-deps-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball, null,
+                "\"dependencies\":{\"@types/node\":\"^18.0.0\"},"
+                        + "\"devDependencies\":{\"jest\":\"^29.0.0\"},"
+                        + "\"peerDependencies\":{\"react\":\">=16\"},"
+                        + "\"optionalDependencies\":{\"fsevents\":\"^2.0.0\"}");
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/dependencies?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("dependencies.size()", equalTo(4))
+                .extract().jsonPath();
+        List<String> packageNames = body.getList("dependencies.package", String.class);
+        List<String> namespaces = body.getList("dependencies.namespace", String.class);
+        assertTrue(packageNames.contains("node"));
+        assertEquals("types", namespaces.get(packageNames.indexOf("node")));
+        assertTrue(packageNames.contains("jest"));
+        assertTrue(packageNames.contains("react"));
+        assertTrue(packageNames.contains("fsevents"));
     }
 
     /**
@@ -808,11 +803,8 @@ class CodeArtifactNpmDockerIntegrationTest {
     void listPackagesBridgesToTheRealVerdaccioAllEndpoint() {
         String scopedPackage = "listpkgsprobe";
         byte[] tarball = "list-packages-tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"@myscope/" + scopedPackage + "\",\"versions\":{\"1.0.0\":{\"name\":"
-                + "\"@myscope/" + scopedPackage + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":"
-                + "\"http://ignored/" + scopedPackage + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + scopedPackage
-                + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        String envelope = npmPublishEnvelope("@myscope/" + scopedPackage, "1.0.0", scopedPackage + "-1.0.0.tgz",
+                tarball);
         given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
                 .contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/@myscope%2F" + scopedPackage)
@@ -840,11 +832,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     void archivingAVersionBlocksItsRealVerdaccioTarballDownloadWhileLeavingTheBytesInPlace() {
         String packageName = "archive-download-pkg";
         byte[] tarball = "archive download throwaway tarball".getBytes(StandardCharsets.UTF_8);
-        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
-                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},"
-                + "\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\","
-                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
-                + "}}}";
+        String envelope = npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz", tarball);
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
                 .then().statusCode(anyOf201Or200());
@@ -949,11 +937,13 @@ class CodeArtifactNpmDockerIntegrationTest {
 
         // Two real versions published directly to REPO, the source for both copies below.
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
-                .body(scopelessEnvelope(packageName, "1.0.0", "original 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .body(npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz",
+                        "original 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
                 .then().statusCode(anyOf201Or200());
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
-                .body(scopelessEnvelope(packageName, "2.0.0", "the 2.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .body(npmPublishEnvelope(packageName, "2.0.0", packageName + "-2.0.0.tgz",
+                        "the 2.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
                 .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
                 .then().statusCode(anyOf201Or200());
 
@@ -973,7 +963,8 @@ class CodeArtifactNpmDockerIntegrationTest {
         // copyPackageVersionsOverwritesAnExistingNpmVersionWithDifferentContentAtTheRealSidecar
         // test sources its own "new" content from a different repository than the "old" one.
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
-                .body(scopelessEnvelope(packageName, "1.0.0", "overwritten 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .body(npmPublishEnvelope(packageName, "1.0.0", packageName + "-1.0.0.tgz",
+                        "overwritten 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
                 .put("/codeartifact/npm/" + DOMAIN + "/overwrite-source-repo/" + packageName)
                 .then().statusCode(anyOf201Or200());
 
@@ -993,15 +984,6 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .body("versions", hasKey("1.0.0"))
                 .body("versions", hasKey("2.0.0"))
                 .body("dist-tags.latest", equalTo("2.0.0"));
-    }
-
-    private static String scopelessEnvelope(String packageName, String version, byte[] tarball) {
-        String assetName = packageName + "-" + version + ".tgz";
-        return "{\"name\":\"" + packageName + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + packageName
-                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + assetName + "\"}}},"
-                + "\"_attachments\":{\"" + assetName + "\":{\"content_type\":\"application/octet-stream\","
-                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
-                + "}}}";
     }
 
     private static void copyNpmVersion(String sourceRepository, String destinationRepository, String packageName,

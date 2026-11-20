@@ -63,6 +63,9 @@ class RedshiftCredentialBrokerTest {
                 broker.classify("acc", "clus", "analyst", first.password()));
         assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
                 broker.classify("acc", "clus", "analyst", second.password()));
+        // Passwordless resolution (e.g. Data API DbUser) picks the most recently issued credential.
+        assertEquals(second.password(),
+                broker.resolve("acc", "clus", "analyst").orElseThrow().password());
     }
 
     @Test
@@ -120,5 +123,31 @@ class RedshiftCredentialBrokerTest {
         broker.issue("acc", "clus", "analyst", List.of(), 900);
         broker.clear();
         assertTrue(broker.resolve("acc", "clus", "analyst").isEmpty());
+    }
+
+    @Test
+    void issueStoresDatabaseRoleAndAutoCreateFlag() {
+        TempCredential cred = broker.issue("acc", "clus", "IAM:analyst", List.of("g1"), 900, "analyst", false);
+
+        assertEquals("IAM:analyst", cred.dbUser());
+        assertEquals("analyst", cred.databaseRole());
+        assertFalse(cred.autoCreate());
+        assertEquals(List.of("g1"), cred.dbGroups());
+    }
+
+    @Test
+    void authenticateReturnsExactMatchingCredentialForPassword() {
+        TempCredential first = broker.issue("acc", "clus", "IAM:analyst", List.of("g1"), 900, "analyst", false);
+        TempCredential second = broker.issue("acc", "clus", "IAM:analyst", List.of("g2"), 900, "analyst", false);
+
+        Optional<TempCredential> matchedFirst = broker.authenticate("acc", "clus", "IAM:analyst", first.password());
+        Optional<TempCredential> matchedSecond = broker.authenticate("acc", "clus", "IAM:analyst", second.password());
+
+        assertTrue(matchedFirst.isPresent());
+        assertEquals(List.of("g1"), matchedFirst.get().dbGroups());
+        assertTrue(matchedSecond.isPresent());
+        assertEquals(List.of("g2"), matchedSecond.get().dbGroups());
+        assertTrue(broker.authenticate("acc", "clus", "IAM:analyst", "wrong").isEmpty());
+        assertTrue(broker.authenticate("acc", "clus", "unknown", "whatever").isEmpty());
     }
 }

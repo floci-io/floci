@@ -42,11 +42,15 @@ public class DbCluster {
     private String masterUserSecretKmsKeyId;
     private Instant createdAt;
     private int proxyPort;
+    private Integer requestedPort;
     private Map<String, String> tags = new LinkedHashMap<>();
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
     private int backupRetentionPeriod = 1;
+    private boolean deletionProtection;
+    private boolean copyTagsToSnapshot;
+    private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
     private String kmsKeyId;
 
     private String dockerVolumeName;
@@ -189,6 +193,9 @@ public class DbCluster {
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
 
+    public Integer getRequestedPort() { return requestedPort; }
+    public void setRequestedPort(Integer requestedPort) { this.requestedPort = requestedPort; }
+
     public List<DbRoleAssociation> getAssociatedRoles() { return associatedRoles; }
     public void setAssociatedRoles(List<DbRoleAssociation> associatedRoles) {
         this.associatedRoles = associatedRoles != null ? new ArrayList<>(associatedRoles) : new ArrayList<>();
@@ -205,6 +212,9 @@ public class DbCluster {
 
     public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
     public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
@@ -249,4 +259,11 @@ public class DbCluster {
     public void setServerlessV2SecondsUntilAutoPause(Integer serverlessV2SecondsUntilAutoPause) {
         this.serverlessV2SecondsUntilAutoPause = serverlessV2SecondsUntilAutoPause;
     }
+    public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
+    public void setCopyTagsToSnapshot(boolean value) { copyTagsToSnapshot = value; }
+    public List<String> getEnabledCloudwatchLogsExports() { return enabledCloudwatchLogsExports; }
+    public void setEnabledCloudwatchLogsExports(List<String> value) {
+        enabledCloudwatchLogsExports = value == null ? new ArrayList<>() : new ArrayList<>(value);
+    }
+
 }

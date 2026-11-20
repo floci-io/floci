@@ -13,6 +13,8 @@
 # so a test that pulled the image itself can be told apart from a prefetch that failed or was
 # still downloading. The lines go to a file because the pulls outlive the workflow step that
 # started them and the step's stdout is closed by then.
+# A nightly check, a *NightlyIntegrationTest class, keys its images on its own name: ci.yml leaves those names out
+# of the list it passes, so they are pulled only for nightly-checks.yml, which passes nothing else.
 # Usage: prefetch-images.sh <shard.txt>
 set -u
 SHARD_FILE="${1:-}"
@@ -69,7 +71,7 @@ starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerInt
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
-       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
+       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
 # Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
 OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
@@ -109,16 +111,34 @@ grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.
 grep -qE '/lambdaweb/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:24
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
-# EmrDockerRunnerDockerIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
+# EmrDockerRunnerNightlyIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
 # default template names (EmrServerlessSparkRunner), 3.5 GB, so it is queued last, behind the Lambda runtimes;
-# EmrHiveStepsDockerIntegrationTest runs a cluster's other steps in it.
-starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
+# Of the nightly checks, EmrHiveStepsNightlyIntegrationTest runs a cluster's other steps in it,
+# EmrServerlessCustomImageNightlyIntegrationTest builds its custom image on it,
+# EmrFlociContainerNightlyIntegrationTest runs a cluster's steps in it from Floci in a container,
+# EmrPigStepsNightlyIntegrationTest a cluster's Pig steps, EmrAppUiNightlyIntegrationTest a MapReduce step,
+# and EmrClusterShrinkNightlyIntegrationTest a cluster shrink.
+starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
+    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
+    EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
-# EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsDockerIntegrationTest EMR
+# EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
-# HDFS in it, EmrDockerRunnerDockerIntegrationTest's included.
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrDockerRunnerDockerIntegrationTest \
+# HDFS in it, EmrDockerRunnerNightlyIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
+# EmrPigStepsNightlyIntegrationTest's and EmrSessionServerNightlyIntegrationTest's included (an emr-spark-* cluster's
+# Hadoop comes from it too).
+starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
+    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
+    EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
+# The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
+# the emr-7.13.0 image, 3.7 GB, the first release with sessions, and EmrServerlessDashboardNightlyIntegrationTest a job
+# run and a session in it, whose dashboards it opens.
+starts EmrServerlessSparkConnectNightlyIntegrationTest EmrServerlessDashboardNightlyIntegrationTest \
+    && ecr public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest
+# The nightly EmrSessionServerNightlyIntegrationTest runs an EMR session's Spark Connect server on an emr-spark-8.1.0
+# cluster, Spark 4, sessions needing the AWS runtime for Apache Spark, and its client in that image.
+starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
@@ -174,7 +194,7 @@ DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { ex
 starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransactionAgeIntegrationTest \
     && [ -n "$DSQL_IMAGE" ] && pull "$DSQL_IMAGE"
 # CodeArtifact's real registry fixtures each use one configured sidecar image.
-# Keep unrelated unit-test shards from pulling all four registries.
+# Keep unrelated unit-test shards from pulling registries they do not use.
 starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact maven-image
 starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
@@ -182,6 +202,8 @@ starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDoc
 starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact nuget-image
 starts CodeArtifactPypiDockerIntegrationTest && configured_image codeartifact pypi-image
+starts CodeArtifactCargoDockerIntegrationTest CodeArtifactCargoExternalConnectionDockerIntegrationTest \
+    CodeArtifactCargoUpstreamRepositoryDockerIntegrationTest && configured_image codeartifact cargo-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
 if starts RdsParameterGroupEngineIntegrationTest; then

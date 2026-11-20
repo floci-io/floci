@@ -9,6 +9,11 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,10 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Wire-protocol regression for floci-io/floci#2383: when a Query or Scan stops because it
  * reached {@code Limit}, DynamoDB returns a {@code LastEvaluatedKey} even if the stop position
- * happens to be the last item of the result set. DynamoDB does not look ahead — per the
- * developer guide, "the absence of LastEvaluatedKey is the only way to know that you have
- * reached the end of the result set", so the client discovers the end on the follow-up request,
- * which returns an empty page with no LastEvaluatedKey.
+ * happens to be the last item of the partition or table, so the client discovers the end on the
+ * follow-up request, which returns an empty page with no LastEvaluatedKey. A Query that stops
+ * where its key condition ends leaves the cursor out.
  *
  * <p>Covers the exact-Limit boundary for ascending Query, descending Query
  * ({@code ScanIndexForward=false}), GSI Query (cursor must carry index + table keys), and Scan,
@@ -544,6 +548,74 @@ class DynamoDbLimitBoundaryPaginationIntegrationTest {
         assertEquals(3, result.path("Count").asInt());
         assertTrue(result.path("LastEvaluatedKey").isMissingNode() || result.path("LastEvaluatedKey").isNull(),
                 "a Scan that exhausts the table below Limit must not carry a cursor: " + summary(result));
+    }
+
+    @ParameterizedTest(name = "{0} from {1} to {2}, forward {3}, Limit {4}")
+    @Order(13)
+    @CsvSource(delimiter = '|', textBlock = """
+        pk = :p AND sk = :a               | 1 |   | true  | 1 | 1     | false
+        pk = :p AND sk BETWEEN :a AND :b  | 1 | 2 | true  | 2 | 1;2   | false
+        pk = :p AND sk <= :a              | 2 |   | true  | 2 | 1;2   | false
+        pk = :p AND sk < :a               | 2 |   | true  | 1 | 1     | false
+        pk = :p AND sk >= :a              | 2 |   | false | 2 | 3;2   | false
+        pk = :p AND sk BETWEEN :a AND :b  | 2 | 3 | true  | 2 | 2;3   | false
+        pk = :p AND sk BETWEEN :a AND :b  | 1 | 5 | true  | 3 | 1;2;3 | true
+        pk = :p AND sk > :a               | 1 |   | true  | 1 | 2     | true
+        """)
+    void queryLimitAtTheEndOfTheKeyRangeLeavesOutTheCursor(String condition, String a, String b, boolean forward,
+                                                           int limit, String keys, boolean cursor) throws Exception {
+        String values = "\":p\": {\"N\": \"1\"}, \":a\": {\"N\": \"%s\"}".formatted(a)
+                + (b == null ? "" : ", \":b\": {\"N\": \"%s\"}".formatted(b));
+        JsonNode page = query("""
+            {
+                "TableName": "%s",
+                "KeyConditionExpression": "%s",
+                "ExpressionAttributeValues": {%s},
+                "ScanIndexForward": %s,
+                "Limit": %d
+            }
+            """.formatted(TABLE, condition, values, forward, limit));
+        assertEquals(List.of(keys.split(";")), sortKeys(page));
+        assertEquals(cursor, page.path("LastEvaluatedKey").isObject(), summary(page));
+    }
+
+    @Test
+    @Order(14)
+    void gsiQueryLimitBeforeAnExcludedItemLeavesOutTheCursor() throws Exception {
+        JsonNode page = query("""
+            {
+                "TableName": "%s",
+                "IndexName": "%s",
+                "KeyConditionExpression": "category = :c AND sk = :a",
+                "ExpressionAttributeValues": {":c": {"S": "a"}, ":a": {"N": "1"}},
+                "Limit": 1
+            }
+            """.formatted(TABLE, INDEX));
+        assertEquals(List.of("1"), sortKeys(page));
+        assertTrue(page.path("LastEvaluatedKey").isMissingNode(), summary(page));
+    }
+
+    @Test
+    @Order(15)
+    void keyConditionsLimitOnTheInclusiveBoundLeavesOutTheCursor() throws Exception {
+        JsonNode page = query("""
+            {
+                "TableName": "%s",
+                "KeyConditions": {
+                    "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"N": "1"}]},
+                    "sk": {"ComparisonOperator": "BETWEEN", "AttributeValueList": [{"N": "2"}, {"N": "3"}]}
+                },
+                "Limit": 2
+            }
+            """.formatted(TABLE));
+        assertEquals(List.of("2", "3"), sortKeys(page));
+        assertTrue(page.path("LastEvaluatedKey").isMissingNode(), summary(page));
+    }
+
+    private static List<String> sortKeys(JsonNode page) {
+        List<String> keys = new ArrayList<>();
+        page.path("Items").forEach(item -> keys.add(item.path("sk").path("N").asText()));
+        return keys;
     }
 
     /** Response summary without the bulky Items array, for assertion messages. */

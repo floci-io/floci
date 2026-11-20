@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.appconfig.model.Application;
@@ -35,7 +36,7 @@ public class AppConfigDataService {
     @Inject
     public AppConfigDataService(StorageFactory storageFactory, AppConfigService appConfigService,
                                 ObjectMapper objectMapper, RegionResolver regions) {
-        this.sessionStore = new AppConfigStorage<>(storageFactory, regions,
+        this.sessionStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfigdata", "appconfigdata-sessions.json", new TypeReference<>() {});
         this.appConfigService = appConfigService;
         this.objectMapper = objectMapper;

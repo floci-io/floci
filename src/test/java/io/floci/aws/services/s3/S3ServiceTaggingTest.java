@@ -71,4 +71,26 @@ class S3ServiceTaggingTest {
         assertFalse(S3RequestParser.hasQueryParamInString(query, "tagging"));
         assertFalse(S3RequestParser.hasQueryParamInString(query, "acl"));
     }
+
+    @Test
+    void hasQueryParamInString_encodedAmpersandInValue_isNoMatch() {
+        assertFalse(S3RequestParser.hasQueryParamInString("prefix=a%26tagging", "tagging"));
+    }
+
+    @Test
+    void hasQueryParamInString_caseVariantBeforeName_matchesOnlyExactCase() {
+        assertTrue(S3RequestParser.hasQueryParamInString("Tagging&tagging", "tagging"));
+        assertFalse(S3RequestParser.hasQueryParamInString("Tagging", "tagging"));
+    }
+
+    @Test
+    void hasQueryParamInString_encodedName_matches() {
+        assertTrue(S3RequestParser.hasQueryParamInString("%74agging", "tagging"));
+    }
+
+    @Test
+    void hasQueryParamInString_malformedEscape_isNoMatchAndDoesNotThrow() {
+        assertTrue(S3RequestParser.hasQueryParamInString("%zz&tagging", "tagging"));
+        assertFalse(S3RequestParser.hasQueryParamInString("%zz", "tagging"));
+    }
 }

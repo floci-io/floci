@@ -186,7 +186,7 @@ public class OamService implements StoredResourceArns {
 
     public Map<String, String> tags(String arn) { return new LinkedHashMap<>(resourceTags(arn)); }
 
-    public void tag(String arn, Map<String, String> tags) {
+    public synchronized void tag(String arn, Map<String, String> tags) {
         validateTags(tags);
         Map<String, String> merged = new LinkedHashMap<>(resourceTags(arn));
         merged.putAll(tags == null ? Map.of() : tags);
@@ -194,7 +194,7 @@ public class OamService implements StoredResourceArns {
         saveTags(arn, merged);
     }
 
-    public void untag(String arn, List<String> tagKeys) {
+    public synchronized void untag(String arn, List<String> tagKeys) {
         if (tagKeys == null) throw missing("TagKeys");
         Map<String, String> updated = new LinkedHashMap<>(resourceTags(arn));
         tagKeys.forEach(updated::remove);
@@ -233,6 +233,31 @@ public class OamService implements StoredResourceArns {
     @Override
     public Optional<String> find(String type, List<String> names, String region) {
         return Optional.empty();
+    }
+
+    /**
+     * The tags held on the sink or link stored under {@code arn}, in the account it names, read in place; both are kept
+     * by their whole ARN, so the ARN is matched whole. Empty for an ARN naming neither.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        String account = arnAccount(arn);
+        if (account == null || account.isEmpty() || !AwsArnUtils.isArnFor(arn, "oam")) {
+            return Map.of();
+        }
+        Optional<Map<String, String>> tags = Optional.empty();
+        if (arn.contains(":sink/")) {
+            tags = AccountAwareStorageBackend.readInAccount(sinks, account, arn).map(OamSink::getTags);
+        } else if (arn.contains(":link/")) {
+            tags = AccountAwareStorageBackend.readInAccount(links, account, arn).map(OamLink::getTags);
+        }
+        Map<String, String> held = new LinkedHashMap<>();
+        tags.ifPresent(stored -> stored.forEach((key, value) -> {
+            if (key != null && value != null) {
+                held.put(key, value);
+            }
+        }));
+        return held;
     }
 
     /** A sink another account owns, which {@code CreateLink} finds in that account and links the caller's to. */

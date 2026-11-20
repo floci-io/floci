@@ -2,14 +2,13 @@ package io.floci.aws.core.common;
 
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.TreeSet;
 
 import static io.restassured.RestAssured.given;
@@ -24,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * never resolves. Everything the partition does publish keeps working.
  */
 @QuarkusTest
-@TestProfile(PartitionStrictModeIntegrationTest.StrictPartitionsProfile.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class PartitionStrictModeIntegrationTest {
 
     @Inject
@@ -132,12 +131,5 @@ class PartitionStrictModeIntegrationTest {
         }
         assertTrue(unpublished.isEmpty(),
                 "credential scopes the commercial partition does not publish: " + unpublished);
-    }
-
-    public static final class StrictPartitionsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.partitions.strict", "true");
-        }
     }
 }

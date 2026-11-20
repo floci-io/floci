@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -41,6 +42,30 @@ public final class ContainerExecStubs {
      */
     public static List<List<String>> completeEveryExec(DockerClient dockerClient, String containerId,
                                                        List<Long> exitCodes, String stdout, String stderr) {
+        return completeEveryExec(dockerClient, containerId, exitCodes, stdout, stderr, new ArrayList<>());
+    }
+
+    /** As above, adding to {@code envs} the environment each exec was created with, in order. */
+    public static List<List<String>> completeEveryExec(DockerClient dockerClient, String containerId,
+                                                       List<Long> exitCodes, String stdout, String stderr,
+                                                       List<List<String>> envs) {
+        return completeEveryExec(dockerClient, dockerClient, containerId, exitCodes, stdout, stderr, envs);
+    }
+
+    /**
+     * As {@link #completeEveryExec(DockerClient, String, long, String, String)}, the execs created and inspected
+     * on {@code dockerClient} and startable on either client, so a test can verify which one each start used.
+     */
+    public static List<List<String>> completeEveryExec(DockerClient dockerClient, DockerClient streamingDockerClient,
+                                                       String containerId, long exitCode, String stdout,
+                                                       String stderr) {
+        return completeEveryExec(dockerClient, streamingDockerClient, containerId, List.of(exitCode), stdout, stderr,
+                new ArrayList<>());
+    }
+
+    private static List<List<String>> completeEveryExec(DockerClient dockerClient, DockerClient streamingDockerClient,
+                                                        String containerId, List<Long> exitCodes, String stdout,
+                                                        String stderr, List<List<String>> envs) {
         String execId = "exec-" + containerId;
         List<List<String>> commands = new ArrayList<>();
 
@@ -51,6 +76,10 @@ public final class ContainerExecStubs {
                     ? array
                     : Arrays.copyOf(args, args.length, String[].class);
             commands.add(List.of(cmd));
+            return createCmd;
+        });
+        when(createCmd.withEnv(anyList())).thenAnswer(invocation -> {
+            envs.add(invocation.getArgument(0));
             return createCmd;
         });
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
@@ -67,6 +96,9 @@ public final class ContainerExecStubs {
             return callback;
         });
         when(dockerClient.execStartCmd(execId)).thenReturn(startCmd);
+        if (streamingDockerClient != dockerClient) {
+            when(streamingDockerClient.execStartCmd(execId)).thenReturn(startCmd);
+        }
 
         InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
         InspectExecResponse inspectResponse = mock(InspectExecResponse.class);

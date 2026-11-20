@@ -4,9 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.InMemoryStorage;
-import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.WalStorage;
 import io.floci.aws.services.sqs.GuardedMessageQueue.ClaimResult;
@@ -14,6 +12,7 @@ import io.floci.aws.services.sqs.GuardedMessageQueue.HandleResult;
 import io.floci.aws.services.sqs.GuardedMessageQueue.MessageCounts;
 import io.floci.aws.services.sqs.model.Message;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.testing.StorageTestBackends;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -149,6 +148,42 @@ class GuardedMessageQueueTest {
 
         ClaimResult reClaimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, reClaimed.claimed().size());
+    }
+
+    @Test
+    void changeVisibility_expectedVisibleAtNoLongerCurrent_keepsTheNewerVisibility() {
+        queue.addMessage(new Message("msg"));
+        Message claimed = queue.claimVisibleMessages(1, 30, false, -1, null).claimed().get(0);
+        Instant setByClaim = claimed.getVisibleAt();
+        ReceiptHandle handle = ReceiptHandle.parse(claimed.getReceiptHandle());
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(handle, 60, false));
+
+        assertEquals(HandleResult.VISIBILITY_CHANGED, queue.changeVisibility(handle, setByClaim, 0, false));
+        assertTrue(queue.claimVisibleMessages(1, 30, false, -1, null).claimed().isEmpty());
+    }
+
+    @Test
+    void changeVisibility_expectedVisibleAtStillCurrent_appliesTheTimeout() {
+        queue.addMessage(new Message("msg"));
+        Message claimed = queue.claimVisibleMessages(1, 30, false, -1, null).claimed().get(0);
+        ReceiptHandle handle = ReceiptHandle.parse(claimed.getReceiptHandle());
+
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(handle, claimed.getVisibleAt(), 0, false));
+        assertEquals(1, queue.claimVisibleMessages(1, 30, false, -1, null).claimed().size());
+    }
+
+    @Test
+    void changeVisibility_fifoMessageReceivedAgain_keepsTheNewReceiversVisibility() {
+        Message message = new Message("msg");
+        message.setMessageGroupId("group");
+        queue.addMessage(message);
+        Message first = queue.claimVisibleMessages(1, 0, true, -1, null).claimed().get(0);
+        ReceiptHandle firstHandle = ReceiptHandle.parse(first.getReceiptHandle());
+        Instant setByFirstClaim = first.getVisibleAt();
+        assertEquals(1, queue.claimVisibleMessages(1, 30, true, -1, null).claimed().size());
+
+        assertEquals(HandleResult.VISIBILITY_CHANGED, queue.changeVisibility(firstHandle, setByFirstClaim, 0, true));
+        assertTrue(queue.claimVisibleMessages(1, 30, true, -1, null).claimed().isEmpty());
     }
 
     @Test
@@ -923,18 +958,13 @@ class GuardedMessageQueueTest {
         assertEquals(deadline, message.getVisibleAt());
     }
 
-    enum SnapshotBackend { PERSISTENT, HYBRID, WAL }
-
     @ParameterizedTest
-    @EnumSource(SnapshotBackend.class)
-    void serializingBackendsKeepLoadedAndSavedMessagesDetached(SnapshotBackend mode) throws Exception {
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void serializingBackendsKeepLoadedAndSavedMessagesDetached(String mode) throws Exception {
         Path snapshot = directory.resolve("messages.json");
         TypeReference<Map<String, List<Message>>> type = new TypeReference<>() {};
-        StorageBackend<String, List<Message>> raw = switch (mode) {
-            case PERSISTENT -> new PersistentStorage<>(snapshot, type);
-            case HYBRID -> new HybridStorage<>(snapshot, type, Long.MAX_VALUE);
-            case WAL -> new WalStorage<>(snapshot, directory.resolve("messages.wal"), type, Long.MAX_VALUE);
-        };
+        StorageBackend<String, List<Message>> raw = StorageTestBackends.create(
+                mode, snapshot, directory.resolve("messages.wal"), type, Long.MAX_VALUE);
         raw.load();
         try {
             for (boolean accountAware : List.of(false, true)) {
@@ -968,11 +998,7 @@ class GuardedMessageQueueTest {
                         .path(rawKey).get(0).path("messageAttributes").path("binary").path("dataType").asText());
             }
         } finally {
-            if (raw instanceof HybridStorage<?, ?> hybrid) {
-                hybrid.shutdown();
-            } else if (raw instanceof WalStorage<?, ?> wal) {
-                wal.shutdown();
-            }
+            StorageTestBackends.close(raw);
         }
     }
 

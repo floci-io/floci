@@ -23,9 +23,10 @@ public record RequestShapeModel(Map<String, String> operations, Map<String, Shap
 
     /**
      * One shape: its type, the shape of each structure member and the members it requires, or the
-     * list element or map value shape.
+     * list element or map value shape, and any string constraints the vendor retains.
      */
-    public record Shape(String type, Map<String, String> members, String element, List<String> required) {
+    public record Shape(String type, Map<String, String> members, String element, List<String> required,
+            Integer minLength, Integer maxLength, String pattern) {
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
@@ -45,7 +46,10 @@ public record RequestShapeModel(Map<String, String> operations, Map<String, Shap
             List<String> required = new ArrayList<>();
             node.path("required").forEach(name -> required.add(name.asText()));
             shapes.put(entry.getKey(), new Shape(node.path("type").asText(), Collections.unmodifiableMap(members),
-                    element, List.copyOf(required)));
+                    element, List.copyOf(required),
+                    node.hasNonNull("minLength") ? node.get("minLength").asInt() : null,
+                    node.hasNonNull("maxLength") ? node.get("maxLength").asInt() : null,
+                    node.hasNonNull("pattern") ? node.get("pattern").asText() : null));
         }
         return new RequestShapeModel(Map.copyOf(operations), Map.copyOf(shapes));
     }

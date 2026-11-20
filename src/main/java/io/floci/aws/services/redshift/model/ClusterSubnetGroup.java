@@ -13,7 +13,7 @@ public class ClusterSubnetGroup {
     private String description;
     private String vpcId;
     private List<String> subnetIds = new ArrayList<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     /** Subnet id to availability zone; null on groups persisted before zones were resolved. */
     private Map<String, String> subnetZones;
 

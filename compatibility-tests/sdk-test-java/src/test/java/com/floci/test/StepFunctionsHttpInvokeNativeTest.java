@@ -16,10 +16,8 @@ import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -100,7 +98,7 @@ class StepFunctionsHttpInvokeNativeTest {
                 failure = t;
                 throw t;
             } finally {
-                runCleanup(cleanup, failure);
+                FixtureCleanup.run(cleanup, failure);
             }
         }
     }
@@ -144,29 +142,6 @@ class StepFunctionsHttpInvokeNativeTest {
                   }
                 }
                 """.formatted(base, connectionArn);
-    }
-
-    // Attempts every registered delete. Failures join the test's own failure, or fail the test when
-    // it otherwise passed.
-    private static void runCleanup(Deque<Runnable> cleanup, Throwable failure) {
-        List<RuntimeException> errors = new ArrayList<>();
-        while (!cleanup.isEmpty()) {
-            try {
-                cleanup.pop().run();
-            } catch (RuntimeException e) {
-                errors.add(e);
-            }
-        }
-        if (errors.isEmpty()) {
-            return;
-        }
-        if (failure != null) {
-            errors.forEach(failure::addSuppressed);
-            return;
-        }
-        RuntimeException aggregate = new RuntimeException("HTTP Task fixture cleanup failed");
-        errors.forEach(aggregate::addSuppressed);
-        throw aggregate;
     }
 
     private static void mockGet(ApiGatewayClient apiGateway, String apiId, String rootId, String path,

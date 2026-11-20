@@ -21,7 +21,7 @@ Floci emulates SageMaker control-plane APIs and runs real Docker containers for 
 | `CreateModel` | Registers a model from `PrimaryContainer` or `Containers`; rejects an empty `Containers` array rather than dereferencing it. |
 | `DescribeModel` | Returns a model by name, scoped to the calling region. |
 | `DeleteModel` | Deletes a model by name, scoped to the calling region. |
-| `ListModels` | Lists models for the calling region; supports `NameContains`, `MaxResults` (1-100), and `NextToken` pagination. |
+| `ListModels` | Lists models for the calling region; supports `NameContains`, `CreationTimeAfter`, `CreationTimeBefore`, `MaxResults` (1-100), and `NextToken` pagination. |
 | `CreateEndpointConfig` | Creates an endpoint configuration; every `ProductionVariants[].ModelName` must already exist. |
 | `DescribeEndpointConfig` | Returns an endpoint configuration by name, scoped to the calling region. |
 | `DeleteEndpointConfig` | Deletes an endpoint configuration by name, scoped to the calling region. |

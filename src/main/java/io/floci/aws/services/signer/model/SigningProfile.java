@@ -81,7 +81,7 @@ public class SigningProfile {
     private Integer signatureValidityPeriodValue;
     private JsonNode overrides;
     private Map<String, String> signingParameters = new LinkedHashMap<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private String status;
     private String statusReason;
     private Long revocationEffectiveFrom;

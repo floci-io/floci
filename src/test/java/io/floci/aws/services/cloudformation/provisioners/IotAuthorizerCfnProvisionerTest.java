@@ -271,7 +271,7 @@ class IotAuthorizerCfnProvisionerTest {
         AwsException error = assertThrows(AwsException.class, () -> update(resource, properties));
 
         assertEquals("ValidationError", error.getErrorCode());
-        assertEquals("AWS::IoT::Authorizer EnableCachingForHttp must be true or false, got  ", error.getMessage());
+        assertEquals("Value of property EnableCachingForHttp must be a boolean.", error.getMessage());
         verify(service, never()).updateAuthorizer(anyString(), any(), anyString());
         assertTrue(authorizers.get("auth").isEnableCachingForHttp());
     }

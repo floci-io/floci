@@ -26,6 +26,9 @@ public class DbInstance {
     private String dbInstanceClass;
     private int allocatedStorage;
     private String storageType;
+    // Null until a request names them; Describe then reports the gp3 baseline for gp3 and omits them otherwise.
+    private Integer iops;
+    private Integer storageThroughput;
     /** The RDS certificate authority for the instance; null on one stored before it was recorded. */
     private String caCertificateIdentifier;
     /** The license model the request named; null means the engine's default. */
@@ -52,6 +55,7 @@ public class DbInstance {
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
     private boolean copyTagsToSnapshot;
+    private int promotionTier = 1;
     private boolean deletionProtection;
     private boolean publiclyAccessible;
     /** MonitoringInterval documents 0 as its default. */
@@ -75,6 +79,7 @@ public class DbInstance {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private Instant createdAt;
     private int proxyPort;
+    private Integer requestedPort;
     // Read replication links, kept on both ends the way DescribeDBInstances reports them: a
     // replica names its source, a source lists its replicas, by identifier within a Region and
     // by ARN across Regions. Null and empty on a standalone. The status is the "read
@@ -146,6 +151,12 @@ public class DbInstance {
 
     public String getStorageType() { return storageType != null ? storageType : DEFAULT_STORAGE_TYPE; }
     public void setStorageType(String storageType) { this.storageType = storageType; }
+
+    public Integer getIops() { return iops; }
+    public void setIops(Integer iops) { this.iops = iops; }
+
+    public Integer getStorageThroughput() { return storageThroughput; }
+    public void setStorageThroughput(Integer storageThroughput) { this.storageThroughput = storageThroughput; }
 
     public String getLicenseModel() { return licenseModel; }
     public void setLicenseModel(String licenseModel) { this.licenseModel = licenseModel; }
@@ -288,6 +299,9 @@ public class DbInstance {
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
 
+    public Integer getRequestedPort() { return requestedPort; }
+    public void setRequestedPort(Integer requestedPort) { this.requestedPort = requestedPort; }
+
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
 
@@ -353,4 +367,7 @@ public class DbInstance {
     public void setMaxAllocatedStorage(Integer maxAllocatedStorage) {
         this.maxAllocatedStorage = maxAllocatedStorage;
     }
+    public int getPromotionTier() { return promotionTier; }
+    public void setPromotionTier(int value) { promotionTier = value; }
+
 }

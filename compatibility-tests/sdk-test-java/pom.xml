@@ -387,6 +387,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>emr</artifactId>
         </dependency>
+        <!-- EMR on EKS client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emrcontainers</artifactId>
+        </dependency>
         <!-- EMR Serverless client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

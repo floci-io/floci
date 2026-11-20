@@ -19,7 +19,7 @@ public class CapacityProvider {
     private String updateStatus;
     private String type;
     private Map<String, Object> autoScalingGroupProvider;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public String getCapacityProviderArn() { return capacityProviderArn; }
     public void setCapacityProviderArn(String capacityProviderArn) { this.capacityProviderArn = capacityProviderArn; }

@@ -1,9 +1,11 @@
 package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
@@ -14,19 +16,23 @@ import io.floci.aws.services.ecs.model.EcsTaskAddress;
 import io.floci.aws.services.ecs.model.NetworkBinding;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.TargetDescription;
+import io.floci.aws.services.elbv2.model.TargetGroup;
 import io.floci.aws.services.elbv2.model.TargetHealth;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.BiConsumer;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Bridges ECS services to ELBv2: when an ECS service declares a {@code loadBalancers}
@@ -40,17 +46,27 @@ import java.util.function.BiConsumer;
 public class EcsLoadBalancerRegistrar {
 
     private static final Logger LOG = Logger.getLogger(EcsLoadBalancerRegistrar.class);
+    // The ECS agent's default range for dynamic host ports on Amazon Linux.
+    private static final int EPHEMERAL_PORT_MIN = 32768;
+    private static final int EPHEMERAL_PORT_MAX = 60999;
 
     private final ElbV2Service elbV2Service;
     private final EcsContainerManager containerManager;
     // taskArn → the targets registered for it, persisted so they can be released after a restart
     private final AccountAwareStorageBackend<EcsRegisteredTargets> ledger;
+    private final Ec2InstancePorts instancePorts;
+    // taskArn → the container instance host ports the task holds until it stops, memory-only like the
+    // task itself. Each list is immutable and replaced through compute(), which is atomic per task.
+    private final Map<String, List<InstancePort>> heldInstancePorts = new ConcurrentHashMap<>();
+
+    private record InstancePort(String accountId, String instanceId, int port, Ec2InstancePorts.Endpoint endpoint) {}
 
     @Inject
     public EcsLoadBalancerRegistrar(ElbV2Service elbV2Service, EcsContainerManager containerManager,
-                                    StorageFactory storageFactory) {
+                                    StorageFactory storageFactory, Ec2InstancePorts instancePorts) {
         this.elbV2Service = elbV2Service;
         this.containerManager = containerManager;
+        this.instancePorts = instancePorts;
         this.ledger = storageFactory.create("ecs", "ecs-registered-targets.json",
                 new TypeReference<Map<String, EcsRegisteredTargets>>() {});
     }
@@ -64,9 +80,22 @@ public class EcsLoadBalancerRegistrar {
      * deregisters a stopping task's target whoever registered it.
      */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
+        registerTask(task, svc, null, region);
+    }
+
+    /**
+     * As {@link #registerTask(EcsTask, EcsServiceModel, String)}, for a task placed on the container
+     * instance backed by EC2 instance {@code ec2InstanceId}. A target group of target type
+     * {@code instance} then gets the target ECS registers on AWS: the instance's id on the host port
+     * the container publishes, which {@link Ec2InstancePorts} maps back to the container.
+     */
+    public void registerTask(EcsTask task, EcsServiceModel svc, String ec2InstanceId, String region) {
         List<EcsRegisteredTargets.Target> planned = new ArrayList<>();
-        forEachTarget(task, svc, (tgArn, td) ->
-                planned.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort())));
+        forEachTarget(task, svc, (tgArn, td, container, binding) -> {
+            TargetDescription target = instanceTarget(task, region, tgArn, ec2InstanceId, td, container, binding)
+                    .orElse(td);
+            planned.add(new EcsRegisteredTargets.Target(tgArn, target.getId(), target.getPort()));
+        });
         if (planned.isEmpty()) {
             return;
         }
@@ -88,11 +117,8 @@ public class EcsLoadBalancerRegistrar {
         if (taskArn == null || registered.size() == planned.size()) {
             return;
         }
-        if (registered.isEmpty()) {
-            ledger.delete(taskArn);
-        } else {
-            ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
-        }
+        // An empty record, rather than none, tells targetsHealthy the task has targets that never registered.
+        ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
     }
 
     /**
@@ -100,17 +126,53 @@ public class EcsLoadBalancerRegistrar {
      * with no record registered nothing, as when none of its containers had a reachable binding.
      * Only a task without an ARN, which {@link #registerTask} cannot record, falls back to the
      * targets its containers resolve to now.
+     *
+     * @return how long the deregistered targets drain: the longest
+     *         {@code deregistration_delay.timeout_seconds} of their target groups, during which
+     *         AWS keeps the task running for the requests already in flight
      */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+    public Duration deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+        List<Duration> drains = new ArrayList<>();
         if (task.getTaskArn() == null) {
-            forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
-            return;
+            forEachTarget(task, svc, (tgArn, td, container, binding) -> drains.add(deregister(region, tgArn, td)));
+        } else {
+            Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
+            if (recorded.isPresent()) {
+                drains.addAll(deregister(recorded.get()));
+                ledger.delete(task.getTaskArn());
+            }
         }
-        Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
-        if (recorded.isPresent()) {
-            deregister(recorded.get());
-            ledger.delete(task.getTaskArn());
+        return drains.stream().max(Comparator.naturalOrder()).orElse(Duration.ZERO);
+    }
+
+    /**
+     * Whether every target {@link #registerTask} recorded for the task reports {@code healthy}. A
+     * task with no load-balanced container has nothing to wait for; one whose targets failed to
+     * register, or whose health cannot be read, is not healthy yet.
+     */
+    public boolean targetsHealthy(EcsTask task) {
+        Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
+                ? Optional.empty() : ledger.get(task.getTaskArn());
+        if (recorded.isEmpty()) {
+            return true;
         }
+        List<EcsRegisteredTargets.Target> targets = recorded.get().targets();
+        if (targets == null || targets.isEmpty()) {
+            return false;
+        }
+        for (EcsRegisteredTargets.Target target : targets) {
+            try {
+                List<TargetHealth> health = elbV2Service.describeTargetHealth(recorded.get().region(),
+                        target.targetGroupArn(), List.of(target.toDescription()));
+                if (health.isEmpty() || health.stream().anyMatch(th -> !"healthy".equals(th.getState()))) {
+                    return false;
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not read the health of {0}: {1}", target.targetGroupArn(), e.getMessage());
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -175,27 +237,140 @@ public class EcsLoadBalancerRegistrar {
         }
     }
 
-    private void deregister(EcsRegisteredTargets recorded) {
+    private List<Duration> deregister(EcsRegisteredTargets recorded) {
+        List<Duration> drains = new ArrayList<>();
         if (recorded.targets() == null) {
-            return;
+            return drains;
         }
         for (EcsRegisteredTargets.Target target : recorded.targets()) {
-            deregister(recorded.region(), target.targetGroupArn(), target.toDescription());
+            drains.add(deregister(recorded.region(), target.targetGroupArn(), target.toDescription()));
         }
+        return drains;
     }
 
-    private void deregister(String region, String tgArn, TargetDescription td) {
+    /** @return the target group's deregistration delay, or zero when the target could not be deregistered */
+    private Duration deregister(String region, String tgArn, TargetDescription td) {
         try {
             elbV2Service.deregisterTargets(region, tgArn, List.of(td));
             LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
                     td.getId(), td.getPort(), tgArn);
         } catch (Exception e) {
             LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
+            return Duration.ZERO;
+        }
+        String delay = null;
+        try {
+            delay = elbV2Service.describeTargetGroupAttributes(region, tgArn)
+                    .get("deregistration_delay.timeout_seconds");
+            return delay == null ? Duration.ZERO : Duration.ofSeconds(Long.parseLong(delay));
+        } catch (Exception e) {
+            LOG.warnv("Not draining target group {0}: could not read its deregistration delay {1}: {2}",
+                    tgArn, delay, e.getMessage());
+            return Duration.ZERO;
         }
     }
 
-    private void forEachTarget(EcsTask task, EcsServiceModel svc,
-                               BiConsumer<String, TargetDescription> action) {
+    /**
+     * The {@code instance} target for a container reached at {@code containerTarget}, when the target
+     * group is of that type and the task runs on a container instance. Its port is the host port the
+     * container publishes on the instance, or, when another task on the instance already holds that
+     * one, as when Docker published nothing and the containers share a container port, a port from
+     * the ephemeral range the ECS agent assigns dynamic host ports from.
+     *
+     * <p>The container's other published host ports are taken on the instance too, where free, as a
+     * bridge-mode task occupies every host port it maps: a target group whose health checks name one
+     * of them then reaches the container. The task holds all of them until it stops, see
+     * {@link #releaseInstancePorts}.
+     */
+    private Optional<TargetDescription> instanceTarget(EcsTask task, String region, String tgArn,
+                                                       String ec2InstanceId, TargetDescription containerTarget,
+                                                       Container container, NetworkBinding binding) {
+        if (ec2InstanceId == null || ec2InstanceId.isBlank() || task.getTaskArn() == null) {
+            return Optional.empty();
+        }
+        TargetGroup group = elbV2Service.getTargetGroup(region, tgArn);
+        if (group == null || !"instance".equals(group.getTargetType())) {
+            return Optional.empty();
+        }
+        String accountId = AwsArnUtils.parse(tgArn).accountId();
+        Ec2InstancePorts.Endpoint endpoint = new Ec2InstancePorts.Endpoint(containerTarget.getId(),
+                containerTarget.getPort());
+        AtomicReference<Integer> trafficPort = new AtomicReference<>();
+        heldInstancePorts.compute(task.getTaskArn(), (taskArn, held) -> {
+            List<InstancePort> ports = held == null ? new ArrayList<>() : new ArrayList<>(held);
+            Integer port = heldPort(ports, ec2InstanceId, endpoint)
+                    .orElseGet(() -> bindInstancePort(accountId, ec2InstanceId, binding.hostPort(), endpoint));
+            if (port != null && heldPort(ports, ec2InstanceId, endpoint).isEmpty()) {
+                ports.add(new InstancePort(accountId, ec2InstanceId, port, endpoint));
+            }
+            for (NetworkBinding other : container.getNetworkBindings()) {
+                Ec2InstancePorts.Endpoint otherEndpoint = new Ec2InstancePorts.Endpoint(containerTarget.getId(),
+                        EcsTaskAddress.isLoopback(containerTarget.getId()) ? other.hostPort() : other.containerPort());
+                if (other.hostPort() > 0 && heldPort(ports, ec2InstanceId, otherEndpoint).isEmpty()
+                        && instancePorts.bind(accountId, ec2InstanceId, other.hostPort(), otherEndpoint)) {
+                    ports.add(new InstancePort(accountId, ec2InstanceId, other.hostPort(), otherEndpoint));
+                }
+            }
+            trafficPort.set(port);
+            return List.copyOf(ports);
+        });
+        if (trafficPort.get() == null) {
+            LOG.warnv("No free host port on {0} for ECS task {1}; registering its container address instead",
+                    ec2InstanceId, task.getTaskArn());
+            return Optional.empty();
+        }
+        TargetDescription target = new TargetDescription();
+        target.setId(ec2InstanceId);
+        target.setPort(trafficPort.get());
+        return Optional.of(target);
+    }
+
+    private static Optional<Integer> heldPort(List<InstancePort> held, String instanceId,
+                                              Ec2InstancePorts.Endpoint endpoint) {
+        return held.stream()
+                .filter(p -> p.instanceId().equals(instanceId) && p.endpoint().equals(endpoint))
+                .map(InstancePort::port)
+                .findFirst();
+    }
+
+    private Integer bindInstancePort(String accountId, String instanceId, int preferred,
+                                     Ec2InstancePorts.Endpoint endpoint) {
+        if (preferred > 0 && instancePorts.bind(accountId, instanceId, preferred, endpoint)) {
+            return preferred;
+        }
+        for (int port = EPHEMERAL_PORT_MIN; port <= EPHEMERAL_PORT_MAX; port++) {
+            if (instancePorts.bind(accountId, instanceId, port, endpoint)) {
+                return port;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Frees the container instance host ports {@link #registerTask} took for the task. Called once the
+     * task is STOPPED rather than when it leaves its target groups: a draining task's containers still
+     * run, so on AWS they still occupy those ports and a replacement on the same instance gets others.
+     */
+    public void releaseInstancePorts(String taskArn) {
+        if (taskArn == null) {
+            return;
+        }
+        List<InstancePort> held = heldInstancePorts.remove(taskArn);
+        if (held == null) {
+            return;
+        }
+        for (InstancePort port : held) {
+            instancePorts.release(port.accountId(), port.instanceId(), port.port(), port.endpoint());
+        }
+    }
+
+    @FunctionalInterface
+    private interface TargetAction {
+        void accept(String targetGroupArn, TargetDescription containerTarget, Container container,
+                    NetworkBinding binding);
+    }
+
+    private void forEachTarget(EcsTask task, EcsServiceModel svc, TargetAction action) {
         if (svc == null || svc.getLoadBalancers() == null || svc.getLoadBalancers().isEmpty()) {
             return;
         }
@@ -225,7 +400,7 @@ public class EcsLoadBalancerRegistrar {
             TargetDescription td = new TargetDescription();
             td.setId(containerManager.resolveContainerHost(container));
             td.setPort(EcsTaskAddress.isLoopback(td.getId()) ? binding.hostPort() : binding.containerPort());
-            action.accept(lb.getTargetGroupArn(), td);
+            action.accept(lb.getTargetGroupArn(), td, container, binding);
         }
     }
 }

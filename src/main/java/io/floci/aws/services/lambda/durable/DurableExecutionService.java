@@ -91,6 +91,7 @@ public class DurableExecutionService implements Resettable {
     private final Object[] executionLocks = newLocks(LOCK_STRIPES);
     private final ConcurrentHashMap<String, Object> startLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CompletableFuture<DurableExecution>> completions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DurableInvocationLogs> logCaptures = new ConcurrentHashMap<>();
     /** Moves on reset and shutdown so an invocation result from before cannot be written afterwards. */
     private final AtomicLong generation = new AtomicLong();
 
@@ -116,7 +117,11 @@ public class DurableExecutionService implements Resettable {
 
     public record StartRequest(String accountId, String region, String functionName, String qualifier,
                                String executionName, String inputPayload, boolean synchronous,
-                               String traceHeader) {
+                               String traceHeader, boolean logTail) {
+        public StartRequest(String accountId, String region, String functionName, String qualifier,
+                            String executionName, String inputPayload, boolean synchronous, String traceHeader) {
+            this(accountId, region, functionName, qualifier, executionName, inputPayload, synchronous, traceHeader, false);
+        }
     }
 
     public record ListRequest(String accountId, String region, String functionName, String version,
@@ -158,15 +163,39 @@ public class DurableExecutionService implements Resettable {
                     throw new AwsException("DurableExecutionAlreadyStartedException",
                             "Execution already started: " + existing.get().getExecutionArn(), 409);
                 }
+                captureLogs(request, existing.get());
                 return existing.get();
             }
             long now = clock.millis();
             execution = newExecution(request, target, name, now);
             trigger(execution, effects);
             store.putForAccount(request.accountId(), storeKey(execution), execution);
+            captureLogs(request, execution);
         }
         runEffects(effects);
         return execution;
+    }
+
+    private void captureLogs(StartRequest request, DurableExecution execution) {
+        if (request.synchronous() && request.logTail()) {
+            logCaptures.compute(execution.getExecutionArn(), (arn, existing) -> {
+                DurableInvocationLogs logs = existing != null ? existing : new DurableInvocationLogs();
+                logs.acquire();
+                return logs;
+            });
+        }
+    }
+
+    public CompletableFuture<String> invocationLogs(String executionArn) {
+        DurableInvocationLogs logs = logCaptures.get(executionArn);
+        return logs == null ? CompletableFuture.completedFuture("") : logs.snapshot();
+    }
+
+    public void releaseInvocationLogs(String executionArn) {
+        logCaptures.computeIfPresent(executionArn, (arn, logs) -> {
+            logs.release();
+            return logs.unused() ? null : logs;
+        });
     }
 
     public CompletableFuture<DurableExecution> awaitCompletion(String executionArn) {
@@ -312,7 +341,7 @@ public class DurableExecutionService implements Resettable {
             indexed.add(new Cursored<>(String.format("%010d", i), operations.get(i)));
         }
         PaginatedResult<DurableOperation> page = paginate(indexed, pageSize(maxItems), marker, "durable-state");
-        return new StatePage(page.items(), page.nextToken() != null ? page.nextToken() : "");
+        return new StatePage(page.items(), page.nextToken());
     }
 
     /** Stopping a closed execution changes nothing and reports the time it closed. */
@@ -523,11 +552,15 @@ public class DurableExecutionService implements Resettable {
             waiter.completeExceptionally(new AwsException("ResourceNotFoundException", NOT_FOUND, 404));
         }
         completions.clear();
+        logCaptures.values().forEach(DurableInvocationLogs::cancel);
+        logCaptures.clear();
     }
 
     @PreDestroy
     void shutdown() {
         generation.incrementAndGet();
+        logCaptures.values().forEach(DurableInvocationLogs::cancel);
+        logCaptures.clear();
     }
 
     // ──────────────────────────── invocation lane ────────────────────────────
@@ -551,6 +584,8 @@ public class DurableExecutionService implements Resettable {
         byte[] payload;
         String traceId = null;
         long startedAt;
+        DurableInvocationLogs logs;
+        String logArn;
         synchronized (lockFor(accountId, key)) {
             DurableExecution execution = store.getForAccount(accountId, key).orElse(null);
             if (execution == null || execution.isClosed() || launchGeneration != generation.get()
@@ -575,13 +610,20 @@ public class DurableExecutionService implements Resettable {
             }
             // The event carries every operation, so the handler has now seen everything up to here.
             execution.setSeenSequence(execution.getChangeSequence());
+            logArn = execution.getExecutionArn();
+            logs = logCaptures.get(logArn);
+            if (logs != null) {
+                logs.beginInvocation();
+            }
         }
         DurableInvocationResult result;
         if (target == null) {
             result = new DurableInvocationResult(null, null, "ResourceNotFoundException");
         } else {
             try {
-                result = invoker.invoke(target, payload, invocationId, traceId);
+                result = logs != null
+                        ? invoker.invoke(target, payload, invocationId, traceId, true)
+                        : invoker.invoke(target, payload, invocationId, traceId);
             } catch (AwsException e) {
                 result = new DurableInvocationResult(null, DurableWire.functionErrorPayload(
                         DurableErrorObject.of(e.getMessage(), e.getErrorCode())),
@@ -592,6 +634,11 @@ public class DurableExecutionService implements Resettable {
                         DurableErrorObject.of(e.getMessage(), "InvocationError")),
                         "InvocationError");
             }
+        }
+        if (logs != null) {
+            logs.complete(result.logResult());
+            logCaptures.computeIfPresent(logArn, (arn, current) ->
+                    current == logs && logs.unused() ? null : current);
         }
         List<Runnable> effects = new ArrayList<>();
         synchronized (lockFor(accountId, key)) {

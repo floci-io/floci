@@ -150,7 +150,8 @@ public class DsqlService implements Resettable {
             }
             clusters.put(key(region, identifier), cluster);
             LOG.infov("Created DSQL cluster {0} in {1}", identifier, region);
-            dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+            dataPlane.provision(cluster,
+                    ready -> markReady(accountId, region, identifier, cluster.getBackendSecret(), ready));
             return cluster;
         }
     }
@@ -218,6 +219,7 @@ public class DsqlService implements Resettable {
     public DsqlCluster deleteCluster(String region, String identifier) {
         DsqlCluster cluster = getCluster(region, identifier);
         String accountId = regionResolver.getAccountId();
+        boolean failed;
         synchronized (lockFor(cluster.getArn())) {
             if (cluster.isDeletionProtectionEnabled()) {
                 throw new AwsException("ValidationException", "Can't delete cluster: Deletion protection is enabled."
@@ -227,10 +229,11 @@ public class DsqlService implements Resettable {
             if (DELETING.equals(cluster.getStatus())) {
                 return cluster;
             }
+            failed = FAILED.equals(cluster.getStatus());
             cluster.setStatus(DELETING);
             clusters.put(key(region, identifier), cluster);
         }
-        dataPlane.deprovision(cluster, () -> {
+        dataPlane.deprovision(cluster, failed, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
             clusters.deleteForAccount(accountId, key(region, identifier));
             locks.remove(cluster.getArn());
             LOG.infov("Deleted DSQL cluster {0} in {1}", identifier, region);
@@ -347,20 +350,41 @@ public class DsqlService implements Resettable {
         }
     }
 
+    /**
+     * Gives the cluster a new map holding its tags and {@code tags}, under its lock, so a lookup that takes no lock
+     * reads one whole set.
+     */
     public void tagResource(String region, String arn, Map<String, String> tags) {
         DsqlCluster cluster = clusterForArn(region, arn, "TagResource");
         synchronized (lockFor(cluster.getArn())) {
-            cluster.getTags().putAll(tags == null ? Map.of() : tags);
+            Map<String, String> merged = new LinkedHashMap<>(cluster.getTags());
+            merged.putAll(tags == null ? Map.of() : tags);
+            cluster.setTags(merged);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
         }
     }
 
+    /** Gives the cluster a new map without {@code tagKeys}, under its lock, as {@link #tagResource}. */
     public void untagResource(String region, String arn, List<String> tagKeys) {
         DsqlCluster cluster = clusterForArn(region, arn, "UntagResource");
         synchronized (lockFor(cluster.getArn())) {
-            (tagKeys == null ? List.<String>of() : tagKeys).forEach(cluster.getTags()::remove);
+            Map<String, String> remaining = new LinkedHashMap<>(cluster.getTags());
+            (tagKeys == null ? List.<String>of() : tagKeys).forEach(remaining::remove);
+            cluster.setTags(remaining);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
         }
+    }
+
+    /**
+     * The tags of the cluster whose ARN is {@code arn} in {@code account}, read in place under the key the handlers
+     * read, its identifier in the ARN's Region, and matched on the whole ARN it records; none when there is no such
+     * cluster.
+     */
+    Map<String, String> clusterTagsInAccount(String account, String arn, String identifier) {
+        return AccountAwareStorageBackend.readInAccount(clusters, account,
+                        key(AwsArnUtils.parse(arn).region(), identifier))
+                .filter(cluster -> arn.equals(cluster.getArn()))
+                .map(DsqlCluster::getTags).orElse(Map.of());
     }
 
     /**
@@ -376,14 +400,17 @@ public class DsqlService implements Resettable {
             String region = cluster.getRegion();
             String identifier = cluster.getIdentifier();
             if (DELETING.equals(cluster.getStatus())) {
-                dataPlane.deprovision(cluster, () -> {
+                // Whether it had FAILED is not kept, so its deletion waits for the server as any other.
+                dataPlane.deprovision(cluster, false,
+                        roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
                     clusters.deleteForAccount(accountId, key(region, identifier));
                     locks.remove(cluster.getArn());
                 });
             } else if (!FAILED.equals(cluster.getStatus())) {
                 cluster.setDatabaseReady(false);
                 clusters.putForAccount(accountId, key(region, identifier), cluster);
-                dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+                dataPlane.provision(cluster,
+                        ready -> markReady(accountId, region, identifier, cluster.getBackendSecret(), ready));
             }
         }
     }
@@ -391,7 +418,8 @@ public class DsqlService implements Resettable {
     @Override
     public void clear() {
         for (DsqlCluster cluster : clusters.scanAllAccounts()) {
-            dataPlane.deprovision(cluster, () -> { });
+            // The clusters go with the storage, so their roles are not saved.
+            dataPlane.deprovision(cluster, false, roles -> { }, () -> { });
         }
         clusters.clear();
         locks.clear();
@@ -399,12 +427,27 @@ public class DsqlService implements Resettable {
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
+    /** Saves the roles a deletion is about to drop, with the cluster still DELETING. */
+    private void savePendingRoles(String accountId, String region, String identifier, List<String> roles) {
+        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
+            synchronized (lockFor(found.getArn())) {
+                DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
+                if (cluster == null) {
+                    return;
+                }
+                cluster.setPendingBackendRoles(List.copyOf(roles));
+                clusters.putForAccount(accountId, key(region, identifier), cluster);
+            }
+        });
+    }
+
     /**
      * Records whether the cluster's database came up. A cluster being created becomes ACTIVE or
      * FAILED; one still waiting for its peers stays PENDING_SETUP until peering, unless its database
      * failed.
      */
-    private void markReady(String accountId, String region, String identifier, boolean ready) {
+    private void markReady(String accountId, String region, String identifier, String backendSecret,
+                           boolean ready) {
         clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
             synchronized (lockFor(found.getArn())) {
                 DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
@@ -412,6 +455,10 @@ public class DsqlService implements Resettable {
                     return;
                 }
                 cluster.setDatabaseReady(ready);
+                // The secret the backend generated as it started, kept so its passwords stay the same.
+                if (cluster.getBackendSecret() == null) {
+                    cluster.setBackendSecret(backendSecret);
+                }
                 if (CREATING.equals(cluster.getStatus()) || (!ready && PENDING_SETUP.equals(cluster.getStatus()))) {
                     cluster.setStatus(ready ? ACTIVE : FAILED);
                 }

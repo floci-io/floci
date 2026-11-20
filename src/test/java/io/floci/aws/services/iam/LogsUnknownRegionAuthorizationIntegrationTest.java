@@ -2,12 +2,12 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.LogsAuthorizationFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -28,17 +28,13 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * How CloudWatch Logs authorizes a call in a region no partition publishes. IAM enforcement and
+ * the unknown regions it needs both come from {@link IamEnforcementProfile}.
+ */
 @QuarkusTest
-@TestProfile(LogsUnknownRegionAuthorizationIntegrationTest.UnknownRegionProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class LogsUnknownRegionAuthorizationIntegrationTest {
-
-    public static class UnknownRegionProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true",
-                    "floci.partitions.allow-unknown-regions", "true");
-        }
-    }
 
     private static final String ACCOUNT = "111111111111";
     private static final String REGION = "us-east-1";

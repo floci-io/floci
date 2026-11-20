@@ -6,8 +6,6 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
@@ -21,15 +19,12 @@ import software.amazon.awssdk.services.redshift.model.Endpoint;
 
 import java.net.URI;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -284,18 +279,6 @@ class RedshiftClusterCfnIntegrationTest {
 
         assertParameterGroupNotFound(pgName);
         assertSubnetGroupNotFound(sgName);
-    }
-
-    private static Connection waitForConnection(String host, int port, String username, String password) throws SQLException {
-        try {
-            return Awaitility.await()
-                    .atMost(Duration.ofSeconds(30))
-                    .pollInterval(Duration.ofMillis(500))
-                    .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/dev", username, password), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/dev", username, password);
-        }
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {

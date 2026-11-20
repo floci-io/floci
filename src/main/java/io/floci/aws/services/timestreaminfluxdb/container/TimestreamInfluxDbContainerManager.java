@@ -79,13 +79,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
     }
 
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (RuntimeException e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     /**
@@ -327,10 +321,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
         Path base = ContainerStorageHelper.hostResourcePath(config, SERVICE, resourceId);
         String dataDir = base.resolve("data").toAbsolutePath().toString();
         String configDir = base.resolve("config").toAbsolutePath().toString();
-        if (!containerDetector.isRunningInContainer()) {
-            ContainerStorageHelper.ensureHostDir(dataDir);
-            ContainerStorageHelper.ensureHostDir(configDir);
-        }
+        ContainerStorageHelper.ensureHostDir(containerDetector, dataDir, configDir);
         builder.withBind(dataDir, DATA_PATH).withBind(configDir, CONFIG_PATH);
     }
 

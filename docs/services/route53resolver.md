@@ -24,6 +24,8 @@
 | `DisassociateResolverRule` | Removes the association between a resolver rule and a VPC. |
 | `GetResolverRuleAssociation` | Returns a resolver rule association by id. |
 | `ListResolverRuleAssociations` | Lists all resolver rule associations. |
+| `UpdateResolverDnssecConfig` | Creates or updates a VPC's DNSSEC validation configuration and returns its terminal validation status. |
+| `GetResolverDnssecConfig` | Returns a stable DNSSEC validation configuration for an existing VPC, defaulting to `DISABLED` before its first update. |
 | `TagResource` | Adds or overwrites tags on a resolver endpoint, resolver rule or custom firewall domain list, by ARN. |
 | `UntagResource` | Removes tag keys from a resolver endpoint, resolver rule or custom firewall domain list; absent keys are ignored. |
 | `ListTagsForResource` | Lists a resource's tags, paginated by `MaxResults` (default and maximum 100) and `NextToken`. |
@@ -39,9 +41,10 @@ needs it present and stable without any create call. This logic predates the res
 this service and is untouched.
 
 Everything else (custom firewall domain lists, resolver endpoints, resolver rules,
-rule associations) is backed by real per-service storage, added this session. Ids use
-the project's standard random-suffix convention (`rslvr-fdl-...`, `rslvr-in-...` /
-`rslvr-out-...`, `rslvr-rr-...`, `rslvr-rrassoc-...`), distinct from the deterministic
+rule associations and DNSSEC configurations) is backed by real per-service storage,
+added this session. Ids use the project's standard random-suffix convention
+(`rslvr-fdl-...`, `rslvr-in-...` / `rslvr-out-...`, `rslvr-rr-...`,
+`rslvr-rrassoc-...`, `rdsc-...`), distinct from the deterministic
 managed-list ids. Resolver endpoint ids are direction-aware as in AWS: `rslvr-in-` for
 `INBOUND` (and `INBOUND_DELEGATION`), `rslvr-out-` for `OUTBOUND`. Any other `Direction`
 is rejected with `InvalidParameterException`.

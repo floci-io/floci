@@ -17,6 +17,13 @@ import java.util.Map;
  */
 final class PaymentCryptographyTestFixtures {
 
+    /** The cross-account grant the reference's own page shows. */
+    static final String CROSS_ACCOUNT_POLICY = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+             "Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},
+             "Action":["payment-cryptography:GenerateCardValidationData",
+              "payment-cryptography:VerifyCardValidationData"],"Resource":"*"}]}""";
+
     private PaymentCryptographyTestFixtures() {
     }
 

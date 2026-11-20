@@ -112,4 +112,77 @@ class EcsJsonHandlerCommandEntryPointTest {
         assertTrue(container.path("entryPoint").isMissingNode(), "entryPoint must stay absent");
         assertTrue(container.path("command").isMissingNode(), "command must stay absent");
     }
+
+    @Test
+    void emptyCommandEntryPointAndEnvironmentReadBackAsEmptyArrays() throws Exception {
+        String requestJson = """
+                {
+                  "family": "empty-list-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "entryPoint": [],
+                      "command": [],
+                      "environment": []
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode container = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0);
+
+        for (String field : List.of("entryPoint", "command", "environment")) {
+            JsonNode value = container.path(field);
+            assertTrue(value.isArray() && value.isEmpty(),
+                    field + " must read back as an empty array");
+        }
+    }
+
+    @Test
+    void emptyMountPointsAndVolumesFromReadBackAsEmptyArrays() throws Exception {
+        String requestJson = """
+                {
+                  "family": "empty-mount-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "mountPoints": [],
+                      "volumesFrom": []
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode container = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0);
+
+        for (String field : List.of("mountPoints", "volumesFrom")) {
+            JsonNode value = container.path(field);
+            assertTrue(value.isArray() && value.isEmpty(),
+                    field + " must read back as an empty array");
+        }
+
+        String omitted = """
+                {
+                  "family": "absent-mount-family",
+                  "containerDefinitions": [
+                    {"name": "app", "image": "alpine:latest"}
+                  ]
+                }
+                """;
+        Response absent = handler.handle("RegisterTaskDefinition", objectMapper.readTree(omitted), "us-east-1");
+        JsonNode plain = objectMapper.valueToTree(absent.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0);
+        assertTrue(plain.path("mountPoints").isArray() && plain.path("mountPoints").isEmpty(),
+                "an omitted mountPoints reads back as an empty array");
+        assertTrue(plain.path("volumesFrom").isArray() && plain.path("volumesFrom").isEmpty(),
+                "an omitted volumesFrom reads back as an empty array");
+    }
 }

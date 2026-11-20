@@ -33,7 +33,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -368,9 +370,19 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void deleteLaunchConfiguration(String region, String name) {
-        if (launchConfigs.remove(lcKey(region, name)) == null) {
-            throw new AwsException("ValidationError",
-                    "Launch configuration '" + name + "' not found.", 400);
+        synchronized (lockFor(region)) {
+            String key = lcKey(region, name);
+            if (!launchConfigs.containsKey(key)) {
+                throw new AwsException("ValidationError",
+                        "Launch configuration '" + name + "' not found.", 400);
+            }
+            boolean inUse = groups.values().stream().anyMatch(group -> region.equals(group.getRegion())
+                    && name.equals(group.getLaunchConfigurationName()));
+            if (inUse) {
+                throw new AwsException("ResourceInUse",
+                        "Launch configuration '" + name + "' is in use by an Auto Scaling group.", 400);
+            }
+            launchConfigs.remove(key);
         }
     }
 
@@ -390,45 +402,64 @@ public class AutoScalingService implements PassedRoleLookup {
                                                     Map<String, String> tags,
                                                     Map<String, Boolean> tagPropagateAtLaunch,
                                                     AsgOptionalFields optionalFields) {
-        String key = asgKey(region, name);
-        if (groups.containsKey(key)) {
-            throw new AwsException("AlreadyExists",
-                    "Auto Scaling group '" + name + "' already exists.", 400);
-        }
-        validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
-        if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
-                && mixedInstancesPolicy == null) {
-            throw new AwsException("ValidationError",
-                    "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
-                            + "InstanceId or MixedInstancesPolicy parameter.", 400);
-        }
-        validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
-                launchTemplateVersion, mixedInstancesPolicy);
-        validateOptionalFields(optionalFields);
-        validateDesiredCapacityType(
-                optionalFields != null ? optionalFields.desiredCapacityType() : null,
-                mixedInstancesPolicy);
+        synchronized (lockFor(region)) {
+            String key = asgKey(region, name);
+            if (groups.containsKey(key)) {
+                throw new AwsException("AlreadyExists",
+                        "Auto Scaling group '" + name + "' already exists.", 400);
+            }
+            validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+            if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
+                    && mixedInstancesPolicy == null) {
+                throw new AwsException("ValidationError",
+                        "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
+                                + "InstanceId or MixedInstancesPolicy parameter.", 400);
+            }
+            validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
+                    launchTemplateVersion, mixedInstancesPolicy);
+            validateOptionalFields(optionalFields);
+            validateDesiredCapacityType(
+                    optionalFields != null ? optionalFields.desiredCapacityType() : null,
+                    mixedInstancesPolicy);
 
+            AutoScalingGroup asg = newGroup(region, name, minSize, maxSize, desiredCapacity,
+                    resolveAvailabilityZones(region, availabilityZones, subnetIds), subnetIds, terminationPolicies,
+                    tags, tagPropagateAtLaunch);
+            asg.setLaunchConfigurationName(launchConfigName);
+            asg.setLaunchTemplateId(launchTemplateId);
+            asg.setLaunchTemplateName(launchTemplateName);
+            asg.setLaunchTemplateVersion(launchTemplateVersion);
+            asg.setMixedInstancesPolicy(mixedInstancesPolicy);
+            asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
+            asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
+            asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
+            asg.setHealthCheckType(healthCheckType != null ? healthCheckType : "EC2");
+            asg.setHealthCheckGracePeriod(healthCheckGracePeriod);
+            if (optionalFields != null) {
+                optionalFields.applyToNewGroup(asg);
+            }
+            groups.put(key, asg);
+            return asg;
+        }
+    }
+
+    /**
+     * A new group {@code name} in {@code region} with what every group is created with: its sizes, zones, subnets,
+     * termination policies, {@code Default} when none are given, and tags. The launch source is the caller's.
+     */
+    private AutoScalingGroup newGroup(String region, String name, int minSize, int maxSize, int desiredCapacity,
+                                      List<String> availabilityZones, List<String> subnetIds,
+                                      List<String> terminationPolicies, Map<String, String> tags,
+                                      Map<String, Boolean> tagPropagateAtLaunch) {
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setAutoScalingGroupName(name);
-        asg.setAutoScalingGroupArn(
-                AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
-                        "autoScalingGroup:" + name).toString());
-        asg.setLaunchConfigurationName(launchConfigName);
-        asg.setLaunchTemplateId(launchTemplateId);
-        asg.setLaunchTemplateName(launchTemplateName);
-        asg.setLaunchTemplateVersion(launchTemplateVersion);
-        asg.setMixedInstancesPolicy(mixedInstancesPolicy);
+        asg.setAutoScalingGroupArn(AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
+                "autoScalingGroup:" + name).toString());
         asg.setMinSize(minSize);
         asg.setMaxSize(maxSize);
         asg.setDesiredCapacity(desiredCapacity);
-        asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
-        asg.setAvailabilityZones(new ArrayList<>(resolveAvailabilityZones(region, availabilityZones, subnetIds)));
+        asg.setAvailabilityZones(new ArrayList<>(availabilityZones));
         asg.setSubnetIds(subnetIds != null ? new ArrayList<>(subnetIds) : new ArrayList<>());
-        asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
-        asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
-        asg.setHealthCheckType(healthCheckType != null ? healthCheckType : "EC2");
-        asg.setHealthCheckGracePeriod(healthCheckGracePeriod);
         asg.setTerminationPolicies(terminationPolicies != null ? new ArrayList<>(terminationPolicies) : List.of("Default"));
         asg.setCreatedTime(Instant.now());
         asg.setRegion(region);
@@ -438,10 +469,6 @@ public class AutoScalingService implements PassedRoleLookup {
         if (tagPropagateAtLaunch != null) {
             asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         }
-        if (optionalFields != null) {
-            optionalFields.applyToNewGroup(asg);
-        }
-        groups.put(key, asg);
         return asg;
     }
 
@@ -456,83 +483,98 @@ public class AutoScalingService implements PassedRoleLookup {
                                         String healthCheckType, Integer healthCheckGracePeriod,
                                         List<String> terminationPolicies,
                                         AsgOptionalFields optionalFields) {
-        // Under the group's lock, which EnterStandby, ExitStandby and the reconciler hold while they read and
-        // change the group's capacity.
-        String key = asgKey(region, name);
-        synchronized (lockFor(key)) {
-            AutoScalingGroup asg = requireGroup(region, name);
-            validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
-            if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
-                throw new AwsException("ValidationError",
-                        "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+        synchronized (lockFor(region)) {
+            // Under the group's lock, which EnterStandby, ExitStandby and the reconciler hold while they read and
+            // change the group's capacity.
+            String key = asgKey(region, name);
+            synchronized (lockFor(key)) {
+                AutoScalingGroup asg = requireGroup(region, name);
+                validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+                if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
+                    throw new AwsException("ValidationError",
+                            "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+                }
+                validateOptionalFields(optionalFields);
+                rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
+                        launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+                LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
+                        launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+                validateEffectiveLaunchImage(region,
+                        effectiveIdentity.launchConfigurationName(),
+                        effectiveIdentity.launchTemplateId(),
+                        effectiveIdentity.launchTemplateName(),
+                        effectiveIdentity.launchTemplateVersion(),
+                        effectiveIdentity.mixedInstancesPolicy());
+                validateDesiredCapacityType(
+                        effectiveDesiredCapacityType(asg, optionalFields),
+                        effectiveIdentity.mixedInstancesPolicy());
+                List<String> updatedZones = availabilityZones;
+                if (subnetIds != null && !subnetIds.isEmpty()) {
+                    updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
+                }
+                if (launchConfigName != null) {
+                    asg.setLaunchConfigurationName(launchConfigName);
+                    asg.setLaunchTemplateId(null);
+                    asg.setLaunchTemplateName(null);
+                    asg.setLaunchTemplateVersion(null);
+                    asg.setMixedInstancesPolicy(null);
+                }
+                if (launchTemplateId != null || launchTemplateName != null) {
+                    asg.setLaunchConfigurationName(null);
+                    asg.setLaunchTemplateId(launchTemplateId);
+                    asg.setLaunchTemplateName(launchTemplateName);
+                    asg.setLaunchTemplateVersion(launchTemplateVersion);
+                    asg.setMixedInstancesPolicy(null);
+                }
+                if (mixedInstancesPolicy != null) {
+                    asg.setLaunchConfigurationName(null);
+                    asg.setLaunchTemplateId(null);
+                    asg.setLaunchTemplateName(null);
+                    asg.setLaunchTemplateVersion(null);
+                    asg.setMixedInstancesPolicy(mixedInstancesPolicy);
+                }
+                if (minSize != null) { asg.setMinSize(minSize); }
+                if (maxSize != null) { asg.setMaxSize(maxSize); }
+                if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
+                if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
+                if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
+                if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
+                if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
+                if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
+                if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+                if (optionalFields != null) {
+                    optionalFields.applyToExistingGroup(asg);
+                }
+                groups.put(key, asg);
             }
-            validateOptionalFields(optionalFields);
-            rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
-                    launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
-            LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
-                    launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
-            validateEffectiveLaunchImage(region,
-                    effectiveIdentity.launchConfigurationName(),
-                    effectiveIdentity.launchTemplateId(),
-                    effectiveIdentity.launchTemplateName(),
-                    effectiveIdentity.launchTemplateVersion(),
-                    effectiveIdentity.mixedInstancesPolicy());
-            validateDesiredCapacityType(
-                    effectiveDesiredCapacityType(asg, optionalFields),
-                    effectiveIdentity.mixedInstancesPolicy());
-            List<String> updatedZones = availabilityZones;
-            if (subnetIds != null && !subnetIds.isEmpty()) {
-                updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
-            }
-            if (launchConfigName != null) {
-                asg.setLaunchConfigurationName(launchConfigName);
-                asg.setLaunchTemplateId(null);
-                asg.setLaunchTemplateName(null);
-                asg.setLaunchTemplateVersion(null);
-                asg.setMixedInstancesPolicy(null);
-            }
-            if (launchTemplateId != null || launchTemplateName != null) {
-                asg.setLaunchConfigurationName(null);
-                asg.setLaunchTemplateId(launchTemplateId);
-                asg.setLaunchTemplateName(launchTemplateName);
-                asg.setLaunchTemplateVersion(launchTemplateVersion);
-                asg.setMixedInstancesPolicy(null);
-            }
-            if (mixedInstancesPolicy != null) {
-                asg.setLaunchConfigurationName(null);
-                asg.setLaunchTemplateId(null);
-                asg.setLaunchTemplateName(null);
-                asg.setLaunchTemplateVersion(null);
-                asg.setMixedInstancesPolicy(mixedInstancesPolicy);
-            }
-            if (minSize != null) { asg.setMinSize(minSize); }
-            if (maxSize != null) { asg.setMaxSize(maxSize); }
-            if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
-            if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
-            if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
-            if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
-            if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
-            if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
-            if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
-            if (optionalFields != null) {
-                optionalFields.applyToExistingGroup(asg);
-            }
-            groups.put(key, asg);
         }
     }
 
     private List<String> resolveAvailabilityZones(String region, List<String> availabilityZones, List<String> subnetIds) {
         if ((availabilityZones == null || availabilityZones.isEmpty()) && subnetIds != null && !subnetIds.isEmpty()) {
-            List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, null);
-            Set<String> foundIds = subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet());
+            Map<String, String> zones = subnetZones(region, subnetIds);
             for (String subnetId : subnetIds) {
-                if (!foundIds.contains(subnetId)) {
+                if (!zones.containsKey(subnetId)) {
                     throw new AwsException("ValidationError", "The subnet ID '" + subnetId + "' does not exist", 400);
                 }
             }
-            return subnets.stream().map(Subnet::getAvailabilityZone).distinct().toList();
+            return zones.values().stream().distinct().toList();
         }
         return availabilityZones != null ? availabilityZones : List.of();
+    }
+
+    /**
+     * The zone of each subnet EC2 has among {@code subnetIds}, by subnet ID, in the order EC2 lists them. An ID EC2
+     * does not have is left out.
+     */
+    private Map<String, String> subnetZones(String region, List<String> subnetIds) {
+        Map<String, String> zones = new LinkedHashMap<>();
+        if (!subnetIds.isEmpty()) {
+            for (Subnet subnet : ec2Service.describeSubnets(region, subnetIds, null)) {
+                zones.put(subnet.getSubnetId(), subnet.getAvailabilityZone());
+            }
+        }
+        return zones;
     }
 
     /**
@@ -588,6 +630,10 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
+        withRegionLockForEksGroup(region, name, () -> deleteGroup(region, name, forceDelete));
+    }
+
+    private void deleteGroup(String region, String name, boolean forceDelete) {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
@@ -599,7 +645,20 @@ public class AutoScalingService implements PassedRoleLookup {
                         "Auto Scaling group '" + name + "' has " + active.size()
                                 + " instance(s). Set ForceDelete=true to delete anyway.", 400);
             }
-            if (forceDelete && ec2Service != null && !active.isEmpty()) {
+            if (asg.isEksManaged()) {
+                // The instance is the cluster's node, which EKS owns and the cluster's other node groups share: it
+                // is not terminated, and stays in the load balancers another of their groups has attached.
+                deregisterFromUnsharedTargetGroups(asg, memberIds(asg), attachedTargetGroups(asg));
+                deregisterFromUnsharedClassicLoadBalancers(asg, memberIds(asg), attachedClassicLoadBalancers(asg));
+            } else if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                // The instances leave the group's load balancers before they are terminated, as on a scale-in.
+                List<String> leaving = active.stream().map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                if (elbV2Service != null) {
+                    deregisterFromTargetGroups(elbV2Service, asg, leaving);
+                }
+                if (elbClassicService != null) {
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving);
+                }
                 active.stream()
                         .map(AsgInstance::getInstanceId)
                         .filter(Objects::nonNull)
@@ -870,10 +929,16 @@ public class AutoScalingService implements PassedRoleLookup {
             throw new AwsException("ValidationError",
                     "HealthStatus must be Healthy or Unhealthy.", 400);
         }
-        updateGroupOfInstance(region, instanceId, asg -> asg.getInstances().stream()
-                .filter(instance -> instanceId.equals(instance.getInstanceId()))
-                .findFirst()
-                .ifPresent(instance -> instance.setHealthStatus(healthStatus)));
+        updateGroupOfInstance(region, instanceId, asg -> {
+            // Auto Scaling replaces an unhealthy instance.
+            if ("Unhealthy".equals(healthStatus)) {
+                refuseForEksGroup(asg);
+            }
+            asg.getInstances().stream()
+                    .filter(instance -> instanceId.equals(instance.getInstanceId()))
+                    .findFirst()
+                    .ifPresent(instance -> instance.setHealthStatus(healthStatus));
+        });
     }
 
     /** Applies {@code update} to the group holding {@code instanceId}, under that group's lock. */
@@ -893,6 +958,19 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             update.accept(asg);
             groups.put(key, asg);
+        }
+    }
+
+    /**
+     * Refuses an operation that would launch, terminate, replace or move an instance of {@code asg} when it is an
+     * EKS group: its instance is the cluster's node, which Floci runs once for all of the cluster's node groups,
+     * and which the reconciler never acts on. DetachInstances and changes to the group's settings stay allowed.
+     */
+    private static void refuseForEksGroup(AutoScalingGroup asg) {
+        if (asg.isEksManaged()) {
+            throw new AwsException("ValidationError", "Auto Scaling group '" + asg.getAutoScalingGroupName()
+                    + "' is managed by Amazon EKS for a node group. Its instance is the cluster's node,"
+                    + " which the cluster's node groups share.", 400);
         }
     }
 
@@ -929,22 +1007,17 @@ public class AutoScalingService implements PassedRoleLookup {
         synchronized (lockFor(region)) {
             synchronized (lockFor(asgKey(region, name))) {
                 AutoScalingGroup asg = requireGroup(region, name);
+                refuseForEksGroup(asg);
                 // An instance belongs to one group at a time, so the whole batch fails before any tag changes.
                 List<String> conflicts = new ArrayList<>();
-                for (AutoScalingGroup group : groups.values()) {
-                    if (group == null || !region.equals(group.getRegion())) {
-                        continue;
-                    }
-                    // Under the group's own lock, which guards its member list against the reconciler.
-                    synchronized (lockFor(asgKey(region, group.getAutoScalingGroupName()))) {
-                        for (AsgInstance member : group.getInstances()) {
-                            if (requested.contains(member.getInstanceId())) {
-                                conflicts.add("The Instance: " + member.getInstanceId()
-                                        + " is already part of AutoScalingGroup:" + group.getAutoScalingGroupName());
-                            }
+                forEachGroupInRegion(region, group -> {
+                    for (AsgInstance member : group.getInstances()) {
+                        if (requested.contains(member.getInstanceId())) {
+                            conflicts.add("The Instance: " + member.getInstanceId()
+                                    + " is already part of AutoScalingGroup:" + group.getAutoScalingGroupName());
                         }
                     }
-                }
+                });
                 if (!conflicts.isEmpty()) {
                     throw new AwsException("ValidationError", conflicts.toString(), 400);
                 }
@@ -982,13 +1055,103 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    /**
+     * Registers {@code instanceId} with each of {@code targetGroupArns}. A target group that refuses it is logged
+     * and skipped, unless {@code strict}: then only a target group that is gone is skipped, and any other failure
+     * is thrown.
+     */
+    static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
+                                         String instanceId, boolean strict) {
+        registerWithTargetGroups(elb, asg, targetGroupArns, List.of(instanceId), strict);
+    }
+
+    /** As above, for several instances, with one call to each target group. */
+    static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
+                                         List<String> instanceIds, boolean strict) {
+        if (instanceIds.isEmpty()) {
+            return;
+        }
+        String instances = String.join(", ", instanceIds);
+        for (String tgArn : targetGroupArns) {
+            // Fresh targets for each target group: ELBv2 fills a target's missing port in with the group's own.
+            List<TargetDescription> targets = instanceIds.stream().map(id -> {
+                TargetDescription target = new TargetDescription();
+                target.setId(id);
+                return target;
+            }).toList();
+            try {
+                elb.registerTargets(asg.getRegion(), tgArn, targets);
+                LOG.debugv("ASG {0}: registered {1} with TG {2}",
+                        asg.getAutoScalingGroupName(), instances, tgArn);
+            } catch (Exception e) {
+                LOG.warnv(e, "ASG {0}: could not register {1} with TG {2}: {3}",
+                        asg.getAutoScalingGroupName(), instances, tgArn, e.getMessage());
+                if (strict && !(e instanceof AwsException aws
+                        && "TargetGroupNotFound".equals(aws.getErrorCode()))) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Registers {@code instanceIds} with each of {@code loadBalancerNames}, Classic Load Balancers, in one call to
+     * each. A load balancer that refuses them is logged and skipped, unless {@code strict}: then only a load balancer
+     * that is gone is skipped, and any other failure is thrown.
+     */
+    static void registerWithClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                 Collection<String> loadBalancerNames, List<String> instanceIds,
+                                                 boolean strict) {
+        if (elb == null || instanceIds.isEmpty()) {
+            return;
+        }
+        String instances = String.join(", ", instanceIds);
+        for (String loadBalancer : loadBalancerNames) {
+            try {
+                elb.registerInstances(asg.getRegion(), loadBalancer, instanceIds);
+                LOG.debugv("ASG {0}: registered {1} with Classic ELB {2}",
+                        asg.getAutoScalingGroupName(), instances, loadBalancer);
+            } catch (Exception e) {
+                LOG.warnv(e, "ASG {0}: could not register {1} with Classic ELB {2}: {3}",
+                        asg.getAutoScalingGroupName(), instances, loadBalancer, e.getMessage());
+                if (strict && !(e instanceof AwsException aws
+                        && "LoadBalancerNotFound".equals(aws.getErrorCode()))) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs {@code action} on each group in {@code region}, under the group's own lock, which guards its member list
+     * against the reconciler. Callers hold the Region's lock, so no other change to which group holds an instance
+     * runs meanwhile.
+     */
+    private void forEachGroupInRegion(String region, Consumer<AutoScalingGroup> action) {
+        for (AutoScalingGroup group : groups.values()) {
+            if (group == null || !region.equals(group.getRegion())) {
+                continue;
+            }
+            synchronized (lockFor(asgKey(region, group.getAutoScalingGroupName()))) {
+                action.accept(group);
+            }
+        }
+    }
+
+    /** Deregisters {@code instanceIds} from every target group attached to {@code asg}, elbv2 sources included. */
     static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, List<String> instanceIds) {
+        deregisterFromTargetGroups(elb, asg, attachedTargetGroups(asg), instanceIds);
+    }
+
+    /** As above, from {@code targetGroupArns} rather than from every target group the group has attached. */
+    static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
+                                           List<String> instanceIds) {
         List<TargetDescription> targets = instanceIds.stream().map(id -> {
             TargetDescription target = new TargetDescription();
             target.setId(id);
             return target;
         }).toList();
-        for (String targetGroup : asg.getTargetGroupARNs()) {
+        for (String targetGroup : targetGroupArns) {
             try {
                 elb.deregisterTargets(asg.getRegion(), targetGroup, targets);
             } catch (AwsException e) {
@@ -1000,9 +1163,21 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    /**
+     * Deregisters {@code instanceIds} from every Classic Load Balancer attached to {@code asg}, elb sources included.
+     */
     static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
                                                     List<String> instanceIds) {
-        for (String loadBalancer : asg.getLoadBalancerNames()) {
+        deregisterFromClassicLoadBalancers(elb, asg, attachedClassicLoadBalancers(asg), instanceIds);
+    }
+
+    /** As above, from {@code loadBalancerNames} rather than from every Classic Load Balancer the group has attached. */
+    static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                    Collection<String> loadBalancerNames, List<String> instanceIds) {
+        if (elb == null || instanceIds.isEmpty()) {
+            return;
+        }
+        for (String loadBalancer : loadBalancerNames) {
             try {
                 elb.deregisterInstances(asg.getRegion(), loadBalancer, instanceIds);
             } catch (AwsException e) {
@@ -1017,6 +1192,12 @@ public class AutoScalingService implements PassedRoleLookup {
 
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
+        withRegionLockForEksGroup(region, name,
+                () -> detachMembers(region, name, instanceIds, decrementDesiredCapacity));
+    }
+
+    private void detachMembers(String region, String name, List<String> instanceIds,
+                               boolean decrementDesiredCapacity) {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
@@ -1035,8 +1216,14 @@ public class AutoScalingService implements PassedRoleLookup {
                     .filter(instanceIds::contains).toList();
             InstanceRefresh refresh = activeInstanceRefresh(asg);
             if (!detached.isEmpty()) {
-                deregisterFromTargetGroups(elbV2Service, asg, detached);
-                deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
+                if (asg.isEksManaged()) {
+                    // The node stays in the load balancers another group holding it has attached.
+                    deregisterFromUnsharedTargetGroups(asg, detached, attachedTargetGroups(asg));
+                    deregisterFromUnsharedClassicLoadBalancers(asg, detached, attachedClassicLoadBalancers(asg));
+                } else {
+                    deregisterFromTargetGroups(elbV2Service, asg, detached);
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
+                }
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
                 completeInstanceRefreshIfSettled(region, name, asg);
@@ -1054,6 +1241,7 @@ public class AutoScalingService implements PassedRoleLookup {
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
         updateGroupOfInstance(region, instanceId, asg -> {
+            refuseForEksGroup(asg);
             InstanceRefresh refresh = activeInstanceRefresh(asg);
             completeInstanceRefreshIfSettled(region, asg.getAutoScalingGroupName(), asg);
             releaseRefreshOwnership(refresh, List.of(instanceId));
@@ -1080,6 +1268,7 @@ public class AutoScalingService implements PassedRoleLookup {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
+            refuseForEksGroup(asg);
             List<AsgInstance> moving = membersInState(asg, instanceIds, "InService");
             int desired = asg.getDesiredCapacity();
             int newDesired = shouldDecrementDesiredCapacity ? desired - moving.size() : desired;
@@ -1114,6 +1303,7 @@ public class AutoScalingService implements PassedRoleLookup {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
+            refuseForEksGroup(asg);
             List<AsgInstance> moving = membersInState(asg, instanceIds, "Standby");
             int desired = asg.getDesiredCapacity();
             int newDesired = desired + moving.size();
@@ -1218,6 +1408,7 @@ public class AutoScalingService implements PassedRoleLookup {
     public InstanceRefresh startInstanceRefresh(String region, String asgName, InstanceRefresh requestedRefresh) {
         synchronized (lockFor(asgKey(region, asgName))) {
             AutoScalingGroup asg = requireGroup(region, asgName);
+            refuseForEksGroup(asg);
             boolean activeRefresh = instanceRefreshes.values().stream()
                     .filter(r -> region.equals(r.getRegion()))
                     .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
@@ -1347,19 +1538,17 @@ public class AutoScalingService implements PassedRoleLookup {
     // ── Load balancer attachment ───────────────────────────────────────────────
 
     public void attachLoadBalancerTargetGroups(String region, String name, List<String> tgArns) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (String arn : tgArns) {
-            if (!asg.getTargetGroupARNs().contains(arn)) {
-                asg.getTargetGroupARNs().add(arn);
+        changeAttachments(region, name, asg -> {
+            for (String arn : tgArns) {
+                if (!asg.getTargetGroupARNs().contains(arn)) {
+                    asg.getTargetGroupARNs().add(arn);
+                }
             }
-        }
-        groups.put(asgKey(region, name), asg);
+        });
     }
 
     public void detachLoadBalancerTargetGroups(String region, String name, List<String> tgArns) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        asg.getTargetGroupARNs().removeAll(tgArns);
-        groups.put(asgKey(region, name), asg);
+        changeAttachments(region, name, asg -> asg.getTargetGroupARNs().removeAll(tgArns));
     }
 
     public List<String> describeLoadBalancerTargetGroups(String region, String name) {
@@ -1367,46 +1556,45 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void attachLoadBalancers(String region, String name, List<String> lbNames) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (String lb : lbNames) {
-            if (!asg.getLoadBalancerNames().contains(lb)) {
-                asg.getLoadBalancerNames().add(lb);
+        changeAttachments(region, name, asg -> {
+            for (String lb : lbNames) {
+                if (!asg.getLoadBalancerNames().contains(lb)) {
+                    asg.getLoadBalancerNames().add(lb);
+                }
             }
-        }
-        groups.put(asgKey(region, name), asg);
+        });
     }
 
     public void detachLoadBalancers(String region, String name, List<String> lbNames) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        asg.getLoadBalancerNames().removeAll(lbNames);
-        groups.put(asgKey(region, name), asg);
+        changeAttachments(region, name, asg -> asg.getLoadBalancerNames().removeAll(lbNames));
     }
 
     // ── Traffic sources ─────────────────────────────────────────────────────────────
     // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources is the modern,
     // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
     // aws_autoscaling_traffic_source_attachment uses instead of the older
-    // AttachLoadBalancerTargetGroups. "accept and remember" like the target-group
-    // attachment above - Floci has no real health-checking loop, so every attached
-    // traffic source is reported InService immediately.
+    // AttachLoadBalancerTargetGroups. Like the target-group attachment above, each source is
+    // stored with its type, and the group's instances join and leave an elbv2 source as they
+    // do a target group attached the older way. Floci has no real health-checking loop, so
+    // every attached traffic source is reported InService immediately.
 
     public record TrafficSourceIdentifier(String identifier, String type) {}
 
     public void attachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (TrafficSourceIdentifier source : sources) {
-            asg.getTrafficSourceTypeByIdentifier().put(source.identifier(),
-                    source.type() != null ? source.type() : "elbv2");
-        }
-        groups.put(asgKey(region, name), asg);
+        changeAttachments(region, name, asg -> {
+            for (TrafficSourceIdentifier source : sources) {
+                asg.getTrafficSourceTypeByIdentifier().put(source.identifier(),
+                        source.type() != null ? source.type() : "elbv2");
+            }
+        });
     }
 
     public void detachTrafficSources(String region, String name, List<TrafficSourceIdentifier> sources) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (TrafficSourceIdentifier source : sources) {
-            asg.getTrafficSourceTypeByIdentifier().remove(source.identifier());
-        }
-        groups.put(asgKey(region, name), asg);
+        changeAttachments(region, name, asg -> {
+            for (TrafficSourceIdentifier source : sources) {
+                asg.getTrafficSourceTypeByIdentifier().remove(source.identifier());
+            }
+        });
     }
 
     public Map<String, String> describeTrafficSources(String region, String name, String trafficSourceType) {
@@ -1421,6 +1609,232 @@ public class AutoScalingService implements PassedRoleLookup {
             }
         });
         return filtered;
+    }
+
+    /** The target groups attached to {@code asg}: as target groups, and as {@code elbv2} traffic sources. */
+    static Set<String> attachedTargetGroups(AutoScalingGroup asg) {
+        return attached(asg.getTargetGroupARNs(), asg, "elbv2");
+    }
+
+    /** The Classic Load Balancers attached to {@code asg}: by name, and as {@code elb} traffic sources. */
+    static Set<String> attachedClassicLoadBalancers(AutoScalingGroup asg) {
+        return attached(asg.getLoadBalancerNames(), asg, "elb");
+    }
+
+    private static Set<String> attached(List<String> listed, AutoScalingGroup asg, String sourceType) {
+        Set<String> attached = new LinkedHashSet<>(listed);
+        asg.getTrafficSourceTypeByIdentifier().forEach((identifier, type) -> {
+            if (sourceType.equals(type)) {
+                attached.add(identifier);
+            }
+        });
+        return attached;
+    }
+
+    // ── EKS managed node groups ────────────────────────────────────────────────
+    // EKS keeps a group for each managed node group, under the name DescribeNodegroup reports. Floci runs one node
+    // per cluster, which all of the cluster's node groups share, so their groups all hold that node, and the
+    // reconciler leaves them alone. The reconciler registers other groups' members with their target groups and
+    // Classic Load Balancers as they come into service; these groups' members are registered and deregistered here,
+    // as those are attached and detached.
+
+    /**
+     * Creates the group EKS keeps for a managed node group, unless a group of that name exists. It has no launch
+     * source: its instances are added with {@link #addEksManagedInstance}. Its zones are those of the subnets EC2
+     * knows, since CreateNodegroup does not check its subnets.
+     */
+    public void createEksManagedGroup(String region, String name, int minSize, int maxSize, int desiredCapacity,
+                                      List<String> subnetIds, Map<String, String> tags) {
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            if (groups.containsKey(key)) {
+                return;
+            }
+            Map<String, Boolean> propagateAtLaunch = new LinkedHashMap<>();
+            tags.keySet().forEach(tagKey -> propagateAtLaunch.put(tagKey, true));
+            AutoScalingGroup asg = newGroup(region, name, minSize, maxSize, desiredCapacity,
+                    subnetZones(region, subnetIds).values().stream().distinct().toList(), subnetIds, null,
+                    tags, propagateAtLaunch);
+            asg.setEksManaged(true);
+            groups.put(key, asg);
+        }
+    }
+
+    /**
+     * Puts {@code instance} in service in the EKS group {@code name}, unless it is a member already, and registers
+     * it with the group's target groups and Classic Load Balancers. Does nothing when there is no EKS group of that
+     * name.
+     */
+    public void addEksManagedInstance(String region, String name, Instance instance) {
+        String key = asgKey(region, name);
+        synchronized (lockFor(region)) {
+            synchronized (lockFor(key)) {
+                AutoScalingGroup asg = groups.get(key);
+                if (asg == null || !asg.isEksManaged() || containsInstance(asg, instance.getInstanceId())) {
+                    return;
+                }
+                AsgInstance member = new AsgInstance();
+                member.setInstanceId(instance.getInstanceId());
+                member.setLifecycleState("InService");
+                member.setHealthStatus("Healthy");
+                member.setAvailabilityZone(instance.getPlacement() != null
+                        ? instance.getPlacement().getAvailabilityZone() : null);
+                member.setInstanceType(instance.getInstanceType());
+                asg.getInstances().add(member);
+                groups.put(key, asg);
+                registerWithTargetGroups(elbV2Service, asg, attachedTargetGroups(asg), member.getInstanceId(),
+                        false);
+                registerWithClassicLoadBalancers(elbClassicService, asg, attachedClassicLoadBalancers(asg),
+                        List.of(member.getInstanceId()), false);
+            }
+        }
+    }
+
+    /**
+     * Deletes the EKS group {@code name}, if there is one, as {@link #deleteAutoScalingGroup} deletes it: its
+     * instance, which EKS owns, is not terminated, and leaves the group's target groups and Classic Load Balancers
+     * except those another group holding it has attached. Does nothing when there is no EKS group of that name.
+     */
+    public void deleteEksManagedGroup(String region, String name) {
+        synchronized (lockFor(region)) {
+            AutoScalingGroup asg = groups.get(asgKey(region, name));
+            if (asg != null && asg.isEksManaged()) {
+                deleteAutoScalingGroup(region, name, true);
+            }
+        }
+    }
+
+    /**
+     * Applies {@code change} to the target groups, Classic Load Balancers and traffic sources attached to the group
+     * {@code name}, and stores it. The group's members are deregistered from the target groups and Classic Load
+     * Balancers the change detached, and its in-service members registered with those it attached, as AWS does, all
+     * under the Region's lock and then the group's, in the order {@code attachInstances} and the changes to an EKS
+     * group's members take them. An instance an EKS group shares with another group stays in a target group or
+     * Classic Load Balancer that other group still has attached.
+     */
+    private void changeAttachments(String region, String name, Consumer<AutoScalingGroup> change) {
+        String key = asgKey(region, name);
+        synchronized (lockFor(region)) {
+            synchronized (lockFor(key)) {
+                AutoScalingGroup current = requireGroup(region, name);
+                List<String> targetGroupsBefore = new ArrayList<>(current.getTargetGroupARNs());
+                List<String> loadBalancersBefore = new ArrayList<>(current.getLoadBalancerNames());
+                Map<String, String> trafficSourcesBefore = new LinkedHashMap<>(current.getTrafficSourceTypeByIdentifier());
+                Set<String> attachedBefore = attachedTargetGroups(current);
+                Set<String> classicBefore = attachedClassicLoadBalancers(current);
+                change.accept(current);
+                Set<String> attached = attachedTargetGroups(current);
+                Set<String> detached = new LinkedHashSet<>(attachedBefore);
+                detached.removeAll(attached);
+                attached.removeAll(attachedBefore);
+                Set<String> classicAttached = attachedClassicLoadBalancers(current);
+                Set<String> classicDetached = new LinkedHashSet<>(classicBefore);
+                classicDetached.removeAll(classicAttached);
+                classicAttached.removeAll(classicBefore);
+                List<String> members = memberIds(current);
+                List<String> inService = current.getInstances().stream()
+                        .filter(member -> "InService".equals(member.getLifecycleState()))
+                        .map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                // The members leave the target groups and Classic Load Balancers the change detached before the change
+                // is stored, one load balancer at a time. When one refuses, the in-service members rejoin those they
+                // had already left and the group keeps them all attached, as it was, so the detach can be sent again.
+                // An ordinary group's instances are its own, so they leave every one it detached.
+                List<Runnable> rejoin = new ArrayList<>();
+                try {
+                    for (String targetGroup : detached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedTargetGroups(current, members, Set.of(targetGroup));
+                        } else if (!members.isEmpty()) {
+                            deregisterFromTargetGroups(elbV2Service, current, List.of(targetGroup), members);
+                        }
+                        rejoin.add(() -> registerWithTargetGroups(elbV2Service, current, List.of(targetGroup),
+                                inService, false));
+                    }
+                    for (String loadBalancer : classicDetached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedClassicLoadBalancers(current, members, Set.of(loadBalancer));
+                        } else {
+                            deregisterFromClassicLoadBalancers(elbClassicService, current, List.of(loadBalancer),
+                                    members);
+                        }
+                        rejoin.add(() -> registerWithClassicLoadBalancers(elbClassicService, current,
+                                List.of(loadBalancer), inService, false));
+                    }
+                } catch (RuntimeException e) {
+                    rejoin.forEach(Runnable::run);
+                    current.setTargetGroupARNs(targetGroupsBefore);
+                    current.setLoadBalancerNames(loadBalancersBefore);
+                    current.setTrafficSourceTypeByIdentifier(trafficSourcesBefore);
+                    throw e;
+                }
+                groups.put(key, current);
+                registerWithTargetGroups(elbV2Service, current, attached, inService, false);
+                registerWithClassicLoadBalancers(elbClassicService, current, classicAttached, inService, false);
+            }
+        }
+    }
+
+    /**
+     * Runs {@code body} holding the Region's lock when {@code name} is an EKS group, so it takes that lock before
+     * the group's own, as every change to an EKS group's members or target groups does.
+     */
+    private void withRegionLockForEksGroup(String region, String name, Runnable body) {
+        AutoScalingGroup asg = groups.get(asgKey(region, name));
+        if (asg == null || !asg.isEksManaged()) {
+            body.run();
+            return;
+        }
+        synchronized (lockFor(region)) {
+            body.run();
+        }
+    }
+
+    private static List<String> memberIds(AutoScalingGroup asg) {
+        return asg.getInstances().stream().map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+    }
+
+    /**
+     * Deregisters each of {@code instanceIds}, members of {@code asg}, from those of {@code targetGroupArns} that no
+     * other group holding the instance has attached: the groups of a cluster's node groups share its node. Called
+     * holding the Region's lock and the group's, so no other group gains or loses the instance or a target group
+     * meanwhile, and the other groups' members are read under their own locks.
+     */
+    private void deregisterFromUnsharedTargetGroups(AutoScalingGroup asg, List<String> instanceIds,
+                                                    Set<String> targetGroupArns) {
+        forEachUnshared(asg, instanceIds, targetGroupArns, AutoScalingService::attachedTargetGroups,
+                (instanceId, leaving) -> deregisterFromTargetGroups(elbV2Service, asg, leaving, List.of(instanceId)));
+    }
+
+    /** As {@link #deregisterFromUnsharedTargetGroups}, from Classic Load Balancers. */
+    private void deregisterFromUnsharedClassicLoadBalancers(AutoScalingGroup asg, List<String> instanceIds,
+                                                            Set<String> loadBalancerNames) {
+        forEachUnshared(asg, instanceIds, loadBalancerNames, AutoScalingService::attachedClassicLoadBalancers,
+                (instanceId, leaving) -> deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving,
+                        List.of(instanceId)));
+    }
+
+    /**
+     * Calls {@code deregister} for each of {@code instanceIds} with those of {@code loadBalancers} that no other group
+     * holding the instance has attached, as {@code attachedOf} reads a group's.
+     */
+    private void forEachUnshared(AutoScalingGroup asg, List<String> instanceIds, Set<String> loadBalancers,
+                                 Function<AutoScalingGroup, Set<String>> attachedOf,
+                                 BiConsumer<String, Set<String>> deregister) {
+        if (loadBalancers.isEmpty()) {
+            return;
+        }
+        for (String instanceId : instanceIds) {
+            Set<String> leaving = new LinkedHashSet<>(loadBalancers);
+            forEachGroupInRegion(asg.getRegion(), other -> {
+                if (!asg.getAutoScalingGroupName().equals(other.getAutoScalingGroupName())
+                        && containsInstance(other, instanceId)) {
+                    leaving.removeAll(attachedOf.apply(other));
+                }
+            });
+            if (!leaving.isEmpty()) {
+                deregister.accept(instanceId, leaving);
+            }
+        }
     }
 
     // ── Lifecycle hooks ────────────────────────────────────────────────────────
@@ -2048,6 +2462,10 @@ public class AutoScalingService implements PassedRoleLookup {
                                               String launchTemplateVersion,
                                               MixedInstancesPolicy mixedInstancesPolicy) {
         if (launchConfigName != null) {
+            if (!launchConfigs.containsKey(lcKey(region, launchConfigName))) {
+                throw new AwsException("ValidationError",
+                        "Launch configuration '" + launchConfigName + "' not found.", 400);
+            }
             return;
         }
         if (launchTemplateId != null || launchTemplateName != null) {

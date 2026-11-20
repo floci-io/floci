@@ -2,6 +2,7 @@ package io.floci.aws.config;
 
 import io.floci.aws.services.iot.IotMqttWebSocketIntegrationTest;
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -83,9 +84,9 @@ class IotMqttWebSocketProxyIntegrationTest {
         String topic = "proxy/" + System.nanoTime();
         byte[] payload = "through the proxy".getBytes(StandardCharsets.UTF_8);
 
-        try (PahoClient subscriber = PahoClient.connect("wss://127.0.0.1:" + publicPort + "/mqtt", "proxy-wss-" + System.nanoTime())) {
+        try (PahoClient subscriber = PahoClient.connect("wss://127.0.0.1:" + publicPort + "/mqtt" + IotWebSocketSigV4.QUERY, "proxy-wss-" + System.nanoTime())) {
             subscriber.client.subscribe(topic, 1);
-            try (PahoClient publisher = PahoClient.connect("ws://127.0.0.1:" + publicPort + "/mqtt", "proxy-ws-" + System.nanoTime())) {
+            try (PahoClient publisher = PahoClient.connect("ws://127.0.0.1:" + publicPort + "/mqtt" + IotWebSocketSigV4.QUERY, "proxy-ws-" + System.nanoTime())) {
                 publisher.client.publish(topic, payload, 1, false);
             }
             assertArrayEquals(payload, subscriber.take(), "a TLS ClientHello and a plain GET on the same port both reach /mqtt");
@@ -145,7 +146,7 @@ class IotMqttWebSocketProxyIntegrationTest {
             socket.startHandshake();
 
             OutputStream out = socket.getOutputStream();
-            out.write(("GET /mqtt HTTP/1.1\r\nHost: " + host + ":" + testSslPort + "\r\nUpgrade: websocket\r\n"
+            out.write(("GET /mqtt" + IotWebSocketSigV4.QUERY + " HTTP/1.1\r\nHost: " + host + ":" + testSslPort + "\r\nUpgrade: websocket\r\n"
                     + "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
                     + "Sec-WebSocket-Protocol: mqtt\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
             out.flush();

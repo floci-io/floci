@@ -2,6 +2,7 @@ package io.floci.aws.services.lambdaweb;
 
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
@@ -160,7 +161,7 @@ class LambdaWebDataPlaneIntegrationTest {
                 .body("state", equalTo("Failed"))
                 .body("stateReason", equalTo(reason));
 
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         given().when().get(revision).then().statusCode(200).body("state", equalTo("Failed"));
         given().contentType("application/json")
                 .body("{\"autoDeploymentMode\": \"Disabled\", \"revisionWeights\": [{\"revisionId\": \"" + revisionId
@@ -176,7 +177,7 @@ class LambdaWebDataPlaneIntegrationTest {
     @Test
     void anEnvironmentDoesNotStartWhenLambdaCanNoLongerAssumeTheRole() {
         String functionName = "dp-role-" + Long.toString(System.nanoTime(), 36);
-        String domain = createFunction(functionName, "ApplicationManaged", LambdaWebZips.indexJs(""),
+        String domain = createFunction(functionName, "ApplicationManaged", LambdaCodeFixtures.nodeJsZip(""),
                 "arn:aws:iam::000000000000:role/" + functionName);
         iamService.updateAssumeRolePolicy(functionName, """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
@@ -377,7 +378,7 @@ class LambdaWebDataPlaneIntegrationTest {
     @Test
     void theGlobalDomainOfAFunctionInAnotherRegionCountsAPageInTheDefaultRegion() {
         String functionName = "dp-global-" + Long.toString(System.nanoTime(), 36);
-        createFunction("us-west-2", functionName, "ApplicationManaged", LambdaWebZips.indexJs(""), ROLE);
+        createFunction("us-west-2", functionName, "ApplicationManaged", LambdaCodeFixtures.nodeJsZip(""), ROLE);
         String west = auth("test", "us-west-2", "lambda");
         String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
         String revisionId = given().header("Authorization", west).when().get(endpoints + "/dev").then().statusCode(200)
@@ -412,7 +413,7 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     private String createFunction(String functionName, String authType) {
-        return createFunction(functionName, authType, LambdaWebZips.indexJs(""));
+        return createFunction(functionName, authType, LambdaCodeFixtures.nodeJsZip(""));
     }
 
     private String createFunction(String functionName, String authType, byte[] code) {

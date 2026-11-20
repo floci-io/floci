@@ -101,7 +101,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
                         text(request, "TransactionData")));
         SessionKey sk = resolveDerivation(request);
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         PaymentCryptographyKeyRules.requireUsage(key,
                 List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
         PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
@@ -169,7 +169,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
             }
         }
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         PaymentCryptographyKeyRules.requireUsage(key,
                 List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
         PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
@@ -306,15 +306,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
     }
 
     // ---- the helpers ---------------------------------------------------------
-
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
-        }
-        PaymentCryptographyKeyRules.requireEnabled(key);
-        return key;
-    }
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);

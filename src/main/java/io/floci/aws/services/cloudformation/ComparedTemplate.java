@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
+import io.floci.aws.services.cloudformation.provisioners.CfnDynamicReferences;
 
 import java.util.HashSet;
 import java.util.List;
@@ -33,7 +34,6 @@ final class ComparedTemplate {
             "Type", "Properties", "Metadata", "DeletionPolicy", "UpdateReplacePolicy", "UpdatePolicy");
     private static final List<String> OUTPUT_KEYS = List.of("Value", "Description", "Export");
     private static final Pattern SUB_VARIABLE = Pattern.compile("\\$\\{([^}]*)}");
-    private static final String DYNAMIC_REFERENCE = "{{resolve:";
 
     private final ObjectMapper objectMapper;
     private final CloudFormationTemplateEngine engine;
@@ -233,7 +233,8 @@ final class ComparedTemplate {
     private JsonNode dynamicReferencesIn(JsonNode node) {
         if (node.isTextual()) {
             String text = node.asText();
-            return text.contains(DYNAMIC_REFERENCE) ? TextNode.valueOf(dynamicReferenceValue.apply(text)) : node;
+            return CfnDynamicReferences.holdsDynamicReference(text)
+                    ? TextNode.valueOf(dynamicReferenceValue.apply(text)) : node;
         }
         if (node.isArray()) {
             ArrayNode array = objectMapper.createArrayNode();

@@ -20,6 +20,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Runs a real Python function in a container. Its FAILED envelope closes the execution and the
@@ -81,9 +83,25 @@ class LambdaDurableFunctionsDockerIntegrationTest {
             .body("DurableExecutions[0].Status", equalTo("FAILED"));
     }
 
+    @Test
+    void aSynchronousDurableTailRequestIncludesTheHandlerLogs() {
+        Response response = given()
+                .header("X-Amz-Durable-Execution-Name", "docker-fail-tail")
+                .header("X-Amz-Log-Type", "Tail")
+                .body("{\"fail\": true}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":1/invocations");
+
+        assertEquals(200, response.statusCode(), response.asString());
+        assertEquals("Unhandled", response.getHeader("X-Amz-Function-Error"));
+        assertNotNull(response.getHeader("X-Amz-Log-Result"), "Durable Invoke must return requested handler logs");
+        String logs = new String(Base64.getDecoder().decode(response.getHeader("X-Amz-Log-Result")), StandardCharsets.UTF_8);
+        assertTrue(logs.contains("durable handler log"), logs);
+    }
+
     static String handlerSource() {
         return """
             def handler(event, context):
+                print("durable handler log", flush=True)
                 return {"Status": "FAILED",
                         "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
             """;

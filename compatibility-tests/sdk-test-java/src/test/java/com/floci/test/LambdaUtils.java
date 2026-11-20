@@ -378,6 +378,18 @@ public final class LambdaUtils {
         return createZip("index.js", code);
     }
 
+    /** ZIP containing a Node.js handler that streams "hello " and "world" through the response stream. */
+    public static byte[] streamingZip() {
+        String code = """
+                exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
+                    responseStream.write('hello ');
+                    responseStream.write('world');
+                    responseStream.end();
+                });
+                """;
+        return createZip("index.js", code);
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

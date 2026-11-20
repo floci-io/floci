@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -342,6 +343,10 @@ class EventBridgeSchedulerIntegrationTest {
                     public List<String> containerFallbackServers() { return List.of("8.8.8.8", "8.8.4.4"); }
                     @Override
                     public boolean spoofAwsEndpoints() { return false; }
+                    @Override
+                    public OptionalInt hostPort() { return OptionalInt.empty(); }
+                    @Override
+                    public boolean bridgeListenerEnabled() { return true; }
                 };
             }
             @Override
@@ -354,6 +359,8 @@ class EventBridgeSchedulerIntegrationTest {
             public DockerConfig docker() { return null; }
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
+            @Override
+            public RequestLogConfig requestLog() { return null; }
             @Override
             public ProtocolsConfig protocols() {
                 return new ProtocolsConfig() {

@@ -51,8 +51,13 @@ public final class OrganizationsFixture {
     }
 
     public void moveAccount(String owner, String account, String source, String destination) {
-        request(owner, "MoveAccount", "{\"AccountId\":\"" + account + "\",\"SourceParentId\":\"" + source
-                + "\",\"DestinationParentId\":\"" + destination + "\"}")
+        moveAccount(owner, "us-east-1", account, source, destination);
+    }
+
+    /** As above; the call signed for {@code region}. */
+    public void moveAccount(String owner, String region, String account, String source, String destination) {
+        OrganizationsRequests.request(owner, region, "MoveAccount", "{\"AccountId\":\"" + account
+                + "\",\"SourceParentId\":\"" + source + "\",\"DestinationParentId\":\"" + destination + "\"}")
                 .post("/").then().statusCode(200);
     }
 

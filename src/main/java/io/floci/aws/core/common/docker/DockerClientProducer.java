@@ -55,11 +55,23 @@ public class DockerClientProducer {
 
     private static final ObjectMapper DOCKER_CONTEXT_JSON_MAPPER = new ObjectMapper();
 
+    /** Bounds the connect and the answer of the Docker circuit breaker's confirming ping. */
+    static final Duration PING_TIMEOUT = Duration.ofSeconds(5);
+
     private final EmulatorConfig config;
+    private final DockerPoolGaugeLogger gaugeLogger;
+    private final DockerCircuitBreaker breaker;
 
     @Inject
     public DockerClientProducer(EmulatorConfig config) {
         this.config = config;
+        this.gaugeLogger = new DockerPoolGaugeLogger(
+                validatePoolGaugeIntervalSeconds(config.docker().poolGaugeIntervalSeconds()));
+        int breakerThreshold = validateBreakerFailureThreshold(config.docker().breakerFailureThreshold());
+        // The probe interval only matters, and is only checked, while the breaker is on.
+        Duration probeInterval = breakerThreshold == 0 ? Duration.ZERO
+                : Duration.ofSeconds(validateBreakerProbeIntervalSeconds(config.docker().breakerProbeIntervalSeconds()));
+        this.breaker = new DockerCircuitBreaker(breakerThreshold, probeInterval);
     }
 
     /**
@@ -414,6 +426,29 @@ public class DockerClientProducer {
                 "FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS");
     }
 
+    /** 0 turns the pool gauge lines off; a negative interval names no schedule. */
+    static int validatePoolGaugeIntervalSeconds(int seconds) {
+        if (seconds < 0) {
+            throw new IllegalArgumentException("floci.docker.pool-gauge-interval-seconds "
+                    + "(FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS) must be 0 or more, got: " + seconds);
+        }
+        return seconds;
+    }
+
+    /** 0 turns the Docker circuit breaker off; a negative threshold is a misconfiguration. */
+    static int validateBreakerFailureThreshold(int threshold) {
+        if (threshold < 0) {
+            throw new IllegalArgumentException("floci.docker.breaker-failure-threshold "
+                    + "(FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD) must be 0 or more, got: " + threshold);
+        }
+        return threshold;
+    }
+
+    static int validateBreakerProbeIntervalSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.breaker-probe-interval-seconds",
+                "FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS");
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
         if (value < 1) {
             throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
@@ -424,10 +459,8 @@ public class DockerClientProducer {
     /**
      * Control-plane DockerClient: create/start/stop/remove/copyArchive and every other
      * short-lived call in Floci. Kept on its own connection pool, separate from the
-     * {@link StreamingDocker} bean, so long-lived log-follow streams can never occupy every
-     * lease in this pool and starve these short calls until httpclient5's connection-request
-     * timeout fires. Exec-output and container-wait streams (CodeBuild phases, Lambda
-     * extensions and exit watchers, EKS audit followers) still use this pool.
+     * {@link StreamingDocker} bean, so long-lived streams can never occupy every lease in this
+     * pool and starve these short calls until httpclient5's connection-request timeout fires.
      */
     @Produces
     @ApplicationScoped
@@ -437,7 +470,9 @@ public class DockerClientProducer {
     }
 
     /**
-     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}). Each
+     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}), Lambda
+     * extension execs and Lambda exit watchers, Lambda Web attach streams, and the output of
+     * long-running execs (CodeBuild phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions). Each
      * stream occupies a connection pool slot for its entire lifetime, so sharing the
      * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
      * control-plane calls. Sized separately because {@code WarmPool}'s cap is per-function,
@@ -452,10 +487,46 @@ public class DockerClientProducer {
     }
 
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
+        gaugeLogger.unregister("control-plane");
+        breaker.close();
         client.close();
     }
 
+    /**
+     * Gives the breaker a ping that opens a one-connection transport of its own for each ping and closes it
+     * after, so a ping never waits for a pooled connection behind the calls whose failures it is confirming,
+     * {@link #PING_TIMEOUT} bounds the connect and the answer, and no transport outlives the client whose
+     * build set the probe. Pings are rare: one after a run of transport failures, then one per probe
+     * interval while the breaker is open.
+     */
+    private void usePingTransport(DefaultDockerClientConfig clientConfig) {
+        if (!breaker.isEnabled()) {
+            return;
+        }
+        breaker.useProbe(() -> {
+            try (FlociDockerHttpClient transport = newPingTransport(clientConfig, PING_TIMEOUT)) {
+                return DockerCircuitBreaker.pingOver(transport).ping();
+            } catch (IOException e) {
+                LOG.debugv("Closing the Docker breaker's ping transport failed: {0}", e.getMessage());
+                return DockerCircuitBreaker.PingResult.INCONCLUSIVE;
+            }
+        });
+    }
+
+    /** One connection whose connect, lease and answer are each bounded by {@code timeout}. */
+    static FlociDockerHttpClient newPingTransport(DefaultDockerClientConfig clientConfig, Duration timeout) {
+        return new FlociDockerHttpClient.Builder()
+                .dockerHost(clientConfig.getDockerHost())
+                .sslConfig(clientConfig.getSSLConfig())
+                .maxConnections(1)
+                .connectionTimeout(timeout)
+                .responseTimeout(timeout)
+                .connectionRequestTimeout(timeout)
+                .build();
+    }
+
     void disposeStreamingDockerClient(@Disposes @StreamingDocker DockerClient client) throws IOException {
+        gaugeLogger.unregister("streaming");
         client.close();
     }
 
@@ -483,7 +554,7 @@ public class DockerClientProducer {
         connection.tlsCertPath().ifPresent(path -> {
             if (connection.skipTlsVerify()) {
                 LOG.infov("Using TLS material from the active Docker context at: {0}, with server "
-                        + "certificate verification skipped per the context's SkipTLSVerify setting.",
+                        + "certificate verification skipped per the context''s SkipTLSVerify setting.",
                         path);
                 builder.withCustomSslConfig(new SkipVerifySslConfig(path.toString()));
             } else {
@@ -499,10 +570,13 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(newHttpClient(clientConfig, maxConnections,
-                Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds())),
+        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
-                        config.docker().connectionRequestTimeoutSeconds()))), role));
+                        config.docker().connectionRequestTimeoutSeconds())));
+        gaugeLogger.register(role, transport::gauges);
+        usePingTransport(clientConfig);
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout, breaker));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -519,17 +593,34 @@ public class DockerClientProducer {
 
     /**
      * Wraps the control-plane transport in {@link RetryingDockerHttpClient} so every short-lived
-     * docker call survives a transient socket drop; the streaming transport stays unwrapped,
-     * its requests (log-follow, exec output) hold hijacked or long-lived streams that must never
-     * be replayed, and its exec-start calls are the one request retrying could turn into a
-     * re-run command.
+     * docker call survives a transient socket drop. The streaming transport replays only container
+     * waits, as the control-plane one does: its other requests (log follow, attach, exec output)
+     * hold hijacked or long-lived streams that must never be replayed, and its exec-start calls are
+     * the one request retrying could turn into a re-run command. {@code callTimeout} bounds a retried
+     * control-plane call across its attempts and backoffs, so it is the longest one call waits on a
+     * silent daemon, not the length of each of its attempts.
      */
-    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role) {
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
+        return wrapForRole(transport, role, callTimeout, null);
+    }
+
+    /**
+     * As {@link #wrapForRole(DockerHttpClient, String, Duration)}, with {@code breaker} (shared by both
+     * roles) between the retry layer and the transport, so an open breaker fails a call before the
+     * retry layer could replay it, and every attempt's outcome reaches the breaker. A null or disabled
+     * breaker leaves the transport as it is.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        DockerCircuitBreaker breaker) {
+        if (breaker != null && breaker.isEnabled()) {
+            transport = new CircuitBreakingDockerHttpClient(transport, breaker);
+        }
         if (!"control-plane".equals(role)) {
-            return transport;
+            // The streaming transport replays only container waits, long-lived streams the call timeout never bounds.
+            return RetryingDockerHttpClient.forContainerWaits(transport);
         }
         LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
-        return new RetryingDockerHttpClient(transport);
+        return new RetryingDockerHttpClient(transport, callTimeout);
     }
 
     /**

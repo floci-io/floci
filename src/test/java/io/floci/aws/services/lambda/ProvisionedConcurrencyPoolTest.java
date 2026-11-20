@@ -1465,6 +1465,8 @@ class ProvisionedConcurrencyPoolTest {
                     launched().initialized.complete(null);
                     launched().initialized.complete(null);
                     ready();
+                    await().atMost(Duration.ofSeconds(5)).pollDelay(Duration.ZERO)
+                            .pollInterval(Duration.ofMillis(10)).until(() -> get().available() == 2);
                     assertEquals(get(), pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst().status());
                 } else if (restart == 1) {
                     assertEquals(2, get().requested());

@@ -43,6 +43,9 @@ import static org.mockito.Mockito.mock;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ElastiCacheAclProxyIntegrationTest {
+    /** A second user, whose rules let it check keys exist but not write them. */
+    private static final String AUDITOR_ACCESS = "on ~* &* -@all +ping +exists";
+
     @TempDir
     static Path directory;
 
@@ -115,7 +118,8 @@ class ElastiCacheAclProxyIntegrationTest {
                 new ElastiCacheAuthProxy.PasswordValidator() {
                     @Override
                     public boolean validatePassword(String username, String password) {
-                        return "subscriber".equals(username) && "synthetic-password".equals(password);
+                        return "subscriber".equals(username) && "synthetic-password".equals(password)
+                                || "auditor".equals(username) && "auditor-password".equals(password);
                     }
 
                     @Override
@@ -123,11 +127,16 @@ class ElastiCacheAclProxyIntegrationTest {
 
                     @Override
                     public AuthMode memberAuthMode(String username) {
+                        if ("auditor".equals(username)) {
+                            return AuthMode.PASSWORD;
+                        }
                         return "subscriber".equals(username) ? memberMode.get() : null;
                     }
 
                     @Override
-                    public String accessString(String username) { return access.get(); }
+                    public String accessString(String username) {
+                        return "auditor".equals(username) ? AUDITOR_ACCESS : access.get();
+                    }
 
                     @Override
                     public TransitEncryption transitEncryption() { return TransitEncryption.REQUIRED; }
@@ -207,6 +216,52 @@ class ElastiCacheAclProxyIntegrationTest {
             access.set("on ~allowed:* &* -@all +get +ping");
             proxy.refreshUser("subscriber");
             assertTrue(command(open, "SET", "allowed:key", "value").startsWith("-NOPERM"));
+        }
+    }
+
+    @Test
+    void aSessionThatSignsInAgainRunsAsItsNewUserAndKeepsItsUserWhenRefused() throws Exception {
+        memberMode.set(AuthMode.PASSWORD);
+        access.set("on ~* &* -@all +ping +set");
+        try (Socket session = connect(proxy.localPort(), trust)) {
+            assertEquals("+OK", command(session, "AUTH", "subscriber", "synthetic-password"));
+            assertEquals("+OK", command(session, "SET", "shared:key", "written"));
+            assertTrue(command(session, "EXISTS", "shared:key").startsWith("-NOPERM"));
+
+            assertEquals("+OK", command(session, "AUTH", "auditor", "auditor-password"));
+            assertEquals(":1", command(session, "EXISTS", "shared:key"));
+            assertTrue(command(session, "SET", "shared:key", "overwritten").startsWith("-NOPERM"));
+
+            assertTrue(command(session, "AUTH", "subscriber", "wrong-password").startsWith("-WRONGPASS"));
+            assertEquals(":1", command(session, "EXISTS", "shared:key"), "a refused sign-in keeps the session's user");
+
+            assertEquals("+OK", command(session, "AUTH", "subscriber", "synthetic-password"));
+            assertEquals("+OK", command(session, "SET", "shared:key", "rewritten"));
+            assertTrue(command(session, "HELLO", "2", "AUTH", "auditor", "auditor-password").startsWith("*"));
+        }
+    }
+
+    @Test
+    void anIamSessionCannotSignInAgainInsideATransaction() throws Exception {
+        memberMode.set(AuthMode.IAM);
+        access.set("on ~* &* +@all");
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "acl-test", "subscriber", "AKIDCACHE", "secret-cache", Instant.now().minusSeconds(60), 900);
+        try (Socket session = connect(proxy.localPort(), trust)) {
+            assertEquals("+OK", command(session, "AUTH", "subscriber", token));
+            assertEquals("+OK", command(session, "AUTH", "subscriber", token), "a fresh token is taken outside one");
+
+            assertEquals("+OK", command(session, "MULTI"));
+            assertTrue(command(session, "AUTH", "subscriber", token)
+                    .startsWith("-ERR Command not allowed inside a transaction"));
+            assertEquals("+QUEUED", command(session, "SET", "transaction:key", "value"));
+            assertTrue(command(session, "EXEC").startsWith("-EXECABORT"));
+            assertEquals(":0", command(session, "EXISTS", "transaction:key"));
+
+            assertEquals("+OK", command(session, "MULTI"));
+            assertEquals("+QUEUED", command(session, "AUTH", "auditor", "auditor-password"),
+                    "a password sign-in is queued like any command");
+            assertEquals("*1", command(session, "EXEC"));
         }
     }
 

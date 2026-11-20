@@ -1,21 +1,22 @@
 package io.floci.aws.services.sqs;
 
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
-/** {@code floci.services.sqs.endpoint-strategy=aws}: queue URLs take the AWS form. */
+/**
+ * {@code floci.services.sqs.endpoint-strategy=aws}: queue URLs take the AWS form. The setting comes
+ * from {@link ContainerBackedEc2Profile}.
+ */
 @QuarkusTest
-@TestProfile(SqsAwsEndpointStrategyIntegrationTest.AwsEndpointStrategyProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class SqsAwsEndpointStrategyIntegrationTest {
 
     private static final String ACCOUNT_ID = "000000000000";
@@ -67,12 +68,5 @@ class SqsAwsEndpointStrategyIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    public static final class AwsEndpointStrategyProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.sqs.endpoint-strategy", "aws");
-        }
     }
 }

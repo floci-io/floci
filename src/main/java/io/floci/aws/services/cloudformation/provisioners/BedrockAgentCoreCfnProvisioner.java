@@ -3,7 +3,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -562,30 +561,8 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
-        return resolved == null || resolved.isNull() || !resolved.isObject() ? null : toApiShape(resolved);
-    }
-
-    /** Recursively renames the members of a resolved node to the API's camelCase, dropping nulls. */
-    private static JsonNode toApiShape(JsonNode node) {
-        if (node.isObject()) {
-            ObjectNode out = JsonNodeFactory.instance.objectNode();
-            node.fields().forEachRemaining(field -> {
-                if (!field.getValue().isNull()) {
-                    out.set(decapitalize(field.getKey()), toApiShape(field.getValue()));
-                }
-            });
-            return out;
-        }
-        if (node.isArray()) {
-            ArrayNode out = JsonNodeFactory.instance.arrayNode();
-            node.forEach(item -> out.add(toApiShape(item)));
-            return out;
-        }
-        return node;
-    }
-
-    private static String decapitalize(String key) {
-        return key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
+        return resolved == null || resolved.isNull() || !resolved.isObject() ? null
+                : CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES);
     }
 
     /** A {@code {key: value}} property with each value resolved, or an empty map when absent. */

@@ -24,12 +24,27 @@ class PublicAccessConditionsTest {
     @CsvSource(delimiter = '|', value = {
         "arn:aws:iam::123456789012:role/app|true",
         "arn:aws:iam::123456789012:role/*|true",
+        "arn:aws:s3:::my-bucket|true",
         "arn:aws:iam::*:role/app|false",
         "arn:aws:iam::12345678901?:root|false",
+        "arn:aws:s3:::*|false",
         "arn:aws:iam::123456789012|false",
     })
     void anArnPinsItsAccountWhenTheAccountHasNoWildcard(String arn, boolean pins) {
         assertEquals(pins, PublicAccessConditions.pinsAccount(arn));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "arn:aws:iam::123456789012:role/app|true",
+        "arn:aws:iam::123456789012:role/*|true",
+        "arn:aws:s3:::my-bucket|true",
+        "arn:aws:iam::123456789012:role/${aws:username}|false",
+        "arn:aws:iam::*:role/app|false",
+        "arn:aws:s3:::*|false",
+    })
+    void aFixedAccountArnPinsItsAccountWithoutPolicyVariables(String arn, boolean fixed) {
+        assertEquals(fixed, PublicAccessConditions.isFixedAccountArn(arn));
     }
 
     @ParameterizedTest

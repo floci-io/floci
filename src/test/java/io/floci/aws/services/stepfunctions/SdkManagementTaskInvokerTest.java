@@ -26,6 +26,19 @@ class SdkManagementTaskInvokerTest {
     private final SdkManagementTaskInvoker invoker = new SdkManagementTaskInvoker(ecs,
             lambda, mock(SecretsManagerJsonHandler.class), registry, mapper);
 
+    /**
+     * The Lambda request a task sends, as the API models it: the mapping's UUID, its path label, from the task's
+     * Uuid alone, the rest of the input its body; a UUID in the input is no member the body holds, so it names none.
+     */
+    @Test
+    void aLambdaTasksRequestTakesTheMappingsUuidAsTheApisUuid() throws Exception {
+        assertEquals(mapper.readTree("{\"UUID\":\"u-2\",\"BatchSize\":5}"),
+                SdkManagementTaskInvoker.lambdaRequest(mapper.readTree("{\"Uuid\":\"u-2\",\"BatchSize\":5}")));
+        assertEquals(mapper.readTree("{\"BatchSize\":5}"),
+                SdkManagementTaskInvoker.lambdaRequest(mapper.readTree("{\"UUID\":\"u-1\",\"BatchSize\":5}")));
+        assertEquals(mapper.readTree("{}"), SdkManagementTaskInvoker.lambdaRequest(mapper.readTree("[]")));
+    }
+
     @Test
     void lambdaMappingUpdateUsesSdkUuidWithoutMutatingTheTaskInput() throws Exception {
         when(registry.isServiceEnabled("lambda")).thenReturn(true);

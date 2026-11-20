@@ -1,14 +1,11 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import java.io.ByteArrayOutputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -26,18 +23,6 @@ class LambdaS3CodeIntegrationTest {
     private static final String KEY_V2 = "functions/hello-s3-v2.zip";
     private static final String FN     = "hello-s3";
 
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    private static byte[] makeZip(String handlerJs) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write(handlerJs.getBytes());
-            zos.closeEntry();
-        }
-        return baos.toByteArray();
-    }
-
     // ── setup ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -53,7 +38,7 @@ class LambdaS3CodeIntegrationTest {
     @Test
     @Order(2)
     void uploadCodeZipToS3() throws Exception {
-        byte[] zip = makeZip("exports.handler = async (e) => ({ statusCode: 200, body: 's3-v1' });");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("exports.handler = async (e) => ({ statusCode: 200, body: 's3-v1' });");
         given()
             .contentType("application/octet-stream")
             .body(zip)
@@ -108,7 +93,7 @@ class LambdaS3CodeIntegrationTest {
     @Test
     @Order(5)
     void uploadUpdatedCodeZipToS3() throws Exception {
-        byte[] zip = makeZip("exports.handler = async (e) => ({ statusCode: 200, body: 's3-v2' });");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("exports.handler = async (e) => ({ statusCode: 200, body: 's3-v2' });");
         given()
             .contentType("application/octet-stream")
             .body(zip)

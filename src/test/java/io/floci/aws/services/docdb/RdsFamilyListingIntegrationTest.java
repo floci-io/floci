@@ -1,6 +1,6 @@
 package io.floci.aws.services.docdb;
 
-import io.floci.aws.testing.RdsAndDocDbMockProfile;
+import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -20,7 +20,7 @@ import static org.hamcrest.Matchers.not;
  * CLIs sign with the {@code rds} scope, and Floci accepts {@code docdb} as well.
  */
 @QuarkusTest
-@TestProfile(RdsAndDocDbMockProfile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class RdsFamilyListingIntegrationTest {
 
     private static final String AURORA = "family-aurora";
