@@ -447,7 +447,6 @@ AWS::RDS::DBCluster	DBClusterInstanceClass	accepted and ignored
 AWS::RDS::DBCluster	DBInstanceParameterGroupName	accepted and ignored
 AWS::RDS::DBCluster	DatabaseInsightsMode	accepted and ignored
 AWS::RDS::DBCluster	DeleteAutomatedBackups	accepted and ignored
-AWS::RDS::DBCluster	DeletionProtection	accepted and ignored
 AWS::RDS::DBCluster	Domain	accepted and ignored
 AWS::RDS::DBCluster	DomainIAMRoleName	accepted and ignored
 AWS::RDS::DBCluster	EnableCloudwatchLogsExports	accepted and ignored
