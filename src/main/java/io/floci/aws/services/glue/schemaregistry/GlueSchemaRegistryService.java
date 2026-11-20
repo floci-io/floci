@@ -1,12 +1,16 @@
 package io.floci.aws.services.glue.schemaregistry;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageJson;
 import io.floci.aws.services.glue.schemaregistry.model.MetadataInfo;
 import io.floci.aws.services.glue.schemaregistry.model.Registry;
 import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
@@ -33,7 +37,12 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
+
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
 @ApplicationScoped
 public class GlueSchemaRegistryService {
@@ -42,6 +51,8 @@ public class GlueSchemaRegistryService {
 
     static final String DEFAULT_REGISTRY_NAME = "default-registry";
     private static final Pattern NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_$#.\\-]+$");
+    // Separates a key's Region from the registry name: names hold no ':', so a key stored before is told apart.
+    private static final String KEY_SEPARATOR = "::";
     private static final int NAME_MAX_LENGTH = 255;
     private static final int DEFAULT_MAX_RESULTS = 100;
     private static final int MAX_MAX_RESULTS = 100;
@@ -97,6 +108,7 @@ public class GlueSchemaRegistryService {
 
     @PostConstruct
     void afterCdiInit() {
+        migrateLegacyKeys();
         rebuildVersionIndexes();
     }
 
@@ -104,51 +116,57 @@ public class GlueSchemaRegistryService {
 
     public Registry createRegistry(String name, String description, Map<String, String> tags, String region) {
         validateName(name, "RegistryName");
-        if (registryStore.get(name).isPresent()) {
+        if (registryStore.get(registryKey(region, name)).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Registry already exists: " + name, 400);
         }
         Registry registry = new Registry(name);
         registry.setDescription(description);
         registry.setTags(tags);
         registry.setRegistryArn(buildRegistryArn(region, name));
-        registryStore.put(name, registry);
+        registryStore.put(registryKey(region, name), registry);
         LOG.infov("Created Glue Registry: {0}", name);
         return registry;
     }
 
+    /**
+     * The registry of {@code region} that {@code registryId} names. Registries are Regional: another Region's,
+     * by name or by ARN, is not found, as one that doesn't exist.
+     */
     public Registry getRegistry(RegistryId registryId, String region) {
         String name = resolveRegistryName(registryId);
-        if (DEFAULT_REGISTRY_NAME.equals(name) && registryStore.get(name).isEmpty()) {
+        requireArnInRegion(registryId == null ? null : registryId.getRegistryArn(), region,
+                () -> new AwsException("EntityNotFoundException", "Registry not found: " + name, 400));
+        if (DEFAULT_REGISTRY_NAME.equals(name) && registryStore.get(registryKey(region, name)).isEmpty()) {
             return autoCreateDefaultRegistry(region);
         }
-        return registryStore.get(name)
+        return registryStore.get(registryKey(region, name))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException", "Registry not found: " + name, 400));
     }
 
-    public List<Registry> listRegistries() {
-        return sortedRegistries();
+    public List<Registry> listRegistries(String region) {
+        return sortedRegistries(region);
     }
 
-    public Page<Registry> listRegistries(Integer maxResults, String nextToken) {
-        return paginate(sortedRegistries(), maxResults, nextToken);
+    public Page<Registry> listRegistries(String region, Integer maxResults, String nextToken) {
+        return paginate(sortedRegistries(region), maxResults, nextToken);
     }
 
     public Registry updateRegistry(RegistryId registryId, String description, String region) {
         Registry registry = getRegistry(registryId, region);
         registry.setDescription(description);
         registry.setUpdatedTime(Instant.now());
-        registryStore.put(registry.getRegistryName(), registry);
+        registryStore.put(registryKey(region, registry.getRegistryName()), registry);
         return registry;
     }
 
     public synchronized Registry deleteRegistry(RegistryId registryId, String region) {
         Registry registry = getRegistry(registryId, region);
-        String prefix = registry.getRegistryName() + ":";
+        String prefix = registryKey(region, registry.getRegistryName()) + ":";
         for (Schema schema : schemaStore.scan(k -> k.startsWith(prefix))) {
-            deleteSchemaByKey(schemaKey(schema.getRegistryName(), schema.getSchemaName()), schema);
+            deleteSchemaByKey(schemaKey(schema), schema);
         }
         registry.setStatus("DELETING");
-        registryStore.delete(registry.getRegistryName());
+        registryStore.delete(registryKey(region, registry.getRegistryName()));
         LOG.infov("Deleted Glue Registry: {0}", registry.getRegistryName());
         return registry;
     }
@@ -169,7 +187,7 @@ public class GlueSchemaRegistryService {
         validateCompatibility(compat);
         validateDefinitionRequired(definition);
         Registry registry = getRegistry(registryId, region);
-        String schemaKey = schemaKey(registry.getRegistryName(), schemaName);
+        String schemaKey = schemaKey(region, registry.getRegistryName(), schemaName);
         if (schemaStore.get(schemaKey).isPresent()) {
             throw new AwsException("AlreadyExistsException",
                     "Schema already exists: " + registry.getRegistryName() + "/" + schemaName, 400);
@@ -220,13 +238,13 @@ public class GlueSchemaRegistryService {
 
     public List<Schema> listSchemas(RegistryId registryId, String region) {
         Registry registry = getRegistry(registryId, region);
-        String prefix = registry.getRegistryName() + ":";
+        String prefix = registryKey(region, registry.getRegistryName()) + ":";
         return sortedSchemas(prefix);
     }
 
     public Page<Schema> listSchemas(RegistryId registryId, String region, Integer maxResults, String nextToken) {
         Registry registry = getRegistry(registryId, region);
-        String prefix = registry.getRegistryName() + ":";
+        String prefix = registryKey(region, registry.getRegistryName()) + ":";
         return paginate(sortedSchemas(prefix), maxResults, nextToken);
     }
 
@@ -255,13 +273,13 @@ public class GlueSchemaRegistryService {
             schema.setSchemaCheckpoint(checkpointVersionNumber);
         }
         schema.setUpdatedTime(Instant.now());
-        schemaStore.put(schemaKey(schema.getRegistryName(), schema.getSchemaName()), schema);
+        schemaStore.put(schemaKey(schema), schema);
         return schema;
     }
 
     public synchronized Schema deleteSchema(SchemaId schemaId, String region) {
         Schema schema = resolveSchema(schemaId, region);
-        String key = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String key = schemaKey(schema);
         int versionsDeleted = deleteSchemaByKey(key, schema);
         schema.setSchemaStatus("DELETING");
         LOG.infov("Deleted Glue Schema {0}/{1} ({2} versions)",
@@ -281,7 +299,7 @@ public class GlueSchemaRegistryService {
                     "Schema definition is not valid " + dataFormat + ": " + defError, 400);
         }
 
-        String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String schemaKey = schemaKey(schema);
         String hash = canonicalHash(definition, dataFormat);
         Map<String, String> hashIndex = versionByDefinitionHash.computeIfAbsent(schemaKey, k -> new ConcurrentHashMap<>());
         String existingId = hashIndex.get(hash);
@@ -333,12 +351,10 @@ public class GlueSchemaRegistryService {
                                           boolean latestVersion,
                                           String region) {
         if (schemaVersionId != null && !schemaVersionId.isBlank()) {
-            return versionStore.get(schemaVersionId)
-                    .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                            "Schema version not found: " + schemaVersionId, 400));
+            return versionIn(schemaVersionId, region);
         }
         Schema schema = resolveSchema(schemaId, region);
-        String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String schemaKey = schemaKey(schema);
         NavigableMap<Long, String> byNumber = versionByNumber.get(schemaKey);
         if (byNumber == null || byNumber.isEmpty()) {
             throw new AwsException("EntityNotFoundException", "No schema versions for " + schemaKey, 400);
@@ -374,7 +390,7 @@ public class GlueSchemaRegistryService {
     }
 
     private List<SchemaVersion> sortedSchemaVersions(Schema schema) {
-        String key = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String key = schemaKey(schema);
         NavigableMap<Long, String> byNumber = versionByNumber.get(key);
         if (byNumber == null || byNumber.isEmpty()) {
             return List.of();
@@ -393,7 +409,7 @@ public class GlueSchemaRegistryService {
             throw new AwsException("InvalidInputException", "Versions expression is required", 400);
         }
         Schema schema = resolveSchema(schemaId, region);
-        String key = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String key = schemaKey(schema);
         NavigableMap<Long, String> byNumber = versionByNumber.get(key);
         if (byNumber == null) {
             byNumber = new ConcurrentSkipListMap<>();
@@ -473,11 +489,10 @@ public class GlueSchemaRegistryService {
 
     public synchronized MetadataPutResult putSchemaVersionMetadata(String schemaVersionId,
                                                                     String key,
-                                                                    String value) {
+                                                                    String value,
+                                                                    String region) {
         validateMetadataKeyValue(key, value);
-        SchemaVersion version = versionStore.get(schemaVersionId)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Schema version not found: " + schemaVersionId, 400));
+        SchemaVersion version = versionIn(schemaVersionId, region);
 
         Map<String, MetadataInfo> metadata = metadataStore.get(schemaVersionId).orElseGet(LinkedHashMap::new);
         MetadataInfo info = metadata.get(key);
@@ -511,11 +526,10 @@ public class GlueSchemaRegistryService {
 
     public synchronized MetadataPutResult removeSchemaVersionMetadata(String schemaVersionId,
                                                                        String key,
-                                                                       String value) {
+                                                                       String value,
+                                                                       String region) {
         validateMetadataKeyValue(key, value);
-        SchemaVersion version = versionStore.get(schemaVersionId)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Schema version not found: " + schemaVersionId, 400));
+        SchemaVersion version = versionIn(schemaVersionId, region);
 
         Map<String, MetadataInfo> metadata = metadataStore.get(schemaVersionId)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
@@ -564,11 +578,9 @@ public class GlueSchemaRegistryService {
     }
 
     public Map<String, MetadataInfo> querySchemaVersionMetadata(String schemaVersionId,
-                                                                List<MetadataKeyValueFilter> metadataList) {
-        if (versionStore.get(schemaVersionId).isEmpty()) {
-            throw new AwsException("EntityNotFoundException",
-                    "Schema version not found: " + schemaVersionId, 400);
-        }
+                                                                List<MetadataKeyValueFilter> metadataList,
+                                                                String region) {
+        versionIn(schemaVersionId, region);
         Map<String, MetadataInfo> stored = metadataStore.get(schemaVersionId).orElse(Map.of());
         if (metadataList == null || metadataList.isEmpty()) {
             return stored;
@@ -595,11 +607,11 @@ public class GlueSchemaRegistryService {
 
     // ---- Tags ------------------------------------------------------------
 
-    public synchronized void tagResource(String resourceArn, Map<String, String> tagsToAdd) {
+    public synchronized void tagResource(String resourceArn, Map<String, String> tagsToAdd, String region) {
         if (tagsToAdd == null || tagsToAdd.isEmpty()) {
             return;
         }
-        TaggedResource resource = resolveTaggedResource(resourceArn);
+        TaggedResource resource = resolveTaggedResource(resourceArn, region);
         Map<String, String> tags = resource.getTags();
         if (tags == null) {
             tags = new LinkedHashMap<>();
@@ -611,11 +623,11 @@ public class GlueSchemaRegistryService {
         resource.persist();
     }
 
-    public synchronized void untagResource(String resourceArn, List<String> tagKeysToRemove) {
+    public synchronized void untagResource(String resourceArn, List<String> tagKeysToRemove, String region) {
         if (tagKeysToRemove == null || tagKeysToRemove.isEmpty()) {
             return;
         }
-        TaggedResource resource = resolveTaggedResource(resourceArn);
+        TaggedResource resource = resolveTaggedResource(resourceArn, region);
         Map<String, String> tags = resource.getTags();
         if (tags == null || tags.isEmpty()) {
             return;
@@ -628,8 +640,35 @@ public class GlueSchemaRegistryService {
         resource.persist();
     }
 
-    public Map<String, String> getTags(String resourceArn) {
-        TaggedResource resource = resolveTaggedResource(resourceArn);
+    /**
+     * A copy of the tags of the registry or the schema stored under {@code arn} in the account and Region it names,
+     * matched on the whole ARN and read in place; empty for an ARN naming nothing stored, or any other resource.
+     */
+    public Map<String, String> storedTags(String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        Map<String, String> tags = null;
+        if (resource.startsWith("registry/")) {
+            tags = AccountAwareStorageBackend.readInAccount(registryStore, parsed.accountId(),
+                            registryKey(parsed.region(), resource.substring("registry/".length())))
+                    .filter(registry -> arn.equals(registry.getRegistryArn()))
+                    .map(Registry::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith("schema/")) {
+            String[] names = resource.substring("schema/".length()).split("/", 2);
+            if (names.length == 2) {
+                tags = AccountAwareStorageBackend.readInAccount(schemaStore, parsed.accountId(),
+                                schemaKey(parsed.region(), names[0], names[1]))
+                        .filter(schema -> arn.equals(schema.getSchemaArn()))
+                        .map(Schema::getTags)
+                        .orElse(null);
+            }
+        }
+        return tags == null ? Map.of() : new LinkedHashMap<>(tags);
+    }
+
+    public Map<String, String> getTags(String resourceArn, String region) {
+        TaggedResource resource = resolveTaggedResource(resourceArn, region);
         Map<String, String> tags = resource.getTags();
         return tags != null ? tags : Map.of();
     }
@@ -649,7 +688,7 @@ public class GlueSchemaRegistryService {
     public SchemaVersion getSchemaByDefinition(SchemaId schemaId, String definition, String region) {
         validateDefinitionRequired(definition);
         Schema schema = resolveSchema(schemaId, region);
-        String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String schemaKey = schemaKey(schema);
         String dataFormat = schema.getDataFormat();
         for (int attempt = 0; attempt < MAX_LOOKUP_FORMAT_ATTEMPTS; attempt++) {
             String hash = canonicalHash(definition, dataFormat);
@@ -697,27 +736,31 @@ public class GlueSchemaRegistryService {
         void persist();
     }
 
-    private TaggedResource resolveTaggedResource(String resourceArn) {
+    /** The registry or schema {@code resourceArn} names, if it is of {@code region}: another Region's is not found. */
+    private TaggedResource resolveTaggedResource(String resourceArn, String region) {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
         if (resourceArn.contains(":registry/")) {
             String name = parseRegistryNameFromArn(resourceArn);
-            Registry r = registryStore.get(name)
-                    .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                            "Registry not found: " + name, 400));
+            Supplier<AwsException> notFound = () -> new AwsException("EntityNotFoundException",
+                    "Registry not found: " + name, 400);
+            requireArnInRegion(resourceArn, region, notFound);
+            String key = registryKey(region, name);
+            Registry r = registryStore.get(key).orElseThrow(notFound);
             return new TaggedResource() {
                 @Override public Map<String, String> getTags() { return r.getTags(); }
                 @Override public void setTags(Map<String, String> tags) { r.setTags(tags); }
-                @Override public void persist() { registryStore.put(r.getRegistryName(), r); }
+                @Override public void persist() { registryStore.put(key, r); }
             };
         }
         if (resourceArn.contains(":schema/")) {
             String[] parts = parseSchemaArn(resourceArn);
-            String key = schemaKey(parts[0], parts[1]);
-            Schema s = schemaStore.get(key)
-                    .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                            "Schema not found: " + parts[0] + "/" + parts[1], 400));
+            Supplier<AwsException> notFound = () -> new AwsException("EntityNotFoundException",
+                    "Schema not found: " + parts[0] + "/" + parts[1], 400);
+            requireArnInRegion(resourceArn, region, notFound);
+            String key = schemaKey(region, parts[0], parts[1]);
+            Schema s = schemaStore.get(key).orElseThrow(notFound);
             return new TaggedResource() {
                 @Override public Map<String, String> getTags() { return s.getTags(); }
                 @Override public void setTags(Map<String, String> tags) { s.setTags(tags); }
@@ -829,6 +872,8 @@ public class GlueSchemaRegistryService {
         String schemaName;
         if (schemaId.getSchemaArn() != null && !schemaId.getSchemaArn().isBlank()) {
             String[] parsed = parseSchemaArn(schemaId.getSchemaArn());
+            requireArnInRegion(schemaId.getSchemaArn(), region, () -> new AwsException("EntityNotFoundException",
+                    "Schema is not found. " + parsed[0] + "/" + parsed[1], 400));
             registryName = parsed[0];
             schemaName = parsed[1];
         } else {
@@ -843,13 +888,13 @@ public class GlueSchemaRegistryService {
                 registryName = reg.getRegistryName();
             } else {
                 registryName = requested;
-                if (registryStore.get(registryName).isEmpty()) {
+                if (registryStore.get(registryKey(region, registryName)).isEmpty()) {
                     throw new AwsException("EntityNotFoundException",
                             "Registry not found: " + registryName, 400);
                 }
             }
         }
-        String key = schemaKey(registryName, schemaName);
+        String key = schemaKey(region, registryName, schemaName);
         return schemaStore.get(key)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Schema is not found. " + registryName + "/" + schemaName, 400));
@@ -880,8 +925,9 @@ public class GlueSchemaRegistryService {
         return defs;
     }
 
-    private List<Registry> sortedRegistries() {
-        List<Registry> registries = new ArrayList<>(registryStore.scan(k -> true));
+    private List<Registry> sortedRegistries(String region) {
+        String prefix = registryKey(region, "");
+        List<Registry> registries = new ArrayList<>(registryStore.scan(k -> k.startsWith(prefix)));
         registries.sort(Comparator.comparing(Registry::getRegistryName,
                 Comparator.nullsLast(String::compareTo)));
         return registries;
@@ -920,7 +966,7 @@ public class GlueSchemaRegistryService {
         if (checkpointVersionNumber < 1) {
             throw new AwsException("InvalidInputException", "Schema checkpoint version must be at least 1", 400);
         }
-        String key = schemaKey(schema.getRegistryName(), schema.getSchemaName());
+        String key = schemaKey(schema);
         NavigableMap<Long, String> byNumber = versionByNumber.get(key);
         if (byNumber == null || !byNumber.containsKey(checkpointVersionNumber)) {
             throw new AwsException("EntityNotFoundException",
@@ -946,7 +992,7 @@ public class GlueSchemaRegistryService {
 
     private Schema schemaForVersion(SchemaVersion version) {
         String[] parts = parseSchemaArn(version.getSchemaArn());
-        String key = schemaKey(parts[0], parts[1]);
+        String key = schemaKey(regionResolver.regionOf(version.getSchemaArn()), parts[0], parts[1]);
         return schemaStore.get(key)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Schema not found for version: " + version.getSchemaVersionId(), 400));
@@ -967,7 +1013,7 @@ public class GlueSchemaRegistryService {
         versionByDefinitionHash.clear();
         Map<String, String> arnToSchemaKey = new HashMap<>();
         for (Schema s : schemaStore.scan(k -> true)) {
-            arnToSchemaKey.put(s.getSchemaArn(), schemaKey(s.getRegistryName(), s.getSchemaName()));
+            arnToSchemaKey.put(s.getSchemaArn(), schemaKey(s));
         }
         List<SchemaVersion> versions = new ArrayList<>(versionStore.scan(k -> true));
         versions.sort(Comparator.comparing(SchemaVersion::getVersionNumber));
@@ -993,7 +1039,7 @@ public class GlueSchemaRegistryService {
     private Registry autoCreateDefaultRegistry(String region) {
         Registry registry = new Registry(DEFAULT_REGISTRY_NAME);
         registry.setRegistryArn(buildRegistryArn(region, DEFAULT_REGISTRY_NAME));
-        registryStore.put(DEFAULT_REGISTRY_NAME, registry);
+        registryStore.put(registryKey(region, DEFAULT_REGISTRY_NAME), registry);
         LOG.infov("Auto-created default Glue Registry");
         return registry;
     }
@@ -1031,9 +1077,90 @@ public class GlueSchemaRegistryService {
         return regionResolver.buildArn("glue", region, "schema/" + registryName + "/" + schemaName);
     }
 
-    private static String schemaKey(String registryName, String schemaName) {
-        return registryName + ":" + schemaName;
+    /** A registry's key: registries are Regional, so it holds their Region and name. */
+    private static String registryKey(String region, String registryName) {
+        return region + KEY_SEPARATOR + registryName;
     }
+
+    /** A schema's key: its registry's key, then the schema's name. */
+    private static String schemaKey(String region, String registryName, String schemaName) {
+        return registryKey(region, registryName) + ":" + schemaName;
+    }
+
+    /** A stored schema's key, in the Region its ARN names. */
+    private String schemaKey(Schema schema) {
+        return schemaKey(regionResolver.regionOf(schema.getSchemaArn()), schema.getRegistryName(),
+                schema.getSchemaName());
+    }
+
+    /** The version by that id, if its schema is of {@code region}: another Region's is not found. */
+    private SchemaVersion versionIn(String schemaVersionId, String region) {
+        return versionStore.get(schemaVersionId)
+                .filter(version -> region.equals(regionResolver.regionOf(version.getSchemaArn())))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        "Schema version not found: " + schemaVersionId, 400));
+    }
+
+    /** Refuses an ARN naming another Region: registries and schemas are Regional, so it names none here. */
+    private void requireArnInRegion(String arn, String region, Supplier<AwsException> notFound) {
+        if (arn != null && !arn.isBlank() && !region.equals(regionResolver.regionOf(arn))) {
+            throw notFound.get();
+        }
+    }
+
+    /**
+     * Moves the registries and schemas stored before they were keyed by Region, under their bare name or
+     * {@code registry:schema}, onto the key of the Region their ARN names. Every Region saw every registry then, so a
+     * schema could be created in another Region than its registry: that registry gets a copy in the schema's Region,
+     * which the schema then names, so it still has its registry there.
+     */
+    private void migrateLegacyKeys() {
+        // Records stored before are in the factory's account stores, the only stores production has.
+        if (!(registryStore instanceof AccountAwareStorageBackend<Registry> registryAccounts)
+                || !(schemaStore instanceof AccountAwareStorageBackend<Schema> schemaAccounts)) {
+            return;
+        }
+        Map<String, AccountEntry<Registry>> registries = new HashMap<>();
+        for (AccountEntry<Registry> registry : registryAccounts.scanAllAccountEntries(LEGACY_KEY)) {
+            registries.put(registry.accountId() + "/" + registry.value().getRegistryName(), registry);
+        }
+        List<AccountEntry<Schema>> renamed = new ArrayList<>();
+        for (AccountEntry<Schema> entry : schemaAccounts.scanAllAccountEntries(LEGACY_KEY)) {
+            Schema schema = entry.value();
+            String region = regionResolver.regionOf(schema.getSchemaArn());
+            AccountEntry<Registry> registry = registries.get(entry.accountId() + "/" + schema.getRegistryName());
+            if (registry == null || region.equals(regionResolver.regionOf(registry.value().getRegistryArn()))) {
+                continue;
+            }
+            String key = registryKey(region, schema.getRegistryName());
+            Registry copy = getInAccount(registryStore, entry.accountId(), key)
+                    .orElseGet(() -> copyIn(registry.value(), region, entry.accountId()));
+            putInAccount(registryStore, entry.accountId(), key, copy);
+            schema.setRegistryArn(copy.getRegistryArn());
+            // A record already under the new key is the newer one, which the move keeps.
+            if (getInAccount(schemaStore, entry.accountId(), schemaKey(schema)).isEmpty()) {
+                renamed.add(entry);
+            }
+        }
+        registryAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY,
+                registry -> registryKey(regionResolver.regionOf(registry.getRegistryArn()),
+                        registry.getRegistryName()));
+        schemaAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY, this::schemaKey);
+        // Written once moved, under the new key: a schema stored before accounts prefixed keys would otherwise
+        // leave its unprefixed record beside a second legacy one.
+        for (AccountEntry<Schema> entry : renamed) {
+            putInAccount(schemaStore, entry.accountId(), schemaKey(entry.value()), entry.value());
+        }
+    }
+
+    /** {@code registry} as a registry of {@code region}, in {@code accountId}, its ARN naming that Region. */
+    private Registry copyIn(Registry registry, String region, String accountId) {
+        Registry copy = StorageJson.copy(registry);
+        copy.setRegistryArn(regionResolver.buildArn("glue", region, accountId, "registry/" + registry.getRegistryName()));
+        return copy;
+    }
+
+    private static final Predicate<String> LEGACY_KEY = key -> !key.contains(KEY_SEPARATOR);
 
     private void validateName(String name, String field) {
         if (name == null || name.isBlank()) {

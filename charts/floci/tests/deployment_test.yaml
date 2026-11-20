@@ -121,6 +121,13 @@ tests:
       floci.lambda.kubernetes.namespace: lambdas
       floci.lambda.kubernetes.initImage: busybox:1.37
       floci.lambda.kubernetes.labels: [team=platform, env=ci]
+      floci.lambda.kubernetes.nodeSelector:
+        workload-type: lambda
+        kubernetes.io/arch: amd64
+      floci.lambda.kubernetes.tolerations:
+        - { key: workload-type, operator: Equal, value: lambda, effect: NoSchedule }
+        - { key: spot, operator: Exists, effect: NoExecute }
+        - { key: example.com/dedicated, value: ci }
       floci.lambda.kubernetes.flociAddress: 10.0.0.7
     asserts:
       - equal:
@@ -146,6 +153,10 @@ tests:
               value: team=platform,env=ci
             - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
               value: lambdas
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR
+              value: kubernetes.io/arch=amd64,workload-type=lambda
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS
+              value: workload-type=lambda:NoSchedule,spot:NoExecute,example.com/dedicated=ci
             - name: FLOCI_STORAGE_MODE
               value: memory
             - name: FLOCI_STORAGE_PERSISTENT_PATH

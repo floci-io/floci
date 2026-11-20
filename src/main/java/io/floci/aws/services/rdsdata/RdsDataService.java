@@ -190,6 +190,7 @@ public class RdsDataService implements Resettable {
     }
 
     public ObjectNode executeStatement(JsonNode request, String region) {
+        validateRequestDatabase(request);
         rejectUnsupportedOptions(request);
 
         String sql = requiredText(request, "sql");
@@ -205,6 +206,7 @@ public class RdsDataService implements Resettable {
     }
 
     public ObjectNode batchExecuteStatement(JsonNode request, String region) {
+        validateRequestDatabase(request);
         String sql = requiredText(request, "sql");
         List<Map<String, JsonNode>> parameterSets = parseParameterSets(request);
 
@@ -217,6 +219,7 @@ public class RdsDataService implements Resettable {
     }
 
     public ObjectNode beginTransaction(JsonNode request, String region) {
+        validateRequestDatabase(request);
         cleanupExpiredTransactions();
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
@@ -699,13 +702,30 @@ public class RdsDataService implements Resettable {
 
     private String databaseName(JsonNode request, RdsDataResourceResolver.DatabaseTarget target) {
         String database = textOrNull(request, "database");
-        if (database != null && !database.isBlank()) {
+        if (database != null && !database.isEmpty()) {
             return database;
         }
         if (target.databaseName() != null && !target.databaseName().isBlank()) {
             return target.databaseName();
         }
         throw new AwsException("BadRequestException", "database is required.", 400);
+    }
+
+    /**
+     * Refuses a request's {@code database} longer than the model's {@code DbName} allows. Runs first, as
+     * AWS checks the request's shape before it looks up the resource. Any other name is the engine's to
+     * judge: {@link RdsDataConnectionFactory#buildUrl} encodes it so it cannot change the connection.
+     */
+    private static void validateRequestDatabase(JsonNode request) {
+        String database = textOrNull(request, "database");
+        // Only an absent or empty name means "the resource's"; one of spaces is checked like any other.
+        if (database == null || database.isEmpty()) {
+            return;
+        }
+        if (database.length() > RdsDataConnectionFactory.MAX_DATABASE_NAME_LENGTH) {
+            throw new AwsException("BadRequestException", "database must be at most "
+                    + RdsDataConnectionFactory.MAX_DATABASE_NAME_LENGTH + " characters.", 400);
+        }
     }
 
     private TransactionContext transaction(String transactionId) {

@@ -67,6 +67,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).
@@ -275,15 +276,28 @@ public class ApiGatewayController {
         return Response.ok(toAuthorizerNode(service.getAuthorizer(region, apiId, authorizerId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
-    @GET
-    @Path("/restapis/{apiId}/authorizers")
-    public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
-        String region = regionResolver.resolveRegion(headers);
-        List<io.floci.aws.services.apigateway.model.Authorizer> auths = service.getAuthorizers(region, apiId);
+    private static Integer pageLimit(String limit) {
+        return Pagination.parseMaxResults(limit, "limit", "BadRequestException");
+    }
+
+    private <T> Response pageResponse(PaginatedResult<T> page, Function<T, JsonNode> toNode) {
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        auths.forEach(a -> items.add(toAuthorizerNode(a)));
+        page.items().forEach(item -> items.add(toNode.apply(item)));
+        if (page.nextToken() != null) {
+            root.put("position", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/authorizers")
+    public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                   @QueryParam("limit") String limit, @QueryParam("position") String position) {
+        String region = regionResolver.resolveRegion(headers);
+        // Authorizer clashes with the imported API Gateway v2 model
+        PaginatedResult<io.floci.aws.services.apigateway.model.Authorizer> page = service.getAuthorizerPage(region, apiId, pageLimit(limit), position);
+        return pageResponse(page, this::toAuthorizerNode);
     }
 
     @GET
@@ -989,11 +1003,11 @@ public class ApiGatewayController {
                              @QueryParam("startDate") String startDate,
                              @QueryParam("endDate") String endDate,
                              @QueryParam("keyId") String keyId,
-                             @QueryParam("limit") Integer limit,
+                             @QueryParam("limit") String limit,
                              @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
         ApiGatewayService.UsageReport report =
-                service.getUsage(region, usagePlanId, startDate, endDate, keyId, limit, position);
+                service.getUsage(region, usagePlanId, startDate, endDate, keyId, pageLimit(limit), position);
 
         ObjectNode root = objectMapper.createObjectNode();
         // The wire key is "values", not "items": the Usage shape models this map with
@@ -1127,13 +1141,11 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/requestvalidators")
-    public Response getRequestValidators(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getRequestValidators(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                         @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<RequestValidator> validators = service.getRequestValidators(region, apiId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        validators.forEach(v -> items.add(toRequestValidatorNode(v)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<RequestValidator> page = service.getRequestValidatorPage(region, apiId, pageLimit(limit), position);
+        return pageResponse(page, this::toRequestValidatorNode);
     }
 
     @GET
@@ -1246,17 +1258,11 @@ public class ApiGatewayController {
                                           @QueryParam("type") String type, @QueryParam("name") String name,
                                           @QueryParam("path") String path,
                                           @QueryParam("locationStatus") String locationStatus,
-                                          @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
+                                          @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ApiGatewayService.DocumentationPartPage page = service.getDocumentationParts(region, apiId, type, name,
-                path, locationStatus, limit, position);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        page.items().forEach(part -> items.add(objectMapper.valueToTree(part)));
-        if (page.position() != null) {
-            root.put("position", page.position());
-        }
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<DocumentationPart> page = service.getDocumentationParts(region, apiId, type, name,
+                path, locationStatus, pageLimit(limit), position);
+        return pageResponse(page, part -> objectMapper.valueToTree(part));
     }
 
     @GET

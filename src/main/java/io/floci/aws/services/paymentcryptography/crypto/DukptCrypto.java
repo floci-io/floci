@@ -73,7 +73,7 @@ public final class DukptCrypto {
             throw new IllegalArgumentException("BDK must be a 16-byte (double-length TDES) key");
         }
         byte[] left8 = Arrays.copyOfRange(zeroCounter(normalizeKsn(ksnHex)), 0, 8);
-        return concat(
+        return Bytes.concat(
                 Ciphers.tdes2Encrypt(left8, bdk),
                 Ciphers.tdes2Encrypt(left8, Ciphers.xor(bdk, KEY_VARIANT)));
     }
@@ -81,7 +81,7 @@ public final class DukptCrypto {
     /** The X9.24-1 non-reversible key generation step, the single-DES "black box". */
     public static byte[] deriveStep(byte[] key16, byte[] reg8) {
         // Order matters: the variant-keyed half comes first.
-        return concat(right(Ciphers.xor(key16, KEY_VARIANT), reg8), right(key16, reg8));
+        return Bytes.concat(right(Ciphers.xor(key16, KEY_VARIANT), reg8), right(key16, reg8));
     }
 
     /**
@@ -127,17 +127,4 @@ public final class DukptCrypto {
         return Ciphers.xor(Ciphers.tdesSingleDesEncrypt(Ciphers.xor(reg8, kr), kl), kr);
     }
 
-    private static byte[] concat(byte[]... parts) {
-        int n = 0;
-        for (byte[] p : parts) {
-            n += p.length;
-        }
-        byte[] out = new byte[n];
-        int at = 0;
-        for (byte[] p : parts) {
-            System.arraycopy(p, 0, out, at, p.length);
-            at += p.length;
-        }
-        return out;
-    }
 }

@@ -29,7 +29,7 @@ public class Application {
     private Instant createdAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant updatedAt;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private String architecture;
     private Map<String, InitialCapacityConfig> initialCapacity;
     private MaximumCapacity maximumCapacity;
@@ -38,6 +38,9 @@ public class Application {
     private NetworkConfiguration networkConfiguration;
     private ImageConfiguration imageConfiguration;
     private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
+    // Each custom image resolved at the application's start, which its runs take until it starts again, by worker type,
+    // the application's own under ""; Floci's own, as the API has none.
+    private Map<String, ImageConfiguration> pinnedImages;
     private MonitoringConfiguration monitoringConfiguration;
     private List<RuntimeConfiguration> runtimeConfiguration;
     private SchedulerConfiguration schedulerConfiguration;
@@ -103,4 +106,7 @@ public class Application {
         return value != null && value.getEpochSecond() >= LEGACY_MILLIS_FLOOR
                 ? Instant.ofEpochMilli(value.getEpochSecond()) : value;
     }
+
+    public Map<String, ImageConfiguration> getPinnedImages() { return pinnedImages; }
+    public void setPinnedImages(Map<String, ImageConfiguration> pinnedImages) { this.pinnedImages = pinnedImages; }
 }

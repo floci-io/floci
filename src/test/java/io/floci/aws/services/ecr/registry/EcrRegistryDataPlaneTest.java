@@ -44,13 +44,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
+    private EcrService ecrService;
     private Semaphore repositoryWriteLock;
     private CountDownLatch repositoryWriteLockRefused;
 
@@ -244,7 +247,60 @@ class EcrRegistryDataPlaneTest {
     }
 
     @Test
+    void recordsOnlyAcceptedManifestWritesBeforeResponding() throws Exception {
+        String digest = "sha256:" + "a".repeat(64);
+        AtomicBoolean accept = new AtomicBoolean();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> request.bodyHandler(body -> {
+                    int successStatus = request.method() == HttpMethod.DELETE ? 202 : 201;
+                    request.response().putHeader("Docker-Content-Digest", digest)
+                            .setStatusCode(accept.get() ? successStatus : 400).end();
+                }))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        try {
+            dataPlane = dataPlane(registry, false);
+            assertEquals(400, putManifest(dataPlane.actualPort()).statusCode());
+            Mockito.verify(ecrService, Mockito.never()).recordImagePush(anyString(), anyString(),
+                    anyString(), anyString(), any());
+            String manifestPath = "/v2/platform/api/manifests/" + digest;
+            assertEquals(400, request(dataPlane.actualPort(), HttpMethod.DELETE, manifestPath).status());
+            Mockito.verify(ecrService, Mockito.never()).removeImagePush(anyString(), anyString(), anyString(), anyString());
+
+            Mockito.doAnswer(call -> {
+                assertEquals(0, repositoryWriteLock.availablePermits());
+                return null;
+            }).when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
+            accept.set(true);
+            assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
+            Mockito.verify(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
+
+            Mockito.doAnswer(call -> {
+                assertEquals(0, repositoryWriteLock.availablePermits());
+                return null;
+            }).when(ecrService).removeImagePush("000000000000", "us-east-1", "platform/api", digest);
+            assertEquals(202, request(dataPlane.actualPort(), HttpMethod.DELETE, manifestPath).status());
+            Mockito.verify(ecrService).removeImagePush("000000000000", "us-east-1", "platform/api", digest);
+
+            Mockito.doThrow(new IllegalStateException("metadata store unavailable"))
+                    .when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                            eq("platform/api"), eq(digest), any());
+            assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
+        } finally {
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void immutableTagRejectsReplacementBeforeItReachesTheRegistry() throws Exception {
+        String digest = "sha256:" + "b".repeat(64);
         AtomicBoolean tagExists = new AtomicBoolean();
         AtomicInteger manifestWrites = new AtomicInteger();
         AtomicReference<String> headPath = new AtomicReference<>();
@@ -263,7 +319,7 @@ class EcrRegistryDataPlaneTest {
                             manifestBody.set(body.toString());
                             manifestWrites.incrementAndGet();
                             tagExists.set(true);
-                            request.response().setStatusCode(201).end();
+                            request.response().setStatusCode(201).putHeader("Docker-Content-Digest", digest).end();
                         });
                     } else {
                         request.response().setStatusCode(405).end();
@@ -275,6 +331,9 @@ class EcrRegistryDataPlaneTest {
         HttpServer dataPlane = null;
         try {
             dataPlane = dataPlane(registry, true);
+            Mockito.doThrow(new IllegalStateException("transient metadata store failure")).doReturn(null)
+                    .when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                            eq("platform/api"), eq(digest), any());
 
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
 
@@ -290,6 +349,8 @@ class EcrRegistryDataPlaneTest {
                     error.getString("message"));
 
             assertEquals(1, manifestWrites.get());
+            Mockito.verify(ecrService, Mockito.times(2)).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
             assertEquals("/v2/legacy/platform-api/manifests/v1", headPath.get());
             assertEquals("/v2/legacy/platform-api/manifests/v1", manifestPath.get());
             assertEquals("{}", manifestBody.get());
@@ -914,7 +975,7 @@ class EcrRegistryDataPlaneTest {
 
     private HttpServer dataPlane(EcrRegistryManager registryManager, boolean immutableTags,
                                  CountDownLatch tagReleased) throws Exception {
-        EcrService ecrService = Mockito.mock(EcrService.class);
+        ecrService = Mockito.mock(EcrService.class);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().uriStyle()).thenReturn("hostname");

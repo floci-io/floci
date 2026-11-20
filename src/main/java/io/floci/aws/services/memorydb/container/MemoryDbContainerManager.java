@@ -102,7 +102,7 @@ public class MemoryDbContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). MemoryDB metadata "
-                        + "operations keep working and clusters still reach 'available', but they "
+                        + "operations keep working and clusters still reach ''available'', but they "
                         + "have no backing Redis/Valkey container until a daemon becomes reachable.",
                         e.getMessage());
             }
@@ -115,13 +115,7 @@ public class MemoryDbContainerManager {
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     public MemoryDbContainerHandle start(String clusterName, String image) {

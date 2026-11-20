@@ -91,11 +91,17 @@ class PaymentCryptographyCardValidationOperationsTest {
         PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
+        Map<String, Object> generated = cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
+                "KeyIdentifier", cvk.getArn(), "PrimaryAccountNumber", PAN,
+                "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
+        String value = (String) generated.get("ValidationData");
+        String wrongValue = (value.charAt(0) - '0' + 1) % 10 + value.substring(1);
+
         AwsException refused = assertThrows(AwsException.class, () -> cardValidation.verify(
                 PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", cvk.getArn(),
                         "PrimaryAccountNumber", PAN,
-                        "ValidationData", "999",
+                        "ValidationData", wrongValue,
                         "VerificationAttributes", cardVerificationValue1(EXPIRY, "201"))),
                 "us-east-1"));
 

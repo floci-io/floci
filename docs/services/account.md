@@ -4,7 +4,7 @@
 
 **Endpoint:** `http://localhost:4566`
 
-Floci supports alternate contacts and primary contact information over the AWS REST JSON protocol.
+Floci supports alternate contacts, primary contact information and account information over the AWS REST JSON protocol.
 
 ## Supported Actions
 
@@ -16,15 +16,21 @@ Floci supports alternate contacts and primary contact information over the AWS R
 | `DeleteAlternateContact` | - |
 | `PutContactInformation` | Creates or replaces the primary contact information of an account (`POST /putContactInformation`) |
 | `GetContactInformation` | Returns the primary contact information of an account and its phone verification status (`POST /getContactInformation`) |
+| `GetAccountInformation` | Returns the ID, name, creation date and state of an account (`POST /getAccountInformation`) |
+| `PutAccountName` | Renames an account (`POST /putAccountName`) |
 <!-- floci:actions:end -->
 
 Alternate contacts and primary contact information are isolated by caller account and stored through `StorageFactory`.
 
+An account in an organization takes its name, creation date and state from its Organizations record. `PutAccountName` renames that record, so `DescribeAccount` and `ListAccounts` answer the new name at once. `AccountCreatedDate` is the `JoinedTimestamp` of an account that Organizations `CreateAccount` made; an invited account and the management account have none. An account that `CloseAccount` left `PENDING_CLOSURE`, a state Account Management does not have, reports `ACTIVE`.
+
+Account Management also keeps a name for each account through `StorageFactory`: the one `PutAccountName` last set, or else the name the account had in Organizations when it was created in or invited into an organization. An account that leaves its organization answers that name. The management account keeps one only if `PutAccountName` gave it one, so it has none after `DeleteOrganization` otherwise. An account in no organization is `ACTIVE`. It has no creation date, and no name until it is given one, because Floci has no sign-up to take them from.
+
 ## AWS-compatible failures
 
-`PutAlternateContact` validates the contact type, name, title, email address, phone number, and optional target account ID. `GetAlternateContact` returns `ResourceNotFoundException` when the requested contact has not been configured. Invalid request data uses `ValidationException` and unsupported cross-account access uses `AccessDeniedException`.
+Requests of all seven operations are checked by `RequestConstraintCheck` against the member types, required members, lengths, patterns and enum values generated from botocore's Account model, such as the `AlternateContactType` values (`BILLING`, `OPERATIONS`, `SECURITY`), the `PhoneNumber` pattern of `PutContactInformation` (a `+` followed by digits, spaces, parentheses, or hyphens), and the `AccountName` of `PutAccountName` (1 to 50 printable ASCII characters other than `<` and `>`). `tools/aws/regen_account_shapes.py` vendors them; `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A member of the wrong JSON type fails with `SerializationException` and any other violation with `ValidationException`. `PutContactInformation` also requires `StateOrRegion` for the countries the API reference documents as requiring it (`US`, `CA`, `GB`, `DE`, `JP`, `IN`, `BR`), a rule the model does not carry. `GetAlternateContact` and `DeleteAlternateContact` return `ResourceNotFoundException` when the requested contact has not been configured, and `GetContactInformation` when no contact information has been stored.
 
-`PutContactInformation` and `GetContactInformation` requests are checked by `RequestConstraintCheck` against the member types, required members, lengths and patterns generated from botocore's Account model, such as the `PhoneNumber` pattern (a `+` followed by digits, spaces, parentheses, or hyphens). `tools/aws/regen_account_shapes.py` vendors them; `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A member of the wrong JSON type fails with `SerializationException` and any other violation with `ValidationException`. `PutContactInformation` also requires `StateOrRegion` for the countries the API reference documents as requiring it (`US`, `CA`, `GB`, `DE`, `JP`, `IN`, `BR`), a rule the model does not carry. `GetContactInformation` returns `ResourceNotFoundException` when no contact information has been stored. Both operations apply the same target account ID rules as the alternate-contact operations.
+A request that names an `AccountId` runs in the organizations context: the caller must be the organization's management account or its delegated administrator for Account Management, the organization must have all features and trusted access for Account Management enabled, and the `AccountId` must name a member account of that organization other than the management account. Any other request that names an `AccountId` returns `AccessDeniedException`, including the management account naming itself, whose own contacts and account information are reached by leaving `AccountId` out.
 
 Three behaviors are Floci's own. An account has no primary contact until `PutContactInformation` stores one, because Floci has no sign-up contact to return. `CountryCode` is checked for its two-character length only, not against the ISO 3166-1 list. `GetContactInformation` always reports `VerificationStatus` as `NOT_SUPPORTED`, because Floci does not verify phone numbers.
 

@@ -62,16 +62,27 @@ class AutoScalingCapacityAccountLockIntegrationTest {
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
             try {
-                RequestScopes.runAs(ACCOUNT, REGION, () -> service.deleteAutoScalingGroup(REGION, name, true));
+                RequestScopes.runAs(ACCOUNT, REGION, () -> delete(REGION, name));
             } finally {
                 RequestScopes.runAs(otherAccount, otherRegion,
-                        () -> service.deleteAutoScalingGroup(otherRegion, name, true));
+                        () -> delete(otherRegion, name));
             }
         }
     }
 
+    private void delete(String region, String name) {
+        if (!service.describeAutoScalingGroups(region, List.of(name)).isEmpty()) {
+            service.deleteAutoScalingGroup(region, name, true);
+        }
+        if (!service.describeLaunchConfigurations(region, List.of(name)).isEmpty()) {
+            service.deleteLaunchConfiguration(region, name);
+        }
+    }
+
     private AutoScalingGroup create(String region, String name) {
-        service.createAutoScalingGroup(region, name, "unused-capacity-lock-source", null, null, null, null,
+        service.createLaunchConfiguration(region, name, null, "ami-12345678", "t3.micro",
+                null, List.of(), null, null, null);
+        service.createAutoScalingGroup(region, name, name, null, null, null, null,
                 0, 1, 0, 300, List.of(region + "a"), List.of(), List.of(), List.of(), "EC2", 0,
                 List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         return service.describeAutoScalingGroups(region, List.of(name)).getFirst();

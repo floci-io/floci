@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"
@@ -526,6 +531,19 @@
     "Engine",
     "NetworkType"
   ],
+  "AWS::ElastiCache::ReplicationGroup": [
+    "AtRestEncryptionEnabled",
+    "CacheSubnetGroupName",
+    "DataTieringEnabled",
+    "GlobalReplicationGroupId",
+    "KmsKeyId",
+    "NetworkType",
+    "Port",
+    "PreferredCacheClusterAZs",
+    "ReplicationGroupId",
+    "SnapshotArns",
+    "SnapshotName"
+  ],
   "AWS::ElastiCache::ServerlessCache": [
     "ServerlessCacheName",
     "KmsKeyId",
@@ -546,6 +564,9 @@
   ],
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
+  ],
+  "AWS::ElasticLoadBalancingV2::ListenerCertificate": [
+    "ListenerArn"
   ],
   "AWS::ElasticLoadBalancingV2::ListenerRule": [
     "ListenerArn"
@@ -888,6 +909,12 @@
   "AWS::S3Vectors::VectorBucket": [
     "VectorBucketName",
     "EncryptionConfiguration"
+  ],
+  "AWS::SES::ConfigurationSet": [
+    "Name"
+  ],
+  "AWS::SES::ConfigurationSetEventDestination": [
+    "ConfigurationSetName"
   ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"

@@ -639,11 +639,8 @@ class CodeArtifactNpmDataPlaneTest {
 
         byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
         String oversizedReadme = "x".repeat(1_000_001);
-        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
-                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
-                + "\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, null,
+                "\"readme\":\"" + oversizedReadme + "\"");
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 envelope);
@@ -681,11 +678,8 @@ class CodeArtifactNpmDataPlaneTest {
 
         byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
         String oversizedReadme = "x".repeat(1_000_001);
-        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
-                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
-                + "\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, null,
+                "\"readme\":\"" + oversizedReadme + "\"");
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 envelope);
@@ -913,8 +907,11 @@ class CodeArtifactNpmDataPlaneTest {
         givenStoredVersion(verdaccioClient, null, "big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content, Map.of());
         startDataPlane(service, verdaccioClient);
 
-        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
-                npmPublishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content));
+        // This streams roughly 94 MiB through HTTP and disk before hashing it. Its correctness
+        // assertion needs a separate deadline from the small routing requests on a busy runner.
+        HttpResponse response = request(HttpMethod.PUT,
+                "/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
+                npmPublishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content), null, 30);
 
         assertEquals(200, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
@@ -1327,7 +1324,8 @@ class CodeArtifactNpmDataPlaneTest {
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
         VerdaccioSidecarManager leases = new VerdaccioSidecarManager(mock(ContainerBuilder.class),
-                mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class));
+                mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class),
+                new CodeArtifactContainerRuns(mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class)).containers());
         leases.registerRepository(NPM_REPOSITORY_ID);
         VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
         doAnswer(call -> {
@@ -1639,6 +1637,11 @@ class CodeArtifactNpmDataPlaneTest {
 
     private HttpResponse request(HttpMethod method, String path, String bearerToken, String body, String accept)
             throws Exception {
+        return request(method, path, bearerToken, body, accept, 6);
+    }
+
+    private HttpResponse request(HttpMethod method, String path, String bearerToken, String body, String accept,
+            int timeoutSeconds) throws Exception {
         RequestOptions options = new RequestOptions()
                 .setHost("127.0.0.1")
                 .setPort(dataPlane.actualPort())
@@ -1659,12 +1662,8 @@ class CodeArtifactNpmDataPlaneTest {
                     resp.headers().forEach(h -> headers.put(h.getKey().toLowerCase(), h.getValue()));
                     return new HttpResponse(resp.statusCode(), buffer.toString(StandardCharsets.UTF_8), headers);
                 }));
-        // 6 seconds, not the 2 used elsewhere in this file: this single wait now covers every
-        // stage of the chain above (request creation, send, body read) rather than one stage each
-        // getting its own 2-second budget the way three separate blocking calls used to, so it
-        // needs the combined allowance to avoid trading the body-read flake this replaced for a
-        // tighter timeout on a busy runner.
-        return responseFuture.toCompletionStage().toCompletableFuture().get(6, TimeUnit.SECONDS);
+        // Bound the complete request chain, including sending and reading the response body.
+        return responseFuture.toCompletionStage().toCompletableFuture().get(timeoutSeconds, TimeUnit.SECONDS);
     }
 
     private record HttpResponse(int statusCode, String body, Map<String, String> headers) {}

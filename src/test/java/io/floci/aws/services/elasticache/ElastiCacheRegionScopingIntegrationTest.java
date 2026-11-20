@@ -11,10 +11,10 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
 /**
- * Replication groups, cache clusters, users and user groups are Regional on AWS: one created in a Region of an
- * account is listed, and found by its id, only from that Region of that account. Each case creates the resource
- * in {@link #HOME} of {@link #ACCOUNT} and checks the unfiltered listing and the id filter from there, from
- * {@link #OTHER_REGION} of the same account, and from {@link #HOME} of {@link #OTHER_ACCOUNT}.
+ * Replication groups, cache clusters, users, user groups and cache parameter groups are Regional on AWS: one
+ * created in a Region of an account is listed, and found by its id, only from that Region of that account. Each case
+ * creates the resource in {@link #HOME} of {@link #ACCOUNT} and checks the unfiltered listing and the id filter from
+ * there, from {@link #OTHER_REGION} of the same account, and from {@link #HOME} of {@link #OTHER_ACCOUNT}.
  */
 @QuarkusTest
 class ElastiCacheRegionScopingIntegrationTest {
@@ -104,6 +104,32 @@ class ElastiCacheRegionScopingIntegrationTest {
     void memcachedCacheClusterIsOnlyVisibleInItsRegionAndAccount() throws InterruptedException {
         requireDocker();
         assertCacheClusterIsRegional("region-scoped-memcached", "memcached");
+    }
+
+    @Test
+    void cacheParameterGroupIsOnlyVisibleInItsRegionAndAccountAndItsNameIsFreeElsewhere() {
+        String name = "region-scoped-params";
+        String[] create = {"CacheParameterGroupName", name, "CacheParameterGroupFamily", "redis7",
+                "Description", "scoped"};
+        send(ACCOUNT, HOME, "CreateCacheParameterGroup", create).then().statusCode(200);
+        try {
+            assertRegional("DescribeCacheParameterGroups", "CacheParameterGroupName", name,
+                    "<CacheParameterGroupName>" + name + "</CacheParameterGroupName>");
+            send(ACCOUNT, OTHER_REGION, "ModifyCacheParameterGroup", "CacheParameterGroupName", name,
+                    "ParameterNameValues.ParameterNameValue.1.ParameterName", "maxmemory-policy",
+                    "ParameterNameValues.ParameterNameValue.1.ParameterValue", "allkeys-lru")
+                    .then().statusCode(404);
+            send(ACCOUNT, OTHER_REGION, "DeleteCacheParameterGroup", "CacheParameterGroupName", name)
+                    .then().statusCode(404);
+
+            send(ACCOUNT, OTHER_REGION, "CreateCacheParameterGroup", create).then().statusCode(200);
+            send(ACCOUNT, OTHER_REGION, "DeleteCacheParameterGroup", "CacheParameterGroupName", name)
+                    .then().statusCode(200);
+            send(ACCOUNT, HOME, "DescribeCacheParameterGroups", "CacheParameterGroupName", name)
+                    .then().statusCode(200);
+        } finally {
+            send(ACCOUNT, HOME, "DeleteCacheParameterGroup", "CacheParameterGroupName", name).then().statusCode(200);
+        }
     }
 
     private static void assertCacheClusterIsRegional(String cluster, String engine) {

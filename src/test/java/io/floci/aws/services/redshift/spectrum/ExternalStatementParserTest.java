@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ExternalStatementParserTest {
@@ -18,6 +19,46 @@ class ExternalStatementParserTest {
         assertThat(schema.schemaName(), equalTo("analytics"));
         assertThat(schema.glueDatabase(), equalTo("lake"));
         assertThat(schema.createDatabaseIfNotExists(), equalTo(true));
+    }
+
+    @Test
+    void parsesCreateExternalSchemaFromKinesis() {
+        ExternalStatement.CreateKinesisSchema schema = (ExternalStatement.CreateKinesisSchema) parser.parse(
+                "CREATE EXTERNAL SCHEMA Kds FROM KINESIS IAM_ROLE 'arn:aws:iam::000000000000:role/R';").orElseThrow();
+        assertThat(schema.schemaName(), equalTo("kds"));
+        assertThat(schema.iamRoleArn(), equalTo("arn:aws:iam::000000000000:role/R"));
+        assertThat(schema.region(), nullValue());
+        assertThat(schema.ifNotExists(), equalTo(false));
+    }
+
+    @Test
+    void parsesKinesisSchemaWithRegionAndIfNotExists() {
+        ExternalStatement.CreateKinesisSchema schema = (ExternalStatement.CreateKinesisSchema) parser.parse(
+                "create external schema if not exists \"Kds\"\nfrom kinesis\nregion 'us-west-2'\n"
+                        + "iam_role 'arn:aws:iam::000000000000:role/R'").orElseThrow();
+        assertThat(schema.schemaName(), equalTo("Kds"));
+        assertThat(schema.region(), equalTo("us-west-2"));
+        assertThat(schema.ifNotExists(), equalTo(true));
+    }
+
+    @Test
+    void rejectsTheDefaultRoleOfAKinesisSchema() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> parser.parse("CREATE EXTERNAL SCHEMA kds FROM KINESIS IAM_ROLE default"));
+        assertThat(error.sqlState(), equalTo("0A000"));
+    }
+
+    @Test
+    void rejectsAKinesisSchemaWithoutAQuotedRole() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> parser.parse("CREATE EXTERNAL SCHEMA kds FROM KINESIS IAM_ROLE arn:aws:iam::000000000000:role/R"));
+        assertThat(error.sqlState(), equalTo("42601"));
+    }
+
+    @Test
+    void doesNotTreatAKinesisSchemaAsADataCatalogSchema() {
+        assertThat(parser.parse("CREATE EXTERNAL SCHEMA kds FROM KINESIS IAM_ROLE 'arn:aws:iam::000000000000:role/R'")
+                .orElseThrow() instanceof ExternalStatement.CreateSchema, equalTo(false));
     }
 
     @Test

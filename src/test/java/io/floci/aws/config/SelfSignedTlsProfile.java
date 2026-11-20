@@ -16,22 +16,45 @@ import java.util.Map;
 
 /**
  * TLS on in Floci's self-signed mode, for the classes that test what it serves. Quarkus builds the
- * application once per distinct profile class, so they share one rather than each declaring their
- * own.
+ * application once per distinct profile class, and keeps every one it built for the rest of the
+ * test JVM, so they share this one rather than each declaring their own.
  *
  * <p>Under {@code @QuarkusTest} the server serves the leaf this class writes before boot, issued by
  * the local CA in {@link #TLS_DIR}. It carries the SANs {@link TlsConfigSource} uses by default,
- * which cover the CloudFront and ECR hosts, except {@code 127.0.0.1}, plus the API Gateway custom
- * domain {@link TlsHttp2HostRoutingIntegrationTest} routes to. The default wildcards cover one label only,
- * so a name two labels below {@code localhost.floci.io} stays uncovered until a test adds it. Each
- * run writes a fresh leaf and metadata, which also drops hostnames an earlier run learned at
- * runtime, so a name a test expects to be absent at boot really is. The CA is kept.
+ * which cover the CloudFront and ECR hosts and {@code host.docker.internal}, except
+ * {@code 127.0.0.1}, plus the API Gateway custom domain {@link TlsHttp2HostRoutingIntegrationTest}
+ * routes to. The default wildcards cover one label only, so a name two labels below
+ * {@code localhost.floci.io} stays uncovered until a test adds it. Each run writes a fresh leaf and
+ * metadata, which also drops hostnames an earlier run learned at runtime, so a name a test expects
+ * to be absent at boot really is. The CA is kept. Next to it go the CA bundle and the Java trust
+ * store Floci mounts into the containers it launches.
  *
- * <p>{@link EcrTlsDataPlaneDockerIntegrationTest} pushes through the ECR registry container, which
- * by default outlives the application and is adopted by name on the next start. This profile names
- * it in this run's {@link SidecarContainersProfile#namespace() sidecar namespace} and stops it at
- * shutdown, so the test never pushes into a registry a developer's Floci or another run owns and
- * leaves none behind. The other classes start no containers, so both overrides are inert for them.
+ * <p>The overrides, and who relies on them:
+ * <ul>
+ *   <li>{@code floci.tls.*}, the two {@code quarkus.tls.key-store} entries and
+ *   {@code floci.storage.persistent-path} serve that leaf on HTTPS, with the CA it was issued by
+ *   behind {@code GET /_floci/ca.pem}, and keep plain HTTP served beside it. Every class here
+ *   relies on them. {@code aws-https-port=0} keeps the TLS proxy from also binding 443, which an
+ *   unprivileged test JVM cannot do and no class here uses.</li>
+ *   <li>{@code floci.docker.resource-namespace} and
+ *   {@code floci.services.ecr.keep-running-on-shutdown=false} name the ECR registry container in
+ *   this run's {@link SidecarContainersProfile#namespace() sidecar namespace} and stop it at
+ *   shutdown. By default it outlives the application and is adopted by name on the next start.
+ *   {@link EcrTlsDataPlaneDockerIntegrationTest} pushes through it, and relies on them so it never
+ *   pushes into a registry a developer's Floci or another run owns, and leaves none behind.</li>
+ *   <li>{@code floci.services.ecr.tls-uri=true} advertises a repository and the login endpoint on
+ *   {@code localhost.floci.io} over HTTPS. {@link EcrTlsUriIntegrationTest} relies on it.</li>
+ * </ul>
+ *
+ * <p>Each is inert where no class relies on it. Only the ECR data plane class starts the registry
+ * container, and only {@code ContainerCaBundleDockerIntegrationTest} starts any other container.
+ * The repository URI setting is read by ECR's control plane and by EKS, and only
+ * {@link EcrTlsUriIntegrationTest} calls either: the data plane class talks to the registry
+ * endpoint directly.
+ *
+ * <p>A class joins if every setting here is either one it relies on or one that never reaches its
+ * requests, and if any setting it adds never reaches the requests of a class already here. A class
+ * that needs {@code 127.0.0.1} in the leaf takes {@code IotMqttTlsProfile}.
  *
  * <p>The paths are compile-time constants so a test can use them without initializing this class,
  * which would write a new leaf under the running application.
@@ -62,7 +85,7 @@ public class SelfSignedTlsProfile implements QuarkusTestProfile {
             Files.writeString(tlsDir.resolve("floci-server.key"), leaf.privateKeyPem());
             Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
                     new ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
-            ContainerCaBundle.write(tlsDir, ca.certificatePath());
+            ContainerCaBundle.writeJavaTrustStore(ContainerCaBundle.write(tlsDir, ca.certificatePath()));
         } catch (IOException | GeneralSecurityException e) {
             throw new IllegalStateException("Could not prepare the TLS fixtures in " + tlsDir, e);
         }
@@ -71,15 +94,16 @@ public class SelfSignedTlsProfile implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
         Path tlsDir = Path.of(TLS_DIR).toAbsolutePath();
-        return Map.of(
-                "floci.tls.enabled", "true",
-                "floci.tls.self-signed", "true",
-                "floci.tls.aws-https-port", "0",
-                "floci.storage.persistent-path", Path.of(DATA_DIR).toAbsolutePath().toString(),
-                "quarkus.tls.key-store.pem.0.cert", tlsDir.resolve("floci-server.crt").toString(),
-                "quarkus.tls.key-store.pem.0.key", tlsDir.resolve("floci-server.key").toString(),
-                "quarkus.http.insecure-requests", "enabled",
-                "floci.docker.resource-namespace", SidecarContainersProfile.namespace(),
-                "floci.services.ecr.keep-running-on-shutdown", "false");
+        return Map.ofEntries(
+                Map.entry("floci.tls.enabled", "true"),
+                Map.entry("floci.tls.self-signed", "true"),
+                Map.entry("floci.tls.aws-https-port", "0"),
+                Map.entry("floci.storage.persistent-path", Path.of(DATA_DIR).toAbsolutePath().toString()),
+                Map.entry("quarkus.tls.key-store.pem.0.cert", tlsDir.resolve("floci-server.crt").toString()),
+                Map.entry("quarkus.tls.key-store.pem.0.key", tlsDir.resolve("floci-server.key").toString()),
+                Map.entry("quarkus.http.insecure-requests", "enabled"),
+                Map.entry("floci.docker.resource-namespace", SidecarContainersProfile.namespace()),
+                Map.entry("floci.services.ecr.keep-running-on-shutdown", "false"),
+                Map.entry("floci.services.ecr.tls-uri", "true"));
     }
 }

@@ -105,12 +105,12 @@ public class RegionResolver {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return defaultRegion;
         }
+        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
+            return defaultRegion;
+        }
         String region = SigV4CredentialScope.segment(authorizationHeader, SigV4CredentialScope.Segment.THIRD);
         if (region != null) {
             return withoutPseudoRegion(region);
-        }
-        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
-            return defaultRegion;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
         return matcher.find() ? withoutPseudoRegion(matcher.group(1)) : defaultRegion;
@@ -198,12 +198,12 @@ public class RegionResolver {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return null;
         }
+        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
+            return null;
+        }
         String region = SigV4CredentialScope.segment(authorizationHeader, SigV4CredentialScope.Segment.THIRD);
         if (region != null) {
             return withoutPseudoRegion(region);
-        }
-        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
-            return null;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
         return matcher.find() ? withoutPseudoRegion(matcher.group(1)) : null;
@@ -299,6 +299,19 @@ public class RegionResolver {
             }
         }
         return defaultRegion;
+    }
+
+    /**
+     * The Region {@code arn} names: the default Region for a record stored without an ARN, or with one that names
+     * none, as records stored before their service kept them per Region are.
+     */
+    public String regionOf(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, getDefaultRegion());
+    }
+
+    /** Whether a resource whose ARN is {@code arn} is of the request's Region, as {@link #regionOf} reads it. */
+    public boolean inRequestRegion(String arn) {
+        return getRegion().equals(regionOf(arn));
     }
 
     /**

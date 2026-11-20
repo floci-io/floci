@@ -30,8 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Integration tests for the four SES v2 export-job operations.
  *
  * <p>Probe-confirmed against real SES (2026-09-23): a request naming its own {@code S3Url} is
- * refused, exactly one data source is required, the metrics source insists on whole UTC days, an
- * unknown job is a 400 rather than a 404, and a finished job cannot be cancelled. Uses an isolated
+ * refused, exactly one data source is required, the metrics source insists on whole UTC days, and
+ * a finished job cannot be cancelled. Probed again 2026-11-14: an unknown job is a 404 when its id
+ * is shaped like a UUID and a 400 otherwise, on the read and on the cancel alike. Uses an isolated
  * signing region so no other test's sends reach the exported rows.
  */
 @QuarkusTest
@@ -273,9 +274,21 @@ class SesExportJobV2IntegrationTest {
 
     @Test
     @Order(9)
-    void getExportJob_unknownJobIsABadRequest() {
+    void unknownJob_isNotFoundWhenTheIdIsShapedLikeOne() {
+        String unknown = "7b9563a7-12fc-4129-ab8c-bd4783006c08";
+        given().header("Authorization", AUTH)
+        .when().get("/v2/email/export-jobs/" + unknown).then().statusCode(404)
+                .header("x-amzn-ErrorType", equalTo("NotFoundException"))
+                .body("message", equalTo("Job ID: <" + unknown + "> not found"));
+        given().contentType("application/json").header("Authorization", AUTH)
+        .when().put("/v2/email/export-jobs/" + unknown + "/cancel").then().statusCode(404)
+                .body("message", equalTo("Job ID: <" + unknown + "> not found"));
+
         given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/no-such-job").then().statusCode(400)
+                .body("message", equalTo("Invalid JobId"));
+        given().contentType("application/json").header("Authorization", AUTH)
+        .when().put("/v2/email/export-jobs/no-such-job/cancel").then().statusCode(400)
                 .body("message", equalTo("Invalid JobId"));
     }
 
@@ -463,7 +476,7 @@ class SesExportJobV2IntegrationTest {
 
         // The default account cannot see it.
         given().header("Authorization", AUTH)
-        .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(400);
+        .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(404);
 
         given().contentType("application/json").header("Authorization", otherAccount)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")

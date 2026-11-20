@@ -35,7 +35,8 @@ import static org.mockito.Mockito.when;
  * and Roles are applied, a role swap reconciles in place, a createOnly change (name, or path on an
  * auto-named profile, or a dropped name) replaces the profile and marks the old one for cleanup, a
  * path change that keeps an explicit name collides with EntityAlreadyExists, a missing Roles is
- * rejected, and delete detaches roles before removing the profile.
+ * rejected, and delete detaches roles before removing the profile, tolerating a pairing another
+ * caller detached first while still stopping where the profile itself has gone.
  */
 class IamInstanceProfileCfnProvisionerTest {
 
@@ -285,6 +286,54 @@ class IamInstanceProfileCfnProvisionerTest {
         AwsException failure = assertThrows(AwsException.class,
                 () -> provisioner.delete(TYPE, "web", "us-east-1"));
         assertEquals("DeleteConflict", failure.getErrorCode());
+    }
+
+    @Test
+    void deleteToleratesAPairingDetachedWhileTheProfileStands() {
+        InstanceProfile withRole = profile("web", "/");
+        withRole.getRoleNames().add("app-role");
+        when(iam.getInstanceProfile("web")).thenReturn(withRole);
+        doThrow(new AwsException("NoSuchEntity",
+                "Role app-role in Instance Profile web cannot be found.", 404))
+                .when(iam).removeRoleFromInstanceProfile("web", "app-role");
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "web", "us-east-1"));
+
+        verify(iam).deleteInstanceProfile("web");
+    }
+
+    @Test
+    void deleteStopsWhereTheProfileWentWithThePairing() {
+        InstanceProfile withRole = profile("web", "/");
+        withRole.getRoleNames().add("app-role");
+        when(iam.getInstanceProfile("web")).thenReturn(withRole)
+                .thenThrow(new AwsException("NoSuchEntity", "gone", 404));
+        doThrow(new AwsException("NoSuchEntity", "gone", 404))
+                .when(iam).removeRoleFromInstanceProfile("web", "app-role");
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "web", "us-east-1"));
+
+        verify(iam, never()).deleteInstanceProfile("web");
+    }
+
+    @Test
+    void aPairingDetachedDuringAnUpdateDoesNotStopTheReconcile() throws Exception {
+        InstanceProfile existing = profile("web", "/");
+        existing.getRoleNames().add("old-role");
+        when(iam.createInstanceProfile("web", "/"))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getInstanceProfile("web")).thenReturn(existing);
+        doThrow(new AwsException("NoSuchEntity",
+                "Role old-role in Instance Profile web cannot be found.", 404))
+                .when(iam).removeRoleFromInstanceProfile("web", "old-role");
+
+        StackResource r = resource();
+        r.setPhysicalId("web");
+        provisioner.provision(r, props("""
+                {"InstanceProfileName": "web", "Roles": ["new-role"]}
+                """), ctx("web"));
+
+        verify(iam).addRoleToInstanceProfile("web", "new-role");
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {

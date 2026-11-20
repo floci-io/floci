@@ -6,9 +6,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ses.mime.SesMimeEncoding;
+import io.floci.aws.services.ses.mime.SesMimeEncoding.TransferEncoding;
 import io.floci.aws.services.ses.model.EmailContent;
 import io.floci.aws.services.ses.model.EmailTemplate;
 import io.floci.aws.services.ses.model.Tag;
@@ -16,17 +19,17 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -45,14 +48,23 @@ import java.util.regex.Pattern;
  * {@link SecureRandom} (no static instance, so no native-image run-time-init registration).
  *
  * <p>Tag validation is a shared cross-resource concern, so {@code createTemplate} calls
- * {@link SesTags#validate} rather than depending back on the facade.
+ * {@link SesTags} rather than depending back on the facade.
  */
 @ApplicationScoped
 public class SesTemplateService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesTemplateService.class);
 
-    private static final Pattern TEMPLATE_VARIABLE = Pattern.compile("\\{\\{\\s*([\\w-]+)\\s*\\}\\}");
+    // The triple-stash form comes first so its braces are consumed with the variable. SES renders
+    // both forms verbatim, without HTML escaping (probed on us-west-2, 2026-11-17).
+    private static final Pattern TEMPLATE_VARIABLE = Pattern.compile(
+            "\\{\\{\\{\\s*([\\w-]+)\\s*\\}\\}\\}|\\{\\{\\s*([\\w-]+)\\s*\\}\\}");
+    private static final DateTimeFormatter RENDER_DATE =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSX", Locale.ROOT).withZone(ZoneOffset.UTC);
+    private static final Pattern SUBJECT_WHITESPACE_RUN = Pattern.compile("[ \\t\\r\\n]+");
+    static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
+    // What TestRenderTemplate shows in place of the list-management link a send would carry.
+    private static final String TEST_RENDER_UNSUBSCRIBE_URL = "http://unsubscribe.example.com";
 
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final ObjectMapper objectMapper;
@@ -73,13 +85,18 @@ public class SesTemplateService implements SesTaggable {
         this.clock = clock;
     }
 
-    public EmailTemplate createTemplate(EmailTemplate template, String region) {
+    public EmailTemplate createTemplate(EmailTemplate template, String region, String accountId) {
+        requirePresent(template);
+        // SES checks the tags before the template itself, except for a reserved key, which it
+        // refuses after the template, before it looks the name up, and in words of its own.
+        SesTags.validateIgnoringSystemKeys(template.getTags());
         validateTemplate(template);
-        SesTags.validate(template.getTags());
+        dropEmptyParts(template);
+        SesTags.requireNoSystemKeys(template.getTags(), "Invalid tags");
         String key = templateKey(region, template.getTemplateName());
         if (templateStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExists",
-                    "Template " + template.getTemplateName() + " already exists.", 400);
+                    "Template " + template.getTemplateName() + " already exists for account id " + accountId, 400);
         }
         Instant now = Instant.now(clock);
         template.setCreatedTimestamp(now);
@@ -90,19 +107,25 @@ public class SesTemplateService implements SesTaggable {
     }
 
     public EmailTemplate getTemplate(String templateName, String region) {
+        validateTemplateName(templateName);
+        return stored(templateName, region);
+    }
+
+    private EmailTemplate stored(String templateName, String region) {
         return templateStore.get(templateKey(region, templateName))
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
                         "Template " + templateName + " does not exist.", 400));
     }
 
     EmailContent.InlineTemplate inline(EmailContent.Template template, String region) {
-        EmailTemplate stored = getTemplate(template.templateName(), region);
+        EmailTemplate stored = stored(template.templateName(), region);
         return new EmailContent.InlineTemplate(stored.getSubject(), stored.getTextPart(),
                 stored.getHtmlPart(), template.templateData(), template.headers());
     }
 
     public EmailTemplate updateTemplate(EmailTemplate template, String region) {
         validateTemplate(template);
+        dropEmptyParts(template);
         String key = templateKey(region, template.getTemplateName());
         EmailTemplate existing = templateStore.get(key)
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
@@ -118,6 +141,7 @@ public class SesTemplateService implements SesTaggable {
     }
 
     public void deleteTemplate(String templateName, String region) {
+        validateTemplateName(templateName);
         String key = templateKey(region, templateName);
         if (templateStore.get(key).isEmpty()) {
             throw new AwsException("TemplateDoesNotExist",
@@ -160,33 +184,55 @@ public class SesTemplateService implements SesTaggable {
         templateStore.put(templateKey(region, template.getTemplateName()), template);
     }
 
-    private static void validateTemplate(EmailTemplate template) {
+    private static void requirePresent(EmailTemplate template) {
         if (template == null) {
             throw new AwsException("InvalidTemplate", "Template is required.", 400);
         }
+    }
+
+    private static void validateTemplate(EmailTemplate template) {
+        requirePresent(template);
         validateTemplateName(template.getTemplateName());
-        boolean hasSubject = template.getSubject() != null && !template.getSubject().isBlank();
+        // SES asks for the subject first, then for a part, and a blank value counts as missing.
+        if (template.getSubject() == null || template.getSubject().isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The subject must be specified.", 400);
+        }
         boolean hasText = template.getTextPart() != null && !template.getTextPart().isBlank();
         boolean hasHtml = template.getHtmlPart() != null && !template.getHtmlPart().isBlank();
-        if (!hasSubject && !hasText && !hasHtml) {
-            throw new AwsException("InvalidTemplate",
-                    "Template must have at least a subject, text, or html part.", 400);
+        if (!hasText && !hasHtml) {
+            throw new AwsException("InvalidParameterValue",
+                    "Template must specify at least one of the parts.", 400);
         }
     }
 
+    /**
+     * SES stores an empty part as no part: a template sent with {@code Text: ""} beside an HTML
+     * part reads back without {@code Text}. A whitespace-only part beside another one is kept.
+     */
+    private static void dropEmptyParts(EmailTemplate template) {
+        if (template.getTextPart() != null && template.getTextPart().isEmpty()) {
+            template.setTextPart(null);
+        }
+        if (template.getHtmlPart() != null && template.getHtmlPart().isEmpty()) {
+            template.setHtmlPart(null);
+        }
+    }
+
+    /**
+     * The name rules create, update, get, delete and test-render apply before anything else, in
+     * SES's order: blank, then longer than {@value SesNames#MAX_LENGTH}, then a character
+     * outside ASCII letters, digits, '_' and '-'. The sends, the tag operations and the tenant
+     * association read a template without them: what SES answers there for such a name is not known.
+     */
     private static void validateTemplateName(String templateName) {
         if (templateName == null || templateName.isBlank()) {
-            throw new AwsException("InvalidTemplate", "TemplateName is required.", 400);
+            throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
         }
-        if (Character.isWhitespace(templateName.charAt(0))
-                || Character.isWhitespace(templateName.charAt(templateName.length() - 1))) {
-            throw new AwsException("InvalidTemplate",
-                    "TemplateName must not contain leading or trailing whitespace.", 400);
-        }
+        SesNames.requireMaxLength(templateName, "InvalidParameterValue", "Template name");
+        SesNames.requireAllowedCharacters(templateName, "InvalidParameterValue", "Template name");
     }
 
     private static String templateKey(String region, String templateName) {
-        validateTemplateName(templateName);
         return "template::" + region + "::" + templateName;
     }
 
@@ -211,6 +257,46 @@ public class SesTemplateService implements SesTaggable {
                     "TemplateArn is missing a template name: " + arn, 400);
         }
         return name;
+    }
+
+    /**
+     * The template a v2 send's {@code TemplateArn} names. SES checks the ARN's partition, service,
+     * region and resource type, each with a message of its own, and not its account
+     * (probe-confirmed). The order among several mismatches at once is not probed.
+     */
+    public static String sendTemplateNameFromArn(String arn, String region) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
+            throw new AwsException("InvalidParameterValue", "ARNs must start with 'arn:': " + arn, 400);
+        }
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "TemplateArn is not a valid SES template ARN: " + arn, 400);
+        }
+        String partition = AwsRegions.partitionFor(region);
+        if (!partition.equals(parsed.partition())) {
+            throw invalidTemplateArn(arn, "Partition should be <" + partition + ">");
+        }
+        if (!"ses".equals(parsed.service())) {
+            throw invalidTemplateArn(arn, "Vendor should be <ses>");
+        }
+        if (!region.equals(parsed.region())) {
+            throw invalidTemplateArn(arn, "Template must be in region <" + region + ">");
+        }
+        if (!parsed.resource().startsWith("template/")) {
+            throw invalidTemplateArn(arn, "Relative ID should start with <template/>");
+        }
+        String name = parsed.resource().substring("template/".length());
+        if (name.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "The template name must be specified.", 400);
+        }
+        return name;
+    }
+
+    private static AwsException invalidTemplateArn(String arn, String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid template ARN <" + arn + ">. " + reason, 400);
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */
@@ -247,17 +333,34 @@ public class SesTemplateService implements SesTaggable {
 
     // ──────────────────────── Rendering (TestRenderTemplate + send-path substitution) ────────────────────────
 
-    public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
-        EmailTemplate template = getTemplate(templateName, region);
+    public String renderTestTemplate(String templateName, String templateDataRaw, String region,
+                                     String accountId) {
+        validateTemplateName(templateName);
+        // The rendering data is read before the template is looked up: both wrong answers the data error.
         JsonNode templateData = parseRenderingData(objectMapper, templateDataRaw);
-        String subject = applyTemplateData(template.getSubject(), templateData);
-        String text = applyTemplateData(template.getTextPart(), templateData);
-        String html = applyTemplateData(template.getHtmlPart(), templateData);
-        return buildTestRenderMime(subject, text, html, ZonedDateTime.now(ZoneOffset.UTC), nextBoundary());
+        // TestRenderTemplate words a missing template its own way, unlike the template CRUD.
+        EmailTemplate template = templateStore.get(templateKey(region, templateName))
+                .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
+                        "Unable to find <" + templateName + "> for <" + accountId + ">", 400));
+        String subject = applyTemplateData(template.getSubject(), templateData, TEST_RENDER_UNSUBSCRIBE_URL);
+        String text = renderStoredPart(template.getTextPart(), templateData);
+        String html = renderStoredPart(template.getHtmlPart(), templateData);
+        return buildTestRenderMime(subject, text, html, Instant.now(clock), nextBoundary());
+    }
+
+    /**
+     * Null when the template has no such part. A stored part stays a part of the message whatever
+     * it renders to: SES writes a whitespace-only part, and one whose variables render to nothing.
+     */
+    private static String renderStoredPart(String stored, JsonNode templateData) {
+        if (stored == null || stored.isEmpty()) {
+            return null;
+        }
+        return applyTemplateData(stored, templateData, TEST_RENDER_UNSUBSCRIBE_URL);
     }
 
     static JsonNode parseRenderingData(ObjectMapper mapper, String raw) {
-        if (raw == null || raw.isBlank()) {
+        if (raw == null) {
             throw new AwsException("InvalidRenderingParameter",
                     "Template rendering data is required.", 400);
         }
@@ -265,14 +368,18 @@ public class SesTemplateService implements SesTaggable {
         try {
             node = mapper.readTree(raw);
         } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidRenderingParameter",
-                    "Template rendering data is invalid: " + e.getOriginalMessage(), 400);
+            LOG.debugv("Template rendering data is not JSON: {0}", e.getOriginalMessage());
+            throw invalidRenderingData();
         }
-        if (!node.isObject()) {
-            throw new AwsException("InvalidRenderingParameter",
-                    "Template rendering data must be a JSON object.", 400);
+        // An empty string and a JSON value that is not an object get the same answer as malformed JSON.
+        if (node == null || !node.isObject()) {
+            throw invalidRenderingData();
         }
         return node;
+    }
+
+    private static AwsException invalidRenderingData() {
+        return new AwsException("InvalidRenderingParameter", "Template rendering data is invalid", 400);
     }
 
     static EmailContent.Simple render(EmailContent.InlineTemplate template) {
@@ -283,19 +390,23 @@ public class SesTemplateService implements SesTaggable {
                 template.headers());
     }
 
+    /** Send-path substitution: the list-management placeholder stays, in its canonical form, for the send to fill. */
     static String applyTemplateData(String text, JsonNode data) {
+        return applyTemplateData(text, data, UNSUBSCRIBE_PLACEHOLDER);
+    }
+
+    static String applyTemplateData(String text, JsonNode data, String unsubscribeReplacement) {
         if (text == null || text.isEmpty()) {
             return text;
         }
         Matcher matcher = TEMPLATE_VARIABLE.matcher(text);
         StringBuilder out = new StringBuilder();
         while (matcher.find()) {
-            String key = matcher.group(1);
+            String key = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
             if ("amazonSESUnsubscribeUrl".equals(key)) {
-                // Reserved list-management placeholder: leave it intact for post-render replacement
-                // in the send path, so a templated body can carry {{amazonSESUnsubscribeUrl}} without
-                // failing as a missing rendering attribute.
-                matcher.appendReplacement(out, Matcher.quoteReplacement(matcher.group(0)));
+                // Reserved list-management placeholder, never a missing rendering attribute. The
+                // triple-stash and spaced spellings are the same placeholder.
+                matcher.appendReplacement(out, Matcher.quoteReplacement(unsubscribeReplacement));
                 continue;
             }
             if (data == null || !data.hasNonNull(key)) {
@@ -310,62 +421,56 @@ public class SesTemplateService implements SesTaggable {
         return out.toString();
     }
 
+    /**
+     * A template with both a text and an HTML part renders as multipart/alternative. One with a
+     * single part renders as that part alone, with nothing after its encoded body. A null part
+     * is absent; an empty or blank one is written as it is.
+     */
     static String buildTestRenderMime(String subject, String text, String html,
-                                       ZonedDateTime date, String boundary) {
-        String safeSubject = sanitizeSubject(subject);
-        String safeText = text == null ? "" : text;
-        String safeHtml = html == null ? "" : html;
-        String dateHeader = DateTimeFormatter.RFC_1123_DATE_TIME.format(date);
+                                       Instant date, String boundary) {
+        boolean hasText = text != null;
+        boolean hasHtml = html != null;
         StringBuilder out = new StringBuilder();
-        out.append("Date: ").append(dateHeader).append("\r\n");
-        out.append("Subject: ").append(safeSubject).append("\r\n");
+        out.append("Date: ").append(RENDER_DATE.format(date)).append("\r\n");
+        out.append("Subject: ").append(SesMimeEncoding.encodeSubject(sanitizeSubject(subject))).append("\r\n");
         out.append("MIME-Version: 1.0\r\n");
-        out.append("Content-Type: multipart/alternative; boundary=\"").append(boundary).append("\"\r\n");
-        out.append("\r\n");
-        appendMimePart(out, boundary, "text/plain", safeText);
-        appendMimePart(out, boundary, "text/html", safeHtml);
-        out.append("--").append(boundary).append("--\r\n");
+        if (hasText && hasHtml) {
+            out.append("Content-Type: multipart/alternative; \r\n\tboundary=\"").append(boundary).append("\"\r\n");
+            out.append("\r\n");
+            out.append("--").append(boundary).append("\r\n");
+            appendEntity(out, "text/plain", text);
+            out.append("\r\n--").append(boundary).append("\r\n");
+            appendEntity(out, "text/html", html);
+            out.append("\r\n--").append(boundary).append("--\r\n");
+        } else if (hasHtml) {
+            appendEntity(out, "text/html", html);
+        } else {
+            appendEntity(out, "text/plain", text == null ? "" : text);
+        }
         return out.toString();
     }
 
-    private static void appendMimePart(StringBuilder out, String boundary, String mimeType, String body) {
-        out.append("--").append(boundary).append("\r\n");
+    private static void appendEntity(StringBuilder out, String mimeType, String body) {
+        byte[] octets = body.getBytes(StandardCharsets.UTF_8);
+        TransferEncoding transferEncoding = TransferEncoding.of(octets);
         out.append("Content-Type: ").append(mimeType).append("; charset=UTF-8\r\n");
-        out.append("Content-Transfer-Encoding: ").append(pickTransferEncoding(body)).append("\r\n");
+        out.append("Content-Transfer-Encoding: ").append(transferEncoding.headerValue()).append("\r\n");
         out.append("\r\n");
-        String normalized = normalizeToCrlf(body);
-        out.append(normalized);
-        if (!normalized.endsWith("\r\n")) {
-            out.append("\r\n");
-        }
-    }
-
-    static String normalizeToCrlf(String body) {
-        return body.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n");
-    }
-
-    static String pickTransferEncoding(String body) {
-        return body.codePoints().allMatch(c -> c < 128) ? "7bit" : "8bit";
+        out.append(transferEncoding.encode(octets));
     }
 
     static String sanitizeSubject(String subject) {
         if (subject == null) {
             return "";
         }
-        // Strip C0 control characters (U+0000-U+001F) and DEL (U+007F): RFC 5322
-        // forbids them in unstructured header field bodies. Replace with spaces so
-        // visible content is preserved when template data accidentally injects them.
-        StringBuilder out = new StringBuilder(subject.length());
-        for (int i = 0; i < subject.length(); i++) {
-            char c = subject.charAt(i);
-            out.append((c < 0x20 || c == 0x7F) ? ' ' : c);
-        }
-        return out.toString();
+        // SES writes every run of spaces, tabs and line breaks in the Subject as one space, so a
+        // value cannot break the header. Any other control character stays and is written inside
+        // an encoded word.
+        return SUBJECT_WHITESPACE_RUN.matcher(subject).replaceAll(" ");
     }
 
     private String nextBoundary() {
-        byte[] bytes = new byte[6];
-        boundaryRandom.nextBytes(bytes);
-        return "===_floci_" + HexFormat.of().formatHex(bytes) + "_===";
+        return "----=_Part_" + boundaryRandom.nextInt(10_000) + "_" + boundaryRandom.nextInt(Integer.MAX_VALUE)
+                + "." + clock.millis();
     }
 }

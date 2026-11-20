@@ -67,26 +67,356 @@ aliases:
 # row lands - don't wait for it to expire.
 deferred: []
 
-# Non-tabular pages with one Query/JSON action dispatcher per numeric base row.
-# These counts are checked against the handler switch, without flattening the
-# grouped documentation. Anchored and mixed-dispatch rows need separate rules.
-# Paths are relative to the Java package root, PACKAGE_DIR in tools/java_sources.py.
+# Rows whose count is checked against the dispatchers behind them, without
+# flattening the grouped or multi-table page into one generated table. The key is the
+# row's link target: `slug`, or `slug#anchor` for a row linking to a section of a page
+# that documents more than one service. A value is one switch dispatcher's path, or a
+# mapping with:
+#   sources:         paths, or `{ path, mode }` for another regen_action_docs.py mode:
+#                    `rest` (JAX-RS methods, optionally narrowed by `route_prefix` or
+#                    `skip_route_prefix`), `map_entries`, or `tag_handler` (a TagHandler
+#                    class, for which the shared /tags controllers serve TagResource,
+#                    UntagResource and ListTagsForResource)
+#   rename_actions:  a method not named after its AWS action, or a list for a method
+#                    serving several actions picked by a query parameter
+#   exclude_actions: labels or methods that are not actions of the row
+# Every row of the matrix needs a generated action table, an entry here, or a
+# hand_counted entry below. Paths are relative to the Java package root, PACKAGE_DIR
+# in tools/java_sources.py.
 action_count_sources:
+  amazonmq:
+    sources:
+      - { path: services/amazonmq/AmazonMqController.java, mode: rest }
+    exclude_actions:                    # BadRequestException for RabbitMQ brokers, as on AWS
+      - CreateUser
+      - DescribeUser
+      - ListUsers
+      - DeleteUser
+  api-gateway:                          # v1; the same controller serves v2 under /v2/
+    sources:
+      - { path: services/apigateway/ApiGatewayController.java, mode: rest, skip_route_prefix: /v2/ }
+      - { path: services/apigateway/ApiGatewayTagHandler.java, mode: tag_handler }
+    rename_actions:
+      CreateRestApi: [CreateRestApi, ImportRestApi]   # mode=import
+      PostApiKeys: [CreateApiKey, ImportApiKeys]      # mode=import
+      CreateV1VpcLink: CreateVpcLink
+      GetV1VpcLinks: GetVpcLinks
+      GetV1VpcLink: GetVpcLink
+      UpdateV1VpcLink: UpdateVpcLink
+      DeleteV1VpcLink: DeleteVpcLink
+      ListTagsForResource: GetTags
+  api-gateway#v2:
+    sources:
+      - { path: services/apigateway/ApiGatewayController.java, mode: rest, route_prefix: /v2/ }
+      - services/apigatewayv2/ApiGatewayV2JsonHandler.java
+    rename_actions:
+      CreateV2Authorizer: CreateAuthorizer
+      GetV2Authorizer: GetAuthorizer
+      GetV2Authorizers: GetAuthorizers
+      UpdateV2Authorizer: UpdateAuthorizer
+      DeleteV2Authorizer: DeleteAuthorizer
+      CreateV2Deployment: CreateDeployment
+      GetV2Deployment: GetDeployment
+      GetV2Deployments: GetDeployments
+      UpdateV2Deployment: UpdateDeployment
+      DeleteV2Deployment: DeleteDeployment
+      CreateV2DomainName: CreateDomainName
+      GetV2DomainName: GetDomainName
+      GetV2DomainNames: GetDomainNames
+      UpdateV2DomainName: UpdateDomainName
+      DeleteV2DomainName: DeleteDomainName
+      CreateV2Model: CreateModel
+      GetV2Model: GetModel
+      GetV2Models: GetModels
+      UpdateV2Model: UpdateModel
+      DeleteV2Model: DeleteModel
+      CreateV2Stage: CreateStage
+      GetV2Stage: GetStage
+      GetV2Stages: GetStages
+      UpdateV2Stage: UpdateStage
+      DeleteV2Stage: DeleteStage
+      UpdateV2Integration: UpdateIntegration
+      GetTagsForResource: GetTags
+  appconfig:
+    sources:
+      - { path: services/appconfig/AppConfigController.java, mode: rest }
+      - { path: services/appconfig/AppConfigTagHandler.java, mode: tag_handler }
+  appconfig#data-plane:
+    sources:
+      - { path: services/appconfig/AppConfigDataController.java, mode: rest }
+  appsync:
+    sources:
+      - { path: services/appsync/AppSyncController.java, mode: rest }
+      - { path: services/appsync/AppSyncTagHandler.java, mode: tag_handler }
+    rename_actions:
+      ListResolversByType: ListResolvers
+      GetEnvironmentVariables: GetGraphqlApiEnvironmentVariables
+      PutEnvironmentVariables: PutGraphqlApiEnvironmentVariables
   autoscaling: services/autoscaling/AutoScalingQueryHandler.java
+  backup:
+    sources:
+      - { path: services/backup/BackupController.java, mode: rest }
+      - { path: services/backup/BackupTagHandler.java, mode: tag_handler }
+    rename_actions:
+      ListTagsForResource: ListTags
+  batch:
+    sources:
+      - { path: services/batch/BatchController.java, mode: rest }
+      - { path: services/batch/BatchTagHandler.java, mode: tag_handler }
+  bcm-data-exports: services/bcmdataexports/BcmDataExportsJsonHandler.java
+  bcm-pricing-calculator: services/bcmpricingcalculator/BcmPricingCalculatorJsonHandler.java
+  bedrock-agentcore#data-plane-invokeagentruntime:
+    sources:
+      - { path: services/bedrockagentcore/BedrockAgentCoreController.java, mode: rest }
+  bedrock-runtime:
+    sources:
+      - { path: services/bedrockruntime/BedrockRuntimeController.java, mode: rest }
+    exclude_actions:
+      - InvokeModelWithResponseStream   # answers 501
+  cloudcontrol: services/cloudcontrol/CloudControlJsonHandler.java
+  cloudfront:
+    sources:
+      - { path: services/cloudfront/CloudFrontController.java, mode: rest }
+    rename_actions:
+      CreateDistribution: [CreateDistribution, CreateDistributionWithTags]   # WithTags
+      Tagging: [TagResource, UntagResource]                                  # Operation=Tag|Untag
+  cloudfront#key-value-stores:           # the cloudfront-keyvaluestore data plane, a client of its own
+    sources:
+      - { path: services/cloudfront/CloudFrontKeyValueStoreController.java, mode: rest }
   cloudmap: services/cloudmap/CloudMapHandler.java
+  cloudwatch: services/cloudwatch/logs/CloudWatchLogsHandler.java  # the CloudWatch Logs row; it routes the nested handlers by name
+  cloudwatch#metrics:
+    sources:
+      - services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java
+      - services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java
   codebuild: services/codebuild/CodeBuildJsonHandler.java
   codedeploy: services/codedeploy/CodeDeployJsonHandler.java
+  codepipeline:
+    sources:
+      - services/codepipeline/CodePipelineService.java
+    exclude_actions:                    # action providers and execution states, not actions
+      - Abandoned
+      - CodeBuild
+      - CodeDeploy
+      - CodePipeline
+      - Failed
+      - Lambda
+      - LambdaInvoke
+      - Stopped
+      - Succeeded
+      - VariableCheck
   cognito: services/cognito/CognitoJsonHandler.java
   config: services/configservice/ConfigServiceJsonHandler.java
+  controltower:
+    sources:
+      - { path: services/controltower/ControlTowerController.java, mode: rest }
+      - { path: services/controltower/ControlTowerControlController.java, mode: rest }
+      - { path: services/controltower/ControlTowerTagHandler.java, mode: tag_handler }
+    rename_actions:
+      Enable: EnableControl
+      List: ListEnabledControls
+      Get: GetEnabledControl
+      Update: UpdateEnabledControl
+      Reset: ResetEnabledControl
+      Operation: GetControlOperation
+  cur: services/cur/CurJsonHandler.java
+  dynamodb: services/dynamodb/NativeDynamoDbJsonHandler.java
+  dynamodb#streams: services/dynamodb/NativeDynamoDbStreamsJsonHandler.java
   ec2: services/ec2/Ec2QueryHandler.java
+  ecr: services/ecr/EcrJsonHandler.java
   ecs: services/ecs/EcsJsonHandler.java
+  eks:
+    sources:
+      - { path: services/eks/EksController.java, mode: rest }
+      - { path: services/eks/EksService.java, mode: tag_handler }
+    rename_actions:
+      CreateNodeGroup: CreateNodegroup
+      DescribeNodeGroup: DescribeNodegroup
+      ListNodeGroups: ListNodegroups
+      DeleteNodeGroup: DeleteNodegroup
   elastic-beanstalk: services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java
   elb: services/elbv2/ElbV2QueryHandler.java
   elb-classic: services/elb/ElbClassicQueryHandler.java
+  emr-serverless:
+    sources:
+      - { path: services/emrserverless/EmrServerlessController.java, mode: rest }
+      - { path: services/emrserverless/EmrServerlessTagHandler.java, mode: tag_handler }
   glue: services/glue/GlueJsonHandler.java
+  guardduty:
+    sources:
+      - { path: services/guardduty/GuardDutyController.java, mode: rest }
+      - { path: services/securityadmin/SecurityAdminController.java, mode: rest, route_prefix: /admin }   # shared with Macie
+      - { path: services/guardduty/GuardDutyTagHandler.java, mode: tag_handler }
+    rename_actions:
+      ListAdmin: ListOrganizationAdminAccounts
   iam: services/iam/IamQueryHandler.java
+  iam#aws-sign-in-login-credentials:
+    sources:
+      - { path: services/signin/SigninController.java, mode: rest }
+    rename_actions:
+      Authorize: AuthorizeOAuth2Access
+      Token: CreateOAuth2Token
+    exclude_actions:                    # the local sign-in pages the browser flow shows
+      - ConsentPage
+      - Consent
+      - ConfirmationPage
+  iot:
+    sources:
+      - { path: services/iot/IotController.java, mode: rest }
+      - { path: services/iot/IotAuthorizerController.java, mode: rest }
+      - { path: services/iot/IotDomainConfigurationController.java, mode: rest }
+      - { path: services/iot/IotFleetIndexingController.java, mode: rest }
+      - { path: services/iot/IotLoggingController.java, mode: rest }
+      - { path: services/iot/IotTagHandler.java, mode: tag_handler }
+    rename_actions:
+      RegisterCertificateWithoutCa: RegisterCertificateWithoutCA
+      ListAttachedPoliciesPost: ListAttachedPolicies
+      ListTargetsForPolicyPost: ListTargetsForPolicy
+      CreateTopicRulePost: CreateTopicRule
+      ListJobExecutionsForThing: [ListJobExecutionsForThing, GetPendingJobExecutions]   # one answer carries both
+  iot#iot-data:
+    sources:
+      - { path: services/iot/IotDataController.java, mode: rest }
+  lakeformation:
+    sources:
+      - { path: services/lakeformation/LakeFormationController.java, mode: rest }
+  lambda:
+    sources:
+      - { path: services/lambda/LambdaController.java, mode: rest }
+      - { path: services/lambda/LambdaAccountSettingsController.java, mode: rest }
+      - { path: services/lambda/LambdaCodeSigningController.java, mode: rest }
+      - { path: services/lambda/LambdaCodeSigningConfigFunctionsController.java, mode: rest }
+      - { path: services/lambda/LambdaResponseStreamController.java, mode: rest }
+      - { path: services/lambda/LambdaConcurrencyController.java, mode: rest }
+      - { path: services/lambda/LambdaProvisionedConcurrencyController.java, mode: rest }
+      - { path: services/lambda/LambdaEventInvokeController.java, mode: rest }
+      - { path: services/lambda/LambdaLayerController.java, mode: rest }
+      - { path: services/lambda/LambdaTagController.java, mode: rest }
+      - { path: services/lambda/LambdaUrlController.java, mode: rest }
+      - { path: services/lambda/durable/DurableExecutionController.java, mode: rest }
+    rename_actions:
+      ListLayers: [ListLayers, GetLayerVersionByArn]                                   # find=LayerVersion
+      Put: PutProvisionedConcurrencyConfig
+      Get: [GetProvisionedConcurrencyConfig, ListProvisionedConcurrencyConfigs]        # List=ALL
+      Delete: DeleteProvisionedConcurrencyConfig
+      Checkpoint: CheckpointDurableExecution
+      GetState: GetDurableExecutionState
+      GetHistory: GetDurableExecutionHistory
+      GetExecution: GetDurableExecution
+      ListByFunction: ListDurableExecutionsByFunction
+      Stop: StopDurableExecution
+      CallbackSucceed: SendDurableExecutionCallbackSuccess
+      CallbackFail: SendDurableExecutionCallbackFailure
+      CallbackHeartbeat: SendDurableExecutionCallbackHeartbeat
+  lambda-microvms:
+    sources:
+      - { path: services/lambdamicrovms/LambdaMicrovmsController.java, mode: rest }
+      - { path: services/lambdamicrovms/LambdaNetworkConnectorsController.java, mode: rest }
+    rename_actions:
+      ListVersions: ListMicrovmImageVersions
+      GetVersion: GetMicrovmImageVersion
+      UpdateVersion: UpdateMicrovmImageVersion
+      DeleteVersion: DeleteMicrovmImageVersion
+      ListBuilds: ListMicrovmImageBuilds
+      GetBuild: GetMicrovmImageBuild
+      ListManagedImages: ListManagedMicrovmImages
+      ListManagedImageVersions: ListManagedMicrovmImageVersions
+  lightsail:                            # local responses: switch arms plus the empty-list answers
+    sources:
+      - services/lightsail/LightsailJsonHandler.java
+      - { path: services/lightsail/LightsailJsonHandler.java, mode: map_entries }
+  managed-prometheus:
+    sources:
+      - { path: services/aps/ApsController.java, mode: rest }
+      - { path: services/aps/ApsService.java, mode: tag_handler }
+  msk:
+    sources:
+      - { path: services/msk/MskController.java, mode: rest }
+      - { path: services/msk/MskTagHandler.java, mode: tag_handler }
+  mwaa:
+    sources:
+      - { path: services/mwaa/MwaaController.java, mode: rest }
+      - { path: services/mwaa/MwaaService.java, mode: tag_handler }
+  oam:
+    sources:
+      - { path: services/oam/OamController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      Tag: TagResource
+      Untag: UntagResource
+  opensearch:                           # with the legacy Elasticsearch API at /2015-01-01/es
+    sources:
+      - { path: services/opensearch/OpenSearchController.java, mode: rest }
+      - { path: services/opensearch/ElasticsearchController.java, mode: rest }
+  pipes:
+    sources:
+      - { path: services/pipes/PipesController.java, mode: rest }
+      - { path: services/pipes/PipesService.java, mode: tag_handler }
+  pricing: services/pricing/PricingJsonHandler.java
+  rds-data:
+    sources:
+      - { path: services/rdsdata/RdsDataController.java, mode: rest }
+    exclude_actions:
+      - ExecuteSql                      # answers BadRequestException, not supported
   resource-groups-tagging: services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
+  rum:
+    sources:
+      - { path: services/rum/RumController.java, mode: rest }
+  s3tables:
+    sources:
+      - { path: services/s3tables/S3TablesController.java, mode: rest }
+  s3vectors:
+    sources:
+      - { path: services/s3vectors/S3VectorsController.java, mode: rest }
+  sagemaker#endpoint-hosting:
+    sources:
+      - { path: services/sagemaker/SageMakerRuntimeController.java, mode: rest }
+    rename_actions:
+      Invoke: InvokeEndpoint
+  scheduler:
+    sources:
+      - { path: services/scheduler/SchedulerController.java, mode: rest }
+      - { path: services/scheduler/SchedulerTagHandler.java, mode: tag_handler }
   ses: services/ses/SesQueryHandler.java
+  ses#v2:
+    sources:
+      - { path: services/ses/SesAccountController.java, mode: rest }
+      - { path: services/ses/SesConfigurationSetController.java, mode: rest }
+      - { path: services/ses/SesContactController.java, mode: rest }
+      - { path: services/ses/SesCvetController.java, mode: rest }
+      - { path: services/ses/SesDedicatedIpController.java, mode: rest }
+      - { path: services/ses/SesExportJobController.java, mode: rest }
+      - { path: services/ses/SesIdentityController.java, mode: rest }
+      - { path: services/ses/SesImportJobController.java, mode: rest }
+      - { path: services/ses/SesInsightsController.java, mode: rest }
+      - { path: services/ses/SesMetricsController.java, mode: rest }
+      - { path: services/ses/SesRecommendationController.java, mode: rest }
+      - { path: services/ses/SesReputationEntityController.java, mode: rest }
+      - { path: services/ses/SesSendController.java, mode: rest }
+      - { path: services/ses/SesSuppressionController.java, mode: rest }
+      - { path: services/ses/SesTagController.java, mode: rest }
+      - { path: services/ses/SesTemplateController.java, mode: rest }
+      - { path: services/ses/SesTenantController.java, mode: rest }
+    rename_actions:
+      ListConfigurationSetsWithFilter: ListConfigurationSets
+      ListEmailIdentitiesWithFilter: ListEmailIdentities
+  sns:
+    sources:
+      - services/sns/SnsJsonHandler.java
+      - services/sns/SnsQueryHandler.java
+  ssm:
+    sources:
+      - services/ssm/SsmJsonHandler.java
+      - services/ssm/Ec2MessagesJsonHandler.java
+  sts: services/iam/StsQueryHandler.java
+  textract: services/textract/TextractJsonHandler.java
+  transcribe: services/transcribe/TranscribeJsonHandler.java
+  transfer: services/transfer/TransferHandler.java
+
+# Rows whose count cannot be derived from their dispatchers, each with the reason. These
+# are the only counts still kept by hand.
+hand_counted:
+  s3: one controller method answers many operations, picked by query-string subresources (?tagging, ?acl, ?versioning, ...)
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages:

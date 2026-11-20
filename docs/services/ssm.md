@@ -32,7 +32,12 @@
 the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
 `ListDocuments` entry. With IAM enforcement on, the tag calls are checked against the resource their
 `ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
-without its leading `/`. `CreateDocument` is checked against `document/<name>`.
+without its leading `/`. `CreateDocument` is checked against `document/<name>`, and `CreateAssociation` against the
+association and the `document/<name>` its `Name` gives.
+
+`CreateAssociation` also runs a document another account shared with the caller through
+`ModifyDocumentPermission`, given in `Name` by its ARN. With IAM enforcement on, the caller's policy must allow
+that ARN. A document the owner did not share is `InvalidDocument`.
 
 `GetParameters` returns successful parameters alphabetically by `Name`, preserving
 the selected versions and labels.
@@ -51,8 +56,19 @@ the request's partition, region and account, and read it as `parameter/<name>`.
 `PutParameter` removes leading and trailing spaces from `Name` before it validates and stores it,
 as AWS does; a tab, newline or other whitespace is not removed. The name must then consist of
 letters, numbers, `.`, `-`, `_` and the `/` separator, so a colon or an interior space fails with
-a `ValidationException`. A parameter stored under such a name by an older Floci version can still
-be read, overwritten by a CloudFormation rollback, and deleted.
+a `ValidationException`. Parameters stored under invalid names by older Floci versions can
+still be read, restored during CloudFormation rollback and deleted.
+
+`GetParameter`, `GetParameters`, `GetParameterHistory`, `LabelParameterVersion` and
+`GetParametersByPath` remove leading and trailing ASCII spaces from the requested name
+or path before lookup, labeling or pagination. An interior space fails the complete
+request with `ValidationException` unless the name addresses a stored parameter, or the
+path contains stored descendants, in the caller's account and region. This exception
+preserves access to legacy Floci data; it does not allow new names with interior spaces.
+Secret-reference authorization uses the trimmed name;
+ARN, version and label selectors retain their normal scope and permission checks.
+Missing batch names are returned in `InvalidParameters` after this trimming. History
+and path pagination tokens work with either the padded or canonical name.
 
 `GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
 (the default) or `BeginsWith`. Values within one filter combine with OR; multiple
@@ -79,6 +95,42 @@ without a label filter continue to return the latest version of each parameter.
 | `ListCommandInvocations` | List command invocation records |
 | `CancelCommand` | Cancel pending or in-progress command invocations |
 
+### Documents
+
+| Action | Description |
+|---|---|
+| `CreateDocument` | Create a document with its content, type and tags |
+| `GetDocument` | Get a document's content, the default version or the one `DocumentVersion` names |
+| `DescribeDocument` | Get a document's description, tags included |
+| `UpdateDocument` | Store new content as the next document version; unchanged content is refused with `DuplicateDocumentContent` |
+| `DeleteDocument` | Delete a document and the accounts it was shared with |
+| `ListDocuments` | List documents, filtered by `Filters` or `DocumentFilterList` |
+| `ModifyDocumentPermission` | Share a document with other accounts, or stop sharing it |
+| `DescribeDocumentPermission` | List the accounts a document is shared with |
+
+### Associations
+
+| Action | Description |
+|---|---|
+| `CreateAssociation` | Associate a document with an instance or with targets. Floci does not run it, so the association reports `Success` at once |
+| `DescribeAssociation` | Get an association by ID, or by document name and instance |
+| `UpdateAssociation` | Change an association's name, document version, targets, parameters or schedule, and raise its version |
+| `DeleteAssociation` | Delete an association by ID, or by document name and instance |
+| `ListAssociations` | List associations, filtered by `AssociationFilterList` |
+
+### Service settings and maintenance windows
+
+| Action | Description |
+|---|---|
+| `GetServiceSetting` | Get a service setting's value, or its default when it was never changed |
+| `UpdateServiceSetting` | Change a service setting's value |
+| `ResetServiceSetting` | Return a service setting to its default |
+| `DescribeMaintenanceWindows` | Always returns an empty list; maintenance windows are not modeled |
+
+The service settings Floci knows are `/ssm/documents/console/public-sharing-permission`,
+`/ssm/parameter-store/default-parameter-tier`, `/ssm/parameter-store/high-throughput-enabled` and
+`/ssm/managed-instance/activation-tier`. Any other setting ID is refused with `ServiceSettingNotFound`.
+
 ### ec2messages Agent Protocol
 
 | Action | Description |
@@ -86,6 +138,9 @@ without a label filter continue to return the latest version of each parameter.
 | `GetMessages` | Agent polls for pending command messages |
 | `AcknowledgeMessage` | Agent acknowledges receipt of a command message |
 | `SendReply` | Agent reports command output and status |
+| `FailMessage` | Agent reports that it could not run a command message; the invocation becomes `Failed` |
+| `DeleteMessage` | Agent discards a command message |
+| `GetEndpoint` | Returns Floci's own base URL as the endpoint for the requested protocol |
 
 ## Run Command Execution
 

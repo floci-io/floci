@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.bedrockagentcorecontrol.model.Gateway;
@@ -87,7 +88,7 @@ public class BedrockAgentCoreGatewayRuleService {
 
     public ObjectNode get(String gatewayId, String ruleId, String region) {
         gatewayService.get(gatewayId, region);
-        if (ruleId == null || !ruleId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+        if (!UuidShapes.matchesLowerCase(ruleId)) {
             throw new AwsException("ValidationException", "ruleId does not satisfy the required UUID pattern", 400);
         }
         return storage.get(key(region, gatewayId, ruleId))
@@ -252,7 +253,7 @@ public class BedrockAgentCoreGatewayRuleService {
         if (!arn.matches("arn:" + AwsArnUtils.PARTITION_REGEX + ":bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:configuration-bundle/[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}")) {
             throw new AwsException("ValidationException", field + ".bundleArn is invalid", 400);
         }
-        if (!version.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(version)) {
             throw new AwsException("ValidationException", field + ".bundleVersion is invalid", 400);
         }
     }

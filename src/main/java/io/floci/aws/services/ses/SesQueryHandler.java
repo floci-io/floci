@@ -185,8 +185,29 @@ public class SesQueryHandler {
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
         } catch (AwsException e) {
-            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.SES, e.getHttpStatus());
+            return AwsQueryResponse.error(e.getErrorCode(), spellOutControlCharacters(e.getMessage()),
+                    AwsNamespaces.SES, e.getHttpStatus());
         }
+    }
+
+    /**
+     * SES writes a control character a message quotes as {@code 0x0009}, which also keeps the
+     * characters XML 1.0 forbids out of the error document.
+     */
+    static String spellOutControlCharacters(String message) {
+        if (message == null || message.chars().noneMatch(c -> c < ' ')) {
+            return message;
+        }
+        StringBuilder out = new StringBuilder(message.length() + 8);
+        for (int i = 0; i < message.length(); i++) {
+            char c = message.charAt(i);
+            if (c < ' ') {
+                out.append(String.format(Locale.ROOT, "0x%04x", (int) c));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     private Response handleVerifyEmailIdentity(MultivaluedMap<String, String> params, String region) {
@@ -475,10 +496,6 @@ public class SesQueryHandler {
     private Response handleSetIdentityMailFromDomain(MultivaluedMap<String, String> params, String region) {
         String identityValue = getParam(params, "Identity");
         String mailFromDomain = getParam(params, "MailFromDomain");
-        if (mailFromDomain == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "MailFromDomain is required (use an empty string to clear the existing setting).", 400);
-        }
         String behaviorOnMxFailure = getParam(params, "BehaviorOnMXFailure");
         identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure,
                 region);
@@ -496,20 +513,26 @@ public class SesQueryHandler {
         return raw != null && AwsQueryBooleans.parse(raw);
     }
 
+    /**
+     * Probed: an identity the account does not hold gets no entry, and one without a MAIL FROM
+     * domain reports {@code BehaviorOnMXFailure} alone, although the model requires all three.
+     */
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
         XmlBuilder xml = new XmlBuilder().start("MailFromDomainAttributes");
         for (String identityValue : identities) {
             Identity identity = identityService.getMailFromAttributes(identityValue, region);
+            if (identity == null) {
+                continue;
+            }
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            xml.elem("MailFromDomain", identity != null && identity.getMailFromDomain() != null
-                    ? identity.getMailFromDomain() : "");
-            xml.elem("MailFromDomainStatus", identity != null
-                    ? identity.getMailFromDomainStatus() : "Pending");
-            xml.elem("BehaviorOnMXFailure", identity != null
-                    ? identity.getBehaviorOnMxFailure() : "UseDefaultValue");
+            xml.elem("BehaviorOnMXFailure", identity.getBehaviorOnMxFailure());
+            if (identity.getMailFromDomain() != null) {
+                xml.elem("MailFromDomain", identity.getMailFromDomain());
+                xml.elem("MailFromDomainStatus", identity.getMailFromDomainStatus());
+            }
             xml.end("value");
             xml.end("entry");
         }
@@ -558,7 +581,7 @@ public class SesQueryHandler {
 
     private Response handleCreateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        templateService.createTemplate(template, region);
+        templateService.createTemplate(template, region, regionResolver.getAccountId());
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateTemplate", AwsNamespaces.SES)).build();
     }
 
@@ -658,15 +681,12 @@ public class SesQueryHandler {
 
     private Response handleTestRenderTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
-        if (templateName == null || templateName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
-        }
         String templateDataRaw = getParam(params, "TemplateData");
-        String rendered = templateService.renderTestTemplate(templateName, templateDataRaw, region);
-        // XML 1.0 character data forbids C0 controls except \t \n \r; strip them
-        // so SDK clients can parse the response when template data injects \x01 etc.
-        String xmlSafe = stripXml10InvalidChars(rendered);
-        String result = new XmlBuilder().elem("RenderedTemplate", xmlSafe).build();
+        String rendered = templateService.renderTestTemplate(templateName, templateDataRaw, region,
+                regionResolver.getAccountId());
+        // The rendered message is printable ASCII, CR, LF and TAB by construction: a part holding
+        // anything else is quoted-printable or base64, so it is always valid XML character data.
+        String result = new XmlBuilder().elem("RenderedTemplate", rendered).build();
         return Response.ok(AwsQueryResponse.envelope("TestRenderTemplate", AwsNamespaces.SES, result)).build();
     }
 
@@ -1005,7 +1025,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -1015,7 +1035,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -1720,32 +1740,5 @@ public class SesQueryHandler {
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
-    }
-
-    /** Package-private for the unit test; the sole caller is the TestRenderTemplate XML response above. */
-    static String stripXml10InvalidChars(String s) {
-        if (s == null || s.isEmpty()) {
-            return s;
-        }
-        // XML 1.0 char production: \t \n \r, U+0020-U+D7FF, U+E000-U+FFFD,
-        // U+10000-U+10FFFF. Anything else (C0 controls, U+FFFE/U+FFFF, lone
-        // surrogates) makes the response unparseable by SDK XML parsers.
-        StringBuilder out = new StringBuilder(s.length());
-        int i = 0;
-        while (i < s.length()) {
-            int cp = s.codePointAt(i);
-            if (isXml10Char(cp)) {
-                out.appendCodePoint(cp);
-            }
-            i += Character.charCount(cp);
-        }
-        return out.toString();
-    }
-
-    private static boolean isXml10Char(int cp) {
-        return cp == 0x09 || cp == 0x0A || cp == 0x0D
-                || (cp >= 0x20 && cp <= 0xD7FF)
-                || (cp >= 0xE000 && cp <= 0xFFFD)
-                || (cp >= 0x10000 && cp <= 0x10FFFF);
     }
 }

@@ -37,7 +37,8 @@ public class RequestCallerResolver {
         String accountId = regionResolver.getAccountId();
         return iamService.resolveCallerArns(accessKeyId)
                 .orElseGet(() -> CallerArns.accountRoot(regionResolver.buildGlobalArn("iam", accountId, "root"),
-                        accountId));
+                                accountId)
+                        .withOrganization(iamService.organizationContextOf(accountId).orElse(null)));
     }
 
     private String accessKeyId() {

@@ -1,0 +1,175 @@
+{
+  "_source": {
+    "page": "https://docs.aws.amazon.com/athena/latest/ug/fine-grained-access-to-glue-resources.html",
+    "fetcher": "tools/aws/fetch_athena_glue_ddl_permissions.py",
+    "prompt": "tools/aws/sources/athena-glue-ddl-permissions.prompt.md",
+    "retrieved": "2026-11-16",
+    "note": "The example policies of the page's table 'Examples of database and table-level permissions', copied as they stand; examples maps the example names to what they stand for, as the page's sentence 'replace the example_db database and test table with your own database and table names' says. regen_iam_request_resources.py reads it."
+  },
+  "examples": {
+    "example_db": "database",
+    "test": "table"
+  },
+  "statements": {
+    "ALTER DATABASE": {
+      "text": "Allows you to modify the properties for the example_db database.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:UpdateDatabase"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db"
+          ]
+        }
+      ]
+    },
+    "CREATE DATABASE": {
+      "text": "Allows you to create the database named example_db.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:CreateDatabase"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db"
+          ]
+        }
+      ]
+    },
+    "CREATE TABLE": {
+      "text": "Allows you to create a table named test in the example_db database.",
+      "policy": [
+        {
+          "Sid": "DatabasePermissions",
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:GetDatabases"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db"
+          ]
+        },
+        {
+          "Sid": "TablePermissions",
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetTables",
+            "glue:GetTable",
+            "glue:GetPartitions",
+            "glue:CreateTable"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db",
+            "arn:aws:glue:us-east-1:123456789012:table/example_db/test"
+          ]
+        }
+      ]
+    },
+    "DROP DATABASE": {
+      "text": "Allows you to drop the example_db database, including all tables in it.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:DeleteDatabase",
+            "glue:GetTables",
+            "glue:GetTable",
+            "glue:DeleteTable"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db",
+            "arn:aws:glue:us-east-1:123456789012:table/example_db/*",
+            "arn:aws:glue:us-east-1:123456789012:userDefinedFunction/example_db/*"
+          ]
+        }
+      ]
+    },
+    "DROP TABLE": {
+      "text": "Allows you to drop a partitioned table named test in the example_db database. If your table does not have partitions, do not include partition actions.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:GetTable",
+            "glue:DeleteTable",
+            "glue:GetPartitions",
+            "glue:GetPartition",
+            "glue:DeletePartition"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db",
+            "arn:aws:glue:us-east-1:123456789012:table/example_db/test"
+          ]
+        }
+      ]
+    },
+    "MSCK REPAIR TABLE": {
+      "text": "Allows you to update catalog metadata after you add Hive compatible partitions to the table named test in the example_db database.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:CreateDatabase",
+            "glue:GetTable",
+            "glue:GetPartitions",
+            "glue:GetPartition",
+            "glue:BatchCreatePartition"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db",
+            "arn:aws:glue:us-east-1:123456789012:table/example_db/test"
+          ]
+        }
+      ]
+    },
+    "SHOW DATABASES": {
+      "text": "Allows you to list all databases in the AWS Glue Data Catalog.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:GetDatabases"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/*"
+          ]
+        }
+      ]
+    },
+    "SHOW TABLES": {
+      "text": "Allows you to list all tables in the example_db database.",
+      "policy": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "glue:GetDatabase",
+            "glue:GetTables"
+          ],
+          "Resource": [
+            "arn:aws:glue:us-east-1:123456789012:catalog",
+            "arn:aws:glue:us-east-1:123456789012:database/example_db",
+            "arn:aws:glue:us-east-1:123456789012:table/example_db/*"
+          ]
+        }
+      ]
+    }
+  }
+}

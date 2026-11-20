@@ -171,10 +171,9 @@ class EksTokenValidator {
     }
 
     private IamService.OwnedSecretKey secretKey(String accessKeyId, String sessionToken) {
-        if (iamService.isSeededDeployerAccessKey(accessKeyId)) {
-            return null;
-        }
-        return iamService.findSecretKeyInAnyAccount(accessKeyId, sessionToken).orElse(null);
+        return iamService.findSecretKeyInAnyAccount(accessKeyId, sessionToken)
+                .filter(key -> !iamService.isSeededDeployerSecret(key.secretAccessKey()))
+                .orElse(null);
     }
 
     private static CredentialScope parseCredentialScope(String encodedCredential) {

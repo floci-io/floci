@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 @ApplicationScoped
 public class ConfigServiceJsonHandler {
@@ -39,46 +40,48 @@ public class ConfigServiceJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
-        return switch (action) {
-            case "PutConfigRule" -> putConfigRule(request, region);
-            case "DeleteConfigRule" -> deleteConfigRule(request, region);
-            case "DescribeConfigRules" -> describeConfigRules(request, region);
-            case "DescribeComplianceByConfigRule" -> describeComplianceByConfigRule(request, region);
-            case "DescribeComplianceByResource" -> describeComplianceByResource(request, region);
-            case "DescribeConfigRuleEvaluationStatus" -> describeConfigRuleEvaluationStatus(request, region);
-            case "StartConfigRulesEvaluation" -> startConfigRulesEvaluation(request, region);
-            case "PutEvaluations" -> putEvaluations(request, region);
-            case "PutExternalEvaluation" -> putExternalEvaluation(request, region);
-            case "DeleteEvaluationResults" -> deleteEvaluationResults(request, region);
-            case "GetComplianceDetailsByConfigRule" -> getComplianceDetailsByConfigRule(request, region);
-            case "GetComplianceDetailsByResource" -> getComplianceDetailsByResource(request, region);
-            case "GetComplianceSummaryByConfigRule" -> getComplianceSummaryByConfigRule(region);
-            case "GetComplianceSummaryByResourceType" -> getComplianceSummaryByResourceType(request, region);
-            case "PutConformancePack" -> putConformancePack(request, region);
-            case "DeleteConformancePack" -> deleteConformancePack(request, region);
-            case "DescribeConformancePacks" -> describeConformancePacks(request, region);
-            case "DescribeConformancePackStatus" -> describeConformancePackStatus(request, region);
-            case "PutConfigurationRecorder" -> putConfigurationRecorder(request, region);
-            case "DescribeConfigurationRecorders" -> describeConfigurationRecorders(request, region);
-            case "DeleteConfigurationRecorder" -> deleteConfigurationRecorder(request, region);
-            case "StartConfigurationRecorder" -> startConfigurationRecorder(request, region);
-            case "StopConfigurationRecorder" -> stopConfigurationRecorder(request, region);
-            case "DescribeConfigurationRecorderStatus" -> describeConfigurationRecorderStatus(request, region);
-            case "PutDeliveryChannel" -> putDeliveryChannel(request, region);
-            case "DescribeDeliveryChannels" -> describeDeliveryChannels(request, region);
-            case "DeleteDeliveryChannel" -> deleteDeliveryChannel(request, region);
-            case "PutRetentionConfiguration" -> putRetentionConfiguration(request, region);
-            case "DescribeRetentionConfigurations" -> describeRetentionConfigurations(request, region);
-            case "DeleteRetentionConfiguration" -> deleteRetentionConfiguration(request, region);
-            case "PutAggregationAuthorization" -> putAggregationAuthorization(request, region);
-            case "DescribeAggregationAuthorizations" -> describeAggregationAuthorizations(request, region);
-            case "DeleteAggregationAuthorization" -> deleteAggregationAuthorization(request, region);
-            case "TagResource" -> tagResource(request, region);
-            case "UntagResource" -> untagResource(request, region);
-            case "ListTagsForResource" -> listTagsForResource(request, region);
+        Callable<Response> operation = switch (action) {
+            case "PutConfigRule" -> () -> putConfigRule(request, region);
+            case "DeleteConfigRule" -> () -> deleteConfigRule(request, region);
+            case "DescribeConfigRules" -> () -> describeConfigRules(request, region);
+            case "DescribeComplianceByConfigRule" -> () -> describeComplianceByConfigRule(request, region);
+            case "DescribeComplianceByResource" -> () -> describeComplianceByResource(request, region);
+            case "DescribeConfigRuleEvaluationStatus" -> () -> describeConfigRuleEvaluationStatus(request, region);
+            case "StartConfigRulesEvaluation" -> () -> startConfigRulesEvaluation(request, region);
+            case "PutEvaluations" -> () -> putEvaluations(request, region);
+            case "PutExternalEvaluation" -> () -> putExternalEvaluation(request, region);
+            case "DeleteEvaluationResults" -> () -> deleteEvaluationResults(request, region);
+            case "GetComplianceDetailsByConfigRule" -> () -> getComplianceDetailsByConfigRule(request, region);
+            case "GetComplianceDetailsByResource" -> () -> getComplianceDetailsByResource(request, region);
+            case "GetComplianceSummaryByConfigRule" -> () -> getComplianceSummaryByConfigRule(region);
+            case "GetComplianceSummaryByResourceType" -> () -> getComplianceSummaryByResourceType(request, region);
+            case "PutConformancePack" -> () -> putConformancePack(request, region);
+            case "DeleteConformancePack" -> () -> deleteConformancePack(request, region);
+            case "DescribeConformancePacks" -> () -> describeConformancePacks(request, region);
+            case "DescribeConformancePackStatus" -> () -> describeConformancePackStatus(request, region);
+            case "PutConfigurationRecorder" -> () -> putConfigurationRecorder(request, region);
+            case "DescribeConfigurationRecorders" -> () -> describeConfigurationRecorders(request, region);
+            case "DeleteConfigurationRecorder" -> () -> deleteConfigurationRecorder(request, region);
+            case "StartConfigurationRecorder" -> () -> startConfigurationRecorder(request, region);
+            case "StopConfigurationRecorder" -> () -> stopConfigurationRecorder(request, region);
+            case "DescribeConfigurationRecorderStatus" -> () -> describeConfigurationRecorderStatus(request, region);
+            case "PutDeliveryChannel" -> () -> putDeliveryChannel(request, region);
+            case "DescribeDeliveryChannels" -> () -> describeDeliveryChannels(request, region);
+            case "DeleteDeliveryChannel" -> () -> deleteDeliveryChannel(request, region);
+            case "PutRetentionConfiguration" -> () -> putRetentionConfiguration(request, region);
+            case "DescribeRetentionConfigurations" -> () -> describeRetentionConfigurations(request, region);
+            case "DeleteRetentionConfiguration" -> () -> deleteRetentionConfiguration(request, region);
+            case "PutAggregationAuthorization" -> () -> putAggregationAuthorization(request, region);
+            case "DescribeAggregationAuthorizations" -> () -> describeAggregationAuthorizations(request, region);
+            case "DeleteAggregationAuthorization" -> () -> deleteAggregationAuthorization(request, region);
+            case "TagResource" -> () -> tagResource(request, region);
+            case "UntagResource" -> () -> untagResource(request, region);
+            case "ListTagsForResource" -> () -> listTagsForResource(request, region);
             default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
+        ConfigRequestShapes.check(action, request);
+        return operation.call();
     }
 
     // --- Config Rules ---
@@ -371,28 +374,13 @@ public class ConfigServiceJsonHandler {
     }
 
     /** PutConfigRule, PutAggregationAuthorization and PutConfigurationRecorder take a
-     *  {@code TagsList} (config/2014-11-12: at most 50 {@code Tag}s, Key 1-128 characters,
-     *  optional Value of at most 256). The first two model {@code InvalidParameterValueException}
-     *  as their only parameter error; PutConfigurationRecorder models {@code ValidationException}.
-     *  Checked before the service stores anything, so a rejected request leaves no resource
-     *  behind. An absent Value is optional in the model and is stored as the empty string. */
+     *  {@code TagsList}, whose count and Key and Value lengths ConfigRequestShapes has checked.
+     *  The model leaves a tag's Key optional, so a tag without one is refused here, with the
+     *  operation's modelled parameter error, before the service stores anything. An absent Value
+     *  is optional in the model and is stored as the empty string. */
     private List<Map<String, String>> extractCreationTags(JsonNode req, String errorCode) {
-        JsonNode tags = req.path("Tags");
-        if (tags.isMissingNode() || tags.isNull()) {
-            return List.of();
-        }
-        if (!tags.isArray()) {
-            throw new AwsException(errorCode, "Tags must be a list.", 400);
-        }
-        if (tags.size() > 50) {
-            throw new AwsException(errorCode, "Tags must contain at most 50 tags.", 400);
-        }
-        for (JsonNode tag : tags) {
-            JsonNode key = tag.path("Key");
-            JsonNode value = tag.path("Value");
-            boolean valueOk = value.isMissingNode() || value.isNull()
-                    || (value.isTextual() && value.asText().length() <= 256);
-            if (!key.isTextual() || key.asText().isEmpty() || key.asText().length() > 128 || !valueOk) {
+        for (JsonNode tag : req.path("Tags")) {
+            if (!tag.path("Key").isTextual()) {
                 throw new AwsException(errorCode,
                         "Each tag needs a Key of 1-128 characters and a Value of at most 256 characters.", 400);
             }

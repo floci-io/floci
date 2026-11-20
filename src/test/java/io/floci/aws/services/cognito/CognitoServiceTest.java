@@ -38,6 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
@@ -66,6 +67,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
@@ -1867,6 +1869,26 @@ class CognitoServiceTest {
         assertEquals(Map.of("env", "test", "team", "platform"), service.listTagsForResource(pool.getArn()));
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the user pool whose ARN it is given, as tag calls leave them; nothing for an
+     * ARN of another account or Region, or of no pool.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheUserPoolTheArnNames() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "dev")),
+                "us-east-1"
+        );
+        service.tagResource(pool.getArn(), Map.of("team", "data"));
+        service.untagResource(pool.getArn(), List.of("env"));
+
+        assertEquals(Map.of("team", "data"), service.storedTags(pool.getArn()));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":us-east-1:", ":eu-west-1:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn() + "x"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::pool"));
+    }
+
     @Test
     void tagResourceRejectsReservedKey() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");
@@ -2415,7 +2437,8 @@ class CognitoServiceTest {
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("123456");
         doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
-                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any());
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any(),
+                        ArgumentMatchers.<Supplier<String>>any());
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),

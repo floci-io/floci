@@ -178,6 +178,20 @@ class S3VectorsWriteLockTest {
         assertThrows(AwsException.class, () -> service.getVectorBucketPolicy("bucket", null, REGION));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void resourceTagMergesPreserveConcurrentTagsAndVectors(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        createIndex();
+        String arn = service.getIndex("bucket", "index", REGION).getIndexArn();
+        overlap(() -> service.tagResource(arn, Map.of("first", "value"), REGION),
+                () -> service.tagResource(arn, Map.of("second", "value"), REGION));
+        assertEquals(Map.of("first", "value", "second", "value"), service.listTagsForResource(arn, REGION));
+        overlap(() -> service.untagResource(arn, List.of("first"), REGION), () -> putVector("stored"));
+        assertEquals(Map.of("second", "value"), service.listTagsForResource(arn, REGION));
+        assertEquals(1, service.getVectors("bucket", "index", List.of("stored"), REGION).size());
+    }
+
     private void putVector(String key) {
         service.putVectors("bucket", "index", List.of(new VectorData(key, List.of(1.0f), Map.of())), REGION);
     }

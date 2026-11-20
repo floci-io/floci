@@ -178,7 +178,7 @@ public class Snapshot {
         this.manualSnapshotRetentionPeriod = manualSnapshotRetentionPeriod;
     }
 
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public Set<String> getAccountsWithRestoreAccess() { return accountsWithRestoreAccess; }
     public void setAccountsWithRestoreAccess(Set<String> value) {

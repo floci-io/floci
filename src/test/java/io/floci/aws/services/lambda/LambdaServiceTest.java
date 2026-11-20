@@ -18,8 +18,11 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
+import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -1171,14 +1174,26 @@ class LambdaServiceTest {
     @Test
     void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
         Map<String, Object> request = baseRequest("oversized-zip");
-        byte[] oversized = new byte[(int) ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES + 1];
-        request.put("Code", Map.of("ZipFile", Base64.getEncoder().encodeToString(oversized)));
+        // Zero bytes, one more than the limit allows, as Base64: refused from its length, before it is decoded.
+        long chunks = ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES / 3 + 1;
+        request.put("Code", Map.of("ZipFile", "A".repeat((int) (chunks * 4))));
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunction(REGION, request));
 
         assertEquals("RequestEntityTooLargeException", error.getErrorCode());
         assertEquals(413, error.getHttpStatus());
+    }
+
+    @Test
+    void anUploadsDecodedLengthIsReadFromItsBase64LengthPaddedOrNot() {
+        assertEquals(0, LambdaService.decodedLength(""));
+        assertEquals(3, LambdaService.decodedLength("AAAA"));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA=="));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA"));
+        assertEquals(5, LambdaService.decodedLength("AAAAAAA="));
+        byte[] limit = new byte[1024];
+        assertEquals(limit.length, LambdaService.decodedLength(Base64.getEncoder().encodeToString(limit)));
     }
 
     @Test
@@ -2493,6 +2508,37 @@ class LambdaServiceTest {
                 + size, e.getMessage());
     }
 
+    @Test
+    void lambdaPackagesStayReadableWithoutLeavingCustomerBuckets(@TempDir Path directory) throws Exception {
+        StorageFactory s3Storage = new InMemoryStorageFactory("000000000000");
+        EmulatorConfig s3Config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(s3Config.storage().persistentPath()).thenReturn(directory.toString());
+        when(s3Config.storage().services().s3().mode()).thenReturn(Optional.of("memory"));
+        S3Service s3 = new S3Service(s3Storage, s3Config, null, null, null, null, null,
+                new RegionResolver(REGION, "000000000000"), new ObjectMapper(), null);
+        s3.createBucket("customer-code", REGION);
+        LambdaService backed = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor());
+        String zip = createZipBase64("index.js");
+        Map<String, Object> firstRequest = baseRequest("tasks-first-" + UUID.randomUUID());
+        firstRequest.put("Code", Map.of("ZipFile", zip));
+        Map<String, Object> secondRequest = baseRequest("tasks-second-" + UUID.randomUUID());
+        secondRequest.put("Code", Map.of("ZipFile", zip));
+
+        LambdaFunction first = backed.createFunction(REGION, firstRequest);
+        LambdaFunction second = backed.createFunction(REGION, secondRequest);
+        String bucket = LambdaService.tasksBucketName(REGION);
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(first)).getData());
+
+        backed.deleteFunction(REGION, first.getFunctionName());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(second)).getData());
+        backed.deleteFunction(REGION, second.getFunctionName());
+        assertTrue(s3.listObjects(bucket, "", null, 100).isEmpty());
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
+    }
+
     private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor) {
         return s3BackedService(s3, warmPool, extractor, null);
     }
@@ -2863,14 +2909,8 @@ class LambdaServiceTest {
                 .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
     }
 
-    private static String zipWithBody(String body) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    private static String zipWithBody(String body) {
+        return LambdaCodeFixtures.nodeJsZipBase64(body + "\n");
     }
 
     @Test

@@ -218,6 +218,7 @@ public class JsonataEvaluator {
             frame.setRuntimeBounds(evaluationTimeoutMillis, maxEvaluationDepth);
             nesting.trackOn(frame);
             boundHeldMemory(frame);
+            JsonataConstructedArrayPaths.install(frame);
             stepFunctionsExtensions.forEach(frame::bind);
             // AWS disables $eval, and the library ships it. An unbound name called as a function is
             // the library's own T1006, which is the code AWS answers. $parse is the replacement.

@@ -82,13 +82,13 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         }
         String explicitName = resolvePresent(props, "AuthorizerName", ctx);
         boolean hasExplicitName = explicitName != null;
-        String signingDisabled = resolveBoolean(props, "SigningDisabled", ctx);
+        Boolean signingDisabled = ctx.resolveOptionalBoolean(props, "SigningDisabled");
         ObjectNode declared = MAPPER.createObjectNode().put("authorizerFunctionArn", functionArn);
         putIfPresent(declared, "status", resolvePresent(props, "Status", ctx));
         putIfPresent(declared, "tokenKeyName", resolvePresent(props, "TokenKeyName", ctx));
-        String caching = resolveBoolean(props, "EnableCachingForHttp", ctx);
+        Boolean caching = ctx.resolveOptionalBoolean(props, "EnableCachingForHttp");
         if (caching != null) {
-            declared.put("enableCachingForHttp", Boolean.parseBoolean(caching));
+            declared.put("enableCachingForHttp", caching);
         }
         JsonNode keys = props == null ? null : ctx.engine().resolveNode(props.get("TokenSigningPublicKeys"));
         if (keys != null && keys.isObject()) {
@@ -111,7 +111,7 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
                 ? authorizerService.describeAuthorizer(ctx.priorPhysicalId(), ctx.region())
                 : null;
         // ponytail: compared with the stored flag, so an absent SigningDisabled reads as its API default false.
-        boolean signingChanged = prior != null && prior.isSigningDisabled() != Boolean.parseBoolean(signingDisabled);
+        boolean signingChanged = prior != null && prior.isSigningDisabled() != Boolean.TRUE.equals(signingDisabled);
         boolean nameWasGenerated = NAME_MODE_GENERATED.equals(attributesBefore.get(NAME_MODE_ATTR));
         if ((signingChanged || nameWasGenerated) && hasExplicitName && explicitName.equals(ctx.priorPhysicalId())) {
             throw new AwsException("ValidationError",
@@ -132,7 +132,7 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
             }
         } else {
             if (signingDisabled != null) {
-                declared.put("signingDisabled", Boolean.parseBoolean(signingDisabled));
+                declared.put("signingDisabled", signingDisabled);
             }
             if (!tags.isEmpty()) {
                 ArrayNode tagList = declared.putArray("tags");
@@ -179,15 +179,6 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         String value = ctx.resolveOptional(props, name);
         boolean literal = props != null && props.path(name).isTextual();
         return literal || (value != null && !value.isEmpty()) ? value : null;
-    }
-
-    /** A present boolean property, refused unless it is true or false rather than read as false. */
-    private static String resolveBoolean(JsonNode props, String name, ProvisionContext ctx) {
-        String value = resolvePresent(props, name, ctx);
-        if (value != null && !"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
-            throw new AwsException("ValidationError", TYPE + " " + name + " must be true or false, got " + value, 400);
-        }
-        return value;
     }
 
     private static void putIfPresent(ObjectNode body, String field, String value) {

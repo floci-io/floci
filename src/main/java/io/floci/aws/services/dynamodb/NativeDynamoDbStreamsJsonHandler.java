@@ -92,12 +92,18 @@ public class NativeDynamoDbStreamsJsonHandler {
                     sd.getTableName(), streamArn);
         }
 
+        String exclusiveStartShardId = request.hasNonNull("ExclusiveStartShardId")
+                ? request.get("ExclusiveStartShardId").asText() : null;
+        Integer limit = request.hasNonNull("Limit") ? request.get("Limit").asInt() : null;
+        DynamoDbStreamService.ShardsPage shards = streamService.describeShards(streamArn, exclusiveStartShardId, limit);
+
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("StreamDescription", describeStreamToNode(sd, keySchema));
+        response.set("StreamDescription", describeStreamToNode(sd, keySchema, shards));
         return Response.ok(response).build();
     }
 
-    private ObjectNode describeStreamToNode(StreamDescription sd, List<KeySchemaElement> keySchema) {
+    private ObjectNode describeStreamToNode(StreamDescription sd, List<KeySchemaElement> keySchema,
+                                            DynamoDbStreamService.ShardsPage page) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("StreamArn", sd.getStreamArn());
         node.put("StreamLabel", sd.getStreamLabel());
@@ -116,15 +122,27 @@ public class NativeDynamoDbStreamsJsonHandler {
         node.set("KeySchema", keySchemaArray);
 
         ArrayNode shards = objectMapper.createArrayNode();
-        ObjectNode shard = objectMapper.createObjectNode();
-        shard.put("ShardId", DynamoDbStreamService.SHARD_ID);
-        ObjectNode seqRange = objectMapper.createObjectNode();
-        seqRange.put("StartingSequenceNumber", sd.getStartingSequenceNumber());
-        shard.set("SequenceNumberRange", seqRange);
-        shards.add(shard);
+        for (DynamoDbStreamService.ShardDescription description : page.shards()) {
+            ObjectNode shard = objectMapper.createObjectNode();
+            shard.put("ShardId", description.shardId());
+            if (description.parentShardId() != null) {
+                shard.put("ParentShardId", description.parentShardId());
+            }
+            ObjectNode seqRange = objectMapper.createObjectNode();
+            seqRange.put("StartingSequenceNumber", description.startingSequenceNumber());
+            if (description.endingSequenceNumber() != null) {
+                seqRange.put("EndingSequenceNumber", description.endingSequenceNumber());
+            }
+            shard.set("SequenceNumberRange", seqRange);
+            shards.add(shard);
+        }
         node.set("Shards", shards);
 
-        node.putNull("LastEvaluatedShardId");
+        if (page.lastEvaluatedShardId() != null) {
+            node.put("LastEvaluatedShardId", page.lastEvaluatedShardId());
+        } else {
+            node.putNull("LastEvaluatedShardId");
+        }
         return node;
     }
 
@@ -156,8 +174,11 @@ public class NativeDynamoDbStreamsJsonHandler {
             recordsArray.add(recordToNode(record));
         }
         response.set("Records", recordsArray);
-        response.put("NextShardIterator", result.nextShardIterator());
-        
+        // A closed shard read to its end has none, which tells the reader it is done.
+        if (result.nextShardIterator() != null) {
+            response.put("NextShardIterator", result.nextShardIterator());
+        }
+
         return Response.ok(response).build();
     }
 

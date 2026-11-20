@@ -15,9 +15,7 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.math.BigInteger;
 import java.security.interfaces.RSAPublicKey;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,8 +83,8 @@ public class EksOidcWellKnownController {
         jwk.put("alg", "RS256");
         jwk.put("use", "sig");
         jwk.put("kid", key.getKeyId());
-        jwk.put("n", base64UrlEncodeUnsigned(publicKey.getModulus()));
-        jwk.put("e", base64UrlEncodeUnsigned(publicKey.getPublicExponent()));
+        jwk.put("n", Base64Url.encodeUnsigned(publicKey.getModulus()));
+        jwk.put("e", Base64Url.encodeUnsigned(publicKey.getPublicExponent()));
 
         return Response.ok(Map.of("keys", List.of(jwk))).build();
     }
@@ -109,17 +107,5 @@ public class EksOidcWellKnownController {
      */
     private String jwksUri(String clusterName, String region) {
         return config.effectiveBaseUrl() + "/_floci/eks/clusters/" + clusterName + "/oidc/keys?region=" + region;
-    }
-
-    /**
-     * Encodes an RSA parameter as an unsigned big-endian base64url value, dropping the leading zero
-     * byte {@link BigInteger#toByteArray()} adds for sign — JWK requires the unsigned form.
-     */
-    private String base64UrlEncodeUnsigned(BigInteger value) {
-        byte[] bytes = value.toByteArray();
-        if (bytes.length > 1 && bytes[0] == 0) {
-            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
-        }
-        return Base64Url.encode(bytes);
     }
 }

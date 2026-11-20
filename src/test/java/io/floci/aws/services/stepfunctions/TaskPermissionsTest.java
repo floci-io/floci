@@ -2,6 +2,7 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
@@ -10,11 +11,18 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -26,6 +34,11 @@ class TaskPermissionsTest {
     private static final String TOPIC = "arn:aws:sns:eu-west-1:111122223333:orders";
     private static final String REDSHIFT_CLUSTER = "arn:aws:redshift:eu-west-1:111122223333:cluster:orders";
     private static final String ENDPOINT = "arn:aws:sns:eu-west-1:111122223333:endpoint/GCM/app/id";
+    private static final String TASK_DEFINITION = "arn:aws:ecs:eu-west-1:111122223333:task-definition/orders:7";
+    private static final String SERVICE = "arn:aws:ecs:eu-west-1:111122223333:service/c/s";
+    private static final String ANY_REVISION = "arn:aws:ecs:eu-west-1:111122223333:task-definition/*:*";
+    private static final String EMR_CLUSTER = "arn:aws:elasticmapreduce:eu-west-1:111122223333:cluster/j-1";
+    private static final String APPLICATION = "arn:aws:emr-serverless:eu-west-1:111122223333:/applications/a";
 
     /** Each form resolves in the state machine's Region, whichever host it names, as the queue lookup does. */
     @ParameterizedTest
@@ -65,8 +78,7 @@ class TaskPermissionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"lambda:invoke", "apigateway:invoke", "aws-sdk:sqs:receiveMessage", "aws-sdk:sns:listTopics",
-            "sns:publishBatch", "aws-sdk:eventbridge:putEvents", "events:listRules", "states:startExecution",
-            "dynamodb:query", "http:invoke"})
+            "sns:publishBatch", "aws-sdk:eventbridge:putEvents", "events:listRules", "dynamodb:query"})
     void integrationsNotMappedStayUnchecked(String integration) {
         assertEquals(Optional.empty(), TaskPermissions.of(integration(integration), input("orders"), machine("aws")));
     }
@@ -393,6 +405,623 @@ class TaskPermissionsTest {
     @Test
     void aRedshiftDataSuffixIsNotServedAndStaysUnchecked() throws Exception {
         assertEquals(Optional.empty(), TaskPermissions.of(integration("aws-sdk:redshiftdata:executeStatement.sync"), json("{}"), machine("aws")));
+    }
+
+    /** Whatever names it, the check is on the revision ECS resolves it to, which is the one it would run. */
+    @ParameterizedTest
+    @ValueSource(strings = {"ecs:runTask", "ecs:runTask.sync"})
+    void runTaskIsCheckedOnTheRevisionEcsResolves(String tail) throws Exception {
+        for (String reference : List.of("orders", "orders:7", TASK_DEFINITION)) {
+            assertEquals(TaskPermissions.accessDenied("ECS.", List.of(new Permission("ecs:RunTask", TASK_DEFINITION))),
+                    ecsPermissions(tail, "{\"TaskDefinition\":\"" + reference + "\"}", ecs()), reference);
+        }
+    }
+
+    /** A form the integration does not serve is left to its unsupported-mode answer, whatever the role. */
+    @Test
+    void aRunTaskFormEcsDoesNotServeStaysUnchecked() throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration("ecs:runTask.sync:2"),
+                json("{\"TaskDefinition\":\"orders\"}"), machine("aws"), null, ecs(), false));
+    }
+
+    /** {@code executeTaskState} strips the suffix, so this is a {@code .waitForTaskToken} as the dispatch sees it. */
+    @Test
+    void runTaskWithATokenIsChecked() throws Exception {
+        assertEquals(List.of(new Permission("ecs:RunTask", TASK_DEFINITION)),
+                TaskPermissions.of(integration("ecs:runTask"), json("{\"TaskDefinition\":\"orders\"}"), machine("aws"),
+                        null, ecs(), true).orElseThrow().permissions());
+    }
+
+    /** A request naming no definition is answered by ECS; one naming a definition ECS does not have, any revision. */
+    @Test
+    void aTaskDefinitionEcsDoesNotHaveIsCheckedWithAnyRevision() throws Exception {
+        for (String request : List.of("{}", "{\"TaskDefinition\":null}")) {
+            assertEquals(TaskPermissions.accessDenied("ECS.", List.of()), ecsPermissions("ecs:runTask", request, ecs()),
+                    request);
+        }
+        assertEquals(List.of(new Permission("ecs:RunTask", ANY_REVISION)),
+                ecsPermissions("ecs:runTask", "{\"TaskDefinition\":\"no-such\"}", ecs()).permissions());
+        assertEquals(List.of(new Permission("ecs:RunTask", ANY_REVISION)), TaskPermissions.of(integration("ecs:runTask"),
+                json("{\"TaskDefinition\":\"orders\"}"), machine("aws")).orElseThrow().permissions());
+    }
+
+    /** The members are read in either casing, as the SDK form recases them for the handler. */
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"Cluster\":\"c\",\"Service\":\"s\"}", "{\"cluster\":\"c\",\"service\":\"s\"}",
+            "{\"Cluster\":\"arn:aws:ecs:eu-west-1:111122223333:cluster/c\",\"Service\":\"s\"}"})
+    void updateServiceIsCheckedOnTheServiceItNames(String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("Ecs.", List.of(new Permission("ecs:UpdateService", SERVICE))),
+                ecsPermissions("aws-sdk:ecs:updateService", request, ecs()));
+    }
+
+    @Test
+    void updateServiceWithNoClusterIsOnTheDefaultCluster() throws Exception {
+        assertEquals(List.of(new Permission("ecs:UpdateService", "arn:aws:ecs:eu-west-1:111122223333:service/default/s")),
+                ecsPermissions("aws-sdk:ecs:updateService", "{\"Service\":\"s\"}", ecs()).permissions());
+    }
+
+    /** Each service named, a name in the request's cluster and an ARN as given, whether ECS has it or not. */
+    @Test
+    void describeServicesIsCheckedOnEachServiceItNames() throws Exception {
+        String inC = "arn:aws:ecs:eu-west-1:111122223333:service/c/";
+        assertEquals(List.of(new Permission("ecs:DescribeServices", SERVICE),
+                        new Permission("ecs:DescribeServices", inC + "a"),
+                        new Permission("ecs:DescribeServices", inC + "missing")),
+                ecsPermissions("aws-sdk:ecs:describeServices",
+                        "{\"Cluster\":\"c\",\"Services\":[\"a\",\"" + SERVICE + "\",\"missing\",\"a\"]}", ecs())
+                        .permissions());
+    }
+
+    @Test
+    void listServicesActsOnNoResource() throws Exception {
+        assertEquals(TaskPermissions.accessDenied("Ecs.", List.of(new Permission("ecs:ListServices", "*"))),
+                TaskPermissions.of(integration("aws-sdk:ecs:listServices"), json("{}"), machine("aws")).orElseThrow());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws-sdk:ecs:runTask", "aws-sdk:ecs:createService", "aws-sdk:ecs:updateService.sync",
+            "ecs:updateService", "elasticmapreduce:listClusters", "elasticmapreduce:createCluster.waitForTaskToken",
+            "elasticmapreduce:cancelStep.sync", "elasticmapreduce:addStep.sync:2", "aws-sdk:elasticmapreduce:addStep",
+            "emr-serverless:listApplications", "emr-serverless:startJobRun.sync:2",
+            "emr-serverless:startJobRun.waitForTaskToken", "aws-sdk:emrserverless:startJobRun"})
+    void aJobApiNotServedStaysUnchecked(String tail) throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration(tail),
+                json("{\"ClusterId\":\"j-1\",\"ApplicationId\":\"a\"}"), machine("aws")));
+    }
+
+    /** {@code executeTaskState} strips the suffix: the integration alone no longer shows these have no such form. */
+    @ParameterizedTest
+    @ValueSource(strings = {"elasticmapreduce:addStep", "emr-serverless:startJobRun"})
+    void anEmrApiWithATokenStaysUnchecked(String tail) throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration(tail),
+                json("{\"ClusterId\":\"j-1\",\"ApplicationId\":\"a\"}"), machine("aws"), null, null, true));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "setClusterTerminationProtection|SetTerminationProtection",
+            "terminateCluster|TerminateJobFlows",
+            "terminateCluster.sync|TerminateJobFlows",
+            "addStep|AddJobFlowSteps",
+            "addStep.sync|AddJobFlowSteps",
+            "cancelStep|CancelSteps"})
+    void anEmrApiNeedsItsActionOnTheCluster(String api, String action) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("EMR.", List.of(new Permission("elasticmapreduce:" + action, EMR_CLUSTER))),
+                TaskPermissions.of(integration("elasticmapreduce:" + api), json("{\"ClusterId\":\"j-1\"}"),
+                        machine("aws")).orElseThrow());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"modifyInstanceFleetByName|ListInstanceFleets|ModifyInstanceFleet",
+            "modifyInstanceGroupByName|ListInstanceGroups|ModifyInstanceGroups"})
+    void aByNameApiNeedsTheListAndTheModify(String api, String list, String modify) throws Exception {
+        assertEquals(List.of(new Permission("elasticmapreduce:" + list, EMR_CLUSTER),
+                        new Permission("elasticmapreduce:" + modify, EMR_CLUSTER)),
+                TaskPermissions.of(integration("elasticmapreduce:" + api), json("{\"ClusterId\":\"j-1\"}"),
+                        machine("aws")).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"elasticmapreduce:createCluster", "elasticmapreduce:createCluster.sync"})
+    void createClusterActsOnNoResource(String tail) throws Exception {
+        assertEquals(List.of(new Permission("elasticmapreduce:RunJobFlow", "*")),
+                TaskPermissions.of(integration(tail), json("{}"), machine("aws")).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"ClusterId\":\"  \"}", "{\"ClusterId\":7}", "{\"clusterId\":\"j-1\"}"})
+    void anEmrRequestNamingNoClusterNeedsNoPermission(String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("EMR.", List.of()),
+                TaskPermissions.of(integration("elasticmapreduce:addStep"), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void theClusterIsInTheStateMachinesPartition() throws Exception {
+        assertEquals(List.of(new Permission("elasticmapreduce:AddJobFlowSteps",
+                        "arn:aws-cn:elasticmapreduce:eu-west-1:" + ACCOUNT + ":cluster/j-1")),
+                TaskPermissions.of(integration("elasticmapreduce:addStep"), json("{\"ClusterId\":\"j-1\"}"),
+                        machine("aws-cn")).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"startApplication,StartApplication", "startApplication.sync,StartApplication",
+            "stopApplication,StopApplication", "deleteApplication,DeleteApplication", "startJobRun,StartJobRun",
+            "startJobRun.sync,StartJobRun"})
+    void anEmrServerlessApiNeedsItsActionOnTheApplication(String api, String action) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("EmrServerless.", List.of(new Permission("emr-serverless:" + action, APPLICATION))),
+                TaskPermissions.of(integration("emr-serverless:" + api), json("{\"ApplicationId\":\"a\"}"),
+                        machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void anEmrServerlessIdIsReadInEitherCase() throws Exception {
+        assertEquals(List.of(new Permission("emr-serverless:CancelJobRun", APPLICATION + "/jobruns/r")),
+                TaskPermissions.of(integration("emr-serverless:cancelJobRun"),
+                        json("{\"applicationId\":\"a\",\"jobRunId\":\"r\"}"), machine("aws")).orElseThrow().permissions());
+    }
+
+    @Test
+    void cancelJobRunIsCheckedOnTheRun() throws Exception {
+        assertEquals(List.of(new Permission("emr-serverless:CancelJobRun", APPLICATION + "/jobruns/r")),
+                TaskPermissions.of(integration("emr-serverless:cancelJobRun.sync"),
+                        json("{\"ApplicationId\":\"a\",\"JobRunId\":\"r\"}"), machine("aws")).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"startJobRun|{}", "startJobRun|{\"ApplicationId\":7}",
+            "startApplication|{\"ApplicationId\":\" \"}", "cancelJobRun|{\"ApplicationId\":\"a\"}",
+            "cancelJobRun|{\"JobRunId\":\"r\"}"})
+    void anEmrServerlessRequestMissingAnIdNeedsNoPermission(String api, String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("EmrServerless.", List.of()),
+                TaskPermissions.of(integration("emr-serverless:" + api), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void createApplicationActsOnNoResource() throws Exception {
+        assertEquals(List.of(new Permission("emr-serverless:CreateApplication", "*")),
+                TaskPermissions.of(integration("emr-serverless:createApplication"), json("{}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    /** A job run passes its execution role to EMR Serverless, as a direct {@code StartJobRun} does. */
+    @Test
+    void aJobRunNeedsPassRoleOnItsExecutionRole() throws Exception {
+        String role = "arn:aws:iam::111122223333:role/job";
+        assertEquals(List.of(new Permission("emr-serverless:StartJobRun", APPLICATION),
+                        new Permission("iam:PassRole", role,
+                                Map.of("iam:PassedToService", List.of("emr-serverless.amazonaws.com")))),
+                TaskPermissions.of(integration("emr-serverless:startJobRun"),
+                        json("{\"ApplicationId\":\"a\",\"ExecutionRoleArn\":\"" + role + "\"}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    /**
+     * Tags a create or a job run sends need {@code emr-serverless:TagResource}, on the application a create makes or
+     * the one a job run is checked on, as a direct request's do, and the call itself is checked with them.
+     */
+    @Test
+    void tagsACreateOrAJobRunSendsNeedTagResource() throws Exception {
+        Map<String, List<String>> tagged = Map.of("aws:RequestTag/team", List.of("data"), "aws:TagKeys", List.of("team"));
+        assertEquals(List.of(new Permission("emr-serverless:CreateApplication", "*", tagged),
+                        new Permission("emr-serverless:TagResource",
+                                "arn:aws:emr-serverless:eu-west-1:111122223333:/applications/*", tagged)),
+                TaskPermissions.of(integration("emr-serverless:createApplication"),
+                        json("{\"Tags\":{\"team\":\"data\"}}"), machine("aws")).orElseThrow().permissions());
+        assertEquals(List.of(new Permission("emr-serverless:StartJobRun", APPLICATION, tagged),
+                        new Permission("emr-serverless:TagResource", APPLICATION, tagged)),
+                TaskPermissions.of(integration("emr-serverless:startJobRun"),
+                        json("{\"ApplicationId\":\"a\",\"Tags\":{\"team\":\"data\"}}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    private static final String STACK = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/s/id";
+    private static final String STACK_SET = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/ss:id";
+
+    private static TaskPermissions control(String tail, String request, StoredResourceArns cloudFormation,
+                                           StoredResourceArns secrets, StoredResourceArns states,
+                                           boolean callback) throws Exception {
+        return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, callback,
+                new TaskPermissions.ControlServices(cloudFormation, secrets, states)).orElseThrow();
+    }
+
+    private static TaskPermissions control(String tail, String request) throws Exception {
+        return control(tail, request, null, null, null, false);
+    }
+
+    /** CloudFormation as IAM asks it: the stack {@code s} and the stack set {@code ss}, under the ids it minted. */
+    private static StoredResourceArns stacks() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "cloudformation";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return switch (type) {
+                    case "stack" -> names.equals(List.of("s")) ? Optional.of(STACK) : Optional.empty();
+                    case "stackset" -> names.equals(List.of("ss")) ? Optional.of(STACK_SET) : Optional.empty();
+                    default -> Optional.empty();
+                };
+            }
+        };
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "createSchedule|{\"Name\":\"n\"}|scheduler:CreateSchedule|schedule/default/n",
+            "updateSchedule|{\"Name\":\"n\",\"GroupName\":\"g\"}|scheduler:UpdateSchedule|schedule/g/n",
+            "deleteSchedule|{\"Name\":\"n\",\"GroupName\":\" \"}|scheduler:DeleteSchedule|schedule/default/n"})
+    void aScheduleIsCheckedInItsGroup(String api, String request, String action, String resource) throws Exception {
+        TaskPermissions permissions = control("aws-sdk:scheduler:" + api, request);
+
+        assertEquals("Scheduler.AccessDeniedException", permissions.deniedError());
+        assertEquals(List.of(new Permission(action, "arn:aws:scheduler:eu-west-1:" + ACCOUNT + ":" + resource)),
+                permissions.permissions());
+    }
+
+    @Test
+    void aScheduleRequestNamingNoScheduleNeedsNoPermission() throws Exception {
+        assertEquals(List.of(), control("aws-sdk:scheduler:deleteSchedule", "{\"GroupName\":\"g\"}").permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws-sdk:scheduler:getSchedule", "aws-sdk:scheduler:listSchedules",
+            "aws-sdk:sfn:describeExecution", "aws-sdk:sfn:stopExecution",
+            "aws-sdk:ec2:describeInstances", "aws-sdk:lambda:invoke", "aws-sdk:secretsmanager:getSecretValue",
+            "aws-sdk:s3:getObject", "s3:getObject", "aws-sdk:s3:listObjectsV2", "dynamodb:query",
+            "aws-sdk:rdsdata:batchExecuteStatement", "http:get", "elasticmapreduce:describeCluster"})
+    void anApiNoIntegrationServesIsNotChecked(String tail) throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration(tail), json("{}"), machine("aws"), null, null, false,
+                new TaskPermissions.ControlServices(null, null, null)));
+    }
+
+    /** A new case in the handler has to name its resource type here, or it would run unchecked under enforcement. */
+    @Test
+    void everyActionTheCloudFormationHandlerServesIsChecked() throws Exception {
+        String handler = Files.readString(Path.of("src/main/java/io/floci/aws/services/cloudformation/"
+                + "CloudFormationQueryHandler.java"));
+        Matcher action = Pattern.compile("case \"([A-Za-z]+)\" -> ").matcher(handler);
+        int actions = 0;
+        while (action.find()) {
+            actions++;
+            String api = Character.toLowerCase(action.group(1).charAt(0)) + action.group(1).substring(1);
+            assertTrue(TaskPermissions.of(integration("aws-sdk:cloudformation:" + api), json("{}"), machine("aws"), null,
+                    null, false, new TaskPermissions.ControlServices(null, null, null)).isPresent(), action.group(1));
+        }
+        assertEquals(36, actions);
+    }
+
+    /** An API the handler does not serve is checked as the direct request is, and the handler answers it. */
+    @Test
+    void aCloudFormationApiTheHandlerDoesNotServeIsCheckedAsTheTableGivesIt() throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:DescribeTypeRegistration", "*")),
+                control("aws-sdk:cloudformation:describeTypeRegistration", "{}").permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"validateTemplate", "listStacks", "listExports", "describeOrganizationsAccess",
+            "activateOrganizationsAccess", "createStackSet", "listStackSets"})
+    void aCloudFormationActionWithNoResourceTypeIsOnAnyResource(String api) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
+                control("aws-sdk:cloudformation:" + api, "{}").permissions());
+    }
+
+    /** A task whose input is no object still needs its action, on any resource, as a direct request naming none. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"listStacks|null", "listStacks|[]", "describeStacks|\"s\"",
+            "executeChangeSet|7"})
+    void aCloudFormationTaskWhoseInputIsNoObjectIsOnAnyResource(String api, String input) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
+                control("aws-sdk:cloudformation:" + api, input).permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"updateStack", "deleteStack", "continueUpdateRollback", "updateTerminationProtection",
+            "createChangeSet", "describeChangeSet", "executeChangeSet", "deleteChangeSet", "listChangeSets",
+            "describeStackEvents", "describeStackResources", "listStackResources", "describeStackResource", "getTemplate",
+            "setStackPolicy", "getStackPolicy", "describeStacks", "getTemplateSummary", "createStack"})
+    void aCloudFormationStackActionIsOnTheStackAsCloudFormationHoldsIt(String api) throws Exception {
+        for (String named : List.of("s", STACK)) {
+            TaskPermissions permissions = control("aws-sdk:cloudformation:" + api,
+                    "{\"StackName\":\"" + named + "\"}", stacks(), null, null, false);
+            assertEquals("CloudFormation.AccessDeniedException", permissions.deniedError());
+            assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), STACK)),
+                    permissions.permissions(), named);
+        }
+    }
+
+    /** A stack CloudFormation does not hold, one a create makes among them, is its ARN with the id open. */
+    @ParameterizedTest
+    @ValueSource(strings = {"createStack", "createChangeSet", "updateStack", "deleteStack", "describeStacks",
+            "describeChangeSet", "getTemplateSummary"})
+    void aStackCloudFormationDoesNotHoldHasItsIdOpen(String api) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api),
+                        "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/new/*")),
+                control("aws-sdk:cloudformation:" + api, "{\"StackName\":\"new\"}", stacks(), null, null, false)
+                        .permissions());
+    }
+
+    @Test
+    void aStackIdIsCheckedAsGiven() throws Exception {
+        String unknown = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/none/id";
+        assertEquals(List.of(new Permission("cloudformation:CreateStack", unknown)),
+                control("aws-sdk:cloudformation:createStack", "{\"StackName\":\"" + unknown + "\"}", stacks(), null,
+                        null, false).permissions());
+    }
+
+    /**
+     * A request naming its stack by no {@code StackName}, a change set by its ARN alone or a physical resource id
+     * alone among them, is checked on any resource, as the direct request is: the vendored request resources fill
+     * the stack from {@code StackName} only.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "describeStacks|{}",
+            "getTemplateSummary|{}",
+            "describeChangeSet|{\"ChangeSetName\":\"arn:aws:cloudformation:eu-west-1:000000000000:changeSet/c/1\"}",
+            "executeChangeSet|{\"ChangeSetName\":\"arn:aws:cloudformation:eu-west-1:000000000000:changeSet/c/1\"}",
+            "deleteChangeSet|{\"ChangeSetName\":\"c\"}",
+            "describeStackResources|{\"PhysicalResourceId\":\"r-1\"}",
+            "listStackResources|{\"PhysicalResourceId\":\"r-1\"}"})
+    void aRequestNamingNoStackIsOnAnyResource(String api, String request) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
+                control("aws-sdk:cloudformation:" + api, request, stacks(), null, null, false).permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"describeStackSet", "updateStackSet", "deleteStackSet", "createStackInstances",
+            "listStackInstances", "describeStackInstance", "deleteStackInstances", "listStackSetOperations",
+            "describeStackSetOperation", "listStackSetAutoDeploymentTargets"})
+    void aStackSetActionIsOnTheStackSetAsCloudFormationHoldsIt(String api) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), STACK_SET)),
+                control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"ss\"}", stacks(), null, null, false)
+                        .permissions());
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api),
+                        "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/none:*")),
+                control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"none\"}", stacks(), null, null, false)
+                        .permissions());
+    }
+
+    @Test
+    void anHttpTaskIsOnTheStateMachineWithItsEndpointAndMethodAsConditionKeys() throws Exception {
+        TaskPermissions permissions = control("http:invoke", "{\"ApiEndpoint\":\"https://a.example/x\",\"Method\":\"PUT\"}");
+
+        assertEquals("States.Http.AccessDeniedException", permissions.deniedError());
+        assertEquals(List.of(new Permission("states:InvokeHTTPEndpoint", machine("aws").getStateMachineArn(),
+                Map.of("states:HTTPEndpoint", List.of("https://a.example/x"), "states:HTTPMethod", List.of("PUT")))),
+                permissions.permissions());
+    }
+
+    @Test
+    void anHttpTaskWithNoMethodHasOnlyTheEndpointKey() throws Exception {
+        assertEquals(Map.of("states:HTTPEndpoint", List.of("https://a.example/x")),
+                control("http:invoke", "{\"ApiEndpoint\":\"https://a.example/x\"}").permissions().getFirst().conditionKeys());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"ApiEndpoint\":\" \"}", "{\"ApiEndpoint\":7}", "{\"Method\":\"GET\"}"})
+    void anHttpTaskNamingNoEndpointNeedsNoPermission(String request) throws Exception {
+        assertEquals(List.of(), control("http:invoke", request).permissions());
+    }
+
+    @Test
+    void describeRegionsIsOnAnyResource() throws Exception {
+        TaskPermissions permissions = control("aws-sdk:ec2:describeRegions", "{}");
+
+        assertEquals("Ec2.AccessDeniedException", permissions.deniedError());
+        assertEquals(List.of(new Permission("ec2:DescribeRegions", "*")), permissions.permissions());
+    }
+
+    @Test
+    void lambdaMappingsAreCheckedAsTheServiceReferenceGivesThem() throws Exception {
+        TaskPermissions list = control("aws-sdk:lambda:listEventSourceMappings", "{\"FunctionName\":\"f\"}");
+        assertEquals("Lambda.AccessDeniedException", list.deniedError());
+        assertEquals(List.of(new Permission("lambda:ListEventSourceMappings", "*")), list.permissions());
+        assertEquals(List.of(new Permission("lambda:UpdateEventSourceMapping",
+                        "arn:aws:lambda:eu-west-1:" + ACCOUNT + ":event-source-mapping:u-2")),
+                control("aws-sdk:lambda:updateEventSourceMapping", "{\"Uuid\":\"u-2\"}").permissions());
+        assertEquals(List.of(), control("aws-sdk:lambda:updateEventSourceMapping", "{}").permissions());
+        assertEquals(List.of(), control("aws-sdk:lambda:updateEventSourceMapping", "{\"UUID\":\"u-1\"}").permissions());
+    }
+
+    /**
+     * The check a direct {@code DescribeSecret} gets: the secret Secrets Manager stores a name under, random suffix
+     * included; a name it stores nothing under, with the suffix open; and another account's ARN as given and as the
+     * caller's own of that name.
+     */
+    @Test
+    void aSecretIsCheckedAsADirectRequestChecksIt() throws Exception {
+        String stored = "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:s-AbCdEf";
+        String foreign = "arn:aws:secretsmanager:eu-west-1:444455556666:secret:o-AbCdEf";
+        StoredResourceArns secrets = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of("s").equals(names) ? Optional.of(stored) : Optional.empty();
+            }
+        };
+
+        TaskPermissions named = control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"s\"}", null, secrets,
+                null, false);
+        assertEquals("SecretsManager.AccessDeniedException", named.deniedError());
+        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret", stored)), named.permissions());
+        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret", foreign),
+                        new Permission("secretsmanager:DescribeSecret",
+                                "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:o-AbCdEf")),
+                control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"" + foreign + "\"}", null, secrets,
+                        null, false).permissions());
+        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret",
+                        "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:none-??????")),
+                control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"none\"}", null, secrets, null, false)
+                        .permissions());
+        assertEquals(List.of(),
+                control("aws-sdk:secretsmanager:describeSecret", "{}", null, secrets, null, false).permissions());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"startExecution,states:StartExecution", "startSyncExecution,states:StartSyncExecution"})
+    void anSdkStartIsCheckedOnTheChildWithTheExecutionRoleChecks(String api, String action) throws Exception {
+        String child = "arn:aws:states:eu-west-1:" + ACCOUNT + ":stateMachine:c";
+        TaskPermissions permissions = control("aws-sdk:sfn:" + api, "{\"StateMachineArn\":\"" + child + "\"}");
+
+        assertEquals("Sfn.AccessDeniedException", permissions.deniedError());
+        assertTrue(permissions.checksExecutionRole());
+        assertEquals(List.of(new Permission(action, child)), permissions.permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"states:startExecution", "states:startExecution.sync", "states:startExecution.sync:2"})
+    void aNestedStartIsCheckedOnTheChildWithoutTheExecutionRoleChecks(String tail) throws Exception {
+        String child = "arn:aws:states:eu-west-1:" + ACCOUNT + ":stateMachine:c";
+        TaskPermissions permissions = control(tail, "{\"StateMachineArn\":\"" + child + "\"}");
+
+        assertEquals("StepFunctions.AccessDeniedException", permissions.deniedError());
+        assertFalse(permissions.checksExecutionRole());
+        assertEquals(List.of(new Permission("states:StartExecution", child)), permissions.permissions());
+    }
+
+    @Test
+    void aStartNamingAVersionIsCheckedOnTheStateMachineAndOneNamingNothingNeedsNoPermission() throws Exception {
+        String child = "arn:aws:states:eu-west-1:" + ACCOUNT + ":stateMachine:c";
+        assertEquals(List.of(new Permission("states:StartExecution", child)),
+                control("states:startExecution", "{\"StateMachineArn\":\"" + child + ":3\"}").permissions());
+        assertEquals(List.of(), control("states:startExecution", "{}").permissions());
+        assertEquals(List.of(), control("aws-sdk:sfn:startExecution", "{\"StateMachineArn\":\"not-an-arn\"}").permissions());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"sendTaskSuccess,states:SendTaskSuccess", "sendTaskFailure,states:SendTaskFailure"})
+    void aCallbackIsCheckedOnWhatItsTokenWaitsIn(String api, String action) throws Exception {
+        String activity = "arn:aws:states:eu-west-1:" + ACCOUNT + ":activity:a";
+        StoredResourceArns states = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "states";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findByMembers(String type, List<String> names, String region) {
+                if (!"t-1".equals(names.getFirst())) {
+                    throw new AwsException("InvalidToken", "Invalid Token", 400);
+                }
+                return Optional.of(activity);
+            }
+        };
+
+        assertEquals(List.of(new Permission(action, activity)),
+                control("aws-sdk:sfn:" + api, "{\"TaskToken\":\"t-1\"}", null, null, states, false).permissions());
+        assertEquals(List.of(), control("aws-sdk:sfn:" + api, "{\"TaskToken\":\"gone\"}", null, null, states, false).permissions());
+    }
+
+    @Test
+    void describeMapRunIsOnTheMapRun() throws Exception {
+        String mapRun = "arn:aws:states:eu-west-1:" + ACCOUNT + ":mapRun:m/label:id";
+        assertEquals(List.of(new Permission("states:DescribeMapRun", mapRun)),
+                control("aws-sdk:sfn:describeMapRun", "{\"MapRunArn\":\"" + mapRun + "\"}").permissions());
+    }
+
+    @Test
+    void itemReaderReadsTheObjectInTheStateMachinesPartition() {
+        assertEquals(List.of(new Permission("s3:GetObject", "arn:aws:s3:::b/k/x.json")),
+                TaskPermissions.itemReaderGetObject("b", "k/x.json", machine("aws")));
+        assertEquals(List.of(new Permission("s3:GetObject", "arn:aws-cn:s3:::b/k")),
+                TaskPermissions.itemReaderGetObject("b", "k", machine("aws-cn")));
+    }
+
+    @Test
+    void itemReaderNamingNoObjectNeedsNoPermission() {
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(null, "k", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(" ", "k", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject("b", null, machine("aws")));
+    }
+
+    @Test
+    void itemReaderListsTheBucketOfferingThePrefixItHas() {
+        assertEquals(List.of(new Permission("s3:ListBucket", "arn:aws:s3:::b")),
+                TaskPermissions.itemReaderListObjects("b", null, machine("aws")));
+        assertEquals(List.of(new Permission("s3:ListBucket", "arn:aws-us-gov:s3:::b",
+                        Map.of("s3:prefix", List.of("data/")))),
+                TaskPermissions.itemReaderListObjects("b", "data/", machine("aws-us-gov")));
+    }
+
+    @Test
+    void itemReaderListingNoBucketNeedsNoPermission() {
+        assertEquals(List.of(), TaskPermissions.itemReaderListObjects(null, "p", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderListObjects("", "p", machine("aws")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"out,out/run/", "out/,out/run/", "'',run/", "/a//,/a//run/"})
+    void resultWriterExportIsEachObjectItWrites(String prefix, String base) throws Exception {
+        JsonNode location = MAPPER.valueToTree(Map.of("Bucket", "b", "Prefix", prefix));
+
+        assertEquals(List.of(new Permission("s3:PutObject", "arn:aws:s3:::b/" + base + "SUCCEEDED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws:s3:::b/" + base + "manifest.json")),
+                TaskPermissions.resultWriterExport(location, "run", false, machine("aws")));
+        assertEquals(List.of(new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "SUCCEEDED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "FAILED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "manifest.json")),
+                TaskPermissions.resultWriterExport(location, "run", true, machine("aws-cn")));
+    }
+
+    @Test
+    void resultWriterExportWithNoPrefixIsUnderTheRun() throws Exception {
+        assertEquals("arn:aws:s3:::b/run/manifest.json", TaskPermissions.resultWriterExport(
+                json("{\"Bucket\":\"b\"}"), "run", false, machine("aws")).getLast().resourceArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"Bucket\":\"\"}", "{\"Bucket\":1}", "{\"Bucket\":\"b\",\"Prefix\":1}"})
+    void resultWriterNamingNoLocationNeedsNoPermission(String location) throws Exception {
+        assertEquals(List.of(), TaskPermissions.resultWriterExport(json(location), "run", true, machine("aws")));
+    }
+
+    /** {@code executeTaskState} strips the suffix, so each of these arrives bare, with a token, and is mapped as itself. */
+    @ParameterizedTest
+    @ValueSource(strings = {"aws-sdk:scheduler:createSchedule", "aws-sdk:cloudformation:listStacks", "http:invoke",
+            "aws-sdk:ec2:describeRegions", "aws-sdk:lambda:listEventSourceMappings",
+            "aws-sdk:secretsmanager:describeSecret", "aws-sdk:sfn:startExecution", "states:startExecution"})
+    void aCallbackFormIsMappedAsTheBareForm(String tail) throws Exception {
+        String request = "{\"Name\":\"n\",\"ApiEndpoint\":\"https://a.example/\",\"StateMachineArn\":"
+                + "\"arn:aws:states:eu-west-1:" + ACCOUNT + ":stateMachine:c\"}";
+
+        assertEquals(control(tail, request), control(tail, request, null, null, null, true));
+    }
+
+    private static TaskPermissions ecsPermissions(String tail, String request, StoredResourceArns ecs) throws Exception {
+        return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, ecs, false).orElseThrow();
+    }
+
+    /** What ECS answers IAM: the revision {@code orders} and {@code orders:7} resolve to, and its default cluster. */
+    private static StoredResourceArns ecs() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "ecs";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "task-definition".equals(type) && List.of(List.of("orders"), List.of("orders:7"),
+                        List.of(TASK_DEFINITION)).contains(names) ? Optional.of(TASK_DEFINITION) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "cluster".equals(type) ? Optional.of("arn:aws:ecs:" + region + ":111122223333:cluster/default")
+                        : Optional.empty();
+            }
+        };
     }
 
     private static List<Permission> sdkPermissions(String api, String request) throws Exception {

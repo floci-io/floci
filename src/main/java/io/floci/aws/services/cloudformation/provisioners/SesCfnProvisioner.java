@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesService;
+import io.floci.aws.services.ses.model.ConfigurationSet;
 import io.floci.aws.services.ses.model.Identity;
 import io.floci.aws.services.ses.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -25,6 +26,7 @@ import java.util.Set;
 public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String TYPE = "AWS::SES::EmailIdentity";
+    private static final String CONFIGURATION_SET_TYPE = "AWS::SES::ConfigurationSet";
     private static final String DEFAULT_KEY_LENGTH = "RSA_2048_BIT";
     private static final String MANAGED_TAGS_ATTR = "__FlociSesManagedTags";
     private static final String UPDATE_SNAPSHOT_ATTR = "__FlociSesUpdateSnapshot";
@@ -40,11 +42,19 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(TYPE);
+        return Set.of(TYPE, CONFIGURATION_SET_TYPE);
     }
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        switch (resource.getResourceType()) {
+            case CONFIGURATION_SET_TYPE -> provisionConfigurationSet(resource, props, ctx);
+            case TYPE -> provisionIdentity(resource, props, ctx);
+            default -> throw invalid("Unsupported SES resource type " + resource.getResourceType() + ".");
+        }
+    }
+
+    private void provisionIdentity(StackResource resource, JsonNode props, ProvisionContext ctx) {
         Properties desired = readProperties(props, ctx);
         boolean recoveredSnapshot = false;
         if (resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
@@ -113,7 +123,46 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        sesService.deleteIdentity(physicalId, region);
+        if (CONFIGURATION_SET_TYPE.equals(resourceType)) {
+            CfnDeletes.safeDelete("SES configuration set", physicalId,
+                    () -> sesService.deleteConfigurationSet(physicalId, region), "ConfigurationSetDoesNotExist");
+        } else {
+            sesService.deleteIdentity(physicalId, region);
+        }
+    }
+
+    private void provisionConfigurationSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = props == null ? null : ctx.engine().resolveNodeOmittingNoValue(props);
+        if (resolved != null && !resolved.isObject()) {
+            throw invalid("Properties must be an object.");
+        }
+        if (resolved != null) {
+            validateKeys(resolved, Set.of("Name"), "Properties");
+        }
+        String explicitName = optionalText(resolved, "Name");
+        if (explicitName != null && explicitName.isBlank()) {
+            throw invalid("Name must not be empty.");
+        }
+        boolean declaredReplacement = ctx.isUpdate()
+                && ctx.changes(CONFIGURATION_SET_TYPE, props).requiresReplacement();
+        String name = declaredReplacement && explicitName == null
+                ? ctx.generatePhysicalName(resource.getLogicalId(), 64, false)
+                : ctx.stablePhysicalName(explicitName, resource.getLogicalId(), 64, false);
+        boolean replacing = ctx.isUpdate()
+                && (declaredReplacement || !name.equals(ctx.priorPhysicalId()));
+        if (replacing && name.equals(ctx.priorPhysicalId())) {
+            throw CfnExceptions.customNamedReplacement(name);
+        }
+
+        Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
+        boolean priorStub = ctx.isUpdate()
+                && CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+        boolean created = !ctx.reusesPriorEntity(name) || priorStub;
+        if (created) {
+            sesService.createConfigurationSet(new ConfigurationSet(name), ctx.region());
+        }
+        resource.setPhysicalId(name);
+        ReplacementCleanup.record(resource, ctx, attributesBefore, replacing);
     }
 
     @Override
@@ -121,7 +170,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         UpdateCleanupResult cleanup = ReplacementCleanup.complete(resource, this::delete);
         if (cleanup.applicable() && !cleanup.complete()) {
             throw new AwsException("InternalFailure",
-                    "Could not delete displaced SES identity " + cleanup.previousPhysicalId()
+                    "Could not delete displaced SES resource " + cleanup.previousPhysicalId()
                             + ": " + cleanup.failureReason(), 500);
         }
         delete(resource.getResourceType(), resource.getPhysicalId(), region);
@@ -185,6 +234,10 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if (CONFIGURATION_SET_TYPE.equals(resource.getResourceType())) {
+            ReplacementCleanup.rollback(resource, this::delete);
+            return true;
+        }
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             restoreManagedTags(resource, readSnapshot(resource));
             resource.getAttributes().remove(UPDATE_SNAPSHOT_ATTR);

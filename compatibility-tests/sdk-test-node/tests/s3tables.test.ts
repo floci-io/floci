@@ -38,6 +38,7 @@ describe('S3 Tables lifecycle', () => {
   const namespace = 'analytics';
   let tableName = uniqueName('events');
   let versionToken: string;
+  let tableArn: string;
 
   beforeAll(() => {
     client = makeClient(S3TablesClient);
@@ -77,7 +78,10 @@ describe('S3 Tables lifecycle', () => {
       tags: { suite: 'sdk-node' },
     }));
     versionToken = table.versionToken!;
-    expect(table.tableARN).toBe(`${bucketArn}/table/${tableName}`);
+    // AWS ends a table's ARN in an id it mints, not the table's name.
+    tableArn = table.tableARN!;
+    expect(tableArn.startsWith(`${bucketArn}/table/`)).toBe(true);
+    expect(tableArn).not.toBe(`${bucketArn}/table/${tableName}`);
   });
 
   it('gets resources and applies list prefixes', async () => {
@@ -95,7 +99,7 @@ describe('S3 Tables lifecycle', () => {
     const tables = await client.send(new ListTablesCommand({ tableBucketARN: bucketArn, namespace, prefix: 'events' }));
     expect(tables.tables?.some((table) => table.name === tableName)).toBe(true);
     const table = await client.send(new GetTableCommand({ tableBucketARN: bucketArn, namespace, name: tableName }));
-    expect(table.tableARN).toBe(`${bucketArn}/table/${tableName}`);
+    expect(table.tableARN).toBe(tableArn);
   });
 
   it('round-trips policies and metadata version tokens', async () => {
@@ -170,6 +174,7 @@ describe('S3 Tables lifecycle', () => {
       name: renamedTableName,
     }));
     expect(renamed.name).toBe(renamedTableName);
+    expect(renamed.tableARN).toBe(tableArn);
     expect(renamed.versionToken).not.toBe(originalToken);
     await expect(client.send(new GetTableCommand({ tableBucketARN: bucketArn, namespace, name: tableName })))
       .rejects.toBeInstanceOf(NotFoundException);

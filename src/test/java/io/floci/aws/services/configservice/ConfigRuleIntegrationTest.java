@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.Collections;
-import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -284,7 +284,7 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigRuleException"));
+            .body("__type", equalTo("ValidationException"));
     }
 
     /**
@@ -324,7 +324,7 @@ class ConfigRuleIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterValueException"));
+                .body("__type", equalTo("ValidationException"));
         }
 
         // Nothing was stored under any of the rejected names.
@@ -373,7 +373,7 @@ class ConfigRuleIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterValueException"));
+                .body("__type", equalTo("ValidationException"));
         }
 
         StringBuilder tooManyTypes = new StringBuilder();
@@ -390,7 +390,7 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
 
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigRules")
@@ -423,7 +423,7 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -439,7 +439,7 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -478,19 +478,20 @@ class ConfigRuleIntegrationTest {
     }
 
     /** PutConfigRule's TagsList (config/2014-11-12): at most 50 tags, Key 1-128, Value 0-256,
-     *  rejected with the operation's modelled InvalidParameterValueException and nothing stored. */
+     *  rejected with ValidationException and nothing stored. The model leaves Key optional, so a
+     *  tag without one keeps the operation's modelled InvalidParameterValueException. */
     @Test
     @Order(101)
     void putConfigRuleRejectsInvalidTagsWithoutCreatingTheRule() {
         String fiftyOne = String.join(",", Collections.nCopies(51, "{\"Key\": \"k\", \"Value\": \"v\"}"));
-        List<String> invalid = List.of(
-            "{\"Value\": \"v\"}",
-            "{\"Key\": \"\", \"Value\": \"v\"}",
-            "{\"Key\": \"" + "k".repeat(129) + "\", \"Value\": \"v\"}",
-            "{\"Key\": \"k\", \"Value\": \"" + "v".repeat(257) + "\"}",
-            "{\"Key\": 7, \"Value\": \"v\"}",
-            fiftyOne);
-        for (String tags : invalid) {
+        Map<String, String> invalid = Map.of(
+            "{\"Value\": \"v\"}", "InvalidParameterValueException",
+            "{\"Key\": \"\", \"Value\": \"v\"}", "ValidationException",
+            "{\"Key\": \"" + "k".repeat(129) + "\", \"Value\": \"v\"}", "ValidationException",
+            "{\"Key\": \"k\", \"Value\": \"" + "v".repeat(257) + "\"}", "ValidationException",
+            "{\"Key\": 7, \"Value\": \"v\"}", "ValidationException",
+            fiftyOne, "ValidationException");
+        invalid.forEach((tags, errorCode) ->
             post("PutConfigRule", """
                 {
                     "ConfigRule": {
@@ -501,8 +502,7 @@ class ConfigRuleIntegrationTest {
                 }
                 """.formatted(tags))
                 .then().statusCode(400)
-                .body("__type", equalTo("InvalidParameterValueException"));
-        }
+                .body("__type", equalTo(errorCode)));
         post("DescribeConfigRules", "{\"ConfigRuleNames\": [\"rule-bad-tags\"]}")
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigRuleException"));
@@ -531,7 +531,7 @@ class ConfigRuleIntegrationTest {
         post("DeleteConfigRule", "{\"ConfigRuleName\": \"rule-keyonly-tag\"}").then().statusCode(200);
     }
 
-    /** PutAggregationAuthorization takes the same TagsList and models the same error. */
+    /** PutAggregationAuthorization takes the same TagsList. */
     @Test
     @Order(103)
     void putAggregationAuthorizationRejectsAnInvalidTag() {
@@ -540,7 +540,7 @@ class ConfigRuleIntegrationTest {
              "Tags": [{"Key": "", "Value": "v"}]}
             """)
             .then().statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
         post("DescribeAggregationAuthorizations", "{}")
             .then().statusCode(200)
             .body("AggregationAuthorizations.AuthorizedAccountId", not(hasItem("444455556666")));

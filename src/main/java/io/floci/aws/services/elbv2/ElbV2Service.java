@@ -33,6 +33,7 @@ import java.net.InetAddress;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -94,6 +95,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private AccountAwareStorageBackend<Map<String, TargetGroup>> targetGroupStore;
     private AccountAwareStorageBackend<Map<String, Listener>> listenerStore;
     private AccountAwareStorageBackend<Map<String, Rule>> ruleStore;
+    private AccountAwareStorageBackend<Map<String, String>> tagStore;
 
     // indexes
     private final Map<String, List<String>> lbToListeners   = new ConcurrentHashMap<>(); // LB-ARN → listener ARNs
@@ -102,6 +104,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // tags: resource-ARN → {key → value}
     private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+
+    /** DNS selects the resource owner independently of a management request's account. */
+    List<LoadBalancer> findByDnsName(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
+        String normalized = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+        if (normalized.regionMatches(true, 0, "dualstack.", 0, "dualstack.".length())) {
+            normalized = normalized.substring("dualstack.".length());
+        }
+        String target = normalized;
+        Collection<Map<String, LoadBalancer>> regions = allAccounts(loadBalancers, loadBalancerStore);
+        return regions.stream().flatMap(region -> region.values().stream())
+                .filter(lb -> target.equalsIgnoreCase(lb.getDnsName()))
+                .toList();
+    }
 
     @PostConstruct
     void initializeStorage()
@@ -121,19 +139,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         this.targetGroups = new StorageBackedMap<>(targetGroupStore);
         this.listeners = new StorageBackedMap<>(listenerStore);
         this.rules = new StorageBackedMap<>(ruleStore);
-        this.tags = storageBacked("elbv2-tags.json",
+        this.tagStore = storageFactory.create("elbv2", "elbv2-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
+        this.tags = new StorageBackedMap<>(tagStore);
         normalizeRegionMaps(loadBalancers);
         normalizeRegionMaps(targetGroups);
         normalizeRegionMaps(listeners);
         normalizeRegionMaps(rules);
         normalizeRegionMaps(tags);
         rebuildIndexes();
-    }
-
-    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
-    {
-        return new StorageBackedMap<>(storageFactory.create("elbv2", fileName, typeReference));
     }
 
     private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
@@ -303,7 +317,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
         String dnsName = name + "-" + id + ".elb." + loadBalancerDnsSuffix();
-        requireSubnets(lbType, subnets);
+        requireSubnets(region, lbType, subnets);
         String vpcId = resolveSubnetVpcId(region, lbType, subnets);
 
         LoadBalancer lb = new LoadBalancer();
@@ -332,7 +346,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     /**
      * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, and an Application Load
-     * Balancer takes at least two, so a CreateLoadBalancer with fewer is refused before anything is
+     * Balancer takes at least two by default, so a CreateLoadBalancer with fewer is refused before anything is
      * created, with the message AWS gives an Application or a Network Load Balancer. A Gateway Load
      * Balancer, which takes subnets the way a Network Load Balancer does, gets the Network one. AWS
      * counts before it looks a subnet up, so one subnet that does not exist gets this error too, not
@@ -342,17 +356,35 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * a SetSubnets that names none, and {@link #setSubnets} on a list that names some, once it has the
      * balancer's type; whether the subnets span two Availability Zones is checked after they are looked
      * up. No public report shows what AWS answers a SetSubnets with one subnet, so it gets the create
-     * message and order.
+     * message and order. Explicit global or regional single-zone overrides reduce the minimum to one.
      */
-    private static void requireSubnets(String lbType, List<String> subnets) {
+    private void requireSubnets(String region, String lbType, List<String> subnets) {
         int count = subnets == null ? 0 : subnets.size();
-        if ("application".equals(lbType) && count < 2) {
+        if ("application".equals(lbType) && requiresTwoAlbZones(region) && count < 2) {
             throw new AwsException("ValidationError",
                     "At least two subnets in two different Availability Zones must be specified", 400);
         }
         if (count == 0) {
             throw new AwsException("ValidationError", "At least one subnet must be specified", 400);
         }
+    }
+
+    private boolean requiresTwoAlbZones(String region) {
+        EmulatorConfig.AlbZoneRule rule = EmulatorConfig.AlbZoneRule.AWS;
+        if (config != null) {
+            EmulatorConfig.ElbV2ServiceConfig settings = config.services().elbv2();
+            if (settings.albZoneRule() != null) {
+                rule = settings.albZoneRule();
+            }
+            Map<String, EmulatorConfig.AlbZoneRule> regions = settings.albZoneRuleByRegion();
+            if (regions != null) {
+                rule = regions.getOrDefault(region, rule);
+            }
+        }
+        return switch (rule) {
+            case AWS -> true;
+            case ALLOW_SINGLE_ZONE -> false;
+        };
     }
 
     /**
@@ -489,7 +521,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     void setSubnetsFromRequest(String region, String arn, List<String> subnets) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         if (subnets.isEmpty()) {
-            requireSubnets(lb.getType(), subnets);
+            requireSubnets(region, lb.getType(), subnets);
         }
         setSubnets(region, arn, subnets);
     }
@@ -500,13 +532,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * moves a balancer an earlier Floci version saved without subnets back onto none.
      */
     public void setSubnets(String region, String arn, List<String> subnets) {
+        setSubnets(region, arn, subnets, false);
+    }
+
+    /** Restores CloudFormation's saved subnet snapshot, including legacy duplicate-zone assignments. */
+    public void restoreSubnetSnapshot(String region, String arn, List<String> subnets) {
+        setSubnets(region, arn, subnets, true);
+    }
+
+    private void setSubnets(String region, String arn, List<String> subnets, boolean restoreSnapshot) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {
             LoadBalancer lb = requireLoadBalancer(region, arn);
             // Counted as on create, before any subnet is looked up; an empty list is taken, as above.
             if (subnets != null && !subnets.isEmpty()) {
-                requireSubnets(lb.getType(), subnets);
+                requireSubnets(region, lb.getType(), subnets);
             }
-            String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
+            String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets, restoreSnapshot);
             if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
                 throw new AwsException("InvalidConfigurationRequest",
                         "All subnets must belong to the load balancer VPC.", 400);
@@ -809,7 +850,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 return;
             }
             ListenerState expected = listenerState(listener);
-            LoadBalancer lb = loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+            LoadBalancer lb = loadBalancerOf(region, listener);
             BooleanSupplier removal = () -> {
                 if (!isCurrentListener(region, expected)) {
                     return false;
@@ -827,14 +868,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
                 return true;
             };
-            boolean removed = dataPlane.removeListener(listenerArn, expected.port(), () -> {
-                if (lb == null) {
-                    return removal.getAsBoolean();
-                }
-                synchronized (lb) {
-                    return removal.getAsBoolean();
-                }
-            });
+            boolean removed = dataPlane.removeListener(listenerArn, expected.port(),
+                    () -> underLoadBalancerLock(lb, removal::getAsBoolean));
             if (removed) {
                 return;
             }
@@ -987,13 +1022,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         rule.setActions(actions != null ? new ArrayList<>(actions) : new ArrayList<>());
         rule.setDefault(false);
 
-        regionRules.put(ruleArn, rule);
-        rules.put(region, regionRules);
-        listenerToRules.computeIfAbsent(listenerArn, k -> new CopyOnWriteArrayList<>()).add(ruleArn);
+        synchronized (lb) {
+            regionRules.put(ruleArn, rule);
+            rules.put(region, regionRules);
+            listenerToRules.computeIfAbsent(listenerArn, k -> new CopyOnWriteArrayList<>()).add(ruleArn);
 
-        // update TG → LB index for all target group actions
-        for (Action a : rule.getActions()) {
-            linkTgToLb(a, listener.getLoadBalancerArn());
+            // update TG → LB index for all target group actions
+            for (Action a : rule.getActions()) {
+                linkTgToLb(a, listener.getLoadBalancerArn());
+            }
         }
 
         if (!initialTags.isEmpty()) {
@@ -1032,25 +1069,63 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     "The default rule for a listener cannot be deleted.", 400);
         }
         String listenerArn = rule.getListenerArn();
-        regionRules.remove(ruleArn);
-        rules.put(region, regionRules);
-        removeFromIndex(listenerToRules, listenerArn, ruleArn);
-        tags.remove(ruleArn);
         Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
-        if (listener != null) {
-            unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
-        }
+        underLoadBalancerLock(loadBalancerOf(region, listener), () -> {
+            regionRules.remove(ruleArn);
+            rules.put(region, regionRules);
+            removeFromIndex(listenerToRules, listenerArn, ruleArn);
+            tags.remove(ruleArn);
+            if (listener != null) {
+                unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+            }
+            return rule;
+        });
         dataPlane.recompileRules(listenerArn, () -> getListenerRules(region, listenerArn));
     }
 
     public Rule modifyRule(String region, String ruleArn, List<RuleCondition> conditions, List<Action> actions) {
         Rule rule = requireRule(region, ruleArn);
         String listenerArn = rule.getListenerArn();
-        if (conditions != null) rule.setConditions(new ArrayList<>(conditions));
-        if (actions != null)    rule.setActions(new ArrayList<>(actions));
-        persistRegion(rules, region);
+        Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
+        underLoadBalancerLock(loadBalancerOf(region, listener), () -> {
+            if (conditions != null) {
+                rule.setConditions(new ArrayList<>(conditions));
+            }
+            if (actions != null) {
+                rule.setActions(new ArrayList<>(actions));
+                if (listener != null) {
+                    // As ModifyListener does for its default actions: a target group the rule now forwards to is in
+                    // use by the load balancer, and one nothing routes to any more is not, so it can be deleted.
+                    for (Action action : actions) {
+                        linkTgToLb(action, listener.getLoadBalancerArn());
+                    }
+                    unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+                }
+            }
+            persistRegion(rules, region);
+            return rule;
+        });
         dataPlane.recompileRules(listenerArn, () -> getListenerRules(region, listenerArn));
         return rule;
+    }
+
+    /** The load balancer {@code listener} belongs to; null when the listener or its load balancer is gone. */
+    private LoadBalancer loadBalancerOf(String region, Listener listener) {
+        return listener == null ? null : loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+    }
+
+    /**
+     * Runs {@code change} holding {@code lb}'s monitor, as every change to the actions of the load balancer's
+     * listeners and rules does, so that unlinking the target groups nothing routes to any more sees each rule as
+     * the other changes left it; unlocked when there is no load balancer, as for a listener whose one is gone.
+     */
+    private <T> T underLoadBalancerLock(LoadBalancer lb, Supplier<T> change) {
+        if (lb == null) {
+            return change.get();
+        }
+        synchronized (lb) {
+            return change.get();
+        }
     }
 
     public void setRulePriorities(String region, Map<String, Integer> arnToPriority) {
@@ -1193,21 +1268,40 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public void addTags(List<String> resourceArns, Map<String, String> newTags) {
+    /**
+     * Gives each resource a new map holding its tags and {@code newTags}. Tag calls run one at a time, so two of them
+     * never lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void addTags(List<String> resourceArns, Map<String, String> newTags) {
         for (String arn : resourceArns) {
-            tags.computeIfAbsent(arn, k -> new LinkedHashMap<>()).putAll(newTags);
-            tags.put(arn, tags.get(arn));
+            Map<String, String> merged = new LinkedHashMap<>(tags.getOrDefault(arn, Map.of()));
+            merged.putAll(newTags);
+            tags.put(arn, merged);
         }
     }
 
-    public void removeTags(List<String> resourceArns, List<String> tagKeys) {
+    /** Gives each resource holding tags a new map without {@code tagKeys}, one tag call at a time. */
+    public synchronized void removeTags(List<String> resourceArns, List<String> tagKeys) {
         for (String arn : resourceArns) {
             Map<String, String> resourceTags = tags.get(arn);
             if (resourceTags != null) {
-                tagKeys.forEach(resourceTags::remove);
-                tags.put(arn, resourceTags);
+                Map<String, String> remaining = new LinkedHashMap<>(resourceTags);
+                tagKeys.forEach(remaining::remove);
+                tags.put(arn, remaining);
             }
         }
+    }
+
+    /**
+     * The tags of the load balancer, target group, listener or rule whose ARN is {@code arn}, in {@code account}, read
+     * in place under the ARN they are kept under, for IAM's lookup of stored tags. A resource's tags go with it when it
+     * is deleted, so a deleted resource's ARN reads none.
+     */
+    public Map<String, String> tagsInAccount(String account, String arn) {
+        if (tagStore == null) {
+            return tags.getOrDefault(arn, Map.of());
+        }
+        return AccountAwareStorageBackend.readInAccount(tagStore, account, arn).orElse(Map.of());
     }
 
     public Map<String, Map<String, String>> describeTags(List<String> resourceArns) {
@@ -1556,7 +1650,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             if (listener == null) {
                 return;
             }
-            LoadBalancer lb = loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+            LoadBalancer lb = loadBalancerOf(region, listener);
             if (lb == null) {
                 return;
             }
@@ -1690,6 +1784,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     }
 
     private String resolveSubnetVpcId(String region, String lbType, List<String> subnetIds) {
+        return resolveSubnetVpcId(region, lbType, subnetIds, false);
+    }
+
+    private String resolveSubnetVpcId(String region, String lbType, List<String> subnetIds,
+                                      boolean restoreSnapshot) {
         if (subnetIds == null || subnetIds.isEmpty()) {
             return null;
         }
@@ -1702,9 +1801,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     .map(Subnet::getAvailabilityZone)
                     .distinct()
                     .count();
-            if (distinctAvailabilityZones < 2) {
+            if (requiresTwoAlbZones(region) && distinctAvailabilityZones < 2) {
                 throw new AwsException("InvalidConfigurationRequest",
                         "Application Load Balancers must be attached to subnets in at least two Availability Zones.", 400);
+            }
+            if (!restoreSnapshot && distinctAvailabilityZones < subnetIds.size()) {
+                throw new AwsException("InvalidConfigurationRequest",
+                        "A load balancer cannot be attached to multiple subnets in the same Availability Zone", 400);
             }
         }
 

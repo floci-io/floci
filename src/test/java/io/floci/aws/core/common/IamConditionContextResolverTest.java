@@ -11,6 +11,7 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
@@ -35,11 +36,14 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,11 +57,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -78,6 +85,26 @@ class IamConditionContextResolverTest {
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
     private ResolvedServiceCatalog serviceCatalog;
+
+    @Test
+    void eksRequestConditionsUseModeledPathsAndLeaveOmissionsAbsent() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":"API","bootstrapClusterCreatorAdminPermissions":false},
+                 "resourcesVpcConfig":{"endpointPrivateAccess":true,"endpointPublicAccess":false}}"""));
+        Map<String, List<String>> create = resolver.resolve("eks", "eks:CreateCluster", request);
+        assertEquals(Map.of("eks:authenticationMode", List.of("API"),
+                "eks:bootstrapClusterCreatorAdminPermissions", List.of("false"),
+                "eks:endpointPrivateAccess", List.of("true"), "eks:endpointPublicAccess", List.of("false")), create);
+        Map<String, List<String>> update = resolver.resolve("eks", "eks:UpdateClusterConfig", request);
+        assertEquals(3, update.size());
+        assertFalse(update.containsKey("eks:bootstrapClusterCreatorAdminPermissions"));
+        assertNull(resolver.resolve("eks", "eks:DescribeCluster", request));
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":null},"resourcesVpcConfig":{"endpointPrivateAccess":[]}}"""));
+        assertNull(resolver.resolve("eks", "eks:CreateCluster", request));
+        assertNull(resolver.resolve("eks", "eks:UpdateClusterConfig", request));
+    }
 
     @SuppressWarnings("unchecked")
     @BeforeEach
@@ -127,8 +154,8 @@ class IamConditionContextResolverTest {
         resolver = new IamConditionContextResolver(
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
                 crossAccountServiceInstance, iamServiceInstance,
-                lambdaWebServiceInstance,
-                requestContext, config,
+                lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()), mock(Instance.class),
+                requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
     }
 
@@ -144,29 +171,80 @@ class IamConditionContextResolverTest {
         String resource = "lambda:Resource/WebFunctionAuthType";
 
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
-                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+                webRequest("PUT", "/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
-                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                "lambda:CreateWebFunctionEndpoint", webRequest("PUT", "/2025-03-07/web-functions/app/endpoints",
                         "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
                 resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
-                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+                        webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
-                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev",
                         "{\"description\":\"d\"}")), "an update without authType names none");
-        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
-            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
-                            "")));
-            assertNull(resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        // A function and an endpoint named by their ARNs, which a client sends encoded.
+        String encoded = function.replace("/", "%2F");
+        for (String[] action : new String[][] {{"lambda:GetWebFunctionEndpoint", "GET"},
+                {"lambda:DeleteWebFunctionEndpoint", "DELETE"}}) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/" + encoded + "/endpoints/" + encoded
+                            + "%2Fendpoint%2Fdev", "")));
+            assertNull(resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/app/endpoints/gone", "")),
+                    "a missing endpoint has none");
         }
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
-                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+                webRequest("GET", "/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
-                webRequest("/2025-03-07/web-functions/app", "")));
+                webRequest("GET", "/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
-                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
+                webRequest("POST", "/2025-03-07/web-functions/app/list-endpoints", "{}")));
+    }
+
+    /**
+     * A change batch carries the keys the generated table names for its action, read from the elements its members
+     * name and spelled by the namespace's service for each member's shape; an element of the same name elsewhere is
+     * not read.
+     */
+    @Test
+    void aChangeBatchCarriesTheKeysItsMembersNameSpelledByShape() {
+        String body = """
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch><Changes>
+                    <Change><Action>UPSERT</Action><ResourceRecordSet><Name>Probe.Example.test</Name><Type>A</Type>
+                      <GeoLocation><Name>elsewhere.example.test</Name></GeoLocation></ResourceRecordSet></Change>
+                    <Change><Action>DELETE</Action><ResourceRecordSet><Name>second.example.test.</Name>
+                      <Type>TXT</Type></ResourceRecordSet></Change>
+                  </Changes></ChangeBatch>
+                </ChangeResourceRecordSetsRequest>""";
+
+        assertEquals(Map.of(
+                "route53:ChangeResourceRecordSetsActions", List.of("ChangeAction:UPSERT", "ChangeAction:DELETE"),
+                "route53:ChangeResourceRecordSetsRecordTypes", List.of("RRType:A", "RRType:TXT"),
+                "route53:ChangeResourceRecordSetsNormalizedRecordNames",
+                List.of("DNSName:Probe.Example.test", "DNSName:second.example.test.")),
+                resolver.resolve("route53", "route53:ChangeResourceRecordSets", xmlRequest(body)));
+        assertNull(resolver.resolve("route53", "route53:ChangeResourceRecordSets",
+                xmlRequest("<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>")), "a body that does not parse");
+        assertNull(resolver.resolve("route53", "route53:ListResourceRecordSets", xmlRequest(body)));
+    }
+
+    @Test
+    void aQueryRequestCarriesTheKeysItsMembersNameAsGiven() {
+        assertEquals(Map.of("redshift:DbUser", List.of("analyst")), resolver.resolve("redshift",
+                "redshift:GetClusterCredentials", formRequest("Action=GetClusterCredentials&DbUser=analyst")));
+        assertNull(resolver.resolve("redshift", "redshift:GetClusterCredentials",
+                formRequest("Action=GetClusterCredentials")));
+    }
+
+    @Test
+    void anAssumeRoleRequestCarriesItsSessionNameAndExternalId() {
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice"), "sts:ExternalId", List.of("partner-42")),
+                resolver.resolve("sts", "sts:AssumeRole", formRequest(
+                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A111111111111%3Arole%2Fr"
+                                + "&RoleSessionName=alice&ExternalId=partner-42")));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), resolver.resolve("sts", "sts:AssumeRole",
+                formRequest("Action=AssumeRole&RoleSessionName=alice")), "no ExternalId, no sts:ExternalId");
+        assertNull(resolver.resolve("sts", "sts:GetCallerIdentity", formRequest("Action=GetCallerIdentity")));
     }
 
     @Test
@@ -218,11 +296,44 @@ class IamConditionContextResolverTest {
         return containerRequest;
     }
 
-    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+    /** An XML request whose body can be read again, as a real request's restored stream can. */
+    private static ContainerRequestContext xmlRequest(String body) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        when(containerRequest.getEntityStream())
+                .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RequestConditionSpelling> spellings(RequestConditionSpelling... spellings) {
+        Instance<RequestConditionSpelling> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(spellings.length == 0);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(spellings).iterator());
+        return instance;
+    }
+
+    /** Spells each Route 53 member as its shape and value, so a test sees which shape each value was read with. */
+    private static final class ShapeNamingSpelling implements RequestConditionSpelling {
+        @Override
+        public String namespace() {
+            return "route53";
+        }
+
+        @Override
+        public String spell(String shape, String value) {
+            return shape + ":" + value;
+        }
+    }
+
+    private ContainerRequestContext webRequest(String method, String path, String body) throws Exception {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
-        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getMethod()).thenReturn(method);
+        when(uriInfo.getPath()).thenReturn(URI.create(path).getPath());
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + path));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getProperty("floci.bufferedJsonBody"))
                 .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;
@@ -539,6 +650,41 @@ class IamConditionContextResolverTest {
                 resolver.resolve("iam", "iam:AttachRolePolicy", queryRequest("iam", query)));
     }
 
+    @Test
+    void aTagBatchLooksUpItsInterfacesOnceAndGivesEachTargetItsOwnKeys() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "DeleteTags");
+        query.add("ResourceId.1", "eni-1");
+        query.add("ResourceId.2", "eni-2");
+        query.add("ResourceId.3", "eni-3");
+        ContainerRequestContext request = queryRequest("ec2", query);
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY));
+        when(request.getProperty(anyString())).thenAnswer(call -> properties.get(call.<String>getArgument(0)));
+        doAnswer(call -> properties.put(call.getArgument(0), call.getArgument(1)))
+                .when(request).setProperty(anyString(), any());
+        when(ec2Service.heldResources(eq("us-east-1"), eq("network-interface"), anyCollection())).thenReturn(Map.of(
+                "eni-1", networkInterface("eni-1", "vpc-a"), "eni-2", networkInterface("eni-2", "vpc-b"),
+                "eni-3", networkInterface("eni-3", "vpc-a")));
+
+        Map<String, List<String>> first = resolver.resolve("ec2", "ec2:DeleteTags", request);
+        List<Map<String, List<String>>> rest = resolver.resolveRemainingTargets("ec2", "ec2:DeleteTags", request);
+
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-a"), first.get("ec2:Vpc"));
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-b"), rest.get(0).get("ec2:Vpc"));
+        assertEquals(List.of("eni-3"), rest.get(1).get("ec2:NetworkInterfaceID"));
+        verify(ec2Service, times(1)).heldResources(anyString(), anyString(), anyCollection());
+        verify(ec2Service).heldResources("us-east-1", "network-interface", Set.of("eni-1", "eni-2", "eni-3"));
+    }
+
+    private static NetworkInterface networkInterface(String id, String vpcId) {
+        NetworkInterface networkInterface = new NetworkInterface();
+        networkInterface.setNetworkInterfaceId(id);
+        networkInterface.setVpcId(vpcId);
+        return networkInterface;
+    }
+
     private static ContainerRequestContext queryRequest(String service, MultivaluedMap<String, String> query) {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         UriInfo uri = mock(UriInfo.class);
@@ -721,8 +867,62 @@ class IamConditionContextResolverTest {
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                requestContext, config, null,
+                spellings(), mock(Instance.class), requestContext, new RegionResolver("us-east-1", "123456789012"),
+                config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+    }
+
+    /** A resolver whose only finder of stored resources is {@code stored}. */
+    private IamConditionContextResolver resolverReading(StoredResourceArns stored) {
+        @SuppressWarnings("unchecked")
+        Instance<StoredResourceArns> instance = mock(Instance.class);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
+        return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                spellings(), instance, requestContext, new RegionResolver("us-east-1", "123456789012"), config,
+                null, serviceCatalog, Clock.systemUTC());
+    }
+
+    @Test
+    void resourceTagsAreTheGeneratedKeysOfTheArnsTypeValuedFromItsServicesStoredTags() {
+        String secret = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app-AbCdEf";
+        Map<String, String> held = new LinkedHashMap<>();
+        held.put("Environment", "prod");
+        held.put("environment", "dev");
+        IamConditionContextResolver reading = resolverReading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> storedTags(String arn) {
+                return secret.equals(arn) ? held : Map.of();
+            }
+        });
+
+        Map<String, List<String>> tags = reading.resourceTags(secret);
+        assertEquals(2, tags.size());
+        assertEquals(List.of("prod", "dev"), tags.get("aws:ResourceTag/Environment"));
+        assertEquals(List.of("prod", "dev"), tags.get("secretsmanager:resourcetag/environment"));
+        assertNull(reading.resourceTags(secret.replace("AbCdEf", "ZyXwVu")));
+        assertNull(reading.resourceTags("*"));
+        // Events' types have resource-tag keys too, but no finder of its stored resources is registered here.
+        assertNull(reading.resourceTags("arn:aws:events:eu-west-1:123456789012:rule/nightly"));
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        context.put("AWS:ResourceTag/environment", List.of("forged"));
+        context.put("aws:RequestTag/Owner", List.of("me"));
+        Map<String, List<String>> checked = IamConditionContextResolver.withResourceTags(context, tags);
+        assertEquals(List.of("prod", "dev"), checked.get("aws:ResourceTag/Environment"));
+        assertFalse(checked.containsKey("AWS:ResourceTag/environment"));
+        assertEquals(List.of("me"), checked.get("aws:RequestTag/Owner"));
+        assertSame(context, IamConditionContextResolver.withResourceTags(context, null));
     }
 
     @Test
@@ -1348,6 +1548,12 @@ class IamConditionContextResolverTest {
                 "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
                 "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
 
+        // The time of the request is on a service call as on every request; the rest is exact.
+        assertTrue(conditions.containsKey("aws:CurrentTime"));
+        assertTrue(conditions.containsKey("aws:EpochTime"));
+        Map<String, List<String>> rest = new HashMap<>(conditions);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
         assertEquals(Map.of(
                 "aws:PrincipalIsAWSService", List.of("true"),
                 "aws:ViaAWSService", List.of("false"),
@@ -1357,7 +1563,7 @@ class IamConditionContextResolverTest {
                 "aws:SourceAccount", List.of("444455556666"),
                 "aws:SourceOwner", List.of("444455556666"),
                 "aws:ResourceAccount", List.of("111122223333"),
-                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+                "aws:RequestedRegion", List.of("eu-west-2")), rest);
     }
 
     @Test

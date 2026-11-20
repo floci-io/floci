@@ -1,6 +1,7 @@
 package io.floci.aws.services.iot;
 
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -136,7 +137,7 @@ class IotMqttWebSocketFramingIntegrationTest {
     }
 
     private String ws() {
-        return "ws://127.0.0.1:" + testHttpPort + "/mqtt";
+        return "ws://127.0.0.1:" + testHttpPort + "/mqtt" + IotWebSocketSigV4.QUERY;
     }
 
     /** MQTT 3.1.1 CONNECT, clean session, keep alive 60, no will, no credentials. */

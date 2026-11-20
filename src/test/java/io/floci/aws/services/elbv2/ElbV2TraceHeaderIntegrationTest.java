@@ -1,6 +1,6 @@
 package io.floci.aws.services.elbv2;
 
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -32,7 +32,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 
 /** What a target receives through a real listener socket, against the ALB request tracing guide. */
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 class ElbV2TraceHeaderIntegrationTest {
 
     private static final String ID = "1-[0-9a-f]{8}-[0-9a-f]{24}";

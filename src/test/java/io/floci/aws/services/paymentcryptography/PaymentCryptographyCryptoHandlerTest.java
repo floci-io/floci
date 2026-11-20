@@ -230,12 +230,170 @@ class PaymentCryptographyCryptoHandlerTest {
                 "GenerationAttributes", iso9797())), "us-east-1");
         String value = (String) mac.get("Mac");
 
-        assertEquals(8, hexBytes(value).length);
+        // The reference counts the length of a mac in hexadecimal characters, so a length of
+        // eight is four bytes.
+        assertEquals(4, hexBytes(value).length);
 
         Map<String, Object> verified = handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 8,
                 "VerificationAttributes", iso9797())), "us-east-1");
         assertEquals(key.getArn(), verified.get("KeyArn"));
+    }
+
+    @Test
+    void aMacAlgorithmThisServiceDoesNotMakeIsRefused() {
+        // The reference's model names the AS 2805 MAC beside the ones this service makes,
+        // and the EMV MAC and the DUKPT CMAC as the variants of the attributes. A request
+        // that asks for one of them is refused with the error that names the ones it makes.
+        PaymentCryptographyKey key = createTdesKey("Generate", "Verify");
+        String message = hex("a message".getBytes());
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("Algorithm", "AS2805_4_1");
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.generateMac(request(Map.of(
+                        "KeyIdentifier", key.getArn(), "MessageData", message,
+                        "GenerationAttributes", attributes)), "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("CMAC"), refused.getMessage());
+        for (String variant : new String[] {"EmvMac", "DukptCmac"}) {
+            ObjectNode variantAttributes = mapper.createObjectNode();
+            variantAttributes.put(variant, mapper.createObjectNode());
+            AwsException refusedVariant = assertThrows(AwsException.class,
+                    () -> handler.generateMac(request(Map.of(
+                            "KeyIdentifier", key.getArn(), "MessageData", message,
+                            "GenerationAttributes", variantAttributes)), "us-east-1"));
+            assertEquals("ValidationException", refusedVariant.getErrorCode());
+            assertTrue(refusedVariant.getMessage().contains(variant), refusedVariant.getMessage());
+        }
+    }
+
+    @Test
+    void aHashedMacIsComputedAndVerified() {
+        // The reference's guide: a key whose algorithm is a keyed hash carries the hash, and
+        // the request names the mac by the name of the family, so the key sets the hash.
+        PaymentCryptographyKey key = createKeyOf("HMAC_SHA256", "TR31_M7_HMAC_KEY",
+                "Generate", "Verify");
+        String message = hex("a message".getBytes());
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("Algorithm", "HMAC");
+
+        Map<String, Object> mac = handler.generateMac(request(Map.of(
+                "KeyIdentifier", key.getArn(), "MessageData", message,
+                "GenerationAttributes", attributes)), "us-east-1");
+        String value = (String) mac.get("Mac");
+
+        // The length the request asks for is ignored, and the mac is the whole hash.
+        assertEquals(32, hexBytes(value).length);
+
+        Map<String, Object> verified = handler.verifyMac(request(Map.of(
+                "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value,
+                "VerificationAttributes", attributes)), "us-east-1");
+        assertEquals(key.getArn(), verified.get("KeyArn"));
+    }
+
+    @Test
+    void aHashedMacUnderAKeyThatCarriesAnotherHashIsRefused() {
+        // The hash a key carries is fixed at its creation, so a request that asks for
+        // another one is refused rather than answered with the hash the key holds.
+        PaymentCryptographyKey key = createKeyOf("HMAC_SHA256", "TR31_M7_HMAC_KEY", "Generate");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("Algorithm", "HMAC_SHA512");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.generateMac(request(Map.of(
+                        "KeyIdentifier", key.getArn(), "MessageData", hex("a message".getBytes()),
+                        "GenerationAttributes", attributes)), "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("SHA-256"), refused.getMessage());
+    }
+
+    @Test
+    void aHashedMacUnderAKeyThatCarriesNoHashIsRefused() {
+        // A key of the hash usage that is not itself a keyed hash key carries no hash, so
+        // the request has to name the one it wants.
+        PaymentCryptographyKey key = createKeyOf("TDES_2KEY", "TR31_M7_HMAC_KEY", "Generate");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("Algorithm", "HMAC");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.generateMac(request(Map.of(
+                        "KeyIdentifier", key.getArn(), "MessageData", hex("a message".getBytes()),
+                        "GenerationAttributes", attributes)), "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("HMAC_SHA256"), refused.getMessage());
+    }
+
+    @Test
+    void aHashedMacKeyOfAnotherUsageIsRefused() {
+        // The hash usage is what binds the key to the mac, so a keyed hash key of another
+        // usage is not a key the service makes.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createKeyOf("HMAC_SHA256", "TR31_M1_ISO_9797_1_MAC_KEY", "Generate"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TR31_M1_ISO_9797_1_MAC_KEY"), refused.getMessage());
+    }
+
+    @Test
+    void anEncryptionModeThisServiceDoesNotMakeIsRefused() {
+        // The reference's model names eight block cipher modes for the symmetric encryption,
+        // and this service makes them all, so a request that names another is refused rather
+        // than answered with a cipher of another kind.
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+        ObjectNode symmetric = mapper.createObjectNode();
+        symmetric.put("Mode", "ROT13");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("Symmetric", symmetric);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.encryptData(request(Map.of(
+                        "KeyIdentifier", key.getArn(),
+                        "PlainText", hex("hello, world!!!!".getBytes()),
+                        "EncryptionAttributes", attributes)), "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("CFB128"), refused.getMessage());
+    }
+
+    @Test
+    void everyModeTheReferenceNamesEncryptsAndDecrypts() {
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+        String plain = hex("hello, world!!!!".getBytes());
+        for (String mode : new String[] {"ECB", "CBC", "CFB", "CFB1", "CFB8", "CFB64", "CFB128",
+                "OFB"}) {
+            ObjectNode symmetric = mapper.createObjectNode();
+            symmetric.put("Mode", mode);
+            ObjectNode attributes = mapper.createObjectNode();
+            attributes.set("Symmetric", symmetric);
+
+            Map<String, Object> encrypted = handler.encryptData(request(Map.of(
+                    "KeyIdentifier", key.getArn(), "PlainText", plain,
+                    "EncryptionAttributes", attributes)), "us-east-1");
+            String cipherText = (String) encrypted.get("CipherText");
+            assertEquals(plain.length(), cipherText.length(), mode);
+
+            Map<String, Object> decrypted = handler.decryptData(request(Map.of(
+                    "KeyIdentifier", key.getArn(), "CipherText", cipherText,
+                    "DecryptionAttributes", attributes)), "us-east-1");
+            assertEquals(plain, decrypted.get("PlainText"), mode);
+        }
+    }
+
+    @Test
+    void aModeTheKeyCipherCannotTakeIsRefused() {
+        // The feedback of the feedback modes is as wide as the cipher's own block at the
+        // widest, and a Triple DES block is eight bytes, so the mode whose feedback is a
+        // hundred and twenty-eight bits is not one a Triple DES key takes.
+        PaymentCryptographyKey key = createTdesDataKey("TDES_2KEY", "Encrypt", "Decrypt");
+        ObjectNode symmetric = mapper.createObjectNode();
+        symmetric.put("Mode", "CFB128");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("Symmetric", symmetric);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.encryptData(request(Map.of(
+                        "KeyIdentifier", key.getArn(), "PlainText", "0011223344556677",
+                        "EncryptionAttributes", attributes)), "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("CFB128"), refused.getMessage());
     }
 
     @Test
@@ -250,7 +408,9 @@ class PaymentCryptographyCryptoHandlerTest {
                 "GenerationAttributes", iso9797())), "us-east-1");
         String value = (String) mac.get("Mac");
 
-        assertEquals(8, hexBytes(value).length);
+        // The reference counts the length of a mac in hexadecimal characters, so a length of
+        // eight is four bytes.
+        assertEquals(4, hexBytes(value).length);
 
         Map<String, Object> verified = handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 8,
@@ -473,7 +633,9 @@ class PaymentCryptographyCryptoHandlerTest {
                 "GenerationAttributes", dukpt("DukptIso9797Algorithm1"))), "us-east-1");
         String value = (String) mac.get("Mac");
 
-        assertEquals(8, hexBytes(value).length);
+        // The reference counts the length of a mac in hexadecimal characters, so a length of
+        // eight is four bytes.
+        assertEquals(4, hexBytes(value).length);
 
         Map<String, Object> verified = handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 8,

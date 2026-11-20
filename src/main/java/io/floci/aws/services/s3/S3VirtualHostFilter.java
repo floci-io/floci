@@ -9,6 +9,7 @@ import io.floci.aws.core.common.RequestUriRewrite;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.lifecycle.ControlPlaneNotFoundFilter;
 import io.floci.aws.services.apigateway.ApiGatewayCustomDomainFilter;
 import io.floci.aws.services.cloudfront.CloudFrontDistributionFilter;
 import io.floci.aws.services.cognito.CognitoCustomDomainFilter;
@@ -151,6 +152,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
+        if (isEndpointRoot(host)) {
+            return;
+        }
         String bucket = extractBucket(host, baseHostname, serviceHostSuffixes);
         if (bucket == null && signedForS3 && s3ServiceInstance != null && s3ServiceInstance.isResolvable()) {
             bucket = extractBucketFromExisting(host, s3ServiceInstance.get());
@@ -163,6 +167,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Do not rewrite S3 Control API paths — the account ID appears as a host label
         // in the S3ControlClient but the path belongs to the S3 Control service, not S3.
         if (path.startsWith("/v20180820/")) {
+            return;
+        }
+
+        // The Floci control plane is matched before any service routing, so a health probe sent with a
+        // bucket-style Host still reaches it. The cost is that a virtual-hosted request cannot address
+        // an object key under _floci/ or _localstack/; a path-style request still can.
+        if (ControlPlaneNotFoundFilter.isControlPlanePath(path)) {
             return;
         }
 
@@ -270,6 +281,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
         // Strip port if present
         String hostname = stripPort(host);
+        if (isEndpointRoot(hostname, baseHostname, serviceHostSuffixes)) {
+            return null;
+        }
 
         // Need at least one dot for a subdomain to exist
         int firstDot = hostname.indexOf('.');
@@ -317,6 +331,19 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
 
         return bucketBeforeS3Qualifier(hostname);
+    }
+
+    /** Whether the host names a configured endpoint rather than a bucket, including controller fallback paths. */
+    boolean isEndpointRoot(String host) {
+        return isEndpointRoot(host, baseHostname, serviceHostSuffixes);
+    }
+
+    private static boolean isEndpointRoot(String host, String baseHostname, Set<String> serviceHostSuffixes) {
+        String withoutPort = stripPort(host);
+        String hostname = withoutPort.endsWith(".")
+                ? withoutPort.substring(0, withoutPort.length() - 1) : withoutPort;
+        return hostname.equalsIgnoreCase(baseHostname)
+                || serviceHostSuffixes.stream().anyMatch(hostname::equalsIgnoreCase);
     }
 
     /**

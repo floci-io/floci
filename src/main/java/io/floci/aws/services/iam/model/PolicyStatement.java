@@ -88,6 +88,13 @@ public class PolicyStatement {
     public String getVersion()             { return version; }
     public String getSid()                 { return sid; }
 
-    public boolean isDeny()  { return "Deny".equalsIgnoreCase(effect); }
-    public boolean isAllow() { return "Allow".equalsIgnoreCase(effect); }
+    /**
+     * Whether the statement states that effect. The two words are compared as written, the IAM
+     * User Guide saying of the element that "The {@code Effect} value is case sensitive", so a
+     * statement whose effect is spelled in another case names neither of them and states nothing.
+     * It is the comparison the write validator of this package makes of a document on its way in.
+     */
+    public boolean isDeny()  { return "Deny".equals(effect); }
+
+    public boolean isAllow() { return "Allow".equals(effect); }
 }

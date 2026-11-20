@@ -526,12 +526,40 @@ def test_mqtt_shadow_reserved_topics(unique_name):
             assert deleted["clientToken"] == "delete-token"
 
 
-def mqtt_connect(client_id):
+def test_mqtt_persistent_session_receives_qos1_messages_queued_while_offline(unique_name):
+    client_id = f"{unique_name}-persistent"
+    topic = f"devices/{unique_name}/commands"
+
+    try:
+        with mqtt_connect(f"{unique_name}-watcher") as watcher:
+            mqtt_subscribe(watcher, f"$aws/events/presence/disconnected/{client_id}")
+            with mqtt_connect(client_id, clean_session=False) as device:
+                mqtt_subscribe(device, topic, qos=1)
+                device.sendall(b"\xe0\x00")
+            mqtt_read_publish(watcher)
+
+        with mqtt_connect(f"{unique_name}-pub") as publisher:
+            mqtt_publish(publisher, topic, b"offline-qos0")
+            mqtt_publish(publisher, topic, b"offline-qos1", qos=1)
+
+        with mqtt_connect(client_id, clean_session=False, session_present=True) as device:
+            packet = mqtt_read_packet(device)
+            assert (packet[0] >> 1) & 0x03 == 1
+            assert mqtt_parse_publish(packet) == (topic, b"offline-qos1")
+    finally:
+        try:
+            mqtt_connect(client_id).close()
+        except (OSError, AssertionError):
+            pass
+
+
+def mqtt_connect(client_id, clean_session=True, session_present=False):
     client = socket.create_connection(("floci", 1883), timeout=5)
     client.settimeout(5)
-    body = mqtt_utf8("MQTT") + bytes([4, 2, 0, 60]) + mqtt_utf8(client_id)
+    flags = 0x02 if clean_session else 0x00
+    body = mqtt_utf8("MQTT") + bytes([4, flags, 0, 60]) + mqtt_utf8(client_id)
     client.sendall(bytes([0x10]) + mqtt_remaining_length(len(body)) + body)
-    assert mqtt_read_packet(client) == b"\x20\x02\x00\x00"
+    assert mqtt_read_packet(client) == bytes([0x20, 0x02, 0x01 if session_present else 0x00, 0x00])
     return client
 
 
@@ -554,19 +582,27 @@ def mqtt_assert_v5_connack(packet):
     assert packet[index + 1] == 0x00
 
 
-def mqtt_subscribe(client, topic):
-    body = b"\x00\x01" + mqtt_utf8(topic) + b"\x00"
+def mqtt_subscribe(client, topic, qos=0):
+    body = b"\x00\x01" + mqtt_utf8(topic) + bytes([qos])
     client.sendall(bytes([0x82]) + mqtt_remaining_length(len(body)) + body)
-    assert mqtt_read_packet(client) == b"\x90\x03\x00\x01\x00"
+    assert mqtt_read_packet(client) == b"\x90\x03\x00\x01" + bytes([qos])
 
 
-def mqtt_publish(client, topic, payload):
-    body = mqtt_utf8(topic) + payload
-    client.sendall(bytes([0x30]) + mqtt_remaining_length(len(body)) + body)
+def mqtt_publish(client, topic, payload, qos=0):
+    if qos == 0:
+        body = mqtt_utf8(topic) + payload
+        client.sendall(bytes([0x30]) + mqtt_remaining_length(len(body)) + body)
+        return
+    body = mqtt_utf8(topic) + b"\x00\x01" + payload
+    client.sendall(bytes([0x32]) + mqtt_remaining_length(len(body)) + body)
+    assert mqtt_read_packet(client) == b"\x40\x02\x00\x01"
 
 
 def mqtt_read_publish(client):
-    packet = mqtt_read_packet(client)
+    return mqtt_parse_publish(mqtt_read_packet(client))
+
+
+def mqtt_parse_publish(packet):
     assert packet[0] & 0xF0 == 0x30
     index = 1
     while packet[index] & 0x80:
@@ -576,6 +612,8 @@ def mqtt_read_publish(client):
     index += 2
     topic = packet[index:index + topic_length].decode()
     index += topic_length
+    if packet[0] & 0x06:
+        index += 2
     return topic, packet[index:]
 
 

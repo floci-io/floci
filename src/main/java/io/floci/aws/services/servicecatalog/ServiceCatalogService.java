@@ -8,8 +8,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.iam.PassedRoleLookup;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.CreateAccountStatus;
@@ -47,25 +51,32 @@ public class ServiceCatalogService implements PassedRoleLookup {
     private final StorageBackend<String, ObjectNode> associationStore;
     private final StorageBackend<String, ObjectNode> shareStore;
     private final StorageBackend<String, ObjectNode> provisionedProductStore;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final OrganizationsService organizationsService;
     private final Clock clock;
 
+    /**
+     * Every resource this service stores is Regional, as on AWS, so each store is the request's Region's view
+     * ({@link RegionScopedStorage}); one stored before, without a Region, is the default Region's.
+     */
     @Inject
     public ServiceCatalogService(StorageFactory storageFactory, ObjectMapper objectMapper,
-                                 OrganizationsService organizationsService, Clock clock) {
-        this.portfolioStore = storageFactory.create("servicecatalog", "servicecatalog-portfolios.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
-        this.productStore = storageFactory.create("servicecatalog", "servicecatalog-products.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
-        this.tagOptionStore = storageFactory.create("servicecatalog", "servicecatalog-tag-options.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
-        this.associationStore = storageFactory.create("servicecatalog", "servicecatalog-associations.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
-        this.shareStore = storageFactory.create("servicecatalog", "servicecatalog-shares.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
-        this.provisionedProductStore = storageFactory.create("servicecatalog", "servicecatalog-provisioned-products.json",
-                new TypeReference<Map<String, ObjectNode>>() {});
+                                 OrganizationsService organizationsService, Clock clock,
+                                 RegionResolver regionResolver) {
+        this.portfolioStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-portfolios.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.productStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-products.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.tagOptionStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-tag-options.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.associationStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.shareStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-shares.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.provisionedProductStore = new RegionScopedStorage<>(storageFactory, regionResolver, "servicecatalog",
+                "servicecatalog-provisioned-products.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.organizationsService = organizationsService;
         this.clock = clock;
@@ -103,6 +114,10 @@ public class ServiceCatalogService implements PassedRoleLookup {
         return portfolioStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
     }
 
+    /**
+     * Seeds the Control Tower Account Factory catalog in the request's Region, the first time that Region asks for
+     * it. Each Region gets its own, under the same ids, as {@code ControlTowerService} seeds a landing zone in each.
+     */
     private void ensureControlTowerCatalog(String region, String accountId) {
         boolean exists = portfolioStore.scan(key -> true).stream()
                 .anyMatch(portfolio -> CONTROL_TOWER_PORTFOLIO_NAME.equals(text(portfolio, "DisplayName"))
@@ -432,10 +447,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
             throw inUse("product", productId, "it is associated with a portfolio");
         }
         productStore.delete(productId);
-        associationStore.keys().stream()
-                .filter(key -> associationStore.get(key)
-                        .map(value -> productMatches(value.path("ProductId").asText(), product)).orElse(false))
-                .toList().forEach(associationStore::delete);
+        StorageOperations.deleteMatchingAtomically(associationStore,
+                value -> productMatches(value.path("ProductId").asText(), product));
     }
 
     public ObjectNode createTagOption(JsonNode request) {
@@ -469,10 +482,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
     public void deleteTagOption(String id) {
         require(tagOptionStore, id, "TagOption");
         tagOptionStore.delete(id);
-        associationStore.keys().stream()
-                .filter(key -> associationStore.get(key)
-                        .map(value -> id.equals(text(value, "TagOptionId"))).orElse(false))
-                .toList().forEach(associationStore::delete);
+        StorageOperations.deleteMatchingAtomically(associationStore, value -> id.equals(text(value, "TagOptionId")));
     }
 
     public String associateProduct(String portfolioId, String productId) {
@@ -701,10 +711,26 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 .toList();
     }
 
+    /**
+     * Copies a product into the request's Region. The source may be of another Region of the request's partition,
+     * the one its ARN names, as on AWS, so it is read there. One of another partition is not found.
+     */
     public String copyProduct(JsonNode request, String region, String accountId) {
         String sourceArn = requireText(request, "SourceProductArn");
         String sourceId = sourceArn.substring(sourceArn.lastIndexOf('/') + 1);
-        ObjectNode source = requireProduct(sourceId);
+        String sourceRegion = region;
+        if (AwsArnUtils.isArn(sourceArn)) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(sourceArn);
+            String partition = regionResolver.getPartition();
+            if (AwsArnUtils.isForeignPartition(arn, partition)
+                    || !arn.region().isEmpty() && !regionResolver.partitionForRegion(arn.region()).equals(partition)) {
+                throw notFound("product", sourceId);
+            }
+            if (!arn.region().isEmpty()) {
+                sourceRegion = arn.region();
+            }
+        }
+        ObjectNode source = RequestScopes.callAs(null, sourceRegion, () -> requireProduct(sourceId));
         String newId = id("prod");
         ObjectNode product = source.deepCopy();
         product.put("Id", newId);

@@ -10,6 +10,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.organizations.OrganizationsService;
@@ -25,16 +26,20 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
-public class SecurityHubService implements Resettable {
+public class SecurityHubService implements Resettable, StoredResourceArns {
     private static final String SELF_MANAGED = "SELF_MANAGED_SECURITY_HUB";
     private static final String MEMBER_CREATED = "Created";
     private static final String MEMBER_ENABLED = "Enabled";
     private static final String MEMBER_REMOVED = "Removed";
     private static final List<String> LINKING_MODES = List.of(
             "ALL_REGIONS", "ALL_REGIONS_EXCEPT_SPECIFIED", "SPECIFIED_REGIONS", "NO_REGIONS");
+
+    /** What a configuration policy's ARN resource starts with, its id following. */
+    private static final String POLICY_RESOURCE = "configuration-policy/";
 
     private final AccountAwareStorageBackend<SecurityHubState> states;
     private final RegionResolver regionResolver;
@@ -795,8 +800,12 @@ public class SecurityHubService implements Resettable {
             }
             return Map.copyOf(state.getHubTags());
         }
-        JsonNode resource = taggedPolicy(state, region, arn);
-        JsonNode tags = resource.get("Tags");
+        return policyTags(taggedPolicy(state, region, arn));
+    }
+
+    /** The tags a configuration policy holds, its {@code Tags} object's string members, by key. */
+    private static Map<String, String> policyTags(JsonNode policy) {
+        JsonNode tags = policy.get("Tags");
         if (tags == null || !tags.isObject()) {
             return Map.of();
         }
@@ -807,6 +816,53 @@ public class SecurityHubService implements Resettable {
             }
         });
         return result;
+    }
+
+    @Override
+    public String namespace() {
+        return "securityhub";
+    }
+
+    /**
+     * A request names its hub by the Region it is signed for, and a configuration policy by the id Security Hub minted,
+     * which its ARN ends in: nothing to find.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the hub or the configuration policy whose ARN is {@code arn}, in the request's account, where the tag
+     * handlers read: an ARN of another account names none. Read in place from the account's state for the Region the
+     * ARN names, a state stored before storage was account-aware included, and matched on the whole ARN, the one
+     * {@link #hubArn} or {@link #policyArn} gives; a hub reads its tags only while Security Hub is enabled there, as
+     * the tag handlers do. A policy's tags change in place under this service's lock, so the read takes that lock.
+     */
+    @Override
+    public synchronized Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "securityhub")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = regionResolver.getAccountId();
+        if (!account.equals(parsed.accountId()) || parsed.region().isEmpty()) {
+            return Map.of();
+        }
+        String region = parsed.region();
+        Optional<SecurityHubState> state = AccountAwareStorageBackend.readInAccount(states, account, region);
+        if (state.isEmpty()) {
+            return Map.of();
+        }
+        if (arn.equals(hubArn(region))) {
+            return state.get().isEnabled() ? new LinkedHashMap<>(state.get().getHubTags()) : Map.of();
+        }
+        if (!parsed.resource().startsWith(POLICY_RESOURCE)) {
+            return Map.of();
+        }
+        String id = parsed.resource().substring(POLICY_RESOURCE.length());
+        JsonNode policy = state.get().getPolicies().get(id);
+        return policy == null || !arn.equals(policyArn(region, id)) ? Map.of() : policyTags(policy);
     }
 
     public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
@@ -886,7 +942,7 @@ public class SecurityHubService implements Resettable {
     }
 
     public String policyArn(String region, String id) {
-        return regionResolver.buildArn("securityhub", region, "configuration-policy/" + id);
+        return regionResolver.buildArn("securityhub", region, POLICY_RESOURCE + id);
     }
 
     private static SecurityHubState copyConfigurationState(SecurityHubState source) {

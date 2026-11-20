@@ -40,6 +40,7 @@ AWS::Backup::BackupVault	BackupVaultCfnProvisioner
 AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
 AWS::Batch::JobDefinition	BatchCfnProvisioner
 AWS::Batch::JobQueue	BatchCfnProvisioner
+AWS::Bedrock::ApplicationInferenceProfile	BedrockCfnProvisioner
 AWS::BedrockAgentCore::Memory	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::Runtime	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
@@ -108,11 +109,13 @@ AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
 AWS::ElastiCache::CacheCluster	ElastiCacheCfnProvisioner
+AWS::ElastiCache::ReplicationGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ServerlessCache	ElastiCacheServerlessCfnProvisioner
 AWS::ElastiCache::SubnetGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::User	ElastiCacheCfnProvisioner
 AWS::ElastiCache::UserGroup	ElastiCacheCfnProvisioner
 AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
+AWS::ElasticLoadBalancingV2::ListenerCertificate	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
@@ -184,6 +187,8 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner
 AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
+AWS::SES::ConfigurationSet	SesCfnProvisioner
+AWS::SES::ConfigurationSetEventDestination	SesEventDestinationCfnProvisioner
 AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SES::ReceiptRule	SesReceiptRuleCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner

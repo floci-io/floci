@@ -1,31 +1,14 @@
 package io.floci.aws.services.lambdaweb;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 /** Code packages for tests that deploy function code, Web Function revisions among them. */
 public final class LambdaWebZips {
 
     private LambdaWebZips() {
-    }
-
-    public static byte[] indexJs(String source) {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(source.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-        return bytes.toByteArray();
     }
 
     /** Files whose ZIP64 fields declare these sizes over empty data. */

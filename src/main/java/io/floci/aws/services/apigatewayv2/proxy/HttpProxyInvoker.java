@@ -1,7 +1,11 @@
 package io.floci.aws.services.apigatewayv2.proxy;
 
+import io.floci.aws.config.ContainerCaBundle;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.SsrfProtection;
 import io.floci.aws.services.apigatewayv2.model.Integration;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLContext;
@@ -45,9 +49,12 @@ import java.util.StringJoiner;
  * request and the response. Java's HttpClient also restricts certain headers
  * (Content-Length, etc.) — those are skipped silently.
  *
- * <p>If the backend is unreachable or times out, returns a 502 Bad Gateway
- * ProxyResult so the controller can relay a clean error to the original client.
+ * <p>If the backend is unreachable or times out, or a mapped header name or value cannot be
+ * written as a single header line (a control character such as CR or LF in a value mapped from the
+ * caller's request), returns a 502 Bad Gateway ProxyResult so the controller can relay a clean
+ * error to the original client. Nothing is sent to the backend in the header case.
  */
+@ApplicationScoped
 public class HttpProxyInvoker {
     private static final Logger LOG = Logger.getLogger(HttpProxyInvoker.class);
 
@@ -74,14 +81,7 @@ public class HttpProxyInvoker {
         public static final ProxyOptions DEFAULTS = new ProxyOptions(Duration.ofSeconds(30), false);
     }
 
-    // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
-    // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
-    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration).
-    private final HttpClient client = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
+    private final HttpClient client;
 
     /** Built on first use: an integration opting out of TLS verification is the exception. */
     private volatile HttpClient insecureClient;
@@ -276,12 +276,33 @@ public class HttpProxyInvoker {
 
     private final HostResolver resolver;
 
+    @Inject
+    public HttpProxyInvoker(EmulatorConfig config) {
+        this(InetAddress::getAllByName, ContainerCaBundle.sslContext(config).orElse(null));
+    }
+
     public HttpProxyInvoker() {
         this(InetAddress::getAllByName);
     }
 
     HttpProxyInvoker(HostResolver resolver) {
+        this(resolver, null);
+    }
+
+    private HttpProxyInvoker(HostResolver resolver, SSLContext sslContext) {
         this.resolver = resolver;
+        this.client = proxyClient(sslContext);
+    }
+
+    // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
+    // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
+    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration).
+    private static HttpClient proxyClient(SSLContext sslContext) {
+        return ContainerCaBundle.httpClientBuilder(sslContext)
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
     }
 
     public ProxyResult invoke(Integration integration, RequestContext ctx) {
@@ -333,6 +354,9 @@ public class HttpProxyInvoker {
         if (pinned) {
             try {
                 return invokeHttpPinned(finalUrl, method, builder, options.timeout());
+            } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
+                LOG.warnv("HTTP_PROXY: {0}", e.getMessage());
+                return errorResult("Bad Gateway: " + e.getMessage());
             } catch (PinnedHttpClient.ResponseTooLargeException ignored) {
                 return tooLargeResult();
             } catch (Exception e) {
@@ -361,11 +385,20 @@ public class HttpProxyInvoker {
                             : HttpRequest.BodyPublishers.noBody());
         }
 
-        for (Map.Entry<String, List<String>> e : builder.headers().entrySet()) {
-            if (RESTRICTED.contains(e.getKey().toLowerCase())) continue;
-            for (String v : e.getValue()) {
-                hrb.header(e.getKey(), v);
+        try {
+            for (Map.Entry<String, List<String>> e : builder.headers().entrySet()) {
+                if (RESTRICTED.contains(e.getKey().toLowerCase())) continue;
+                for (String v : e.getValue()) {
+                    PinnedHttpClient.requireValidHeader(e.getKey(), v);
+                    hrb.header(e.getKey(), v);
+                }
             }
+        } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
+            LOG.warnv("HTTP_PROXY: {0}", e.getMessage());
+            return errorResult("Bad Gateway: " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("HTTP_PROXY: invalid request header: {0}", e.getMessage());
+            return errorResult("Bad Gateway: invalid request header");
         }
 
         try {

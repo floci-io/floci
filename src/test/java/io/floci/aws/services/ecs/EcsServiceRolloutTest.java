@@ -1,12 +1,5 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.CreateServiceRequest;
@@ -21,7 +14,6 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -33,13 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * A service's running tasks must follow its task definition. {@code UpdateService} with a new
@@ -326,38 +315,10 @@ class EcsServiceRolloutTest {
     }
 
     private static EcsService newMockModeService() {
-        return newMockModeService(null);
+        return EcsServiceFixtures.mockModeService();
     }
 
     private static EcsService newMockModeService(EcsEventPublisher publisher) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
-                publisher);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
+        return EcsServiceFixtures.builder().eventPublisher(publisher).build();
     }
 }

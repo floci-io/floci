@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.durable.DurableFunctionInvoker.DurableInvocationResult;
 import io.floci.aws.services.lambda.durable.ScriptedDurableFunctionInvoker.Invocation;
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
@@ -27,15 +28,17 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Plays the Durable Execution SDK over the REST API while a scripted stand-in holds the function
  * invocation open, so the checkpoint protocol is exercised end to end without a container.
+ * {@link S3EnforceAuthProfile} swaps that stand-in in.
  */
 @QuarkusTest
-@TestProfile(LambdaDurableScriptedProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class LambdaDurableProtocolIntegrationTest {
 
     private static final String LAMBDA = "/2015-03-31";
@@ -45,6 +48,9 @@ class LambdaDurableProtocolIntegrationTest {
 
     @Inject
     ScriptedDurableFunctionInvoker invoker;
+
+    @Inject
+    DurableExecutionService executions;
 
     @BeforeEach
     void createFunctionAndDrainInvocations() {
@@ -89,6 +95,33 @@ class LambdaDurableProtocolIntegrationTest {
 
         invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
         assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+    }
+
+    @Test
+    void aTailRequestWaitsForHandlerLogsAfterACheckpointClosesTheExecution() throws Exception {
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "checkpoint-log-tail")
+                .header("X-Amz-Log-Type", "Tail")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        assertTrue(invocation.logTail());
+        JsonNode event = MAPPER.readTree(invocation.payload());
+        String arn = event.get("DurableExecutionArn").asText();
+        checkpoint(arn, event.get("CheckpointToken").asText(), """
+                {"Id": "x", "Type": "EXECUTION", "Action": "SUCCEED", "Payload": "\\"done\\""}
+                """);
+        assertTrue(executions.awaitCompletion(arn).isDone());
+        assertFalse(executions.invocationLogs(arn).isDone(), "the handler still owns its final log tail");
+
+        invocation.response().complete(new DurableInvocationResult("tail-request",
+                "{\"Status\":\"SUCCEEDED\"}".getBytes(StandardCharsets.UTF_8), null, "aGFuZGxlciBsb2dzCg=="));
+
+        Response response = invoke.get(30, TimeUnit.SECONDS);
+        assertEquals(200, response.statusCode());
+        assertEquals("\"done\"", response.asString());
+        assertEquals("aGFuZGxlciBsb2dzCg==", response.getHeader("X-Amz-Log-Result"));
+        assertEquals("", executions.invocationLogs(arn).join(), "request log capture is released after the response");
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
 import io.floci.aws.testing.StorageFactories;
 import io.floci.aws.testutil.LogCapture;
@@ -99,10 +100,9 @@ class SnsHttpsSubscriptionTrustTest {
 
     // A service built the way CDI builds it, with TLS off.
     private SnsService service(Optional<String> extraCaPath) {
-        EmulatorConfig config = StorageFactories.config(dir.resolve("data"), ACCOUNT);
+        EmulatorConfig config = ExtraCaConfigs.stub(StorageFactories.config(dir.resolve("data"), ACCOUNT), false,
+                extraCaPath);
         when(config.effectiveBaseUrl()).thenReturn(BASE_URL);
-        when(config.tls().enabled()).thenReturn(false);
-        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
         return new SnsService(StorageFactories.open(config, "memory"), config, new RegionResolver(REGION, ACCOUNT),
                 null, null, null, new ObjectMapper(), SnsMessageSigner.inMemory(BASE_URL));
     }

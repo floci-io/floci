@@ -172,4 +172,23 @@ class EventBridgeErrorMessagesIntegrationTest {
                 + "\"TagKeys\":[\"k\"]}", "ResourceNotFoundException",
                 "Rule emsg-untag does not exist on EventBus default.");
     }
+
+    @Test
+    void tagCallsOnMissingResourcesUseThePerKindWording() {
+        String nf = "ResourceNotFoundException";
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        refused("ListTagsForResource", "{\"ResourceARN\":\"" + events + "archive/emsg-tag-arch\"}", nf,
+                "Archive emsg-tag-arch does not exist.");
+        refused("TagResource", "{\"ResourceARN\":\"" + events + "rule/emsg-tag-bus/emsg-tag-rule\","
+                + "\"Tags\":[]}", nf, "Rule emsg-tag-rule does not exist on EventBus emsg-tag-bus.");
+        refused("UntagResource", "{\"ResourceARN\":\"" + events + "event-bus/emsg-tag-bus\","
+                + "\"TagKeys\":[\"k\"]}", nf, "Event bus emsg-tag-bus does not exist.");
+    }
+
+    @Test
+    void listRuleNamesByTargetOnMissingBusUsesTheBusWording() {
+        refused("ListRuleNamesByTarget", "{\"TargetArn\":\"arn:aws:sqs:us-east-1:000000000000:q\","
+                + "\"EventBusName\":\"emsg-lrnbt-bus\"}", "ResourceNotFoundException",
+                "Event bus emsg-lrnbt-bus does not exist.");
+    }
 }

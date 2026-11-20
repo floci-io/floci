@@ -738,9 +738,53 @@ public class IamActionRegistry {
         if (credentialScope == null || !routes.routes(credentialScope)) {
             return Map.of();
         }
+        return matchedRoute(routes, credentialScope, ctx).map(IamRestRoutes.Match::labels).orElse(Map.of());
+    }
+
+    /**
+     * Whether a request of the credential scope is taken by a route of a model AWS documents on a page of its own
+     * rather than in botocore, as Glue's Iceberg REST endpoint is: such a request is another API's, Apache Iceberg's
+     * REST catalog, so it carries none of its operation's members, and one its body gives was added by the caller.
+     */
+    public static boolean takenByDocumentedRoute(String credentialScope, ContainerRequestContext ctx) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        return credentialScope != null && routes.documents(credentialScope)
+                && matchedRoute(routes, credentialScope, ctx).map(IamRestRoutes.Match::documented).orElse(false);
+    }
+
+    /**
+     * The vendored route of the credential scope a request's method, path and query match, as {@link #resolveRoute}
+     * matches it.
+     */
+    private static Optional<IamRestRoutes.Match> matchedRoute(IamRestRoutes routes, String credentialScope,
+                                                              ContainerRequestContext ctx) {
         return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
+    }
+
+    /**
+     * Whether the path of a request sent to the URI {@code uriInfo} gives is one of the credential scope's vendored
+     * model, whatever method it is sent with: matched still percent-encoded, so an encoded {@code /} stays inside
+     * its label and an unencoded one ends it. True for a scope whose routes are not vendored, which the model
+     * cannot answer for.
+     */
+    public static boolean modelRoutes(String credentialScope, UriInfo uriInfo) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        return !routes.routes(credentialScope)
+                || routes.takesPath(credentialScope, sentPath(uriInfo), uriInfo.getQueryParameters());
+    }
+
+    /** Keep the modeled operation when AWS authorizes its route under a different action name. */
+    public String operationForRoute(String credentialScope, String action, ContainerRequestContext ctx) {
+        if (credentialScope == null || action == null) {
+            return action;
+        }
+        String method = ctx.getMethod().toUpperCase();
+        return restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)),
                         ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx))
-                .map(IamRestRoutes.Match::labels).orElse(Map.of());
+                .filter(operation -> action.equals(IamAuthorizedActions.actionFor(credentialScope, operation, method)))
+                .map(operation -> credentialScope + ":" + operation)
+                .orElse(action);
     }
 
     /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */

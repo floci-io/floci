@@ -24,7 +24,8 @@ class S3InvalidVersionIdIntegrationTest {
 
         for (String key : List.of(KEY, "missing")) {
             String path = "/" + BUCKET + "/" + key;
-            for (String versionId : List.of("bogus", "")) {
+            // Floci mints lower-case ids, so the upper-case spelling of one is not a minted id.
+            for (String versionId : List.of("bogus", "", "0F8FAD5B-D9CB-469F-A165-70867728950E")) {
                 String version = "versionId=" + versionId;
                 refused(given().when().get(path + "?" + version), versionId);
                 refused(given().when().delete(path + "?" + version), versionId);

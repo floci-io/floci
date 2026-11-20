@@ -1,10 +1,13 @@
 package io.floci.aws.services.codeartifact;
 
+import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.PerKeyContainerPool;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -34,6 +37,7 @@ import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -52,8 +56,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -79,8 +85,10 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -101,6 +109,7 @@ class CodeArtifactServiceTest {
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
     private AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore;
+    private AccountAwareStorageBackend<PackageGroup> packageGroupStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarClient pypiserverClient;
@@ -113,7 +122,7 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        AccountAwareStorageBackend<PackageGroup> packageGroupStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        packageGroupStore = spy(AccountAwareStorageBackend.<PackageGroup>inMemory(ACCOUNT_ID));
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -135,6 +144,86 @@ class CodeArtifactServiceTest {
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
                 packageGroupStore, regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient, bagetterClient)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repositoryAdmissionDoesNotHoldServiceMonitorDuringStartup(boolean failStartup) throws Exception {
+        service.createDomain(REGION, "admission", null, Map.of());
+        service.createRepository(REGION, "admission", null, "repo", null, null, Map.of());
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        PerKeyContainerPool pool = new PerKeyContainerPool(lifecycle, "/health");
+        SidecarRepositoryLease lease = new SidecarRepositoryLease("test", pool);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finishStartup = new CountDownLatch(1);
+        CountDownLatch secondAdmission = new CountDownLatch(1);
+        AtomicInteger admissions = new AtomicInteger();
+        doAnswer(invocation -> {
+            lease.registerRepository(invocation.getArgument(0));
+            return null;
+        }).when(pypiserverClient).registerRepository(anyString());
+        doAnswer(invocation -> {
+            if (admissions.incrementAndGet() == 2) {
+                secondAdmission.countDown();
+            }
+            lease.beginUse(invocation.getArgument(0));
+            return null;
+        }).when(pypiserverClient).beginUse(anyString());
+        String id = service.resolveContainerIdAndBeginUse(
+                "pypi", REGION, "admission", null, "repo", pypiserverClient);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/health", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        String endpoint = "http://127.0.0.1:" + server.getAddress().getPort();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                Future<String> startup = executor.submit(() -> pool.ensureReady(id, () -> {
+                    started.countDown();
+                    try {
+                        assertTrue(finishStartup.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                    if (failStartup) {
+                        throw new IllegalStateException("controlled startup failure");
+                    }
+                    return new PerKeyContainerPool.StartedContainer("owned-container", endpoint);
+                }));
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                Future<String> admission = executor.submit(() -> service.resolveContainerIdAndBeginUse(
+                        "pypi", REGION, "admission", null, "repo", pypiserverClient));
+                assertTrue(secondAdmission.await(5, TimeUnit.SECONDS));
+                Future<DomainView> unrelated = executor.submit(() ->
+                        service.createDomain(REGION, "unrelated", null, Map.of()));
+                assertDoesNotThrow(() -> unrelated.get(2, TimeUnit.SECONDS),
+                        "A same-repository admission must not hold the service monitor during startup");
+                assertEquals(id, admission.get(2, TimeUnit.SECONDS));
+                finishStartup.countDown();
+                if (failStartup) {
+                    assertEquals("controlled startup failure", assertThrows(
+                            ExecutionException.class,
+                            () -> startup.get(5, TimeUnit.SECONDS)).getCause().getMessage());
+                } else {
+                    assertEquals(endpoint, startup.get(5, TimeUnit.SECONDS));
+                }
+                lease.release(id);
+                lease.endUse(id);
+                verify(lifecycle, never()).stopAndRemoveStrict(anyString(), any());
+                lease.endUse(id);
+                if (!failStartup) {
+                    verify(lifecycle).stopAndRemoveStrict("owned-container", null);
+                }
+            } finally {
+                finishStartup.countDown();
+            }
+        } finally {
+            lease.stopManagedContainers();
+            server.stop(0);
+        }
     }
 
     // -------------------------------------------------------------- domains
@@ -1062,7 +1151,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertEquals(Set.of("maven", "npm", "pypi", "nuget"), created.getSidecarContainerIds().keySet());
+        assertEquals(Set.of("maven", "npm", "pypi", "nuget", "cargo"), created.getSidecarContainerIds().keySet());
         created.getSidecarContainerIds().values()
                 .forEach(id -> assertTrue(id != null && !id.isBlank()));
     }
@@ -2634,6 +2723,117 @@ class CodeArtifactServiceTest {
                 "com.example", "widget", "1.0"));
         assertEquals(Optional.of("upstream-repo"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null,
                 "repo", "maven", "com.example", "widget", "1.0"));
+    }
+
+    /** Retains npm {@code widget@1.0} into {@code repository} from {@code origin}, a connection or a repository. */
+    private void retainNpmWidget(String repository, String origin, RetentionOriginKind kind) {
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, repository, "npm", null,
+                "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, repository, "npm", null, "widget", "1.0", origin, kind, fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, repository, "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+    }
+
+    private CodeArtifactService.PackageVersionSummary listedNpmWidget(String repository) {
+        when(verdaccioClient.listPackageVersions(anyString(), eq("dom"), eq(repository), isNull(), eq("widget")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0",
+                        Instant.ofEpochSecond(1000))));
+        return service.listPackageVersions(REGION, "dom", null, repository, "npm", null, "widget", null, null, null,
+                null, null).versions().get(0);
+    }
+
+    /**
+     * A version's origin names where it "originally entered" the domain: one retained through an
+     * upstream that had itself retained it from a repository further up names that repository, not
+     * the upstream it was read through.
+     */
+    @Test
+    void aVersionRetainedThroughAnIntermediateUpstreamNamesTheRepositoryItWasPublishedTo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("origin", "mid", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("mid", "origin", RetentionOriginKind.UPSTREAM_REPOSITORY);
+        retainNpmWidget("repo", "mid", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals("origin", summary.upstreamRepositoryName());
+        assertEquals(null, summary.externalConnectionName());
+        assertEquals("origin", listedNpmWidget("mid").upstreamRepositoryName());
+    }
+
+    /** One an upstream fetched through its external connection entered the domain there, so it is EXTERNAL. */
+    @Test
+    void aVersionRetainedThroughAnUpstreamThatFetchedItExternallyIsExternal() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("up", "public:npmjs", RetentionOriginKind.EXTERNAL_CONNECTION);
+        retainNpmWidget("repo", "up", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("EXTERNAL", summary.originType());
+        assertEquals("public:npmjs", summary.externalConnectionName());
+        assertEquals(null, summary.upstreamRepositoryName());
+        assertEquals(Optional.of("up"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "repo", "npm",
+                null, "widget", "1.0"));
+    }
+
+    /**
+     * The upstream has written what it fetched through its connection but not yet confirmed it when
+     * the copy here is claimed and confirmed: the copy is still the one that entered the domain
+     * through that connection, and stays so once the upstream confirms.
+     */
+    @Test
+    void aVersionCopiedWhileTheUpstreamsExternalFetchIsUnconfirmedIsExternal() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        long upFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "up", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome upClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "up", "npm", null, "widget", "1.0", "public:npmjs",
+                RetentionOriginKind.EXTERNAL_CONNECTION, upFence);
+
+        retainNpmWidget("repo", "up", RetentionOriginKind.UPSTREAM_REPOSITORY);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "up", "npm", null, "widget", "1.0",
+                upClaim.episodeId(), true);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("EXTERNAL", summary.originType());
+        assertEquals("public:npmjs", summary.externalConnectionName());
+    }
+
+    /**
+     * The upstream's attempt gives its claim up after the copy here was claimed, the upstream's own
+     * copy having been published there: confirmed, the copy here names the upstream it came from.
+     */
+    @Test
+    void aCopyConfirmedAfterTheUpstreamGaveItsClaimUpNamesTheUpstream() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        long upFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "up", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome upClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "up", "npm", null, "widget", "1.0", "public:npmjs",
+                RetentionOriginKind.EXTERNAL_CONNECTION, upFence);
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "npm", null, "widget", "1.0", "up", RetentionOriginKind.UPSTREAM_REPOSITORY,
+                fence);
+
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "up", "npm", null, "widget", "1.0",
+                upClaim.episodeId(), false);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals("up", summary.upstreamRepositoryName());
     }
 
     /**
@@ -5212,6 +5412,141 @@ class CodeArtifactServiceTest {
         AwsException missingVersion = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION,
                 "dom", null, "repo", "generic", "ns", "my-pkg", null, null, null));
         assertEquals("ValidationException", missingVersion.getErrorCode());
+    }
+
+    // ----------------------------------------------------- ListPackageVersionDependencies
+
+    @Test
+    void listPackageVersionDependenciesBridgesToReposiliteForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(
+                List.of(new CodeArtifactService.PackageDependency("com.example", "b", "compile", "2.0.0")));
+
+        CodeArtifactService.PackageVersionDependenciesListResult result = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "maven", "com.example", "a", "1.0", null);
+
+        assertEquals(1, result.dependencies().size());
+        assertEquals("b", result.dependencies().get(0).packageName());
+        assertEquals("compile", result.dependencies().get(0).dependencyType());
+    }
+
+    @Test
+    void listPackageVersionDependenciesFailsNotFoundForAMavenVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionDependenciesRoutesEveryValidFormatToTheSidecarBridge() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("npm", "pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, null, "my-pkg", "1.0.0", null));
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesRejectsAFormatAwsDoesNotDocumentForThisAction() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("generic", "cargo", "ruby", "swift", "not-a-real-format")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, null, "my-pkg", "1.0.0", null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesRequiresANamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                "dom", null, "repo", "maven", null, "a", "1.0", null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionDependenciesRejectsANamespaceForPypiAndNuGet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, "a-namespace", "my-pkg", "1.0.0", null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesPaginatesWithANextToken() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        List<CodeArtifactService.PackageDependency> many = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            many.add(new CodeArtifactService.PackageDependency(null, "dep-" + String.format("%03d", i), "regular",
+                    "1.0.0"));
+        }
+        when(verdaccioClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(many);
+
+        CodeArtifactService.PackageVersionDependenciesListResult firstPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", null);
+
+        assertEquals(100, firstPage.dependencies().size());
+        assertTrue(firstPage.nextToken() != null);
+
+        CodeArtifactService.PackageVersionDependenciesListResult secondPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", firstPage.nextToken());
+
+        assertEquals(50, secondPage.dependencies().size());
+    }
+
+    /**
+     * Qodo review finding: byte-for-byte identical dependency entries (a real shape for NuGet,
+     * where the same package id can be declared under more than one target-framework group with
+     * the same version requirement) must not share a pagination cursor - if a 100-item page ends
+     * between two of them, resuming "strictly after" a shared cursor would silently drop whichever
+     * one(s) land past the boundary.
+     */
+    @Test
+    void listPackageVersionDependenciesPaginationNeverDropsIdenticalEntriesAcrossAPageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        List<CodeArtifactService.PackageDependency> many = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            // Every entry is byte-for-byte identical: the real worst case for a cursor collision.
+            many.add(new CodeArtifactService.PackageDependency(null, "Shared.Package", null, "1.0.0"));
+        }
+        when(bagetterClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(many);
+
+        CodeArtifactService.PackageVersionDependenciesListResult firstPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", null);
+        CodeArtifactService.PackageVersionDependenciesListResult secondPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", firstPage.nextToken());
+
+        assertEquals(100, firstPage.dependencies().size());
+        assertEquals(50, secondPage.dependencies().size());
     }
 
     // ----------------------------------------------------- ListPackageVersions
@@ -8120,10 +8455,10 @@ class CodeArtifactServiceTest {
         assertEquals("dom", view.domainName());
         assertEquals("contact", view.contactInfo());
         assertEquals("desc", view.description());
-        assertNull(view.parentPattern());
+        assertEquals("/*", view.parentPattern());
         assertEquals("INHERIT", view.restrictions().get("PUBLISH").mode());
         assertEquals("ALLOW", view.restrictions().get("PUBLISH").effectiveMode());
-        assertNull(view.restrictions().get("PUBLISH").inheritedFromPattern());
+        assertEquals("/*", view.restrictions().get("PUBLISH").inheritedFromPattern());
     }
 
     @Test
@@ -8133,8 +8468,9 @@ class CodeArtifactServiceTest {
         service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
         PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
         assertEquals("/npm/*", child.parentPattern());
-        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/npm/*");
-        assertNull(root.parentPattern());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("/*", npm.parentPattern());
+        assertNull(service.describePackageGroup(REGION, "dom", null, "/*").parentPattern());
     }
 
     @Test
@@ -8185,7 +8521,8 @@ class CodeArtifactServiceTest {
         service.createPackageGroup(REGION, "dom", null, "/pypi/*", null, null, Map.of());
 
         PackageGroupListResult all = service.listPackageGroups(REGION, "dom", null, null, null, null);
-        assertEquals(2, all.packageGroups().size());
+        assertEquals(List.of("/*", "/npm/*", "/pypi/*"),
+                all.packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
 
         PackageGroupListResult npmOnly = service.listPackageGroups(REGION, "dom", null, "/npm", null, null);
         assertEquals(1, npmOnly.packageGroups().size());
@@ -8262,11 +8599,76 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void getAssociatedPackageGroupThrowsResourceNotFoundWhenNoGroupMatches() {
+    void getAssociatedPackageGroupIsTheRootGroupWhenNoOtherGroupMatches() {
         service.createDomain(REGION, "dom", null, Map.of());
-        AwsException e = assertThrows(AwsException.class,
-                () -> service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react"));
-        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        GetAssociatedPackageGroupResult result =
+                service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react");
+        assertEquals("/*", result.packageGroup().pattern());
+        assertEquals("STRONG", result.associationType());
+    }
+
+    @Test
+    void aDomainIsCreatedWithItsRootPackageGroupAllowingEveryOrigin() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/*");
+        assertEquals("Default root package group", root.description());
+        assertNull(root.contactInfo());
+        assertNull(root.parentPattern());
+        for (String type : List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM")) {
+            assertEquals("ALLOW", root.restrictions().get(type).mode(), type);
+            assertEquals("ALLOW", root.restrictions().get(type).effectiveMode(), type);
+            assertNull(root.restrictions().get(type).inheritedFromPattern(), type);
+        }
+        assertEquals(List.of("/*"), service.listPackageGroups(REGION, "dom", null, null, null, null)
+                .packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
+    }
+
+    @Test
+    void theRootPackageGroupCanBeChangedButNotCreatedAgainOrDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException created = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/*", null, null, Map.of()));
+        assertEquals("ConflictException", created.getErrorCode());
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.deletePackageGroup(REGION, "dom", null, "/*"));
+        assertEquals("ValidationException", deleted.getErrorCode());
+        assertEquals("The root package group, '/*', cannot be deleted.", deleted.getMessage());
+
+        service.updatePackageGroup(REGION, "dom", null, "/*", "team@example.com", "everything");
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("BLOCK", npm.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/*", npm.restrictions().get("PUBLISH").inheritedFromPattern());
+        assertEquals("everything", service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aDomainWhoseRootCannotBeStoredIsNotLeftBehindToRefuseTheRetry() {
+        doThrow(new IllegalStateException("storage unavailable")).when(packageGroupStore)
+                .putForAccount(anyString(), startsWith(REGION + "::dom::"), any());
+        assertThrows(IllegalStateException.class, () -> service.createDomain(REGION, "dom", null, Map.of()));
+        doCallRealMethod().when(packageGroupStore).putForAccount(anyString(), anyString(), any());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aStoredDomainWithoutARootPackageGroupGetsOneWhenSeeded() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        List.copyOf(packageGroupStore.keysForAccount(ACCOUNT_ID))
+                .forEach(key -> packageGroupStore.deleteForAccount(ACCOUNT_ID, key));
+        assertThrows(AwsException.class, () -> service.describePackageGroup(REGION, "dom", null, "/*"));
+
+        service.seedRootPackageGroups();
+        service.seedRootPackageGroups();
+
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+        assertEquals(1, service.listPackageGroups(REGION, "dom", null, null, null, null).packageGroups().size());
     }
 
     @Test

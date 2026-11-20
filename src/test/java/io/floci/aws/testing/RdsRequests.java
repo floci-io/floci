@@ -12,9 +12,11 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.RdsClientBuilder;
 import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -27,8 +29,12 @@ public final class RdsRequests {
     private RdsRequests() {}
 
     public static RequestSpecification rds(String action) {
+        return rds(action, "test");
+    }
+
+    public static RequestSpecification rds(String action, String accessKey) {
         return given().header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20261011/us-east-1/rds/aws4_request")
+                        "AWS4-HMAC-SHA256 Credential=" + accessKey + "/20261011/us-east-1/rds/aws4_request")
                 .contentType(URLENC).formParam("Action", action).formParam("Version", "2014-10-31");
     }
 
@@ -73,6 +79,25 @@ public final class RdsRequests {
         }
     }
 
+    /** The ids of the VPC security groups {@code DescribeDBInstances} reports for DB instance {@code id}. */
+    public static List<String> vpcSecurityGroupIds(RdsClient client, String id) {
+        return client.describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst()
+                .vpcSecurityGroups().stream().map(VpcSecurityGroupMembership::vpcSecurityGroupId).toList();
+    }
+
+    /**
+     * Two CloudFormation resources, to put inside a template's {@code Resources}: an Aurora PostgreSQL
+     * cluster {@code Cluster}, and its {@code Member} instance, which also has
+     * {@code memberProperties}, written as members of a JSON object.
+     */
+    public static String auroraClusterWithMember(String memberProperties) {
+        return """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {"Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"}},
+                "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {"DBClusterIdentifier": {"Ref": "Cluster"},
+                  "Engine": "aurora-postgresql", "DBInstanceClass": "db.r6g.large", %s}}""".formatted(memberProperties);
+    }
+
     private static RdsClientBuilder rdsClientBuilder(String region, String account) {
         return RdsClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
@@ -89,7 +114,16 @@ public final class RdsRequests {
     /** Creates a PostgreSQL instance with database {@code appdb} and returns its endpoint port. */
     public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
                                              boolean iamDatabaseAuthentication) {
-        return rds("CreateDBInstance")
+        return createPostgresInstance(id, masterUsername, masterPassword, iamDatabaseAuthentication, null);
+    }
+
+    /**
+     * Creates a PostgreSQL instance with database {@code appdb}, in DB parameter group
+     * {@code parameterGroupName} unless it is null, and returns its endpoint port.
+     */
+    public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
+                                             boolean iamDatabaseAuthentication, String parameterGroupName) {
+        RequestSpecification request = rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", id)
                 .formParam("Engine", "postgres")
                 .formParam("MasterUsername", masterUsername)
@@ -97,10 +131,23 @@ public final class RdsRequests {
                 .formParam("DBName", "appdb")
                 .formParam("AllocatedStorage", "20")
                 .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication)
+                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication);
+        if (parameterGroupName != null) {
+            request.formParam("DBParameterGroupName", parameterGroupName);
+        }
+        return request
         .when().post("/").then().statusCode(200)
                 .extract().xmlPath()
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+    }
+
+    public static RequestSpecification createAuroraPostgresCluster(String id) {
+        return rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password");
     }
 
     public static void deleteInstance(String id) {

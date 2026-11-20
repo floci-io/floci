@@ -23,7 +23,7 @@ public final class DockerDaemon {
             String os = dockerClient.infoCmd().exec().getOperatingSystem();
             return Optional.ofNullable(os).map(value -> value.toLowerCase(Locale.ROOT));
         } catch (Exception e) {
-            LOG.debugv("Could not read the Docker daemon's operating system: {0}", e.getMessage());
+            LOG.debugv("Could not read the Docker daemon''s operating system: {0}", e.getMessage());
             return Optional.empty();
         }
     }

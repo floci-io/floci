@@ -56,7 +56,8 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     @Inject
     public PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper) {
-        this(manager, mapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+        this(manager, mapper, HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper, HttpClient httpClient) {
@@ -376,6 +377,59 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             }
         }
         return filenames;
+    }
+
+    /**
+     * pypiserver's own {@code /<project>/json} API carries only filenames and URLs, never a
+     * distribution's embedded {@code Requires-Dist} metadata, so this picks a representative
+     * asset for the version and opens it directly: a {@code .whl} (a plain ZIP, simpler and more
+     * reliable to parse) if one exists, otherwise an sdist in one of the formats this reader can
+     * actually decompress ({@code .tar.gz}/{@code .tgz}, both gzip+tar, or {@code .zip}). When
+     * several wheels exist for the version (e.g. per-platform builds), the first by lexicographic
+     * filename order is used, a deterministic choice rather than "whichever happens to list
+     * first" - a documented simplification, since real AWS's own tie-break for this case is not
+     * publicly documented either. Empty when the version has no wheel or decompressible-sdist
+     * asset at all (including when it exists only as a real {@code .tar.bz2}/{@code .tar.xz}
+     * sdist, both real formats {@link #ARCHIVE_SUFFIX} recognizes that this reader deliberately
+     * does not attempt, since bzip2/xz decompression would need a new runtime dependency), or the
+     * chosen asset has no parseable {@code Requires-Dist} metadata.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        List<String> filenames = listPackageVersionAssetNames(repositoryContainerId, domain, repository, namespace,
+                packageName, version);
+        String wheel = filenames.stream().filter(name -> name.endsWith(".whl")).sorted().findFirst().orElse(null);
+        String assetName = wheel;
+        if (assetName == null) {
+            // .tar.gz/.tgz (both real gzip+tar) and .zip are all real sdist formats this sidecar's
+            // own ARCHIVE_SUFFIX already recognizes and this reader can actually decompress. A
+            // release available only as .tar.bz2/.tar.xz (also real, ARCHIVE_SUFFIX-recognized
+            // formats) falls through to the empty-list return below rather than being misread:
+            // bzip2/xz decompression would need a new runtime dependency this codebase
+            // deliberately avoids.
+            assetName = filenames.stream()
+                    .filter(name -> name.endsWith(".tar.gz") || name.endsWith(".tgz") || name.endsWith(".zip"))
+                    .sorted().findFirst().orElse(null);
+        }
+        if (assetName == null) {
+            return List.of();
+        }
+        Optional<byte[]> asset = fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace,
+                packageName, version, assetName);
+        if (asset.isEmpty()) {
+            return List.of();
+        }
+        Optional<byte[]> metadata;
+        if (wheel != null) {
+            metadata = PypiVersionMetadata.extractWheelMetadata(asset.get());
+        } else if (assetName.endsWith(".zip")) {
+            metadata = PypiVersionMetadata.extractZipSdistMetadata(asset.get());
+        } else {
+            metadata = PypiVersionMetadata.extractSdistMetadata(asset.get());
+        }
+        return metadata.map(PypiVersionMetadata::parseRequiresDist).orElse(List.of());
     }
 
     /**

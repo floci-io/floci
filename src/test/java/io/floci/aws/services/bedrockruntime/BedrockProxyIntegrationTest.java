@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
-import io.floci.aws.testing.BedrockProxyBackendProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -23,8 +23,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.BedrockProxyBackendProfile.MAPPED_MODEL_ID;
-import static io.floci.aws.testing.BedrockProxyBackendProfile.PORT;
+import static io.floci.aws.testing.SidecarContainersProfile.BEDROCK_PROXY_MAPPED_MODEL_ID;
+import static io.floci.aws.testing.SidecarContainersProfile.BEDROCK_PROXY_PORT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -41,13 +41,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * against a real (mock) OpenAI-compatible backend.
  *
  * <p>The backend, its URL, the API key and the model mapping come from
- * {@link BedrockProxyBackendProfile}, which this class shares with the other proxy classes that
+ * {@link SidecarContainersProfile}, which this class shares with the other proxy classes that
  * talk to a stand-in. That profile also turns passthrough on, which no test here reaches, since
  * every call names the mapped model id. The case with no mapping, no default model and no
  * passthrough is in {@code BedrockProxyTimeoutIntegrationTest}, where passthrough stays off.
  */
 @QuarkusTest
-@TestProfile(BedrockProxyBackendProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class BedrockProxyIntegrationTest {
 
     private static final String AUTH_HEADER =
@@ -65,7 +65,7 @@ class BedrockProxyIntegrationTest {
 
     @BeforeEach
     void setUp() throws IOException {
-        backend = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
+        backend = HttpServer.create(new InetSocketAddress("127.0.0.1", BEDROCK_PROXY_PORT), 0);
         backend.createContext("/v1/chat/completions", exchange -> {
             byte[] reqBody = exchange.getRequestBody().readAllBytes();
             received.set(new RecordedRequest(exchange.getRequestURI().getPath(), exchange.getRequestHeaders(), reqBody));
@@ -103,7 +103,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200)
             .body("output.message.role", equalTo("assistant"))
@@ -141,7 +141,7 @@ class BedrockProxyIntegrationTest {
                     .header("Authorization", AUTH_HEADER)
                     .body(request.toString())
                 .when()
-                    .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+                    .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
                 .then()
                     .statusCode(200);
                 JsonNode sent = objectMapper.readTree(received.get().body());
@@ -184,7 +184,7 @@ class BedrockProxyIntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body(request.toString())
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
         .then()
             .statusCode(200);
 
@@ -215,7 +215,7 @@ class BedrockProxyIntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body(request.toString())
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
         JsonNode sent = objectMapper.reader().with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
@@ -238,7 +238,7 @@ class BedrockProxyIntegrationTest {
                     "jsonSchema":{"schema":"{\\"type\\":\\"object\\"}"}}}}}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
         JsonNode format = objectMapper.readTree(received.get().body()).path("response_format").path("json_schema");
@@ -262,7 +262,7 @@ class BedrockProxyIntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body(request.toString())
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
         JsonNode sent = objectMapper.readTree(received.get().body());
@@ -298,7 +298,7 @@ class BedrockProxyIntegrationTest {
                     {"messages":[{"role":"user","content":[{"text":"hi"}]}],"outputConfig":%s}
                     """.formatted(outputConfig))
             .when()
-                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+                .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
@@ -332,7 +332,7 @@ class BedrockProxyIntegrationTest {
                 ]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
         .then()
             .statusCode(200);
 
@@ -362,7 +362,7 @@ class BedrockProxyIntegrationTest {
                 ]}]}
                 """.formatted(format))
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -388,7 +388,7 @@ class BedrockProxyIntegrationTest {
                 ]}]}
                 """.formatted(encoded))
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
         assertEquals("data:image/png;base64," + encoded, objectMapper.readTree(received.get().body())
@@ -410,7 +410,7 @@ class BedrockProxyIntegrationTest {
                 ]}]}
                 """.formatted(encoded))
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
@@ -440,7 +440,7 @@ class BedrockProxyIntegrationTest {
                     {"messages":[{"role":"user","content":[{"text":"Describe"},{"image":%s}]}]}
                     """.formatted(image))
             .when()
-                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+                .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
@@ -476,7 +476,7 @@ class BedrockProxyIntegrationTest {
                     ]}
                     """.formatted(content))
             .when()
-                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+                .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"))
@@ -509,7 +509,7 @@ class BedrockProxyIntegrationTest {
                 ]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
         .then()
             .statusCode(200);
         JsonNode toolMessage = objectMapper.readTree(received.get().body()).path("messages").get(1);
@@ -558,7 +558,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200)
             .body("output.message.role", equalTo("assistant"))
@@ -619,7 +619,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200)
             .body("output.message.content[0].text", equalTo("Let me check the weather for you."))
@@ -648,7 +648,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200)
             .body("stopReason", equalTo("end_turn"))
@@ -674,7 +674,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200)
             .body("output.message.content[0].text", equalTo("array-shaped reply"));
@@ -705,7 +705,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -750,7 +750,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -778,7 +778,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(424)
             .body("message", Matchers.allOf(
@@ -801,7 +801,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(424)
             .body("__type", equalTo("ModelErrorException"));
@@ -826,7 +826,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -871,7 +871,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -910,7 +910,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -947,7 +947,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -977,7 +977,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -1006,7 +1006,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -1038,7 +1038,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -1070,7 +1070,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -1109,7 +1109,7 @@ class BedrockProxyIntegrationTest {
                 }
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(200);
 
@@ -1138,7 +1138,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
@@ -1178,7 +1178,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "weather in Berlin?"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .extract().body().asString();
@@ -1207,7 +1207,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
@@ -1238,7 +1238,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .extract().body().asString();
@@ -1270,7 +1270,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .extract().body().asString();
@@ -1304,7 +1304,7 @@ class BedrockProxyIntegrationTest {
                 {"messages": [{"role": "user", "content": [{"text": "weather?"}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse-stream")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse-stream")
         .then()
             .statusCode(200)
             .extract().body().asString();
@@ -1323,7 +1323,7 @@ class BedrockProxyIntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/invoke")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/invoke")
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));

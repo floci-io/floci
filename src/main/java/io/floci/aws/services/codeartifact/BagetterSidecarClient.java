@@ -538,6 +538,35 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Reads {@code <dependencies>} straight off the same real {@code .nuspec}
+     * {@link #fetchPackageVersionReadme} already fetches and parses, via
+     * {@link NuspecXml#dependencies}. NuGet never carries {@code dependencyType} (AWS's own docs:
+     * "the dependencyType field is never set for NuGet packages") and has no namespace component,
+     * so every entry maps straight across with both left {@code null}.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        String lowerId = packageName.toLowerCase(Locale.ROOT);
+        Optional<String> normalizedVersion = matchVersion(repositoryContainerId, lowerId, version);
+        if (normalizedVersion.isEmpty()) {
+            return List.of();
+        }
+        Optional<byte[]> nuspec = getBytes(repositoryContainerId, "/v3/package/"
+                + SidecarUriUtils.encodeSegment(lowerId) + "/" + SidecarUriUtils.encodeSegment(normalizedVersion.get())
+                + "/" + SidecarUriUtils.encodeSegment(lowerId) + ".nuspec");
+        if (nuspec.isEmpty()) {
+            return List.of();
+        }
+        List<CodeArtifactService.PackageDependency> dependencies = new ArrayList<>();
+        for (NuspecXml.RawDependency raw : NuspecXml.dependencies(nuspec.get())) {
+            dependencies.add(new CodeArtifactService.PackageDependency(null, raw.id(), null, raw.version()));
+        }
+        return dependencies;
+    }
+
+    /**
      * {@code empty()} when {@code version} doesn't match any version BaGetter actually holds for this
      * package, its own normalized form otherwise. BaGetter lists each version it holds already
      * normalized and lowercased (confirmed directly against its own {@code PackageContentController

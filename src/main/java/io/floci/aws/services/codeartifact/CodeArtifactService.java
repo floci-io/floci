@@ -89,7 +89,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget", "cargo");
     private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
     /**
      * Formats AWS documents as valid for {@code GetPackageVersionReadme} specifically: the
@@ -100,6 +100,15 @@ public class CodeArtifactService implements Resettable {
      * than silently 404ing the way an unimplemented capability elsewhere here might.
      */
     private static final Set<String> README_FORMATS = Set.of("npm", "pypi", "nuget");
+    /**
+     * Formats AWS documents as valid for {@code ListPackageVersionDependencies} specifically: the
+     * action's own request parameter doc gives "Valid Values: npm | pypi | maven | nuget",
+     * narrower than the shared eight-value {@code PackageFormat} wire enum every other
+     * package-version action here accepts. Generic, Ruby, Swift, and (despite its sparse index
+     * already carrying a real {@code deps} array) Cargo package versions are rejected outright for
+     * this action rather than silently 404ing or extending AWS's own documented scope.
+     */
+    private static final Set<String> DEPENDENCY_FORMATS = Set.of("npm", "pypi", "maven", "nuget");
     /** The real {@code PackageVersionStatus} wire enum, confirmed against {@code service-2.json}. */
     private static final Set<String> PACKAGE_VERSION_STATUSES =
             Set.of("Published", "Unfinished", "Unlisted", "Archived", "Disposed", "Deleted");
@@ -122,6 +131,10 @@ public class CodeArtifactService implements Resettable {
      * restrictions map this service returns iterates them. */
     private static final List<String> PACKAGE_GROUP_RESTRICTION_TYPES =
             List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM");
+    /** The pattern of the root package group every domain holds from its creation, which matches every package. */
+    static final String ROOT_PACKAGE_GROUP = "/*";
+    /** The description CodeArtifact gives the root package group, the same in every domain. */
+    private static final String ROOT_PACKAGE_GROUP_DESCRIPTION = "Default root package group";
     /** The real {@code PackageGroupOriginRestrictionMode} wire enum. */
     private static final Set<String> PACKAGE_GROUP_MODES =
             Set.of("ALLOW", "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK", "INHERIT");
@@ -197,6 +210,10 @@ public class CodeArtifactService implements Resettable {
     public record AssetSummary(String name, long size, Map<String, String> hashes) {}
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
+    public record PackageDependency(String namespace, String packageName, String dependencyType,
+            String versionRequirement) {}
+    public record PackageVersionDependenciesListResult(String format, String namespace, String packageName,
+            String version, String versionRevision, List<PackageDependency> dependencies, String nextToken) {}
     public record PackageVersionSummary(String version, String revision, String status, String originType,
             String externalConnectionName, String upstreamRepositoryName) {}
     public record ListPackageVersionsResult(String format, String namespace, String packageName,
@@ -384,9 +401,37 @@ public class CodeArtifactService implements Resettable {
      * claim is created from nothing (never on an increment of an existing one), so a finish call
      * for an episode already torn down and replaced by a new one under the same source name
      * can never be mistaken for a finish of that new episode (see the field's own javadoc above).
+     * {@code entryPoint} is where the version entered the domain, which is what the version's
+     * origin reports (see {@link #entryPointThrough}).
      */
     private record RetainedVersionOriginClaim(String originName, RetentionOriginKind originKind,
-            int inFlightAttempts, boolean confirmed, long episodeId) {
+            int inFlightAttempts, boolean confirmed, long episodeId, EntryPoint entryPoint) {
+    }
+
+    /**
+     * Where a package version entered the domain, AWS's {@code DomainEntryPoint}: the external
+     * connection it was fetched from, or the repository it was published to.
+     */
+    private record EntryPoint(RetentionOriginKind kind, String name) {
+    }
+
+    /**
+     * The entry point of a version retained from {@code upstreamRepository}: the one its copy there
+     * has when that copy was itself retained, from an external connection or from a repository
+     * further up, and the upstream repository when the version was published there. A claim still
+     * in flight there counts: the copy read from the upstream can be the one that claim just wrote,
+     * before the attempt that wrote it confirms it. Read when the version is retained, and again
+     * when its own claim is confirmed (see {@link #finishRetainedVersionOriginAttempt}), so a later
+     * change at the upstream does not move it, as the retained version itself is not affected by
+     * one.
+     */
+    private EntryPoint entryPointThrough(String owner, String region, String domain, String upstreamRepository,
+            String format, String namespace, String packageName, String version) {
+        RetainedVersionOriginClaim upstreamClaim = retainedVersionOriginConnections.get(ownerScopedKey(owner,
+                packageVersionKey(region, domain, upstreamRepository, format, namespace,
+                        accountingPackageName(format, packageName), normalizedContainerBackedVersion(format, version))));
+        return upstreamClaim != null ? upstreamClaim.entryPoint()
+                : new EntryPoint(RetentionOriginKind.UPSTREAM_REPOSITORY, upstreamRepository);
     }
 
     /**
@@ -494,7 +539,48 @@ public class CodeArtifactService implements Resettable {
         d.setCreatedTime(Instant.now().getEpochSecond());
         d.setTags(validateTags(tags, Map.of(), domain, "domain"));
         domains.putForAccount(owner, key, d);
+        try {
+            packageGroups.putForAccount(owner, packageGroupKey(region, domain, ROOT_PACKAGE_GROUP),
+                    rootPackageGroup(owner, d));
+        } catch (RuntimeException e) {
+            // A domain left without its root would refuse the retry as a duplicate.
+            domains.deleteForAccount(owner, key);
+            throw e;
+        }
         return new DomainView(d, 0, 0L);
+    }
+
+    /**
+     * The root package group a domain is created with. "Every domain in CodeArtifact automatically contains a root
+     * package group", which "allows package versions to enter repositories in the domain from all origin types by
+     * default": each of its restrictions is {@code ALLOW} rather than {@code INHERIT}, as it has no parent to inherit
+     * from, and a group under it inherits from it. Its description is the one CodeArtifact gives it.
+     */
+    private PackageGroup rootPackageGroup(String owner, CodeArtifactDomain d) {
+        String arn = regionResolver.buildArn("codeartifact", d.getRegion(), owner,
+                "package-group/" + d.getName() + ROOT_PACKAGE_GROUP);
+        PackageGroup root = new PackageGroup(ROOT_PACKAGE_GROUP, arn, d.getName(), owner, d.getRegion(), null,
+                ROOT_PACKAGE_GROUP_DESCRIPTION, d.getCreatedTime());
+        Map<String, PackageGroupRestriction> restrictions = new LinkedHashMap<>();
+        PACKAGE_GROUP_RESTRICTION_TYPES.forEach(type ->
+                restrictions.put(type, new PackageGroupRestriction("ALLOW", new ArrayList<>())));
+        root.setRestrictions(restrictions);
+        return root;
+    }
+
+    /**
+     * Gives every stored domain without one its root package group, for a domain stored by a release that did not
+     * create the group with it. Run once storage is loaded.
+     */
+    public synchronized void seedRootPackageGroups() {
+        for (AccountAwareStorageBackend.AccountEntry<CodeArtifactDomain> entry
+                : domains.scanAllAccountEntries(k -> true)) {
+            CodeArtifactDomain d = entry.value();
+            String key = packageGroupKey(d.getRegion(), d.getName(), ROOT_PACKAGE_GROUP);
+            if (packageGroups.getForAccount(entry.accountId(), key).isEmpty()) {
+                packageGroups.putForAccount(entry.accountId(), key, rootPackageGroup(entry.accountId(), d));
+            }
+        }
     }
 
     /**
@@ -1243,6 +1329,80 @@ public class CodeArtifactService implements Resettable {
         }
         return new PackageVersionAssetsListResult(format, namespace, packageName, version, revision, page.items(),
                 page.nextToken());
+    }
+
+    /**
+     * Lists the direct dependencies of one package version, extracted from that format's own
+     * metadata file (the POM for Maven, {@code package.json} for npm, the wheel/sdist metadata for
+     * pypi, the {@code .nuspec} for NuGet). AWS documents this action for exactly those 4 formats
+     * ({@link #DEPENDENCY_FORMATS}), narrower than {@link #CONTAINER_BACKED_FORMATS}: generic and
+     * Cargo are rejected here even though Cargo's own sparse index already carries a real {@code
+     * deps} array, since AWS's own request parameter doc does not list Cargo as a valid format for
+     * this specific action.
+     */
+    public PackageVersionDependenciesListResult listPackageVersionDependencies(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String nextToken) {
+        if (format == null || !DEPENDENCY_FORMATS.contains(format)) {
+            throw validation("format must be one of " + DEPENDENCY_FORMATS + ".");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(version, "packageVersion");
+        validatePackageToken("packageVersion", version);
+        validatePackageCoordinates(format, namespace, packageName, "listing the dependencies of");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        try {
+            if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+                throw notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version");
+            }
+            List<PackageDependency> dependencies;
+            try {
+                dependencies = manager.listPackageVersionDependencies(repoId, domain, repository, namespace,
+                        packageName, version);
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing a " + format + " package version's "
+                        + "dependencies is not yet supported by this emulator.", 500);
+            }
+            List<IndexedDependency> indexed = new ArrayList<>(dependencies.size());
+            for (int i = 0; i < dependencies.size(); i++) {
+                indexed.add(new IndexedDependency(i, dependencies.get(i)));
+            }
+            PaginatedResult<IndexedDependency> page = Pagination.paginate(indexed, this::dependencyCursor, null,
+                    nextToken, 100, 1000, "ValidationException");
+            String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format,
+                    namespace, packageName, version, repoId).revision();
+            return new PackageVersionDependenciesListResult(format, namespace, packageName, version, revision,
+                    page.items().stream().map(IndexedDependency::dependency).toList(), page.nextToken());
+        } finally {
+            endSidecarUse(manager, repoId);
+        }
+    }
+
+    private record IndexedDependency(int index, PackageDependency dependency) {}
+
+    /**
+     * A stable, always-unique pagination cursor for {@link #listPackageVersionDependencies}:
+     * every field folded in, plus the entry's own original-list index as a final tiebreaker, so
+     * two byte-for-byte identical dependencies (e.g. the same NuGet package id declared under two
+     * different target-framework groups with the same version requirement) never share a cursor.
+     * Without the index, {@link Pagination#slice}'s own "resume strictly after this cursor" logic
+     * would skip every entry sharing the boundary cursor when a page happens to end on one of them.
+     */
+    private String dependencyCursor(IndexedDependency indexed) {
+        PackageDependency dependency = indexed.dependency();
+        return (dependency.namespace() == null ? "" : dependency.namespace()) + "\u0000"
+                + dependency.packageName() + "\u0000"
+                + (dependency.dependencyType() == null ? "" : dependency.dependencyType()) + "\u0000"
+                + (dependency.versionRequirement() == null ? "" : dependency.versionRequirement()) + "\u0000"
+                + String.format("%010d", indexed.index());
     }
 
     /**
@@ -2746,16 +2906,14 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * {@code originType} plus the domain entry point a caller needs to render it: for {@code
-     * EXTERNAL}, the exact external connection a version was retained from; for an {@code
-     * INTERNAL} version genuinely retained from a same-domain upstream repository (real AWS has
-     * no third {@code originType} value for this, confirmed against the live {@code
-     * PackageVersionOrigin} API reference, which lists only {@code INTERNAL}/{@code EXTERNAL}/
-     * {@code UNKNOWN}), {@code upstreamRepositoryName}; for a true direct publish, neither is set.
-     * AWS's own {@code DomainEntryPoint} reference describes an ingested package's entry point as
-     * the source it came from, {@code repositoryName} only for one published directly, so a caller
-     * surfacing a domain entry point needs the real source's name itself, not just the originType
-     * flag.
+     * {@code originType} plus the domain entry point a caller needs to render it, where the version
+     * "originally entered" the domain ({@code DomainEntryPoint}): for {@code EXTERNAL}, the external
+     * connection it was fetched through, this repository's or an upstream's; for an {@code INTERNAL}
+     * version retained from a same-domain upstream repository (real AWS has no third {@code
+     * originType} value for this, confirmed against the live {@code PackageVersionOrigin} API
+     * reference, which lists only {@code INTERNAL}/{@code EXTERNAL}/{@code UNKNOWN}), the repository
+     * it was published to, as {@code upstreamRepositoryName}, however many upstreams it came
+     * through; for a true direct publish, neither is set.
      */
     private record VersionOrigin(String originType, String externalConnectionName, String upstreamRepositoryName) {}
 
@@ -2763,9 +2921,9 @@ public class CodeArtifactService implements Resettable {
             String namespace, String packageName, String version) {
         return confirmedRetainedVersionOriginClaim(region, domain, owner, repository, format, namespace, packageName,
                 version)
-                .map(c -> c.originKind() == RetentionOriginKind.EXTERNAL_CONNECTION
-                        ? new VersionOrigin("EXTERNAL", c.originName(), null)
-                        : new VersionOrigin("INTERNAL", null, c.originName()))
+                .map(c -> c.entryPoint().kind() == RetentionOriginKind.EXTERNAL_CONNECTION
+                        ? new VersionOrigin("EXTERNAL", c.entryPoint().name(), null)
+                        : new VersionOrigin("INTERNAL", null, c.entryPoint().name()))
                 .orElse(new VersionOrigin("INTERNAL", null, null));
     }
 
@@ -3428,15 +3586,18 @@ public class CodeArtifactService implements Resettable {
         RetainedVersionOriginClaim existing = retainedVersionOriginConnections.get(key);
         if (existing == null) {
             long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+            EntryPoint entryPoint = originKind == RetentionOriginKind.EXTERNAL_CONNECTION
+                    ? new EntryPoint(originKind, originName)
+                    : entryPointThrough(owner, region, domain, originName, format, namespace, packageName, version);
             retainedVersionOriginConnections.put(key,
-                    new RetainedVersionOriginClaim(originName, originKind, 1, false, episodeId));
+                    new RetainedVersionOriginClaim(originName, originKind, 1, false, episodeId, entryPoint));
             return new RetainedVersionOriginClaimOutcome(true, episodeId);
         }
         if (!existing.originName().equals(originName) || existing.originKind() != originKind) {
             return new RetainedVersionOriginClaimOutcome(false, 0L);
         }
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(originName, originKind,
-                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId()));
+                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId(), existing.entryPoint()));
         return new RetainedVersionOriginClaimOutcome(true, existing.episodeId());
     }
 
@@ -3482,8 +3643,15 @@ public class CodeArtifactService implements Resettable {
         if (remaining == 0 && !confirmed) {
             retainedVersionOriginConnections.remove(key);
         } else {
+            // Read again as the claim is confirmed: the upstream's own claim may have been confirmed,
+            // or given up, since this one was taken.
+            EntryPoint entryPoint = confirmed && !existing.confirmed()
+                    && existing.originKind() == RetentionOriginKind.UPSTREAM_REPOSITORY
+                    ? entryPointThrough(owner, region, domain, existing.originName(), format, namespace, packageName,
+                            version)
+                    : existing.entryPoint();
             retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(
-                    existing.originName(), existing.originKind(), remaining, confirmed, episodeId));
+                    existing.originName(), existing.originKind(), remaining, confirmed, episodeId, entryPoint));
         }
     }
 
@@ -3618,7 +3786,12 @@ public class CodeArtifactService implements Resettable {
             String format, String namespace, String packageName, String version, String repoId,
             long versionFenceSnapshot, long episodeId) {
         String owner = effectiveOwner(domainOwner);
-        if ("nuget".equals(format)) {
+        // Not a nuget-specific quirk: needed by any format whose sidecar client holds a real
+        // per-request container lease (beginUse/endUse actually doing something, not the no-op
+        // default) that could go stale if the repository is deleted and recreated mid-write.
+        // KellnrSidecarClient (cargo) delegates beginUse/endUse to a real lease exactly like
+        // BagetterSidecarClient (nuget) does, so it has the identical exposure.
+        if ("nuget".equals(format) || "cargo".equals(format)) {
             if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repoId)) {
                 return false;
             }
@@ -4274,7 +4447,7 @@ public class CodeArtifactService implements Resettable {
             String namespace, String packageName, List<String> versions, Map<String, String> versionRevisions,
             boolean allowOverwrite, boolean includeFromUpstream) {
         if (!"generic".equals(format) && !CONTAINER_BACKED_FORMATS.contains(format)) {
-            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', or 'nuget'.");
+            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', 'nuget', or 'cargo'.");
         }
         boolean hasVersions = versions != null && !versions.isEmpty();
         boolean hasRevisions = versionRevisions != null && !versionRevisions.isEmpty();
@@ -4882,7 +5055,7 @@ public class CodeArtifactService implements Resettable {
         }
         long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(sourceClaim.get().originName(),
-                sourceClaim.get().originKind(), 0, true, episodeId));
+                sourceClaim.get().originKind(), 0, true, episodeId, sourceClaim.get().entryPoint()));
     }
 
     /**
@@ -4902,8 +5075,10 @@ public class CodeArtifactService implements Resettable {
                 namespace, accountingPackageName(format, packageName),
                 normalizedContainerBackedVersion(format, version)));
         long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+        EntryPoint entryPoint = entryPointThrough(owner, region, domain, upstreamRepository, format, namespace,
+                packageName, version);
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(upstreamRepository,
-                RetentionOriginKind.UPSTREAM_REPOSITORY, 0, true, episodeId));
+                RetentionOriginKind.UPSTREAM_REPOSITORY, 0, true, episodeId, entryPoint));
     }
 
     /**
@@ -5238,7 +5413,7 @@ public class CodeArtifactService implements Resettable {
         if (!isValidPackageToken(packageName) || !isValidPackageToken(version)
                 || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': the namespace, name, "
-                    + "or version contains a character ('#', '/', or whitespace) a real CodeArtifact package "
+                    + "or version contains a character (''#'', ''/'', or whitespace) a real CodeArtifact package "
                     + "coordinate cannot have.", domain, repository, packageName, version);
             return;
         }
@@ -5334,7 +5509,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = packageGroupKey(region, domain, pattern);
         requireDomain(owner, domainKey(region, domain), domain);
-        if (packageGroups.getForAccount(owner, key).isPresent()) {
+        if (ROOT_PACKAGE_GROUP.equals(pattern) || packageGroups.getForAccount(owner, key).isPresent()) {
             throw conflict("A package group with pattern '" + pattern + "' already exists.", pattern,
                     "package-group");
         }
@@ -5357,6 +5532,10 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = packageGroupKey(region, domain, pattern);
         PackageGroup group = requirePackageGroup(owner, key, pattern);
+        if (ROOT_PACKAGE_GROUP.equals(group.getPattern())) {
+            // The service's own sentence, as recorded against AWS.
+            throw validation("The root package group, '/*', cannot be deleted.");
+        }
         List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
         // Computed before the delete removes it from storage: DeletePackageGroup's own documented
         // behavior ("the direct child package groups will become children of the package group's
@@ -5611,11 +5790,9 @@ public class CodeArtifactService implements Resettable {
     /**
      * The single group a package is associated with: the most specific group in {@code all}
      * whose pattern matches {@code path} at all (strong or weak), per the User Guide's own
-     * "a package is associated with exactly one package group" rule. {@link Optional#empty}
-     * models a domain where no created group's pattern reaches this package at all — real
-     * CodeArtifact has no implicit catch-all root group (confirmed by {@code
-     * GetAssociatedPackageGroup}'s own documented {@code ResourceNotFoundException}), so callers
-     * must treat that as "this package has no group," not fall back to a synthesized default.
+     * "a package is associated with exactly one package group" rule. Every domain holds the root
+     * group {@code /*}, which matches every package, so a package of a domain always has one;
+     * {@link Optional#empty} is left for a list of groups that has no root.
      */
     private Optional<AssociatedGroupMatch> findAssociatedGroup(List<PackageGroup> all,
             PackageGroupPatterns.PackagePath path) {
@@ -6042,7 +6219,7 @@ public class CodeArtifactService implements Resettable {
             long packageFenceSnapshot) {
         if (!isValidPackageToken(packageName) || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping container-backed asset byte accounting for {0}/{1} package ''{2}'': namespace or "
-                    + "package name contains a character ('#', '/', or whitespace) a real CodeArtifact package "
+                    + "package name contains a character (''#'', ''/'', or whitespace) a real CodeArtifact package "
                     + "coordinate cannot have.", domain, repository, packageName);
             return;
         }
@@ -6112,7 +6289,7 @@ public class CodeArtifactService implements Resettable {
             String repository, String repositoryContainerId, String format, String namespace, String packageName) {
         if (!isValidPackageToken(packageName) || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Ignoring a native unpublish of {0}/{1} package ''{2}'': namespace or package name contains "
-                    + "a character ('#', '/', or whitespace) a real CodeArtifact package coordinate cannot have.",
+                    + "a character (''#'', ''/'', or whitespace) a real CodeArtifact package coordinate cannot have.",
                     domain, repository, packageName);
             return;
         }
@@ -6252,8 +6429,8 @@ public class CodeArtifactService implements Resettable {
     /**
      * The priority-ordered, deduplicated, cycle-safe chain of repositories AWS searches when
      * resolving a package-manager request against {@code repository}'s own {@code upstreams}
-     * (never including {@code repository} itself); see {@link UpstreamRepositoryResolver}'s own
-     * javadoc for why this is a breadth-first walk, not a depth-first one.
+     * (never including {@code repository} itself), depth-first in list order; see {@link
+     * UpstreamRepositoryResolver}'s own javadoc.
      */
     List<String> resolveUpstreamSearchOrder(String region, String domain, String domainOwner, String repository) {
         String owner = effectiveOwner(domainOwner);
@@ -6421,7 +6598,7 @@ public class CodeArtifactService implements Resettable {
         if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
             throw validation("namespace is required when " + action + " a " + format + " package.");
         }
-        if (("pypi".equals(format) || "nuget".equals(format)) && namespace != null) {
+        if (("pypi".equals(format) || "nuget".equals(format) || "cargo".equals(format)) && namespace != null) {
             throw validation(format + " packages do not have a namespace.");
         }
     }

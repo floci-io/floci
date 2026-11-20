@@ -3,6 +3,7 @@ package io.floci.aws.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.DelayedTaskScheduler;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -48,8 +49,8 @@ import static org.mockito.Mockito.when;
 class DynamoDbTtlForwardingTest {
 
     /** A Scheduler that never runs the drain, so buffered CDC records stay put for inspection. */
-    private static final KinesisStreamingForwarder.Scheduler NO_DRAIN =
-            new KinesisStreamingForwarder.Scheduler() {
+    private static final DelayedTaskScheduler NO_DRAIN =
+            new DelayedTaskScheduler() {
                 @Override
                 public void schedule(Runnable task, long delayMillis) {
                     // intentionally never executes the drain

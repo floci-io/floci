@@ -5,11 +5,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
+import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.iam.PublicAccessConditions;
 import org.jboss.logging.Logger;
 
 import java.util.Iterator;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -41,6 +41,7 @@ final class S3PublicAccessEvaluator {
     /** Recognised like the keys above, but the value additionally has to be a narrow range. */
     private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
     private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
+    private static final String PRINCIPAL_ARN_CONDITION_KEY = "aws:principalarn";
     private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
             "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
 
@@ -53,6 +54,62 @@ final class S3PublicAccessEvaluator {
     private S3PublicAccessEvaluator() {
     }
 
+    /**
+     * The effect a statement states, or the empty string when it states neither of them. The two
+     * words are the words as written, the IAM User Guide saying of the element that "The {@code
+     * Effect} value is case sensitive", which is the reading the policy evaluator makes of the same
+     * element, so a signed request and an unsigned one answer one bucket policy alike.
+     */
+    private static String effectOf(JsonNode statement) {
+        String effect = statement.path("Effect").asText("");
+        return "Allow".equals(effect) || "Deny".equals(effect) ? effect : "";
+    }
+
+    /**
+     * Whether a principal element names anybody at all. Each entry is written as a string, so an
+     * element whose entries are no strings names nobody, an empty list and a typed map whose types
+     * name nothing among them. An exclusion that names nobody carves nobody out, so a statement
+     * whose {@code NotPrincipal} names nobody covers nobody rather than everyone, which is again
+     * the policy evaluator's reading of the element.
+     *
+     * <p>This gates the readers that decide a request. The Block Public Access status does not ask
+     * it, that one answering S3's own rule rather than who the statement covers; see
+     * {@link #grantsToEveryone(JsonNode)}.
+     */
+    private static boolean namesAnyPrincipal(JsonNode principal) {
+        if (principal == null || principal.isMissingNode() || principal.isNull()) {
+            return false;
+        }
+        if (principal.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = principal.fields();
+            while (fields.hasNext()) {
+                if (namesPrincipalValue(fields.next().getValue())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return namesPrincipalValue(principal);
+    }
+
+    /** Whether one principal entry, a string or a list of them, names anybody. */
+    private static boolean namesPrincipalValue(JsonNode value) {
+        if (value == null) {
+            return false;
+        }
+        if (value.isTextual()) {
+            return true;
+        }
+        if (value.isArray()) {
+            for (JsonNode item : value) {
+                if (item.isTextual()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     static boolean publicPolicyAllows(ObjectMapper objectMapper, String policy, String action, String resourceArn) {
         return publicPolicyDecision(objectMapper, policy, action, resourceArn) == PublicAccessDecision.ALLOW;
     }
@@ -62,18 +119,16 @@ final class S3PublicAccessEvaluator {
             return PublicAccessDecision.NEUTRAL;
         }
         try {
-            JsonNode statements = objectMapper.readTree(policy).path("Statement");
             boolean allowed = false;
-            Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
-            for (JsonNode statement : iterable) {
-                String effect = statement.path("Effect").asText("");
-                if (!"Allow".equalsIgnoreCase(effect) && !"Deny".equalsIgnoreCase(effect)) {
+            for (JsonNode statement : PolicyDocument.statementsOf(objectMapper.readTree(policy))) {
+                String effect = effectOf(statement);
+                if (effect.isEmpty()) {
                     continue;
                 }
                 if (!statementMatchesPublicPrincipalActionResource(statement, action, resourceArn)) {
                     continue;
                 }
-                if ("Deny".equalsIgnoreCase(effect)) {
+                if ("Deny".equals(effect)) {
                     return PublicAccessDecision.DENY;
                 }
                 if (statement.hasNonNull("Condition")) {
@@ -100,12 +155,10 @@ final class S3PublicAccessEvaluator {
             return PublicAccessDecision.NEUTRAL;
         }
         try {
-            JsonNode statements = objectMapper.readTree(policy).path("Statement");
             boolean allowed = false;
-            Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
-            for (JsonNode statement : iterable) {
-                String effect = statement.path("Effect").asText("");
-                if (!"Allow".equalsIgnoreCase(effect) && !"Deny".equalsIgnoreCase(effect)) {
+            for (JsonNode statement : PolicyDocument.statementsOf(objectMapper.readTree(policy))) {
+                String effect = effectOf(statement);
+                if (effect.isEmpty()) {
                     continue;
                 }
                 if (!principalMatches(statement, principalType, principalValue)
@@ -116,7 +169,7 @@ final class S3PublicAccessEvaluator {
                 if (!conditionsMatch(statement.path("Condition"), context)) {
                     continue;
                 }
-                if ("Deny".equalsIgnoreCase(effect)) {
+                if ("Deny".equals(effect)) {
                     return PublicAccessDecision.DENY;
                 }
                 allowed = true;
@@ -135,7 +188,8 @@ final class S3PublicAccessEvaluator {
      * containing neither a wildcard nor an IAM policy variable. A single public statement makes
      * the whole policy public, which is what {@code RestrictPublicBuckets} keys off.
      *
-     * <p>Bucket policies can use a wildcard in the access point name when the account is fixed.
+     * <p>Bucket policies can use a wildcard in the resource part of {@code aws:PrincipalArn} or
+     * the access point name of {@code s3:DataAccessPointArn} when the 12-digit account is fixed.
      * Floci does not model access points, so the different access-point-policy rule does not apply.
      */
     static boolean policyIsPublic(ObjectMapper objectMapper, String policy) {
@@ -143,9 +197,7 @@ final class S3PublicAccessEvaluator {
             return false;
         }
         try {
-            JsonNode statements = objectMapper.readTree(policy).path("Statement");
-            Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
-            for (JsonNode statement : iterable) {
+            for (JsonNode statement : PolicyDocument.statementsOf(objectMapper.readTree(policy))) {
                 if (statementIsPublic(statement)) {
                     return true;
                 }
@@ -161,22 +213,13 @@ final class S3PublicAccessEvaluator {
         if (statement == null || !statement.isObject()) {
             return false;
         }
-        if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText(""))) {
+        if (!"Allow".equals(effectOf(statement))) {
             return false;
         }
-        if (!grantsToEveryone(statement)) {
+        if (!PolicyDocument.grantsToEveryone(statement)) {
             return false;
         }
         return !conditionPinsToFixedValues(statement.path("Condition"));
-    }
-
-    private static boolean grantsToEveryone(JsonNode statement) {
-        if (statement.hasNonNull("Principal")) {
-            return hasPublicPrincipal(statement.path("Principal"));
-        }
-        // An Allow on NotPrincipal grants to everyone the statement does not name.
-        return statement.hasNonNull("NotPrincipal")
-                && !hasPublicPrincipal(statement.path("NotPrincipal"));
     }
 
     private static boolean conditionPinsToFixedValues(JsonNode conditions) {
@@ -203,7 +246,9 @@ final class S3PublicAccessEvaluator {
                 }
                 if (NON_PUBLIC_CONDITION_KEYS.contains(key)
                         && !operatorName.equalsIgnoreCase("IpAddress")
-                        && allValuesFixed(entry.getValue(), PublicAccessConditions::isFixedValue)) {
+                        && allValuesFixed(entry.getValue(), PRINCIPAL_ARN_CONDITION_KEY.equals(key)
+                                ? PublicAccessConditions::isFixedAccountArn
+                                : PublicAccessConditions::isFixedValue)) {
                     return true;
                 }
                 if (SOURCE_IP_CONDITION_KEY.equals(key)
@@ -271,10 +316,10 @@ final class S3PublicAccessEvaluator {
 
     private static boolean principalMatchesPublic(JsonNode statement) {
         if (statement.hasNonNull("Principal")) {
-            return hasPublicPrincipal(statement.path("Principal"));
+            return PolicyDocument.namesEveryone(statement.path("Principal"));
         }
-        if (statement.hasNonNull("NotPrincipal")) {
-            return !hasPublicPrincipal(statement.path("NotPrincipal"));
+        if (namesAnyPrincipal(statement.path("NotPrincipal"))) {
+            return !PolicyDocument.namesEveryone(statement.path("NotPrincipal"));
         }
         return false;
     }
@@ -284,7 +329,7 @@ final class S3PublicAccessEvaluator {
         if (statement.hasNonNull("Principal")) {
             return principalNodeMatches(statement.path("Principal"), principalType, principalValue);
         }
-        if (statement.hasNonNull("NotPrincipal")) {
+        if (namesAnyPrincipal(statement.path("NotPrincipal"))) {
             return !principalNodeMatches(
                     statement.path("NotPrincipal"), principalType, principalValue);
         }
@@ -431,49 +476,6 @@ final class S3PublicAccessEvaluator {
         if (statement.hasNonNull("NotResource")) {
             JsonNode notResource = statement.get("NotResource");
             return nodeCanMatch(notResource) && !nodeMatches(notResource, resourceArn);
-        }
-        return false;
-    }
-
-    private static boolean hasPublicPrincipal(JsonNode principal) {
-        if (principal == null || principal.isMissingNode() || principal.isNull()) {
-            return false;
-        }
-        if (principal.isTextual()) {
-            return "*".equals(principal.asText());
-        }
-        if (principal.isArray()) {
-            for (JsonNode item : principal) {
-                if ("*".equals(item.asText())) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        if (principal.isObject()) {
-            Iterator<JsonNode> values = principal.elements();
-            while (values.hasNext()) {
-                if (nodeContainsPublicPrincipal(values.next())) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean nodeContainsPublicPrincipal(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return false;
-        }
-        if (node.isTextual()) {
-            return "*".equals(node.asText());
-        }
-        if (node.isArray()) {
-            for (JsonNode item : node) {
-                if ("*".equals(item.asText())) {
-                    return true;
-                }
-            }
         }
         return false;
     }

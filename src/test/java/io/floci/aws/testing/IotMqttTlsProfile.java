@@ -17,16 +17,18 @@ import java.util.Map;
  * The IoT MQTT broker started at boot on a plaintext and a TLS listener, with TLS on in Floci's
  * self-signed mode, for the classes that test what devices reach: the TLS and mutual TLS
  * listeners, MQTT over WebSocket on the HTTP and HTTPS ports, custom authorizers and the plain
- * broker. Quarkus builds the application once per distinct profile class, so they share one
- * rather than each declaring their own.
+ * broker, and for the TLS classes whose clients dial {@code 127.0.0.1}. Quarkus builds the
+ * application once per distinct profile class, and keeps every one it built for the rest of the
+ * test JVM, so they share this one rather than each declaring their own.
  *
  * <p>Under {@code @QuarkusTest} the server serves the leaf this class writes before boot, issued by
  * the local CA in {@link #TLS_DIR}, as TlsConfigSource leaves it in production. TlsConfigSource
  * reads system properties, not profile overrides, so the profile lays the files down itself and
  * points the TLS registry's default entry at them. The leaf carries {@code 127.0.0.1}, so Paho's
- * hostname verification passes against {@code ssl://127.0.0.1} and {@code wss://127.0.0.1}. Its
- * wildcard covers one label below {@code localhost.floci.io}, so a name two labels below stays
- * uncovered until a test adds it. Each run writes a fresh leaf and metadata, which also drops
+ * hostname verification passes against {@code ssl://127.0.0.1} and {@code wss://127.0.0.1}, and
+ * {@code localhost.floci.io}, the registry host of a path-style ECR repository. Its wildcard covers
+ * one label below {@code localhost.floci.io}, so a name two labels below stays uncovered until a
+ * test adds it. Each run writes a fresh leaf and metadata, which also drops
  * hostnames an earlier run learned at runtime. The CA is kept.
  *
  * <p>The overrides, and who relies on them:
@@ -41,14 +43,23 @@ import java.util.Map;
  *   <li>{@code quarkus.http.insecure-requests} keeps plain HTTP served next to HTTPS, for RestAssured
  *   and the {@code ws://} tests.</li>
  *   <li>The {@code floci.services.iot.mqtt} entries start the broker at boot on fixed loopback ports,
- *   which every class dials. They differ from the ports of the other MQTT test profiles.</li>
+ *   which every IoT class dials. They differ from the ports of the other MQTT test profiles.</li>
+ *   <li>{@code floci.services.ecr.tls-uri=true} with {@code floci.services.ecr.uri-style=path}
+ *   advertises a repository as {@code localhost.floci.io:<port>/<account>/<region>/<name>}, with
+ *   the login endpoint on that host over HTTPS. {@code EcrTlsPathUriIntegrationTest} relies on
+ *   them, and checks the URI and the registry calls it reaches through the TLS port.</li>
  * </ul>
  *
  * <p>The TLS listener admits only registered device certificates whose policy allows the connect,
  * and the plaintext one stays permissive; the WebSocket bridge hands its sessions to the plaintext
  * listener. A class that only uses the plaintext listener and plain HTTP, such as
  * {@code IotMqttEnabledIntegrationTest}, never reaches the TLS listener or the HTTPS port, so TLS
- * is inert for it.
+ * is inert for it. The ECR settings are read only by ECR's control plane and by EKS, which no IoT
+ * class calls, and {@code EcrTlsPathUriIntegrationTest} calls no IoT action and never dials the
+ * broker.
+ *
+ * <p>A class joins if every setting here is either one it relies on or one that never reaches its
+ * requests, and if any setting it adds never reaches the requests of a class already here.
  *
  * <p>The paths and ports are compile-time constants so a test can use them without initializing
  * this class, which would write a new leaf under the running application.
@@ -71,7 +82,7 @@ public class IotMqttTlsProfile implements QuarkusTestProfile {
                 Files.deleteIfExists(tlsDir.resolve(name));
             }
             FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
-            List<String> sans = List.of("localhost", "127.0.0.1", "*.localhost.floci.io");
+            List<String> sans = List.of("localhost", "127.0.0.1", "localhost.floci.io", "*.localhost.floci.io");
             CertificateGenerator.GeneratedCertificate leaf =
                     ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
             Files.writeString(tlsDir.resolve("floci-server.crt"), leaf.certificatePem());
@@ -98,6 +109,8 @@ public class IotMqttTlsProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.iot.mqtt.auto-start", "true"),
                 Map.entry("floci.services.iot.mqtt.host", "127.0.0.1"),
                 Map.entry("floci.services.iot.mqtt.port", Integer.toString(PLAIN_PORT)),
-                Map.entry("floci.services.iot.mqtt.tls-port", Integer.toString(TLS_PORT)));
+                Map.entry("floci.services.iot.mqtt.tls-port", Integer.toString(TLS_PORT)),
+                Map.entry("floci.services.ecr.tls-uri", "true"),
+                Map.entry("floci.services.ecr.uri-style", "path"));
     }
 }

@@ -37,6 +37,9 @@ public class EmrTaskInvoker {
     // a ValidationException fails addStep.sync as EMR.AmazonElasticMapReduceException.
     private static final Set<String> MODELED_ERRORS = Set.of("InvalidRequestException", "InternalServerException");
     private static final String BASE_ERROR = "AmazonElasticMapReduceException";
+    // What EMR answers a step's cancel when its cluster is gone, or the step past cancelling where a cluster's release
+    // takes no cancel.
+    private static final String NOTHING_TO_UNDO = "EMR.InvalidRequestException";
     private static final Set<String> APIS = Set.of("createCluster", "setClusterTerminationProtection",
             "terminateCluster", "addStep", "cancelStep", "modifyInstanceFleetByName", "modifyInstanceGroupByName");
     private static final Set<String> SYNC_APIS = Set.of("createCluster", "terminateCluster", "addStep");
@@ -58,10 +61,16 @@ public class EmrTaskInvoker {
      */
     record Job(String api, String clusterId, String stepId, ObjectNode response) {}
 
+    /** Whether {@link #start} takes the integration, as a {@code .sync} of an API that waits or the API itself. */
+    static boolean serves(StatesIntegration integration) {
+        String api = integration.api();
+        return APIS.contains(api) && (integration.suffix().isEmpty()
+                || ".sync".equals(integration.suffix()) && SYNC_APIS.contains(api));
+    }
+
     Job start(StatesIntegration integration, JsonNode input, String region) {
         String api = integration.api();
-        if (!APIS.contains(api)
-                || !integration.suffix().isEmpty() && !(".sync".equals(integration.suffix()) && SYNC_APIS.contains(api))) {
+        if (!serves(integration)) {
             throw unsupported(integration);
         }
         JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();
@@ -124,7 +133,14 @@ public class EmrTaskInvoker {
         request.putArray("StepIds").add(job.stepId());
         try {
             call("CancelSteps", request, region);
-        } catch (RuntimeException e) {
+        } catch (AslExecutor.FailStateException e) {
+            // EMR's InvalidRequestException says the cluster is gone or its release cannot cancel steps (a step it
+            // will not cancel comes back FAILED in an answer that succeeds). Being best effort, either leaves the Task
+            // ending as it was. Any other answer, like any other failure, is a fault and is raised, as the
+            // emr-serverless undo raises its own.
+            if (!NOTHING_TO_UNDO.equals(e.error)) {
+                throw e;
+            }
             LOG.warnv("elasticmapreduce:addStep.sync ended before its step {0} did, and the step could not be "
                     + "cancelled: {1}", job.stepId(), e.getMessage());
         }

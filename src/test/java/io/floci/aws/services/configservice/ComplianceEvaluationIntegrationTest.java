@@ -424,7 +424,7 @@ class ComplianceEvaluationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidResultTokenException"));
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -476,7 +476,7 @@ class ComplianceEvaluationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
     }
 
     @Test

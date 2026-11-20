@@ -244,7 +244,10 @@ public final class RedshiftRoleAccess {
                     "IAM Role '" + roleArn + "' could not be assumed: " + e.getMessage(), e);
         }
         Map<String, List<String>> context = new HashMap<>(conditionContext);
-        new CallerArns(roleArn, roleArn).putPrincipalKeys(context);
+        new CallerArns(roleArn, roleArn)
+                .withOrganization(iamService.organizationContextOf(AwsArnUtils.parse(roleArn).accountId())
+                        .orElse(null))
+                .putPrincipalKeys(context);
         if (!allowedUnderOrganizationPolicies(iamService, caller, AwsArnUtils.parse(roleArn).accountId(), action,
                 resourceArn, context)) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,

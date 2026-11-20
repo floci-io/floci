@@ -1,23 +1,33 @@
 package io.floci.aws.services.mwaa.proxy;
 
 import io.floci.aws.core.common.docker.ContainerExec;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpClientRequest;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.KeyCertOptions;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * HTTP relay for a single MWAA environment's webserver traffic.
@@ -30,11 +40,20 @@ import java.util.concurrent.TimeoutException;
  * {@code CreateCliToken} for this environment, then runs the request body (the raw Airflow CLI
  * command, e.g. {@code "dags list"}) inside the Airflow container and returns the
  * AWS-documented {@code {"stdout": "<base64>", "stderr": "<base64>"}} shape.
+ *
+ * <p>{@code POST /aws_mwaa/login} is intercepted too. A valid {@code CreateWebLoginToken} token in
+ * its {@code token} form field signs in to Airflow's own login form as the environment's admin, and
+ * the response hands back Airflow's {@code session} cookie with a redirect to {@code /home}, the
+ * cookie Amazon MWAA's REST API guide has clients send to {@code /api/v1}.
  */
 public class MwaaWebProxy {
 
     private static final Logger LOG = Logger.getLogger(MwaaWebProxy.class);
     private static final String CLI_PATH = "/aws_mwaa/cli";
+    private static final String LOGIN_PATH = "/aws_mwaa/login";
+    private static final String AIRFLOW_LOGIN_PATH = "/login/";
+    private static final Pattern CSRF_TOKEN_INPUT = Pattern.compile("<input[^>]*name=\"csrf_token\"[^>]*>");
+    private static final Pattern VALUE_ATTRIBUTE = Pattern.compile("value=\"([^\"]*)\"");
     // CLI execs get their own small pool, shared by name across environments, so a burst of
     // slow Docker execs cannot occupy the Vert.x worker pool the rest of the emulator uses.
     private static final String CLI_WORKER_POOL_NAME = "mwaa-cli";
@@ -48,32 +67,49 @@ public class MwaaWebProxy {
     private final Vertx vertx;
     private final String backendHost;
     private final int backendPort;
-    private final CliTokenValidator tokenValidator;
+    private final TokenValidator cliTokenValidator;
     private final CliExecutor cliExecutor;
+    private final TokenValidator webTokenValidator;
+    private final AirflowAccount airflowAccount;
     private final WorkerExecutor cliWorkers;
 
     private HttpServer server;
     private HttpClient client;
 
     public MwaaWebProxy(String environmentName, Vertx vertx, String backendHost, int backendPort,
-                        CliTokenValidator tokenValidator, CliExecutor cliExecutor) {
+                        TokenValidator cliTokenValidator, CliExecutor cliExecutor,
+                        TokenValidator webTokenValidator, AirflowAccount airflowAccount) {
         this.environmentName = environmentName;
         this.vertx = vertx;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
-        this.tokenValidator = tokenValidator;
+        this.cliTokenValidator = cliTokenValidator;
         this.cliExecutor = cliExecutor;
+        this.webTokenValidator = webTokenValidator;
+        this.airflowAccount = airflowAccount;
         this.cliWorkers = vertx.createSharedWorkerExecutor(CLI_WORKER_POOL_NAME, CLI_WORKER_POOL_SIZE);
     }
 
-    /** Starts listening on {@code proxyPort}, blocking until bound (or throwing on failure). */
+    /** Starts listening on {@code proxyPort} over plain HTTP, blocking until bound (or throwing on failure). */
     public void start(int proxyPort) throws Exception {
+        start(proxyPort, null);
+    }
+
+    /**
+     * Starts listening on {@code proxyPort}, blocking until bound (or throwing on failure). With
+     * {@code serverKeyCertOptions} the proxy serves HTTPS with that key and certificate.
+     */
+    public void start(int proxyPort, KeyCertOptions serverKeyCertOptions) throws Exception {
         client = vertx.createHttpClient(new HttpClientOptions()
                 .setConnectTimeout(5000)
                 .setKeepAlive(true));
-        server = vertx.createHttpServer(new HttpServerOptions()
+        HttpServerOptions serverOptions = new HttpServerOptions()
                 .setHost("0.0.0.0")
-                .setPort(proxyPort));
+                .setPort(proxyPort);
+        if (serverKeyCertOptions != null) {
+            serverOptions.setSsl(true).setKeyCertOptions(serverKeyCertOptions);
+        }
+        server = vertx.createHttpServer(serverOptions);
         server.requestHandler(this::handleRequest);
         try {
             server.listen().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
@@ -104,6 +140,8 @@ public class MwaaWebProxy {
     private void handleRequest(HttpServerRequest req) {
         if (req.method() == HttpMethod.POST && CLI_PATH.equals(req.path())) {
             handleCli(req);
+        } else if (req.method() == HttpMethod.POST && LOGIN_PATH.equals(req.path())) {
+            handleLogin(req);
         } else {
             forward(req);
         }
@@ -111,7 +149,7 @@ public class MwaaWebProxy {
 
     private void handleCli(HttpServerRequest req) {
         String token = extractBearerToken(req.getHeader("Authorization"));
-        if (token == null || !tokenValidator.isValid(environmentName, token)) {
+        if (token == null || !cliTokenValidator.isValid(environmentName, token)) {
             req.response().setStatusCode(401)
                     .putHeader("Content-Type", "application/json")
                     .end("{\"message\":\"Missing or invalid CLI token\"}");
@@ -136,6 +174,115 @@ public class MwaaWebProxy {
                                 .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
                     });
         });
+    }
+
+    private void handleLogin(HttpServerRequest req) {
+        req.setExpectMultipart(true);
+        req.endHandler(ignored -> {
+            String token = req.getFormAttribute("token");
+            if (token == null || !webTokenValidator.isValid(environmentName, token)) {
+                req.response().setStatusCode(401)
+                        .putHeader("Content-Type", "application/json")
+                        .end("{\"message\":\"Missing, invalid or expired web login token\"}");
+                return;
+            }
+            signInToAirflow()
+                    .onSuccess(cookies -> {
+                        HttpServerResponse response = req.response().setStatusCode(302).putHeader("Location", "/home");
+                        cookies.forEach(cookie -> response.headers().add("Set-Cookie", cookie));
+                        response.end();
+                    })
+                    .onFailure(e -> {
+                        LOG.warnv("MWAA web login failed for environment {0}: {1}", environmentName, e.getMessage());
+                        req.response().setStatusCode(502)
+                                .putHeader("Content-Type", "application/json")
+                                .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
+                    });
+        });
+    }
+
+    /**
+     * Signs in through Airflow's login form the way a browser does: GET it for the CSRF token and
+     * the anonymous session cookie, POST the admin credentials back with both, and return the
+     * {@code Set-Cookie} headers of the redirect Airflow answers a successful sign-in with.
+     */
+    private Future<List<String>> signInToAirflow() {
+        return client.request(backendRequest(HttpMethod.GET, AIRFLOW_LOGIN_PATH))
+                .compose(HttpClientRequest::send)
+                .compose(loginPage -> loginPage.body().compose(body -> client.request(backendRequest(HttpMethod.POST,
+                                AIRFLOW_LOGIN_PATH))
+                        .compose(post -> {
+                            String cookie = sessionCookie(loginPage.cookies());
+                            if (cookie != null) {
+                                post.putHeader("Cookie", cookie);
+                            }
+                            post.putHeader("Content-Type", "application/x-www-form-urlencoded");
+                            return post.send(loginForm(csrfToken(body.toString(StandardCharsets.UTF_8)), airflowAccount));
+                        })))
+                .compose(response -> response.body().compose(ignored -> signedInCookies(response)));
+    }
+
+    private RequestOptions backendRequest(HttpMethod method, String uri) {
+        return new RequestOptions()
+                .setHost(backendHost)
+                .setPort(backendPort)
+                .setURI(uri)
+                .setMethod(method);
+    }
+
+    private static Future<List<String>> signedInCookies(HttpClientResponse response) {
+        String location = response.getHeader("Location");
+        if (response.statusCode() != 302 || sessionCookie(response.cookies()) == null
+                || !leavesTheLoginForm(location)) {
+            return Future.failedFuture("Airflow did not accept the environment's admin sign-in (HTTP "
+                    + response.statusCode() + (location != null ? ", redirected to " + location : "") + ")");
+        }
+        return Future.succeededFuture(response.cookies());
+    }
+
+    /**
+     * Whether a sign-in's redirect leads away from the login form. Flask-AppBuilder answers refused
+     * credentials with a redirect back to it, carrying a session cookie that only holds the flashed
+     * message.
+     */
+    static boolean leavesTheLoginForm(String location) {
+        if (location == null || location.isBlank()) {
+            return false;
+        }
+        try {
+            String path = URI.create(location).getPath();
+            return path != null && !path.startsWith("/login");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    static String csrfToken(String loginPage) {
+        Matcher input = CSRF_TOKEN_INPUT.matcher(loginPage);
+        if (!input.find()) {
+            return null;
+        }
+        Matcher value = VALUE_ATTRIBUTE.matcher(input.group());
+        return value.find() ? value.group(1) : null;
+    }
+
+    static String sessionCookie(List<String> setCookieHeaders) {
+        for (String header : setCookieHeaders) {
+            if (header.startsWith("session=")) {
+                int end = header.indexOf(';');
+                return end >= 0 ? header.substring(0, end) : header;
+            }
+        }
+        return null;
+    }
+
+    static Buffer loginForm(String csrfToken, AirflowAccount account) {
+        String form = "username=" + URLEncoder.encode(account.username(), StandardCharsets.UTF_8)
+                + "&password=" + URLEncoder.encode(account.password(), StandardCharsets.UTF_8);
+        if (csrfToken != null) {
+            form += "&csrf_token=" + URLEncoder.encode(csrfToken, StandardCharsets.UTF_8);
+        }
+        return Buffer.buffer(form);
     }
 
     private void forward(HttpServerRequest req) {
@@ -193,8 +340,12 @@ public class MwaaWebProxy {
     }
 
     @FunctionalInterface
-    public interface CliTokenValidator {
+    public interface TokenValidator {
         boolean isValid(String environmentName, String token);
+    }
+
+    /** The Airflow web UI account a valid web login token signs in as. */
+    public record AirflowAccount(String username, String password) {
     }
 
     @FunctionalInterface

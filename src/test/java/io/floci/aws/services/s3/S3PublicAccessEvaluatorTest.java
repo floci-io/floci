@@ -3,6 +3,7 @@ package io.floci.aws.services.s3;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.floci.aws.services.s3.S3PublicAccessEvaluator.PublicAccessDecision.ALLOW;
@@ -194,6 +195,38 @@ class S3PublicAccessEvaluatorTest {
                 "s3:GetObject", OBJECT_ARN,
                 Map.of("AWS:SourceArn",
                         "arn:aws:cloudfront::000000000000:distribution/EBLOCKED")));
+    }
+
+    @Test
+    void anEffectSpelledInAnotherCaseDoesNotAllowAnonymousRead() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"allow",
+                  "Principal":"*",
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*"
+                }}""";
+
+        assertEquals(NEUTRAL, S3PublicAccessEvaluator.publicPolicyDecision(
+                OBJECT_MAPPER, policy, "s3:GetObject", OBJECT_ARN));
+        assertEquals(NEUTRAL, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "AWS", "arn:aws:iam::123456789012:user/alice",
+                "s3:GetObject", OBJECT_ARN, Map.of()));
+    }
+
+    @Test
+    void aNotPrincipalThatNamesNobodyDoesNotAllowAnonymousRead() {
+        for (String notPrincipal : List.of("[]", "[123]", "{}", "{\"AWS\":[]}")) {
+            String policy = "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\","
+                    + "\"NotPrincipal\":" + notPrincipal + ","
+                    + "\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::public-bucket/*\"}}";
+
+            assertEquals(NEUTRAL, S3PublicAccessEvaluator.publicPolicyDecision(
+                    OBJECT_MAPPER, policy, "s3:GetObject", OBJECT_ARN), notPrincipal);
+            assertEquals(NEUTRAL, S3PublicAccessEvaluator.principalPolicyDecision(
+                    OBJECT_MAPPER, policy, "AWS", "arn:aws:iam::123456789012:user/alice",
+                    "s3:GetObject", OBJECT_ARN, Map.of()), notPrincipal);
+        }
     }
 
     @Test

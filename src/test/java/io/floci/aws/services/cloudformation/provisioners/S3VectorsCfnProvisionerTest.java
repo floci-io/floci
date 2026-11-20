@@ -220,7 +220,7 @@ class S3VectorsCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", " ", "\t", "Uppercase", "under_score", "dot.name", "ab", "-bucket", "bucket-",
+    @ValueSource(strings = {"", " ", "\t", "Uppercase", "under_score", "dot..name", "ab", "-bucket", "bucket-",
             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl"})
     void invalidBucketNamesAreRejectedForBothSelectors(String name) throws Exception {
         for (String selector : List.of("VectorBucketName", "VectorBucketArn")) {
@@ -232,6 +232,28 @@ class S3VectorsCfnProvisionerTest {
             assertEquals("ValidationError", error.getErrorCode());
         }
         verifyNoInteractions(service);
+    }
+
+    /**
+     * An index may name, by name or by ARN, a bucket an older Floci took under a name the create rules now reserve;
+     * a bucket the stack creates under such a name is refused.
+     */
+    @Test
+    void anIndexReachesABucketStoredUnderAReservedName() throws Exception {
+        stubCreates();
+        for (String selector : List.of("VectorBucketName", "VectorBucketArn")) {
+            ObjectNode props = indexProps();
+            props.remove("VectorBucketArn");
+            props.put(selector, "VectorBucketName".equals(selector) ? "sthree-logs"
+                    : BUCKET_ARN.replace("my-bucket", "sthree-logs"));
+            provisioner.provision(resource("Index"), props, context(null));
+        }
+        verify(service, times(2)).createIndex(eq("sthree-logs"), eq("my-index"), eq(3), eq("float32"), eq("cosine"),
+                anyList(), any(), anyMap(), eq(REGION));
+
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(resource("VectorBucket"),
+                props("{\"VectorBucketName\":\"sthree-logs\"}"), context(null)));
+        assertEquals("ValidationError", refused.getErrorCode());
     }
 
     @Test

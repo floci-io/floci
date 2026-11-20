@@ -1510,40 +1510,104 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
         throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
     }
 
-    public void tagResource(String arn, Map<String, String> tags) {
+    /**
+     * Puts a new tag map in place of the state machine's or the activity's, never changing one in place, so a reader
+     * copying it, as {@link #storedTags} does on every request IAM checks, sees one whole set; under the service's lock
+     * the other state machine writes take, so an update copying the state machine does not lose a tag.
+     */
+    public synchronized void tagResource(String arn, Map<String, String> tags) {
         Optional<StateMachine> smOpt = stateMachineStore.get(arn);
         if (smOpt.isPresent()) {
             StateMachine sm = smOpt.get();
-            sm.getTags().putAll(tags);
+            Map<String, String> next = new HashMap<>(sm.getTags());
+            next.putAll(tags);
+            sm.setTags(next);
             stateMachineStore.put(arn, sm);
             return;
         }
         Optional<Activity> actOpt = activityStore.get(arn);
         if (actOpt.isPresent()) {
             Activity activity = actOpt.get();
-            activity.getTags().putAll(tags);
+            Map<String, String> next = new HashMap<>(activity.getTags());
+            next.putAll(tags);
+            activity.setTags(next);
             activityStore.put(arn, activity);
             return;
         }
         throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
     }
 
-    public void untagResource(String arn, List<String> tagKeys) {
+    /** As {@link #tagResource}, without the keys. */
+    public synchronized void untagResource(String arn, List<String> tagKeys) {
         Optional<StateMachine> smOpt = stateMachineStore.get(arn);
         if (smOpt.isPresent()) {
             StateMachine sm = smOpt.get();
-            tagKeys.forEach(sm.getTags()::remove);
+            Map<String, String> next = new HashMap<>(sm.getTags());
+            tagKeys.forEach(next::remove);
+            sm.setTags(next);
             stateMachineStore.put(arn, sm);
             return;
         }
         Optional<Activity> actOpt = activityStore.get(arn);
         if (actOpt.isPresent()) {
             Activity activity = actOpt.get();
-            tagKeys.forEach(activity.getTags()::remove);
+            Map<String, String> next = new HashMap<>(activity.getTags());
+            tagKeys.forEach(next::remove);
+            activity.setTags(next);
             activityStore.put(arn, activity);
             return;
         }
         throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
+    }
+
+    /**
+     * The tags of the state machine or the activity stored under {@code arn} in the account and Region it names, read
+     * in place and matched on the whole ARN; a version and an execution have their state machine's, as all versions
+     * of a state machine share its tags and its executions inherit them, and an alias has none. Empty for an ARN
+     * naming nothing stored.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "states")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String resource = parsed.resource();
+        if (resource.startsWith("activity:")) {
+            return AccountAwareStorageBackend.readInAccount(activityStore, account, arn)
+                    .map(activity -> Map.copyOf(activity.getTags()))
+                    .orElse(Map.of());
+        }
+        if (resource.startsWith("execution:")) {
+            return AccountAwareStorageBackend.readInAccount(executionStore, account, arn)
+                    .map(execution -> stateMachineTags(account, execution.getStateMachineArn(), null))
+                    .orElse(Map.of());
+        }
+        String[] stateMachine = resource.split(":", -1);
+        if (!"stateMachine".equals(stateMachine[0]) || stateMachine.length < 2 || stateMachine.length > 3) {
+            return Map.of();
+        }
+        if (stateMachine.length == 2) {
+            return stateMachineTags(account, arn, null);
+        }
+        return stateMachine[2].matches("[0-9]+")
+                ? stateMachineTags(account, arn.substring(0, arn.lastIndexOf(':')), arn)
+                : Map.of();
+    }
+
+    /** The tags of the state machine stored under {@code arn} in the account, when it holds {@code version} if one. */
+    private Map<String, String> stateMachineTags(String account, String arn, String version) {
+        Optional<StateMachine> stored = AccountAwareStorageBackend.readInAccount(stateMachineStore, account, arn);
+        if (stored.isEmpty() || version != null && !holdsVersion(stored.get(), version)) {
+            return Map.of();
+        }
+        return Map.copyOf(stored.get().getTags());
+    }
+
+    private synchronized boolean holdsVersion(StateMachine stateMachine, String versionArn) {
+        return stateMachine.getVersions().stream()
+                .anyMatch(published -> versionArn.equals(published.getStateMachineVersionArn()));
     }
 
     public synchronized void replaceStateMachineTags(String arn, Map<String, String> tags) {

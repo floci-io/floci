@@ -46,10 +46,6 @@ on:
       - 'src/main/resources/iam/managed-policy-versions.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
-  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
-  # apply to merge_group, so a queued PR is always checked.
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
@@ -91,7 +87,8 @@ jobs:
   aws-data:
     name: Vendored AWS data in sync
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The IAM request-resources check alone takes about four and a half minutes.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

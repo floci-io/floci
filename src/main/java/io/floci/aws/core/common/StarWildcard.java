@@ -1,5 +1,8 @@
 package io.floci.aws.core.common;
 
+import java.util.BitSet;
+import java.util.function.IntPredicate;
+
 /** Patterns whose only wildcard is a star. */
 public final class StarWildcard {
 
@@ -14,12 +17,40 @@ public final class StarWildcard {
      * pattern holds. A caller that wants a case-insensitive match passes both in one case.
      */
     public static boolean matches(String pattern, String value) {
+        return scan(pattern, index -> pattern.charAt(index) == '*', value);
+    }
+
+    /**
+     * As {@link #matches}, where a backslash makes the star or the backslash after it literal:
+     * {@code \*} stands for a {@code *} and {@code \\} for a {@code \}, the two escapes
+     * EventBridge's {@code wildcard} filter takes. A backslash before any other character stands
+     * for itself.
+     */
+    public static boolean matchesEscaped(String pattern, String value) {
+        StringBuilder literal = new StringBuilder(pattern.length());
+        BitSet stars = new BitSet(pattern.length());
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            if (c == '\\' && i + 1 < pattern.length()
+                    && (pattern.charAt(i + 1) == '*' || pattern.charAt(i + 1) == '\\')) {
+                literal.append(pattern.charAt(++i));
+            } else {
+                if (c == '*') {
+                    stars.set(literal.length());
+                }
+                literal.append(c);
+            }
+        }
+        return scan(literal, stars::get, value);
+    }
+
+    private static boolean scan(CharSequence pattern, IntPredicate isStar, String value) {
         int patternIndex = 0;
         int valueIndex = 0;
         int starPattern = -1;
         int starValue = -1;
         while (valueIndex < value.length()) {
-            if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+            if (patternIndex < pattern.length() && isStar.test(patternIndex)) {
                 starPattern = patternIndex++;
                 starValue = valueIndex;
             } else if (patternIndex < pattern.length()
@@ -33,7 +64,7 @@ public final class StarWildcard {
                 return false;
             }
         }
-        while (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+        while (patternIndex < pattern.length() && isStar.test(patternIndex)) {
             patternIndex++;
         }
         return patternIndex == pattern.length();
