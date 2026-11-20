@@ -1136,12 +1136,16 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/requestvalidators")
-    public Response getRequestValidators(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getRequestValidators(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                         @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<RequestValidator> validators = service.getRequestValidators(region, apiId);
+        PaginatedResult<RequestValidator> page = service.getRequestValidatorPage(region, apiId, pageLimit(limit), position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        validators.forEach(v -> items.add(toRequestValidatorNode(v)));
+        page.items().forEach(v -> items.add(toRequestValidatorNode(v)));
+        if (page.nextToken() != null) {
+            root.put("position", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

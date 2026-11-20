@@ -2371,6 +2371,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return requestValidatorStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<RequestValidator> getRequestValidatorPage(String region, String apiId, Integer limit,
+                                                                     String position) {
+        List<RequestValidator> validators = getRequestValidators(region, apiId).stream()
+                .sorted(Comparator.comparing(RequestValidator::getId))
+                .toList();
+        return pageById(validators, RequestValidator::getId, limit, position);
+    }
+
     public void deleteRequestValidator(String region, String apiId, String validatorId) {
         getRequestValidator(region, apiId, validatorId);
         requestValidatorStore.delete(requestValidatorKey(region, apiId, validatorId));
