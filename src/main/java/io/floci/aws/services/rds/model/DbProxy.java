@@ -1,5 +1,6 @@
 package io.floci.aws.services.rds.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -43,6 +44,7 @@ public class DbProxy {
     public DbProxy() {}
 
     /** AWS RDS Proxy exposes a bare hostname and clients connect on the engine's default port. */
+    @JsonIgnore
     public String getEndpoint() {
         return endpointHost;
     }

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.floci.aws.testing.RdsRequests.auroraClusterWithMember;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -94,18 +95,9 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
     void anAuroraMemberCannotCarryItsOwnRoles() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-rds-roles-member-" + suffix;
-        String clusterId = "cfn-roles-member-cluster-" + suffix;
         try {
-            stack("CreateStack", stackName, """
-                    {"Resources": {
-                      "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
-                        "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
-                        "MasterUsername": "dbadmin", "MasterUserPassword": "password123"}},
-                      "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
-                        "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
-                        "DBInstanceClass": "db.r6g.large",
-                        "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}}}
-                    """.formatted(clusterId, EXPORT_ROLE));
+            stack("CreateStack", stackName, "{\"Resources\": {%s}}".formatted(auroraClusterWithMember(
+                    "\"AssociatedRoles\": [{\"RoleArn\": \"%s\", \"FeatureName\": \"s3Import\"}]".formatted(EXPORT_ROLE))));
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
             assertTrue(state.status().startsWith("ROLLBACK") || state.status().equals("CREATE_FAILED"),
                     state.status());

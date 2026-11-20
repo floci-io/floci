@@ -43,7 +43,7 @@ public class FargateProfile {
     private Health health;
 
     @JsonProperty("tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     @JsonIgnore
     private String accountId;

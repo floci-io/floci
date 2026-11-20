@@ -76,6 +76,8 @@ operations keep their existing resource builders, including batch, transaction a
 | `DescribeImport` | Get import status and metadata |
 | `ListImports` | List imports, optionally filtered by table ARN |
 
+`CreateTable` and `UpdateTable` store the `WarmThroughput` of a table and of its global secondary indexes, and DescribeTable reports it. Pre-warming finishes at once, so DescribeTable always shows `ACTIVE`.
+
 ## Legacy 2011-12-05 clients
 
 The JSON 1.0 target `DynamoDB_20111205` supports `DescribeTable`, `Query` and

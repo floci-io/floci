@@ -137,6 +137,25 @@ class SpectrumKinesisViewPreparationTest {
     }
 
     @Test
+    void anEscapedQuoteInAnEscapeStringDoesNotHideAJoinOrAnAggregateFromTheChecks() {
+        SpectrumSqlException join = assertThrows(SpectrumSqlException.class, () -> preparation.prepare(
+                "CREATE MATERIALIZED VIEW v AS SELECT E'\\'' AS q FROM kds.events e JOIN public.t ON e.shard_id = 'a'",
+                SESSION, backend));
+        SpectrumSqlException aggregate = assertThrows(SpectrumSqlException.class, () -> preparation.prepare(
+                "CREATE MATERIALIZED VIEW v AS SELECT E'\\'' AS q, count(*) FROM kds.events WHERE shard_id = 'a'",
+                SESSION, backend));
+
+        assertThat(join.getMessage(), containsString("JOIN"));
+        assertThat(aggregate.getMessage(), containsString("aggregate"));
+    }
+
+    @Test
+    void aKeywordInsideAnEscapeStringWithAnEscapedQuoteIsNotTakenForAJoin() {
+        preparation.prepare("CREATE MATERIALIZED VIEW v AS SELECT E'it\\'s a join' AS c FROM kds.events",
+                SESSION, backend);
+    }
+
+    @Test
     void droppingTheLastViewAlsoDropsTheStagingTable() {
         preparation.prepare(CREATE_VIEW, SESSION, backend);
 

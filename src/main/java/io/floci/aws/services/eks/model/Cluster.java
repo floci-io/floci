@@ -62,7 +62,7 @@ public class Cluster {
     private String platformVersion;
 
     @JsonProperty("tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     @JsonIgnore
     private String containerId;

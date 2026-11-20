@@ -2332,8 +2332,8 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
-Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
+DynamoDB, SSM, KMS, IAM, Resource Groups, API Gateway
+and CloudWatch Logs. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue and Amazon SQS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS and Amazon EKS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2531,9 +2531,10 @@ A Scheduler request is checked against `schedule/<group>/<name>`, the group from
 `GroupName` on a create or an update, from `groupName` otherwise, and the `default` group when neither
 names one, as botocore documents ("If you omit this, the default schedule group is used"), or
 `schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
-`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
-is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
-route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A Lambda request
+`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`, from the generated table. A DSQL request
+is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN its modeled
+`/tags/{resourceArn}` carries, from the generated table; `CreateCluster` and `ListClusters` against
+`cluster/*`, as DSQL checks them, `ListClusters` from a measured entry. A Lambda request
 is checked on what the table reads from it, as for the other services it reads. A function named by its
 name, its ARN, a partial ARN (`123456789012:function:my-function`, its Region optional) or its resource
 part (`function:my-function`) is the function of that name, an ARN keeping its account and Region beside
@@ -2559,26 +2560,24 @@ came from. `ListQueues`, and `CancelMessageMoveTask`, whose `TaskHandle` names n
 `*`, so a grant scoped to a queue, or to the account's queues, does not allow cancelling a move task: it
 takes a grant on `*`.
 
-An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
-checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
-a cluster it does not hold, and `CreateCluster` against the cluster its body names, as the EKS user
-guide's example policy for creating a cluster grants it. A node group, Fargate profile, add-on,
-access entry or Pod Identity association route is checked against the ARN EKS holds that resource
-under, which ends in an id the request does not carry, so a policy names it with a wildcard, such as
-`nodegroup/<cluster>/<name>/*`; listing or creating them, and the other routes under a cluster, are
-checked against the cluster. A name holding an encoded `/` is read as one name, as EKS reads it.
-`DescribeUpdate` is checked against the add-on the update was made to, since the updates Floci keeps
-are its add-ons' and EKS returns one whether or not the request names its add-on, and otherwise
-against the cluster. An EKS tagging request is checked against the caller's own cluster named after
-the ARN's last `/`, whatever the ARN names before it, as EKS looks it up.
+An EKS request is checked on what the generated table reads from it, in the caller's account, where
+EKS looks everything up. A cluster route is checked against `cluster/<name>`, the name its path gives,
+and `CreateCluster` against the cluster its body names, from a measured entry quoting the EKS user
+guide's example policy for creating a cluster, as the Service Reference lists no resource type for it.
+A node group, add-on or Fargate profile, whose ARN ends in an id EKS minted, is checked against the ARN
+EKS holds it under, found by the names its path gives in the request's Region, or with its names open
+when EKS holds none; an access entry, Pod Identity association, identity provider config or capability
+is checked with the parts of its ARN the request does not give open, so a policy names it with a
+wildcard, such as `access-entry/<cluster>/*`. Listing or creating them, and the other routes under a
+cluster, are checked against the cluster. An EKS tagging request is checked against the ARN its
+`/tags/{resourceArn}` carries, and EKS tags the resource whose ARN is that whole ARN.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
-and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
-it is signed with. The ARN is
+and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
 whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
-serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty, Security Hub and EKS tag only on
 `/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
 encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
@@ -3035,6 +3034,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - Aurora DSQL cluster policies take part the same way for a control plane call on the cluster, and when a client connects to the cluster's endpoint. See [DSQL](dsql.md#authentication).
 - SQS queue policies take part the same way for a call on the queue; see [SQS](sqs.md#queue-policies-under-iam-enforcement).
 - EventBridge event bus policies, the statements `PutPermission` adds, take part the same way for a call on the bus; see [EventBridge](eventbridge.md#event-bus-policies-under-iam-enforcement).
+- A role's trust policy takes part the same way for `sts:AssumeRole` on the role, with the role as its resource: a trust policy names no `Resource`. It is not consulted for IAM actions on the role, such as `iam:GetRole` or `iam:PassRole`. See [STS trust policy enforcement](sts.md#trust-policy-enforcement).
 - API Gateway REST API policies are stored but not evaluated.
 - A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES and Lambda, when it reads the code of a Web Function revision from S3, are the services checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement) and [Lambda Web Functions](lambda-web-functions.md#emulation-behavior).
 
@@ -3177,7 +3177,7 @@ so a denied request gets `AccessDenied` even for a cluster that does not exist. 
 that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
-from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SNS, DynamoDB, Kinesis, Secrets
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, DynamoDB, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
 the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
@@ -3535,8 +3535,10 @@ floci populates:
   job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
-  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, and SQS for
-  its queues. Tag keys differing only in case are one condition key holding every value.
+  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
+  Aurora DSQL for its clusters and EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
+  associations and access entries. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3743,6 +3745,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `sts:RoleSessionName` and `sts:ExternalId`: the `RoleSessionName` and `ExternalId` an `AssumeRole` request
+  passes, as given, for the caller's identity-based policies, permissions boundary, session policy and SCPs, as
+  the role's trust policy reads them (see [STS](sts.md)); `sts:ExternalId` is absent when the request passes none.
+  The actions and request members come from the same `request-condition-keys.json`.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
+  evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
+  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

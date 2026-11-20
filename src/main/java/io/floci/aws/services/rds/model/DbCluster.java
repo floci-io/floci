@@ -48,6 +48,7 @@ public class DbCluster {
     private String engineMode;
     private boolean storageEncrypted;
     private int backupRetentionPeriod = 1;
+    private boolean deletionProtection;
     private boolean copyTagsToSnapshot;
     private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
     private String kmsKeyId;
@@ -211,6 +212,9 @@ public class DbCluster {
 
     public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
     public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }

@@ -28,17 +28,20 @@ jobs:
   checks:
     name: Nightly checks (${{ matrix.group }})
     runs-on: ubuntu-latest
-    # The existing checks keep their 336-minute total plus twenty minutes for setup. The shrink check runs
-    # separately: its sixteen-minute method and two-minute setup plus twenty minutes for compilation/prefetch.
-    # Combining them would exceed the hosted runner's 360-minute job limit.
+    # Each group runs its checks one after another, within their own @Timeout bounds, plus about twenty minutes for
+    # compilation, the image and the prefetch; together they would exceed the 360 minutes a hosted runner gives one
+    # job. standard holds every check but the EMR Docker runner's, 339 minutes. docker-runner holds
+    # EmrDockerRunnerNightlyIntegrationTest's eleven two-minute tests and two-minute setup, and
+    # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, 42 minutes. A check added,
+    # or a bound raised, raises its group's timeout with it, so a slow check fails with its own message.
     strategy:
       fail-fast: false
       matrix:
         include:
           - group: standard
-            timeout: 356
-          - group: cluster-shrink
-            timeout: 38
+            timeout: 359
+          - group: docker-runner
+            timeout: 62
     timeout-minutes: ${{ matrix.timeout }}
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
@@ -49,17 +52,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Every test is a top-level class in src/test/java, so the file name is the class name, as ci.yml relies on.
+      # On a pull request, only the checks it adds or changes run, or all of them when it changes this workflow.
       - name: List the nightly checks
         id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          GROUP: ${{ matrix.group }}
         run: |
+          set -euo pipefail
           cd src/test/java
           find . -name '*NightlyIntegrationTest.java' | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
             > "$GITHUB_WORKSPACE/all-nightly.txt"
           cd "$GITHUB_WORKSPACE"
-          if [ "${{ matrix.group }}" = "cluster-shrink" ]; then
-            grep '/EmrClusterShrinkNightlyIntegrationTest$' all-nightly.txt > nightly.txt
+          if [ -n "$PR" ]; then
+            gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only > changed.txt
+            if ! grep -qx '.github/workflows/nightly-checks.yml' changed.txt; then
+              sed -n 's|^src/test/java/\(.*NightlyIntegrationTest\)\.java$|\1|p' changed.txt | LC_ALL=C sort \
+                | comm -12 all-nightly.txt - > selected.txt
+              mv selected.txt all-nightly.txt
+            fi
+          fi
+          runner='/(EmrDockerRunner|EmrClusterShrink)NightlyIntegrationTest$'
+          if [ "$GROUP" = "docker-runner" ]; then
+            grep -E "$runner" all-nightly.txt > nightly.txt || true
           else
-            grep -v '/EmrClusterShrinkNightlyIntegrationTest$' all-nightly.txt > nightly.txt
+            grep -vE "$runner" all-nightly.txt > nightly.txt || true
           fi
           count=$(wc -l < nightly.txt | tr -d ' ')
           echo "count=$count" >> "$GITHUB_OUTPUT"
@@ -94,6 +112,14 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: |
             maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - if: steps.list.outputs.count != '0'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Prefetch the checks' Docker images (background)
         if: steps.list.outputs.count != '0'

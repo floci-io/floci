@@ -24,6 +24,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -60,10 +61,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * runner mode runs each step, and an application each job run, in a container of the release's EMR Serverless image,
  * which reaches Floci's S3 and Glue from there, a job run's executors each in a container of their own, as the profile sets. The cached {@code emr-7.5.0} image keeps a local run from pulling;
  * CI pulls it (3.5 GB) the first time.
+ *
+ * <p>A nightly check: it pulls a 3.5 GB image and runs for over ten minutes, about half of a pull request shard, so
+ * it runs with {@code -Dnightly.checks.enabled=true}.
  */
 @QuarkusTest
 @TestProfile(CloudFormationSettingsProfile.class)
-class EmrDockerRunnerDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class EmrDockerRunnerNightlyIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String REGION = "us-east-1";

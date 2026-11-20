@@ -1,12 +1,12 @@
 package io.floci.aws.services.lambdamicrovms;
 
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmImageFixture.BuildInputs;
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmImageFixture.UpdatedImage;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-
-import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -18,6 +18,12 @@ class LambdaMicrovmImageVersionBuildSpecIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    private final LambdaMicrovmImageFixture images = new LambdaMicrovmImageFixture(cleanup, "version-build-spec-",
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:original", "1.0",
+                    "arn:aws:iam::000000000000:role/original", "s3://artifacts/original.zip"),
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:replacement", "2.0",
+                    "arn:aws:iam::000000000000:role/replacement", "s3://artifacts/replacement.zip"));
 
     @Test
     void getKeepsEachVersionsBuildInputsAfterAnUpdate() {
@@ -38,24 +44,11 @@ class LambdaMicrovmImageVersionBuildSpecIntegrationTest {
     }
 
     private String createAndUpdate() {
-        String name = "version-build-spec-" + UUID.randomUUID();
-        given().contentType("application/json").body("{\"name\":\"" + name + "\"," + fields("original", "1.0") + "}")
-                .when().post(IMAGES).then().statusCode(201);
-        cleanup.register(() -> given().when().delete(IMAGES + "/" + name).then().statusCode(200));
-        ValidatableResponse updated = given().contentType("application/json")
-                .body("{" + fields("replacement", "2.0") + "}")
-                .when().put(IMAGES + "/" + name).then().statusCode(200);
-        assertBuildSpec(updated, "", "replacement", "2.0");
-        given().when().get(IMAGES + "/" + name).then().statusCode(200)
+        UpdatedImage image = images.createWithTwoVersions();
+        assertBuildSpec(image.response(), "", "replacement", "2.0");
+        given().when().get(IMAGES + "/" + image.name()).then().statusCode(200)
                 .body("latestActiveImageVersion", equalTo("2.0"));
-        return name;
-    }
-
-    private static String fields(String label, String version) {
-        return "\"baseImageArn\":\"arn:aws:lambda:us-east-1:aws:microvm-image:" + label + "\","
-                + "\"baseImageVersion\":\"" + version + "\","
-                + "\"buildRoleArn\":\"arn:aws:iam::000000000000:role/" + label + "\","
-                + "\"codeArtifact\":{\"uri\":\"s3://artifacts/" + label + ".zip\"}";
+        return image.name();
     }
 
     private static void assertBuildSpec(ValidatableResponse response, String prefix, String label, String version) {

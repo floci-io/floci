@@ -349,6 +349,9 @@ public class BedrockController {
         if (model.servedInRegion(region)) {
             inferenceTypes.add("ON_DEMAND");
         }
+        if (model.servedThroughProfileFrom(region)) {
+            inferenceTypes.add("INFERENCE_PROFILE");
+        }
         node.putObject("modelLifecycle").put("status", model.lifecycleStatus());
         return node;
     }

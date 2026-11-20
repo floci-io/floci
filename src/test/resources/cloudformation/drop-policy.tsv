@@ -5,6 +5,10 @@ AWS::ApiGateway::Authorizer	Name	keep:required by AWS
 AWS::ApiGateway::Authorizer	ProviderARNs	clear	the field reads back empty
 AWS::ApiGateway::Authorizer	RestApiId	create-only	a drop fails: the rest api is not found
 AWS::ApiGateway::Authorizer	Type	keep:required by AWS
+AWS::ApiGateway::Stage	DeploymentId	keep:the patch cannot remove it
+AWS::ApiGateway::Stage	Description	clear	the field reads back absent
+AWS::ApiGateway::Stage	RestApiId	create-only	a drop fails: the rest api is not found
+AWS::ApiGateway::Stage	StageName	create-only	a drop fails: the stage name is required
 AWS::ApiGatewayV2::Authorizer	ApiId	create-only	a drop fails: the authorizer is not found
 AWS::ApiGatewayV2::Authorizer	AuthorizerPayloadFormatVersion	clear	a create without it accepts the authorizer
 AWS::ApiGatewayV2::Authorizer	AuthorizerResultTtlInSeconds	clear	the field reads back absent

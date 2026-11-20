@@ -328,7 +328,8 @@ public final class RequestResources {
         for (String id : ids) {
             String arn = "*";
             for (Map.Entry<String, String> prefix : targets.prefixes().entrySet()) {
-                if (id.startsWith(prefix.getValue())) {
+                // A longer, uncovered resource prefix must not borrow a shorter covered type's ARN.
+                if (id.startsWith(prefix.getValue()) && id.indexOf('-', prefix.getValue().length()) < 0) {
                     arn = idArn(formats.get(prefix.getKey()).format(), id, partition, region, accountId);
                     break;
                 }

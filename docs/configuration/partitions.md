@@ -156,9 +156,10 @@ a colon in that setting. Existing stored namespaces are not migrated or deleted 
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
   lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
   GovCloud keeps `com.amazonaws`. Gateway endpoints and their AWS-managed prefix lists (S3,
-  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition. S3 offers both kinds: where
-  the two names agree it is one service carrying both types, and in China it is listed twice, the
-  gateway `com.amazonaws.cn-north-1.s3` and the interface `cn.com.amazonaws.cn-north-1.s3`.
+  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition. Both offer both kinds: where
+  the two names agree it is one service carrying both types, and where they differ (S3 in China) it
+  is listed twice, the gateway `com.amazonaws.cn-north-1.s3` and the interface
+  `cn.com.amazonaws.cn-north-1.s3`.
 - **Lambda runtime images** pull from ECR Public (`public.ecr.aws`), which exists only in the
   commercial partition; point `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` at a mirror elsewhere.
 - **WAF `CLOUDFRONT` scope**: available only where CloudFront exists (`aws`, `aws-cn`), and its

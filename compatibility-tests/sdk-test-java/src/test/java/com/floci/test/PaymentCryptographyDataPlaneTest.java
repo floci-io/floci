@@ -198,6 +198,67 @@ class PaymentCryptographyDataPlaneTest {
     }
 
     @Test
+    void aHashedMacIsMadeUnderAKeyThatCarriesTheHash() {
+        // The reference's guide: a key whose algorithm is a keyed hash carries the hash, and
+        // the request names the mac by the name of the family.
+        String hmacKeyArn = TestFixtures.paymentCryptographyClient().createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.HMAC_SHA256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_M7_HMAC_KEY)
+                        .keyModesOfUse(m -> m.generate(true).verify(true)))
+                .exportable(true))
+                .key().keyArn();
+
+        String value = client.generateMac(r -> r
+                .keyIdentifier(hmacKeyArn)
+                .messageData(MESSAGE)
+                .generationAttributes(MacAttributes.builder()
+                        .algorithm(MacAlgorithm.HMAC)
+                        .build()))
+                .mac();
+
+        // The length is ignored for the keyed hash, so the mac is the whole hash: sixty-four
+        // hexadecimal characters of SHA-256.
+        assertThat(value).hasSize(64);
+
+        client.verifyMac(r -> r
+                .keyIdentifier(hmacKeyArn)
+                .messageData(MESSAGE)
+                .mac(value)
+                .verificationAttributes(MacAttributes.builder()
+                        .algorithm(MacAlgorithm.HMAC)
+                        .build()));
+    }
+
+    @Test
+    void aKeyEncryptsInEveryModeTheReferenceNames() {
+        for (EncryptionMode mode : new EncryptionMode[] {EncryptionMode.ECB, EncryptionMode.CBC,
+                EncryptionMode.CFB, EncryptionMode.CFB1, EncryptionMode.CFB8, EncryptionMode.CFB64,
+                EncryptionMode.CFB128, EncryptionMode.OFB}) {
+            String cipherText = client.encryptData(r -> r
+                    .keyIdentifier(keyArn)
+                    .plainText(PLAIN_TEXT)
+                    .encryptionAttributes(EncryptionDecryptionAttributes.builder()
+                            .symmetric(SymmetricEncryptionAttributes.builder().mode(mode).build())
+                            .build()))
+                    .cipherText();
+
+            assertThat(cipherText).hasSize(PLAIN_TEXT.length());
+
+            String plainText = client.decryptData(r -> r
+                    .keyIdentifier(keyArn)
+                    .cipherText(cipherText)
+                    .decryptionAttributes(EncryptionDecryptionAttributes.builder()
+                            .symmetric(SymmetricEncryptionAttributes.builder().mode(mode).build())
+                            .build()))
+                    .plainText();
+
+            assertThat(plainText).isEqualTo(PLAIN_TEXT);
+        }
+    }
+
+    @Test
     void aMacOfAnotherMessageIsRefused() {
         String value = client.generateMac(r -> r
                 .keyIdentifier(macKeyArn)

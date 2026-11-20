@@ -401,18 +401,19 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
-    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls, plus
-    # CodeBuild phase execs, EKS audit followers and ECS Exec sessions. Past the limit,
-    # create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls. Past the
+    # limit, create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
     # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
     # over the annotation.
     max-connections: 1024
     # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
     # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
-    # (log follow and exit watcher) plus one per extension; 2048 covers the 500 containers the
-    # runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
+    # (log follow and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS
+    # Exec session, EKS audit follower, user data script and EMR bootstrap action one; 3072 covers the
+    # 500 Lambda containers the runtime API port range allows with two extensions each (2000) and
+    # leaves about 1000 for everything else. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 2048
+    streaming-max-connections: 3072
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
@@ -512,13 +513,17 @@ floci:
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       # code-volume-populate-concurrency:     # FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY — max concurrent first-time code-volume populates (default max(2, cpus/2), which a CPU-constrained container collapses to 2)
-      executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      executor: docker                        # docker | kubernetes (run Lambda environments as pods) | process (run provided.* bootstraps on this machine)
       durable-sweep-enabled: true             # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED - fire durable execution timers (waits, step retries, execution timeouts, retention)
       durable-sweep-interval-seconds: 1       # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS
       # kubernetes:
       #   namespace: default                  # Namespace Lambda pods are created in
       #   labels:                             # Extra pod labels, key=value entries
       #     - team=platform
+      #   node-selector:                      # Pod node selector, key=value entries
+      #     - workload-type=lambda
+      #   tolerations:                        # Taints the pods tolerate: key=value:Effect (Equal) or key:Effect (Exists)
+      #     - workload-type=lambda:NoSchedule
       #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
@@ -761,6 +766,9 @@ floci:
       enabled: true
       job-run-duration-seconds: 0   # 0 = job runs succeed as soon as they start
       crawler-run-duration-seconds: 0   # 0 = crawls finish as soon as they start
+      runner-mode: immediate   # docker = run a glueetl job's script in a container of the image below
+      image: public.ecr.aws/glue/aws-glue-libs:5
+      # docker-network: floci_default
     ses:
       enabled: true
       # smtp-host: mailpit          # SMTP server for email relay (empty = store only)

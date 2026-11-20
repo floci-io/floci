@@ -197,6 +197,8 @@ and extraEnv cannot set any of these.
   "FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE" "floci.lambda.kubernetes.namespace"
   "FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE" "floci.lambda.kubernetes.initImage"
   "FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS" "floci.lambda.kubernetes.labels"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR" "floci.lambda.kubernetes.nodeSelector"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS" "floci.lambda.kubernetes.tolerations"
   "FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS" "floci.lambda.kubernetes.flociAddress"
   | toJson }}
 {{- end }}
@@ -244,6 +246,28 @@ sets fails the render and names the value to use instead.
 {{- end }}
 {{- with $k8s.labels }}
 {{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS" (join "," .) }}
+{{- end }}
+{{- with $k8s.nodeSelector }}
+{{- $terms := list }}
+{{- range $key, $value := . }}
+{{- $terms = append $terms (printf "%s=%s" $key $value) }}
+{{- end }}
+{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR" (join "," $terms) }}
+{{- end }}
+{{- with $k8s.tolerations }}
+{{- /* Each toleration becomes the taint it tolerates in kubectl taint syntax, the form Floci parses. */}}
+{{- $taints := list }}
+{{- range . }}
+{{- $taint := .key }}
+{{- if ne (default "Equal" .operator) "Exists" }}
+{{- $taint = printf "%s=%s" $taint (default "" .value) }}
+{{- end }}
+{{- with .effect }}
+{{- $taint = printf "%s:%s" $taint . }}
+{{- end }}
+{{- $taints = append $taints $taint }}
+{{- end }}
+{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS" (join "," $taints) }}
 {{- end }}
 {{- with $k8s.flociAddress }}
 {{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS" . }}

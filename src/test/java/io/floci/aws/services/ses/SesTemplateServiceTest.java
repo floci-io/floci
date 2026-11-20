@@ -11,9 +11,11 @@ import io.floci.aws.services.ses.model.Tag;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -120,6 +122,54 @@ class SesTemplateServiceTest {
                 Arguments.of(" ", ""));
     }
 
+    private static EmailTemplate tagged(String name, String subject, String text, String tagKey) {
+        EmailTemplate template = new EmailTemplate(name, subject, text, null);
+        template.setTags(List.of(new Tag(tagKey, "v")));
+        return template;
+    }
+
+    // probed: a malformed tag is refused before the name and the content
+    @Test
+    void create_checksTagsBeforeTheNameAndTheContent() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged(" ", null, null, "bad!key"), REGION, ACCOUNT));
+        assertEquals("Tags can only contain letters, numbers, spaces, and the following special characters: "
+                + "_ . : / = + - @", e.getMessage());
+    }
+
+    // probed: a reserved key waits for the content
+    @Test
+    void create_checksTheContentBeforeAReservedTagKey() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("reserved", "S", null, "aws:x"), REGION, ACCOUNT));
+        assertEquals("Template must specify at least one of the parts.", e.getMessage());
+    }
+
+    // probed: the template operation words a reserved key its own way and stores nothing
+    @Test
+    void create_refusesAReservedTagKeyAsInvalidTags() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("reserved", "S", "t", "aws:x"), REGION, ACCOUNT));
+        assertEquals("BadRequestException", e.getErrorCode());
+        assertEquals("Invalid tags", e.getMessage());
+        assertTrue(service.find("reserved", REGION).isEmpty());
+    }
+
+    // probed: a reserved key is refused before the name is looked up
+    @Test
+    void create_refusesAReservedTagKeyBeforeAnExistingName() {
+        service.createTemplate(template("stored"), REGION, ACCOUNT);
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("stored", "S", "t", "aws:x"), REGION, ACCOUNT));
+        assertEquals("Invalid tags", e.getMessage());
+    }
+
+    @Test
+    void create_refusesANullTemplate() {
+        AwsException e = assertThrows(AwsException.class, () -> service.createTemplate(null, REGION, ACCOUNT));
+        assertEquals("Template is required.", e.getMessage());
+    }
+
     // probed: the content is checked before the name is looked up, on both operations
     @Test
     void contentIsCheckedBeforeTheTemplateIsLookedUp() {
@@ -150,9 +200,92 @@ class SesTemplateServiceTest {
         assertEquals(" ", service.getTemplate("blank-text", REGION).getTextPart());
     }
 
+    static Stream<Arguments> refusedNames() {
+        String charset = ">: only alphanumeric ASCII characters, '_', and '-' are allowed.";
+        return Stream.of(
+                Arguments.of(null, "The template name must be specified."),
+                Arguments.of("", "The template name must be specified."),
+                Arguments.of(" ", "The template name must be specified."),
+                Arguments.of("\t", "The template name must be specified."),
+                Arguments.of("\u3000", "The template name must be specified."),
+                Arguments.of("a".repeat(65), "Template name cannot exceed 64 characters."),
+                // probed: the length is checked before the characters
+                Arguments.of("a".repeat(64) + " ", "Template name cannot exceed 64 characters."),
+                Arguments.of("welcome ", "Template name <welcome " + charset),
+                Arguments.of(" welcome", "Template name < welcome" + charset),
+                Arguments.of("wel come", "Template name <wel come" + charset),
+                Arguments.of("wel.come", "Template name <wel.come" + charset),
+                Arguments.of("wel:come", "Template name <wel:come" + charset),
+                Arguments.of("wel/come", "Template name <wel/come" + charset),
+                Arguments.of("welcome\n", "Template name <welcome\n" + charset),
+                Arguments.of("welcom\u00e9", "Template name <welcom\u00e9" + charset),
+                Arguments.of("welcome\uff11", "Template name <welcome\uff11" + charset),
+                // probed: a no-break space is not blank, so it is a character that is not allowed
+                Arguments.of("\u00a0", "Template name <\u00a0" + charset));
+    }
+
+    @ParameterizedTest
+    @MethodSource("refusedNames")
+    void everyOperation_refusesTheName(String name, String message) {
+        List<Executable> operations = List.of(
+                () -> service.createTemplate(template(name), REGION, ACCOUNT),
+                () -> service.updateTemplate(template(name), REGION),
+                () -> service.getTemplate(name, REGION),
+                () -> service.deleteTemplate(name, REGION),
+                () -> service.renderTestTemplate(name, "{}", REGION, ACCOUNT));
+        for (Executable operation : operations) {
+            AwsException e = assertThrows(AwsException.class, operation);
+            assertEquals("InvalidParameterValue", e.getErrorCode());
+            assertEquals(message, e.getMessage());
+        }
+    }
+
+    // probed: the name is checked before the subject
     @Test
-    void create_rejectsBlankName() {
-        assertThrows(AwsException.class, () -> service.createTemplate(template(" "), REGION, ACCOUNT));
+    void create_refusesTheNameBeforeTheContent() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(new EmailTemplate("wel come", null, null, null), REGION, ACCOUNT));
+        assertEquals("Template name <wel come>: only alphanumeric ASCII characters, '_', and '-' are allowed.",
+                e.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-", "_", "0123456789", "Welcome_Mail-2"})
+    void create_acceptsLettersDigitsUnderscoreAndHyphen(String name) {
+        service.createTemplate(template(name), REGION, ACCOUNT);
+        assertEquals(name, service.getTemplate(name, REGION).getTemplateName());
+    }
+
+    // The sends, the tag operations and the tenant association were not probed with such a name:
+    // they keep answering that the template is missing.
+    @ParameterizedTest
+    @ValueSource(strings = {"wel.come", "wel come", " welcome"})
+    void lookupsOutsideTheTemplateOperations_treatARefusedNameAsMissing(String name) {
+        assertTrue(service.find(name, REGION).isEmpty());
+
+        AwsException tags = assertThrows(AwsException.class, () -> service.listTags(name, REGION));
+        assertEquals("NotFoundException", tags.getErrorCode());
+        assertEquals("No Template present with name: " + name, tags.getMessage());
+
+        EmailContent.Template content = new EmailContent.Template(name, MAPPER.createObjectNode(), List.of());
+        AwsException send = assertThrows(AwsException.class, () -> service.inline(content, REGION));
+        assertEquals("TemplateDoesNotExist", send.getErrorCode());
+        assertEquals("Template " + name + " does not exist.", send.getMessage());
+    }
+
+    // probed with an unknown name and bad data; the name rules come ahead of both
+    @Test
+    void renderTestTemplate_refusesTheNameBeforeTheData() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.renderTestTemplate("wel come", null, REGION, ACCOUNT));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+    }
+
+    @Test
+    void create_acceptsA64CharacterName() {
+        String name = "a".repeat(64);
+        service.createTemplate(template(name), REGION, ACCOUNT);
+        assertEquals(name, service.getTemplate(name, REGION).getTemplateName());
     }
 
     @Test

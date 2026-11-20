@@ -18,10 +18,6 @@ on:
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
-  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
-  # apply to merge_group, so a queued PR is always checked.
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
@@ -80,12 +76,23 @@ jobs:
       # Restore on every shard; save from shard 1 only. With a combined cache step
       # every shard would race the same save key: one wins, the rest spend
       # post-job time reserving-then-failing plus redundant multi-hundred-MB uploads.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: maven-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: |
             maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs. Without it every shard downloads Maven from Maven
+      # Central with one unretried wget, and a failed fetch fails the shard at Compile. Its own
+      # cache, because the restore path is part of the cache version: adding it to the repository
+      # cache above would make every reader of that key miss.
+      - id: maven-wrapper-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       # Derived from test sources, not target/test-classes, so shard.txt exists
       # before Compile and the image prefetch below overlaps the compile instead
@@ -174,11 +181,23 @@ jobs:
       # restore-keys prefix for the bulk, and re-downloads its delta on each re-run
       # rather than caching it. pom.xml changed 21 times in 30 days, so that is a
       # small minority of PRs paying a small delta.
+      #
+      # Skipped on an exact hit: the key is immutable, so saving it again only fails to reserve it.
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: always() && matrix.shard == 1 && github.event_name == 'push'
+        if: >-
+          always() && matrix.shard == 1 && github.event_name == 'push'
+          && steps.maven-cache.outputs.cache-hit != 'true'
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: >-
+          always() && matrix.shard == 1 && github.event_name == 'push'
+          && steps.maven-wrapper-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Upload shard manifest and results
         if: always()
@@ -196,6 +215,44 @@ jobs:
   # to two shards, or any class assigned to none - checked against the same
   # commit's own class list, never a hardcoded count. Intended to become the one
   # required status check; its name stays stable across re-sharding.
+  # Each pom.xml change saves a new ~700 MB Maven cache and leaves the previous one behind
+  # until GitHub evicts something, so after a push to main this deletes every maven-Linux-*
+  # entry but the current pom's, once that one exists. Its own job, so only this one holds
+  # the actions: write token, and only on main.
+  prune-maven-cache:
+    name: Prune superseded Maven caches
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: pom.xml
+          sparse-checkout-cone-mode: false
+      - name: Delete maven-Linux caches other than the current pom's
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: maven-Linux-${{ hashFiles('pom.xml') }}
+        run: |
+          set -euo pipefail
+          # main's entries only: a cache another ref saved under the same key must not stand in for
+          # main's own when deciding whether the older ones can go.
+          keys=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key maven-Linux- \
+            --limit 100 --json id,key)
+          if ! jq -e --arg keep "$KEEP" 'any(.[]; .key == $keep)' <<<"$keys" >/dev/null; then
+            echo "The current pom's cache ($KEEP) is not saved yet; keeping the older ones."
+            exit 0
+          fi
+          jq -r --arg keep "$KEEP" '.[] | select(.key != $keep) | "\(.id) \(.key)"' <<<"$keys" \
+            | while read -r id key; do
+                echo "Deleting superseded cache $key"
+                gh cache delete "$id" --repo "$GITHUB_REPOSITORY"
+              done
+
   ci-summary:
     name: CI summary
     runs-on: ubuntu-latest

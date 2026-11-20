@@ -185,8 +185,29 @@ public class SesQueryHandler {
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
         } catch (AwsException e) {
-            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.SES, e.getHttpStatus());
+            return AwsQueryResponse.error(e.getErrorCode(), spellOutControlCharacters(e.getMessage()),
+                    AwsNamespaces.SES, e.getHttpStatus());
         }
+    }
+
+    /**
+     * SES writes a control character a message quotes as {@code 0x0009}, which also keeps the
+     * characters XML 1.0 forbids out of the error document.
+     */
+    static String spellOutControlCharacters(String message) {
+        if (message == null || message.chars().noneMatch(c -> c < ' ')) {
+            return message;
+        }
+        StringBuilder out = new StringBuilder(message.length() + 8);
+        for (int i = 0; i < message.length(); i++) {
+            char c = message.charAt(i);
+            if (c < ' ') {
+                out.append(String.format(Locale.ROOT, "0x%04x", (int) c));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     private Response handleVerifyEmailIdentity(MultivaluedMap<String, String> params, String region) {
@@ -658,9 +679,6 @@ public class SesQueryHandler {
 
     private Response handleTestRenderTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
-        if (templateName == null || templateName.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
-        }
         String templateDataRaw = getParam(params, "TemplateData");
         String rendered = templateService.renderTestTemplate(templateName, templateDataRaw, region,
                 regionResolver.getAccountId());

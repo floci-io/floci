@@ -2009,8 +2009,8 @@ public class Ec2ContainerManager {
         };
 
         UserDataPipeline.executeUserData(
-                dockerClient, containerId, "EC2 instance " + instanceId, userData,
-                userDataExecutionTimeout, lineConsumer, activeUserDataCallbacks);
+                dockerClient, lifecycleManager.getStreamingDockerClient(), containerId, "EC2 instance " + instanceId,
+                userData, userDataExecutionTimeout, lineConsumer, activeUserDataCallbacks);
     }
 
     private void closeActiveUserDataCallbacks() {

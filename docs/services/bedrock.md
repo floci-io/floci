@@ -134,9 +134,10 @@ The answers depend on the calling Region, as on AWS:
   the calling Region, so `us.amazon.nova-lite-v1:0` called from `us-west-1` routes to four Regions and from
   `us-east-1` to three. `GetInferenceProfile` on a profile the Region cannot use returns
   `ResourceNotFoundException`.
-- `inferenceTypesSupported` is `ON_DEMAND` only where the model is served in the Region
-  itself, and empty where it is reachable only through an inference profile, so
-  `byInferenceType=ON_DEMAND` leaves those out.
+- `inferenceTypesSupported` includes `ON_DEMAND` where the model is served in the Region
+  itself, and `INFERENCE_PROFILE` where a seeded system-defined profile can be called from
+  the Region. A model reachable only through a profile reports `INFERENCE_PROFILE` without
+  `ON_DEMAND`, so `byInferenceType=ON_DEMAND` leaves those out.
 - `modelArn` is `arn:<partition>:bedrock:<region>::foundation-model/<modelId>`, and
   the system-defined `inferenceProfileArn` carries the calling Region and account.
   `GetInferenceProfile` answers an ARN of another service or without an account with

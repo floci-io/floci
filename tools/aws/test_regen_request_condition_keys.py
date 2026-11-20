@@ -133,7 +133,7 @@ def test_the_vendored_table_covers_its_namespaces():
     assert document["memberShapes"]["route53:ChangeResourceRecordSets"][
         "ChangeBatch.Changes.Change.ResourceRecordSet.Name"] == "DNSName"
     assert document["protocols"] == {"eks": "rest-json", "lambda": "rest-json",
-                                     "redshift": "query", "route53": "rest-xml"}
+                                     "redshift": "query", "route53": "rest-xml", "sts": "query"}
 
 
 @pytest.mark.parametrize("changed", [
@@ -197,3 +197,13 @@ def test_eks_cluster_request_members_and_create_only_bootstrap_key():
         key: paths for key, paths in create.items() if key != "eks:bootstrapClusterCreatorAdminPermissions"
     }
     assert "eks:DescribeCluster" not in document["actions"]
+
+
+def test_assume_role_reads_its_session_name_and_external_id():
+    document = json.loads(OUTPUT.read_text())
+    assert document["members"]["sts:AssumeRole"] == {
+        "sts:ExternalId": ["ExternalId"], "sts:RoleSessionName": ["RoleSessionName"]}
+    assert document["members"]["sts:AssumeRoleWithWebIdentity"] == {"sts:RoleSessionName": ["RoleSessionName"]}
+    assert document["actions"]["sts:AssumeRoleWithSAML"] == ["sts:RoleSessionName"]
+    assert "sts:AssumeRoleWithSAML" not in document["members"]
+    assert "sts:GetCallerIdentity" not in document["actions"]

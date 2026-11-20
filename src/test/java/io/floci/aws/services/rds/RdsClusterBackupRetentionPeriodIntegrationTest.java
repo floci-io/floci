@@ -8,6 +8,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
 
@@ -32,12 +33,7 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
     }
 
     private static Response createCluster(String id, String period) {
-        RequestSpecification req = rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", id)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password");
+        RequestSpecification req = createAuroraPostgresCluster(id);
         if (period != null) {
             req = req.formParam("BackupRetentionPeriod", period);
         }

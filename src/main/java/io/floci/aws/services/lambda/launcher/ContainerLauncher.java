@@ -281,28 +281,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
                 awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
                 awsEnv.flociEndpoint(dockerFlags.dnsServers().isEmpty()), roleCredentials, lambdaAccountId));
-        if (fn.getEnvironment() != null) {
-            boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
-            boolean userDefinesFullCredentialTriad = definesFullCredentialTriad(fn.getEnvironment());
-            fn.getEnvironment().forEach((k, v) -> {
-                if (isAwsCredentialVariable(k)) {
-                    // Credential injection is all-or-nothing: a partial override (e.g. only
-                    // AWS_ACCESS_KEY_ID set) must never join the baseline's other two values —
-                    // that pairs a user-chosen key with the owner-account/execution-role secret
-                    // and session token, a tuple nothing can verify. Only let the user's triad
-                    // through when it is complete, and only when there is no execution role
-                    // (which is already the authoritative credential source).
-                    if (!hasExecutionRoleCredentials && userDefinesFullCredentialTriad) {
-                        env.add(k + "=" + v);
-                    }
-                } else {
-                    env.add(k + "=" + v);
-                }
-            });
-        }
-
-        env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
-        env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
+        LambdaRuntimeEnv.addFunctionEnvironment(env, fn, roleCredentials.isPresent());
         if (provisioned) {
             env.removeIf(value -> value.startsWith("AWS_LAMBDA_INITIALIZATION_TYPE="));
             env.add("AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency");
@@ -549,16 +528,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             // null by then); otherwise the failure happened before Docker ever saw the volume, so
             // its in-flight reference must be released here or cleanup would wait on it forever.
             releaseCodeVolumeReference(reservedCodeVolume);
-            // Stop the server before releasing its port, or the still-listening Vert.x server
-            // makes a later cold start that reuses the port serve this runtime too.
-            try {
-                runtimeApiServer.stop().get(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            } catch (Exception stopFailure) {
-                LOG.debugv("Runtime API server stop failed during launch cleanup: {0}",
-                        stopFailure.getMessage());
-            }
+            RuntimeApiServerFactory.stopBeforeRelease(runtimeApiServer);
             try {
                 runtimeApiServerFactory.release(runtimeApiServer);
             } catch (Exception cleanupError) {

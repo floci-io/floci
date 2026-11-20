@@ -20,11 +20,34 @@ import java.util.function.Consumer;
  * intrinsic functions in properties) plus the region/account/stack it is being created in. The
  * helpers were lifted verbatim from the former CloudFormation monolith's private methods
  * so extracted provisioners produce byte-identical physical ids and resolved values.
+ *
+ * <p>{@code priorEngine} resolves {@code priorProperties} with the previous deployment's parameters,
+ * conditions and mappings, and the physical ids and attributes the update started from. A value the
+ * previous template took from a parameter, or from a resource this update replaces, reads as it was
+ * then. A dynamic reference, an export or another stack's output still reads its current value. A
+ * context built without one uses {@code engine} there, which reads such a value as this update
+ * resolves it.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
                                Consumer<StackEvent> progress, JsonNode priorProperties,
-                               PropertyChanges changes, String delegatedRoleBoundaryArn) {
+                               PropertyChanges changes, String delegatedRoleBoundaryArn,
+                               CloudFormationTemplateEngine priorEngine) {
+
+    public ProvisionContext {
+        if (priorEngine == null) {
+            priorEngine = engine;
+        }
+    }
+
+    /** The context without the previous deployment's engine; see the record's description. */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties,
+                            PropertyChanges changes, String delegatedRoleBoundaryArn) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, changes,
+                delegatedRoleBoundaryArn, null);
+    }
 
     /**
      * The context as every provisioner but the IAM role one needs it: no delegation cap, which is
@@ -56,7 +79,7 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      */
     public ProvisionContext withPriorPhysicalId(String priorPhysicalId) {
         return new ProvisionContext(engine, region, accountId, stackName, priorPhysicalId, progress,
-                priorProperties, changes);
+                priorProperties, changes, delegatedRoleBoundaryArn, priorEngine);
     }
 
     /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */

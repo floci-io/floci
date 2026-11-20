@@ -481,7 +481,10 @@ through 2^360. They reject incomplete `StatisticValues` sets and datums combinin
 `StatisticValues` before storing any part of the batch. Missing statistics return `MissingParameter`;
 invalid values and non-object statistics return `InvalidParameterValue`; combining scalar and
 statistics returns `InvalidParameterCombination`. JSON bodies use the corresponding SDK exception
-shape names. The console's supported numeric values use the same bounds.
+shape names. `Values` accepts 1 to 150 numeric samples with optional matching, nonnegative
+`Counts`; omitted counts default to one. The public JSON and Query APIs normalize these weighted
+samples without expanding their counts and reject combinations with `Value` or `StatisticValues`.
+The console's supported numeric values use the same bounds.
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 

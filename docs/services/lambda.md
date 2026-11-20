@@ -17,6 +17,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
 | `DeleteFunction` | Remove a function |
 | `Invoke` | Invoke a function synchronously or asynchronously. A durable function starts a durable execution |
+| `InvokeWithResponseStream` | Invoke a function and stream its response as event stream frames (see Response streaming below) |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
 | `GetEventSourceMapping` | Get event source mapping details |
 | `ListEventSourceMappings` | List all event source mappings |
@@ -315,6 +316,19 @@ Not emulated yet:
 - The `Deleting` state AWS shows for about a minute after `DeleteFunction` of a durable function.
   Floci removes it at once.
 
+## Response streaming
+
+`InvokeWithResponseStream` answers with an `application/vnd.amazon.eventstream` body. It has one
+`PayloadChunk` event for each chunk the function streams and one `InvokeComplete` event at the end.
+A function that does not stream sends its whole response as one `PayloadChunk`. Every invocation
+type runs the function, so `DryRun` and `Event` stream like `RequestResponse`.
+
+`X-Amz-Executed-Version`, `x-amzn-Remapped-Content-Type`, `Qualifier`, `X-Amz-Client-Context` and
+`X-Amz-Log-Type: Tail` are supported. With a log tail, `InvokeComplete` carries `LogResult`.
+`InvokeComplete` carries `ErrorCode` for a failed invocation. An error a streaming handler throws
+also sets `ErrorDetails`, a timeout is `Sandbox.Timeout`, and a runtime that exits in the middle of
+a stream is `Runtime.TruncatedResponse`.
+
 ## Code signing configuration pagination
 
 `ListCodeSigningConfigs` accepts `MaxItems` from 1 to 10,000 and returns `NextMarker`
@@ -494,7 +508,7 @@ Pagination uses Lambda's shared validation: out-of-range integers return
 marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
 Missing or inaccessible function references return `ResourceNotFoundException`.
 
-A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci does not read for a function URL. A handler that does not stream is answered as with `BUFFERED`.
 
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
@@ -659,7 +673,6 @@ For a longer drain, explicitly stop with the larger timeout and then start Floci
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- `InvokeWithResponseStream`
 
 Code signing enforcement is not emulated: an attached configuration never gates a deployment.
 The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or
@@ -713,9 +726,11 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
-| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers), `kubernetes` (pods) or `process` (local processes, see [Process executor](#process-executor)) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR` | *(unset)* | Pod node selector as comma-separated `key=value` entries; an invalid entry fails the cold start to avoid scheduling the pod on unsupported nodes |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS` | *(unset)* | Pod tolerations as comma-separated taints in `kubectl taint` syntax: `key=value:Effect` (operator `Equal`) or `key:Effect` (operator `Exists`); leave out `:Effect` to tolerate every effect |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | *(unset)* | Host/IP pods use to reach Floci; auto-detected when Floci runs in-cluster |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code (needs `sh`, `wget`, `unzip`) |
 
@@ -857,7 +872,9 @@ services:
 
 If mounting the Docker socket is not acceptable (for example on a hardened
 Kubernetes cluster), use the [Kubernetes executor](#kubernetes-executor)
-instead — it needs no privileged access and no socket.
+instead. It needs no privileged access and no socket. On a development
+machine without Docker, the [process executor](#process-executor) runs
+`provided.*` functions as local processes.
 
 ### Kubernetes executor
 
@@ -1024,6 +1041,61 @@ entries; only clients of the emulator itself use port 4566.
   namespace at startup; run multiple Floci instances in separate namespaces.
 - Layers published by Floci versions before this feature have no stored
   archive; re-publish them once to make them downloadable by pods.
+
+### Process executor
+
+Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=process` to run each Lambda execution
+environment as a process on the machine Floci runs on, without Docker. It
+follows the [custom runtime](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-custom.html)
+contract: Floci starts the package's `bootstrap` in the package directory, and
+the bootstrap polls the Lambda Runtime API at `AWS_LAMBDA_RUNTIME_API`. Each
+execution environment runs from its own copy of a .zip package, in the system
+temporary directory, so a code update does not change an environment that is
+already running. The copy is deleted when the environment stops.
+
+The process gets:
+
+- `AWS_LAMBDA_RUNTIME_API` on `127.0.0.1`, `_HANDLER`, `LAMBDA_TASK_ROOT` and
+  the other `AWS_LAMBDA_*` variables, as with the other executors.
+- `TZ=:UTC` and `LANG=en_US.UTF-8`, as Lambda sets them. The function's own
+  `Environment` can override both.
+- The function's `Environment` variables, and an AWS SDK endpoint and region
+  pointing at Floci. A function whose execution role Floci knows gets that
+  role's credentials, as with the docker executor.
+- `PATH` from Floci's own environment. No other variable is passed, so Floci's
+  own environment variables, credentials included, do not reach the function.
+  The process can still read anything your user can, such as `~/.aws`.
+
+Its output goes to Floci's log and the function's CloudWatch Logs stream, one
+event per line, with lines longer than 256 KB split into several events.
+Hot-reload functions run from their host directory directly.
+
+The process runs with the permissions of the user Floci runs as, with no
+isolation and no memory limit, so this executor is meant for local
+development only.
+
+Limitations:
+
+- Only `provided.*` runtimes from a .zip package or a hot-reload directory are
+  supported. Other runtimes, container images, functions with layers and
+  functions that mount a file system fail to launch with a clear error.
+- The bootstrap in a .zip package's copy is made executable when it starts,
+  since Floci does not keep file modes when it extracts a package. Other files
+  in the package keep the modes extraction gave them. A hot-reload bootstrap must
+  already be executable.
+- Floci refuses to start with this executor when it runs inside a container,
+  where the processes would run in that container instead of on your machine.
+- Invocations with `LogType=Tail` return no log tail.
+- The bootstrap runs on Linux and macOS only, and must be built for the
+  machine Floci runs on: a binary built for Lambda's Linux runs only on a
+  Linux host of the same architecture. The function's `Architectures` is
+  ignored.
+- Stopping an environment stops its bootstrap and the processes it started.
+  Processes a bootstrap left behind after it exited on its own are not
+  tracked and keep running until you stop them, and so are bootstraps still
+  running when Floci itself is killed, along with their code copies. Nothing
+  removes them when Floci starts again, as the Docker and Kubernetes executors
+  do for their leftovers.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 

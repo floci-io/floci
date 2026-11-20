@@ -237,6 +237,17 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void anAssumeRoleRequestCarriesItsSessionNameAndExternalId() {
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice"), "sts:ExternalId", List.of("partner-42")),
+                resolver.resolve("sts", "sts:AssumeRole", formRequest(
+                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A111111111111%3Arole%2Fr"
+                                + "&RoleSessionName=alice&ExternalId=partner-42")));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), resolver.resolve("sts", "sts:AssumeRole",
+                formRequest("Action=AssumeRole&RoleSessionName=alice")), "no ExternalId, no sts:ExternalId");
+        assertNull(resolver.resolve("sts", "sts:GetCallerIdentity", formRequest("Action=GetCallerIdentity")));
+    }
+
+    @Test
     void logStreamTagsUseRawParentNameAndRequestRegion() throws Exception {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         when(request.getProperty("floci.bufferedJsonBody"))

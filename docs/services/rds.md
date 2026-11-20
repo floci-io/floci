@@ -97,8 +97,8 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
-| `DeleteDBCluster` | Delete a cluster |
-| `ModifyDBCluster` | Update cluster settings |
+| `DeleteDBCluster` | Delete a cluster; refused with `InvalidParameterCombination` while deletion protection is on |
+| `ModifyDBCluster` | Update cluster settings, including deletion protection |
 | `CreateDBParameterGroup` | Create a parameter group |
 | `DescribeDBParameterGroups` | List parameter groups |
 | `DeleteDBParameterGroup` | Delete a parameter group |
@@ -234,10 +234,12 @@ checked against the instance's other window. Modifications apply immediately —
 
 ## Cluster settings read-back
 
-`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot` and the enabled
-CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration` enable
-and disable deltas; omitted fields preserve their values, including an explicit
+`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot`, `DeletionProtection`
+and the enabled CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration`
+enable and disable deltas; omitted fields preserve their values, including an explicit
 false snapshot-copy flag. Create, modify and describe return the stored settings.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` also set `DeletionProtection`
+on the new cluster, defaulting to false.
 
 Aurora member instances retain `PromotionTier` from create and modify, defaulting
 to 1 and accepting 0 through 15. Both the instance response and the cluster member
@@ -592,12 +594,17 @@ restores, point-in-time copies and read replicas. It also survives persistent, h
 reloads. Legacy records without the member retain the existing `gp2` fallback.
 
 Storage type changes apply immediately to control-plane metadata; the backing container volume's
-performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+performance is unchanged. `MultiAZ` changes remain unimplemented. `Iops` and `StorageThroughput` are stored from Create and
+Modify and described for the storage types that carry them (`Iops` on io1, io2 and gp3, throughput on gp3);
+every other type reports `StorageThroughput` as `0`; a gp3 instance that named neither reports the
+[gp3 baseline](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage).
+`Iops` on a type without provisioned IOPS (`Iops=0` is allowed) and `StorageThroughput` on any type but gp3 are
+refused with `InvalidParameterCombination`; a create that names `Iops` and no type defaults to io1.
 Omitted create requests retain Floci's existing `gp2` default, which differs from the current
 [AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
 Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
 than applying the [AWS restore default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html).
-Floci does not enforce every engine-specific storage allocation, IOPS restriction or regional
+Floci does not enforce every engine-specific storage allocation, IOPS range or ratio, or regional
 storage-type availability. Magnetic `standard` storage is refused.
 
 ### Storage autoscaling threshold changes

@@ -31,6 +31,11 @@ final class BedrockModelCatalog {
         boolean servedInRegion(String region) {
             return inRegion.contains(region);
         }
+
+        boolean servedThroughProfileFrom(String region) {
+            return PROFILES.stream().anyMatch(profile -> profile.modelId().equals(modelId)
+                    && profile.routes().containsKey(region));
+        }
     }
 
     /**
@@ -63,9 +68,7 @@ final class BedrockModelCatalog {
     /** The models callable from a Region, in their own Region or through one of their profiles. */
     static List<FoundationModel> modelsIn(String region) {
         return MODELS.stream()
-                .filter(model -> model.servedInRegion(region) || PROFILES.stream()
-                        .anyMatch(profile -> profile.modelId().equals(model.modelId())
-                                && profile.routes().containsKey(region)))
+                .filter(model -> model.servedInRegion(region) || model.servedThroughProfileFrom(region))
                 .toList();
     }
 

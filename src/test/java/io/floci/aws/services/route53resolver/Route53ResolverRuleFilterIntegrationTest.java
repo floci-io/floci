@@ -1,6 +1,7 @@
 package io.floci.aws.services.route53resolver;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.Route53ResolverRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
@@ -21,6 +22,8 @@ import static org.hamcrest.Matchers.equalTo;
 class Route53ResolverRuleFilterIntegrationTest {
 
     private static final String REGION = "ap-southeast-2";
+    private static final String AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION
+            + "/route53resolver/aws4_request";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -95,6 +98,6 @@ class Route53ResolverRuleFilterIntegrationTest {
     }
 
     private static ValidatableResponse call(String action, String body) {
-        return Route53ResolverRegionScopingIntegrationTest.call(REGION, action, body);
+        return Route53ResolverRequests.call(action, body, AUTH_HEADER);
     }
 }

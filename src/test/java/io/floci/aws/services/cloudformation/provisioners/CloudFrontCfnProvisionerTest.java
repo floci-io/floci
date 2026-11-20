@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -247,6 +248,76 @@ class CloudFrontCfnProvisionerTest {
         ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
         verify(cloudFront).createDistribution(sent.capture(), any());
         assertNull(sent.getValue().getConfig().getConnectionMode());
+    }
+
+    /** A minimal DistributionConfig template carrying the given ViewerCertificate object, or none when null. */
+    private JsonNode withViewerCertificate(String viewerCertificate) throws Exception {
+        String fragment = viewerCertificate == null ? "" : "\"ViewerCertificate\": " + viewerCertificate + ",";
+        return json("{\"DistributionConfig\": {" + fragment
+                + "\"Origins\": [{\"Id\": \"o1\", \"DomainName\": \"origin.example.com\","
+                + " \"CustomOriginConfig\": {\"OriginProtocolPolicy\": \"https-only\"}}],"
+                + " \"DefaultCacheBehavior\": {\"TargetOriginId\": \"o1\","
+                + " \"ViewerProtocolPolicy\": \"redirect-to-https\"}}}");
+    }
+
+    @Test
+    void copiesTheAcmViewerCertificateTheTemplateDeclares() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, withViewerCertificate("{\"AcmCertificateArn\": \"arn:aws:acm:us-east-1:000000000000:certificate/abc\", \"SslSupportMethod\": \"sni-only\", \"MinimumProtocolVersion\": \"TLSv1.2_2021\"}"),
+                distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("ACMCertificateArn", "arn:aws:acm:us-east-1:000000000000:certificate/abc");
+        expected.put("SSLSupportMethod", "sni-only");
+        expected.put("MinimumProtocolVersion", "TLSv1.2_2021");
+        assertEquals(expected, sent.getValue().getConfig().getViewerCertificate());
+    }
+
+    @Test
+    void mapsTheIamCertificateIdOntoItsApiName() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, withViewerCertificate("{\"IamCertificateId\": \"ASCAEXAMPLE\", \"SslSupportMethod\": \"vip\", \"MinimumProtocolVersion\": \"TLSv1\"}"),
+                distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("IAMCertificateId", "ASCAEXAMPLE");
+        expected.put("SSLSupportMethod", "vip");
+        expected.put("MinimumProtocolVersion", "TLSv1");
+        assertEquals(expected, sent.getValue().getConfig().getViewerCertificate());
+    }
+
+    @Test
+    void rendersTheDefaultCertificateFlagAsText() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, withViewerCertificate("{\"CloudFrontDefaultCertificate\": true}"),
+                distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        assertEquals(Map.of("CloudFrontDefaultCertificate", "true"),
+                sent.getValue().getConfig().getViewerCertificate());
+    }
+
+    @Test
+    void leavesTheViewerCertificateUnsetWhenTheTemplateOmitsIt() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, withViewerCertificate(null), distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        assertNull(sent.getValue().getConfig().getViewerCertificate());
     }
 
     @Test

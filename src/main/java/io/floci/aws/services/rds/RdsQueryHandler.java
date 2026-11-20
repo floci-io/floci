@@ -996,7 +996,9 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
                 params.getFirst("StorageType"),
                 params.getFirst("CACertificateIdentifier"),
-                params.getFirst("LicenseModel"));
+                params.getFirst("LicenseModel"),
+                optionalInt(params.getFirst("Iops")),
+                optionalInt(params.getFirst("StorageThroughput")));
     }
 
     /**
@@ -1448,6 +1450,7 @@ public class RdsQueryHandler {
             List<DbRoleAssociation> associatedRoles = parseAssociatedRoles(params);
             service.validateClusterRoleAssociations(id, engine, associatedRoles);
             boolean enableHttpEndpoint = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableHttpEndpoint"));
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             String globalCluster = params.getFirst("GlobalClusterIdentifier");
             if (enableHttpEndpoint && (globalCluster == null || globalCluster.isBlank())) {
                 // A global cluster's members take its Aurora engine; any other create names its own.
@@ -1459,33 +1462,22 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Integer requestedPort = parseIntegerParam(params, "Port");
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
+            boolean protectedCluster = Boolean.TRUE.equals(deletionProtection);
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
-                cluster = requestedPort == null
-                    ? service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
-                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
-                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
-                    : service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
-                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
-                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
-                            requestedPort);
+                cluster = service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
+                        params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
+                        iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
+                        serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                        manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                        requestedPort, protectedCluster);
             } else {
-                cluster = requestedPort == null
-                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
-                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
-                            requestedPort);
+                cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
+                        masterPassword, databaseName, iamEnabled, paramGroupName,
+                        dbSubnetGroupName, availabilityZone, multiAz, region,
+                        serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                        manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                        requestedPort, protectedCluster);
             }
             Map<String, String> tags = parseTags(params);
             String kmsKeyId = params.getFirst("KmsKeyId");
@@ -1501,6 +1493,9 @@ public class RdsQueryHandler {
                 try {
                     cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
                 } catch (AwsException e) {
+                    if (protectedCluster) {
+                        service.setDeletionProtection(region, id, false);
+                    }
                     service.deleteDbCluster(id, region);
                     throw e;
                 }
@@ -1630,6 +1625,7 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
@@ -1647,6 +1643,9 @@ public class RdsQueryHandler {
             }
             if (copyTagsToSnapshot != null || exportChanges != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, null, exportChanges);
+            }
+            if (deletionProtection != null) {
+                cluster = service.setDeletionProtection(region, id, deletionProtection);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3060,7 +3059,9 @@ public class RdsQueryHandler {
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                    params.getFirst("EngineMode"), parseTags(params), region);
+                    params.getFirst("EngineMode"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                    parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
         } catch (AwsException e) {
@@ -3085,7 +3086,9 @@ public class RdsQueryHandler {
                 params.getFirst("DBClusterParameterGroupName"),
                 params.getFirst("AvailabilityZones.member.1"),
                 parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                params.getFirst("EngineMode"), parseTags(params), region);
+                params.getFirst("EngineMode"),
+                Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
                 dbClusterXml(cluster))).build();
     }
@@ -3408,6 +3411,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("StorageType", i.getStorageType())
+           .elem("Iops", iops(i))
+           .elem("StorageThroughput", storageThroughput(i))
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
@@ -3499,6 +3504,41 @@ public class RdsQueryHandler {
                     .end("StatusInfos");
         }
         return xml.build();
+    }
+
+    /** Iops as Describe reports it: on io1, io2 and gp3, the stored value, else the gp3 baseline. */
+    private static String iops(DbInstance i) {
+        String type = i.getStorageType();
+        boolean gp3 = "gp3".equals(type);
+        if (!gp3 && !"io1".equals(type) && !"io2".equals(type)) {
+            return null;
+        }
+        if (i.getIops() != null) {
+            return i.getIops().toString();
+        }
+        return gp3 ? (gp3BaselineSteppedUp(i) ? "12000" : "3000") : null;
+    }
+
+    /** StorageThroughput as Describe reports it: on gp3 the stored value, else the baseline; 0 on any other type. */
+    private static String storageThroughput(DbInstance i) {
+        if (!"gp3".equals(i.getStorageType())) {
+            return "0";
+        }
+        if (i.getStorageThroughput() != null) {
+            return i.getStorageThroughput().toString();
+        }
+        return gp3BaselineSteppedUp(i) ? "500" : "125";
+    }
+
+    /**
+     * Whether the gp3 baseline has stepped up from 3000 IOPS / 125 MiB/s to 12000 / 500: at 400 GiB
+     * (Db2, MariaDB, MySQL, PostgreSQL) or 200 GiB (Oracle), never on SQL Server.
+     * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
+     */
+    private static boolean gp3BaselineSteppedUp(DbInstance i) {
+        String engine = instanceEngine(i);
+        int threshold = engine.startsWith("sqlserver") ? Integer.MAX_VALUE : engine.startsWith("oracle") ? 200 : 400;
+        return i.getAllocatedStorage() >= threshold;
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {
@@ -3652,6 +3692,7 @@ public class RdsQueryHandler {
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
+           .elem("DeletionProtection", c.isDeletionProtection())
            .elem("CopyTagsToSnapshot", c.isCopyTagsToSnapshot())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())

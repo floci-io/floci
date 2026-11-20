@@ -710,6 +710,7 @@ public class CloudWatchMetricsQueryHandler {
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params) {
         Map<String, SortedSet<Integer>> memberIndexes = new HashMap<>();
+        Map<String, Map<String, List<String>>> fieldsByDatum = new HashMap<>();
         Set<String> statisticPrefixes = new HashSet<>();
         // An empty EntityMetricData entry serializes to no keys, so its index is absent
         // while later entries keep theirs: iterate the indexes present, not 1..first gap.
@@ -720,6 +721,7 @@ public class CloudWatchMetricsQueryHandler {
                 String prefix = member.group();
                 memberIndexes.computeIfAbsent(member.group(1), ignored -> new TreeSet<>())
                         .add(parseMetricMemberIndex(member.group(2), prefix));
+                fieldsByDatum.computeIfAbsent(prefix, ignored -> new HashMap<>()).put(key, params.get(key));
                 if (key.startsWith(prefix + "StatisticValues.")) {
                     statisticPrefixes.add(prefix);
                 }
@@ -730,11 +732,13 @@ public class CloudWatchMetricsQueryHandler {
             }
         }
         List<MetricDatum> datums = parseMetricData(params, "MetricData",
-                memberIndexes.getOrDefault("MetricData", Collections.emptySortedSet()), statisticPrefixes);
+                memberIndexes.getOrDefault("MetricData", Collections.emptySortedSet()),
+                fieldsByDatum, statisticPrefixes);
         for (int index : entityIndexes) {
             String listPrefix = "EntityMetricData.member." + index + ".MetricData";
             datums.addAll(parseMetricData(params, listPrefix,
-                    memberIndexes.getOrDefault(listPrefix, Collections.emptySortedSet()), statisticPrefixes));
+                    memberIndexes.getOrDefault(listPrefix, Collections.emptySortedSet()),
+                    fieldsByDatum, statisticPrefixes));
         }
         LOG.debugv("Query PutMetricData parsed {0} datums", datums.size());
         return datums;
@@ -749,7 +753,9 @@ public class CloudWatchMetricsQueryHandler {
     }
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params, String listPrefix,
-                                             SortedSet<Integer> memberIndexes, Set<String> statisticPrefixes) {
+                                             SortedSet<Integer> memberIndexes,
+                                             Map<String, Map<String, List<String>>> fieldsByDatum,
+                                             Set<String> statisticPrefixes) {
         List<MetricDatum> datums = new ArrayList<>();
         for (int i : memberIndexes) {
             String memberPrefix = listPrefix + ".member." + i + ".";
@@ -797,7 +803,7 @@ public class CloudWatchMetricsQueryHandler {
             }
             datum.setDimensions(dims);
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromQuery(fieldsByDatum.get(memberPrefix), memberPrefix, datum));
         }
         return datums;
     }

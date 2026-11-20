@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
+import static io.floci.aws.testing.StackSetErrors.assertNotFound;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -540,14 +541,11 @@ class CloudFormationStackSetsIntegrationTest {
         String queue = "errq-" + UUID.randomUUID().toString().substring(0, 8);
 
         // Describe a non-existent stack set → StackSetNotFoundException.
-        given()
+        assertNotFound(given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackSet")
             .formParam("StackSetName", "does-not-exist-" + setName)
-            .header("Authorization", auth(ADMIN, "cloudformation"))
-        .when().post("/")
-        .then().statusCode(404)
-            .body(containsString("StackSetNotFoundException"));
+            .header("Authorization", auth(ADMIN, "cloudformation")), "does-not-exist-" + setName);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -919,14 +917,11 @@ class CloudFormationStackSetsIntegrationTest {
             .body(containsString("<Code>ValidationError</Code>"))
             .body(containsString("<Message>Parameters: [Suffix] must have values</Message>"));
 
-        given()
+        assertNotFound(given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackSet")
             .formParam("StackSetName", setName)
-            .header("Authorization", auth(ADMIN, "cloudformation"))
-        .when().post("/")
-        .then().statusCode(404)
-            .body(containsString("StackSetNotFoundException"));
+            .header("Authorization", auth(ADMIN, "cloudformation")), setName);
 
         given()
             .contentType("application/x-www-form-urlencoded")

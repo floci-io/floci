@@ -59,6 +59,7 @@ class DbClusterPersistenceTest {
         DbCluster restored = clusterReader.get("legacy").orElseThrow();
         assertFalse(restored.isCopyTagsToSnapshot());
         assertTrue(restored.getEnabledCloudwatchLogsExports().isEmpty());
+        assertFalse(restored.isDeletionProtection());
         PersistentStorage<String, DbInstance> instanceReader = new PersistentStorage<>(
                 instances, new TypeReference<Map<String, DbInstance>>() {});
         instanceReader.load();
@@ -155,5 +156,23 @@ class DbClusterPersistenceTest {
         reader.load();
 
         assertTrue(reader.get("data-api-cluster").orElseThrow().isHttpEndpointEnabled());
+    }
+
+    @Test
+    void deletionProtectionPersistsAcrossInstances(@TempDir Path directory) {
+        Path file = directory.resolve("rds-clusters.json");
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("protected-cluster");
+        cluster.setDeletionProtection(true);
+
+        PersistentStorage<String, DbCluster> writer = new PersistentStorage<>(
+                file, new TypeReference<Map<String, DbCluster>>() {});
+        writer.put(cluster.getDbClusterIdentifier(), cluster);
+
+        PersistentStorage<String, DbCluster> reader = new PersistentStorage<>(
+                file, new TypeReference<Map<String, DbCluster>>() {});
+        reader.load();
+
+        assertTrue(reader.get("protected-cluster").orElseThrow().isDeletionProtection());
     }
 }

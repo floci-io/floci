@@ -22,7 +22,7 @@ public class Topic {
     private Map<String, String> attributes = new HashMap<>();
 
     @JsonProperty("Tags")
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     @JsonProperty("CreatedAt")
     private Instant createdAt;

@@ -36,7 +36,7 @@ class ContainerConcurrentRemovalTest {
     private final Closeable waitStream = mock(Closeable.class);
     private final ConflictException conflict = new ConflictException("removal already in progress");
     private final ContainerLifecycleManager manager = new ContainerLifecycleManager(
-            docker, mock(ImageCacheService.class), mock(ContainerDetector.class), mock(EmulatorConfig.class));
+            docker, docker, mock(ImageCacheService.class), mock(ContainerDetector.class), mock(EmulatorConfig.class));
 
     private void removalConflict(boolean running) {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
