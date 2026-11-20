@@ -5244,7 +5244,7 @@ public class DynamoDbService {
         return results;
     }
 
-    private AwsException resourceNotFoundException(String tableName) {
+    static AwsException resourceNotFoundException(String tableName) {
         return new AwsException("ResourceNotFoundException",
                 "Requested resource not found: Table: " + tableName + " not found", 400);
     }

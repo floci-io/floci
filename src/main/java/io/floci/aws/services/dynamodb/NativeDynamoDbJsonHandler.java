@@ -3516,13 +3516,8 @@ public class NativeDynamoDbJsonHandler {
                 .path("ApproximateCreationDateTimePrecision");
         String precision = precisionNode.isMissingNode() || precisionNode.isNull()
                 ? KinesisStreamingDestination.PRECISION_MILLISECOND : precisionNode.asText();
-        if (!KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
-                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + precision
-                            + "' at 'enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [MILLISECOND, MICROSECOND]");
-        }
+        validateKinesisPrecision(precision,
+                "enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
 
         return Response.ok(kinesisDestinationResponse(
                 tableService.enableKinesisStreamingDestination(tableName, streamArn, precision, region))).build();
@@ -3552,33 +3547,27 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private static String kinesisUpdatePrecision(JsonNode request) {
-        JsonNode configuration = request.path("UpdateKinesisStreamingConfiguration");
-        if (!configuration.isMissingNode() && !configuration.isNull() && !configuration.isObject()) {
-            throw new AwsException("SerializationException",
-                    "UpdateKinesisStreamingConfiguration must be an object", 400);
-        }
-        JsonNode precisionNode = configuration.path("ApproximateCreationDateTimePrecision");
-        if (!precisionNode.isMissingNode() && !precisionNode.isNull() && !precisionNode.isTextual()) {
-            throw new AwsException("SerializationException", "ApproximateCreationDateTimePrecision must be a string", 400);
-        }
+        JsonNode precisionNode = request.path("UpdateKinesisStreamingConfiguration")
+                .path("ApproximateCreationDateTimePrecision");
         String precision = precisionNode.isMissingNode() || precisionNode.isNull() ? null : precisionNode.asText();
+        validateKinesisPrecision(precision,
+                "updateKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
+        return precision;
+    }
+
+    private static void validateKinesisPrecision(String precision, String member) {
         if (precision != null && !KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
                 && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
-            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(precision,
-                    "updateKinesisStreamingConfiguration.approximateCreationDateTimePrecision",
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(precision, member,
                     List.of(KinesisStreamingDestination.PRECISION_MILLISECOND,
                             KinesisStreamingDestination.PRECISION_MICROSECOND)));
         }
-        return precision;
     }
 
     private static String kinesisUpdateString(JsonNode request, String member, String path, int minimumLength) {
         JsonNode value = request.path(member);
         if (value.isMissingNode() || value.isNull()) {
             throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
-        }
-        if (!value.isTextual()) {
-            throw new AwsException("SerializationException", member + " must be a string", 400);
         }
         String violation = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), minimumLength, 1024);
         if (violation != null) {

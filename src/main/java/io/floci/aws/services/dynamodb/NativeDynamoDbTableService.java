@@ -637,7 +637,7 @@ public class NativeDynamoDbTableService {
                                                                        String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         if (AwsArnUtils.looksLikeArn(tableName) && !tableName.equals(table.getTableArn())) {
-            throw new AwsException("ResourceNotFoundException", "Requested table not found: " + tableName, 400);
+            throw DynamoDbService.resourceNotFoundException(table.getTableName());
         }
         String resolvedTableName = table.getTableName();
 
