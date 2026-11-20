@@ -175,12 +175,12 @@ class SsmServicePublicAmiParameterTest {
         assertTrue(names.contains(AMZN2_DEFAULT), names.toString());
         assertEquals(9, names.size());
         assertTrue(ssmService.getParametersByPath("/aws/service", false, REGION).isEmpty());
-        assertEquals(54, ssmService.getParametersByPath("/aws/service", true, REGION).size());
+        assertEquals(77, ssmService.getParametersByPath("/aws/service", true, REGION).size());
     }
 
     @Test
     void appliesPathTypeFiltersToPublicParameters() {
-        assertEquals(54, ssmService.getParametersByPath("/aws/service", true,
+        assertEquals(77, ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("String"))), REGION).size());
         assertTrue(ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("StringList"))), REGION).isEmpty());
