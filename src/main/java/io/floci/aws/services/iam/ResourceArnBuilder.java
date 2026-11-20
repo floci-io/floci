@@ -172,7 +172,6 @@ public class ResourceArnBuilder {
             case "s3"             -> buildS3Resources(operation, path, ctx, region);
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
-            case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
@@ -217,22 +216,6 @@ public class ResourceArnBuilder {
             }
         }
         return null;
-    }
-
-    private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode body = readJsonBody(ctx);
-        if (body == null) {
-            return "*";
-        }
-        String path = IamActionRegistry.decodedPath(ctx);
-        boolean create = path.endsWith("/groups") || path.endsWith("/groups/");
-        String group = create ? body.path("Name").asText()
-                : body.path("Group").asText(body.path("GroupName").asText());
-        if (group.isEmpty()) {
-            return "*";
-        }
-        return AwsArnUtils.looksLikeArn(group) ? group
-                : AwsArnUtils.Arn.of("resource-groups", region, accountId, "group/" + group).toString();
     }
 
     /** Uses the serving operation and the same raw names as the handler. */
