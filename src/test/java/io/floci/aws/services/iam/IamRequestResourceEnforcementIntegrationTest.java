@@ -849,6 +849,16 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service
                         + "\",\"taskSet\":\"" + other + "\",\"force\":true}").post("/"));
 
+        String taggedArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":task-set/" + cluster + "/" + service
+                + "/" + tagged;
+        User deniedUser = user("res-ecs-task-set-full-arn-deny");
+        deniedUser.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(send(deniedUser, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + taggedArn + "\",\"force\":true}"),
+                "ecs:DeleteTaskSet");
+
         User user = user("res-ecs-task-set-tags");
         user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
@@ -858,6 +868,11 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(send(user, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
                 + "\"service\":\"" + service + "\",\"taskSet\":\"" + other + "\",\"force\":true}"),
                 "ecs:DeleteTaskSet");
+        String otherArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":task-set/" + cluster + "/" + service
+                + "/" + other;
+        send(deniedUser, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + otherArn + "\",\"force\":true}")
+                .statusCode(200);
     }
 
     /**
