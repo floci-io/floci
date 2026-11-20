@@ -4449,12 +4449,13 @@ public interface EmulatorConfig {
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.
          *
-         * <p>2048 covers the 500 containers the runtime API port range
+         * <p>3072 covers the 500 containers the runtime API port range
          * ({@link LambdaServiceConfig#runtimeApiBasePort}) allows, each with its log follow, its
-         * exit watcher and two extensions. Connections are opened on demand, so a small stack
-         * never approaches the limit.
+         * exit watcher and two extensions (2000), and leaves about 1000 for the other containers'
+         * log follows and the long-running commands above. Connections are opened on demand, so a
+         * small stack never approaches the limit.
          */
-        @WithDefault("2048")
+        @WithDefault("3072")
         int streamingMaxConnections();
 
         /**

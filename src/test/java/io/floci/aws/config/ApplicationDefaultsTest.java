@@ -156,13 +156,13 @@ class ApplicationDefaultsTest {
 
         assertFalse(streamingMaxConnections.isMissingNode(),
                 "streaming-max-connections should be declared in application.yml");
-        assertEquals(2048, streamingMaxConnections.asInt());
+        assertEquals(3072, streamingMaxConnections.asInt());
 
         WithDefault fallback = EmulatorConfig.DockerConfig.class
                 .getMethod("streamingMaxConnections")
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "streamingMaxConnections should declare a fallback default");
-        assertEquals("2048", fallback.value(),
+        assertEquals("3072", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
 
