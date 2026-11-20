@@ -3059,7 +3059,9 @@ public class RdsQueryHandler {
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                    params.getFirst("EngineMode"), parseTags(params), region);
+                    params.getFirst("EngineMode"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                    parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
         } catch (AwsException e) {
@@ -3084,7 +3086,9 @@ public class RdsQueryHandler {
                 params.getFirst("DBClusterParameterGroupName"),
                 params.getFirst("AvailabilityZones.member.1"),
                 parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                params.getFirst("EngineMode"), parseTags(params), region);
+                params.getFirst("EngineMode"),
+                Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
                 dbClusterXml(cluster))).build();
     }

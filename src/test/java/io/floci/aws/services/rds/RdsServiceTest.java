@@ -6490,7 +6490,7 @@ class RdsServiceTest {
 
         AwsException clusterFault = assertThrows(AwsException.class, () -> rdsService.restoreDbClusterToPointInTime(
                 "pitr-cluster-target", "pitr-cluster", null, null, null, true,
-                null, null, null, null, null, Map.of(), "us-east-1"));
+                null, null, null, null, null, false, Map.of(), "us-east-1"));
         assertEquals("InvalidDBClusterStateFault", clusterFault.getErrorCode());
         assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
                 () -> rdsService.getDbCluster("pitr-cluster-target")).getErrorCode());
@@ -8008,9 +8008,9 @@ class RdsServiceTest {
 
         DbCluster restored = "snapshot".equals(path)
                 ? rdsService.restoreDbClusterFromSnapshot("iam-restored", "iam-snapshot", "aurora-postgresql",
-                        null, null, null, null, null, null, requested, null, null, "us-east-1")
+                        null, null, null, null, null, null, requested, null, false, null, "us-east-1")
                 : rdsService.restoreDbClusterToPointInTime("iam-restored", "iam-source", null, null,
-                        null, true, null, null, null, requested, null, null, "us-east-1");
+                        null, true, null, null, null, requested, null, false, null, "us-east-1");
 
         assertEquals(expected, restored.isIamDatabaseAuthenticationEnabled());
         assertEquals(expected, rdsService.getDbCluster("iam-restored").isIamDatabaseAuthenticationEnabled());
@@ -8034,7 +8034,7 @@ class RdsServiceTest {
 
         // SnapshotIdentifier takes the ARN as well as the name, as aws_rds_cluster commonly passes it.
         DbCluster restored = rdsService.restoreDbClusterFromSnapshot("restored-cluster", copy.getDbClusterSnapshotArn(),
-                "aurora-postgresql", null, null, null, null, null, null, null, null, Map.of("env", "restore"), "us-east-1");
+                "aurora-postgresql", null, null, null, null, null, null, null, null, false, Map.of("env", "restore"), "us-east-1");
         assertEquals("restored-cluster", restored.getDbClusterIdentifier());
         assertEquals("admin", restored.getMasterUsername());
         assertEquals("dbname", restored.getDatabaseName());
@@ -8044,11 +8044,11 @@ class RdsServiceTest {
 
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("mysql-cluster", "csnap", "aurora-mysql",
-                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+                        null, null, null, null, null, null, null, null, false, null, "us-east-1")).getErrorCode());
         assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("other-cluster",
                         "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:absent", "aurora-postgresql",
-                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+                        null, null, null, null, null, null, null, null, false, null, "us-east-1")).getErrorCode());
 
         DbClusterSnapshot deleted = rdsService.deleteDbClusterSnapshot("csnap");
         assertEquals("deleted", deleted.getStatus());
@@ -8068,7 +8068,7 @@ class RdsServiceTest {
 
         DbCluster restored = rdsService.restoreDbClusterFromSnapshot("restored-cluster", "csnap",
                 "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertEquals(7005, restored.getEndpoint().port());
         assertEquals(7005, restored.getProxyPort());
         assertEquals(7005, rdsService.getDbCluster("restored-cluster").getEndpoint().port());
@@ -8078,23 +8078,23 @@ class RdsServiceTest {
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("duplicate-port", "csnap",
                         "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                        null, "us-east-1")).getErrorCode());
+                        false, null, "us-east-1")).getErrorCode());
 
         DbCluster outsideRange = rdsService.restoreDbClusterFromSnapshot("outside-range", "csnap",
                 "aurora-postgresql", null, 5432, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertNotEquals(5432, outsideRange.getProxyPort());
         assertTrue(outsideRange.getProxyPort() >= 7000 && outsideRange.getProxyPort() <= 7099);
         assertNotEquals(restored.getProxyPort(), outsideRange.getProxyPort());
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("invalid-port", "csnap",
                         "aurora-postgresql", null, 1149, null, null, null, null, null, null,
-                        null, "us-east-1")).getErrorCode());
+                        false, null, "us-east-1")).getErrorCode());
 
         rdsService.deleteDbCluster("restored-cluster");
         DbCluster reused = rdsService.restoreDbClusterFromSnapshot("reused-port", "csnap",
                 "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertEquals(7005, reused.getEndpoint().port());
     }
 

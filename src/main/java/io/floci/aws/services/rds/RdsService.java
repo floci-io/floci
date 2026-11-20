@@ -2772,7 +2772,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                                   String engineVersion, Integer port, String databaseName,
                                                   String dbSubnetGroupName, String parameterGroupName,
                                                   String availabilityZone, Boolean iamEnabled, String engineMode,
-                                                  Map<String, String> tags, String region) {
+                                                  boolean deletionProtection, Map<String, String> tags,
+                                                  String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         // SnapshotIdentifier takes the snapshot's name or its ARN (API reference).
@@ -2798,7 +2799,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
                 null, null, null, false, null,
                 engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
-                snapshot.isStorageEncrypted(), port, false);
+                snapshot.isStorageEncrypted(), port, deletionProtection);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -2808,6 +2809,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 containerManager.restorePostgresSnapshot(cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
                 try {
+                    if (deletionProtection) {
+                        setDeletionProtection(effectiveRegion, clusterId, false);
+                    }
                     deleteDbCluster(clusterId, effectiveRegion);
                 } catch (Exception cleanupError) {
                     e.addSuppressed(cleanupError);
@@ -2832,7 +2836,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                                    String sourceClusterResourceId, String restoreType,
                                                    Instant restoreToTime, Boolean useLatestRestorableTime,
                                                    Integer port, String dbSubnetGroupName, String parameterGroupName,
-                                                   Boolean iamEnabled, String engineMode,
+                                                   Boolean iamEnabled, String engineMode, boolean deletionProtection,
                                                    Map<String, String> tags, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
@@ -2897,7 +2901,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, null, false, effectiveRegion,
                 null, null, null, false, null,
                 !isBlank(engineMode) ? engineMode : source.getEngineMode(),
-                source.isStorageEncrypted(), port, false);
+                source.isStorageEncrypted(), port, deletionProtection);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -2917,6 +2921,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
                 try {
+                    if (deletionProtection) {
+                        setDeletionProtection(effectiveRegion, clusterId, false);
+                    }
                     deleteDbCluster(clusterId, effectiveRegion);
                 } catch (Exception cleanupError) {
                     e.addSuppressed(cleanupError);
