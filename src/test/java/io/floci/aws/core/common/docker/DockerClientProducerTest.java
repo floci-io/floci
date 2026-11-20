@@ -732,6 +732,22 @@ class DockerClientProducerTest {
     }
 
     @Test
+    void validateBreakerFailureThreshold_negative_throwsNamingTheSetting() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateBreakerFailureThreshold(-1));
+
+        assertThat(e.getMessage(), containsString("floci.docker.breaker-failure-threshold"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD"));
+        assertThat(e.getMessage(), containsString("must be at least 0"));
+    }
+
+    @Test
+    void validateBreakerFailureThreshold_zeroOrPositive_returnsItUnchanged() {
+        assertEquals(0, DockerClientProducer.validateBreakerFailureThreshold(0));
+        assertEquals(3, DockerClientProducer.validateBreakerFailureThreshold(3));
+    }
+
+    @Test
     void validateImagePullTimeoutSeconds_positive_returnsItUnchanged() {
         assertEquals(1, DockerClientProducer.validateImagePullTimeoutSeconds(1));
         assertEquals(1800, DockerClientProducer.validateImagePullTimeoutSeconds(1800));

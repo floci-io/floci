@@ -434,11 +434,8 @@ public class DockerClientProducer {
 
     /** 0 turns the Docker circuit breaker off; a negative threshold is a misconfiguration. */
     static int validateBreakerFailureThreshold(int threshold) {
-        if (threshold < 0) {
-            throw new IllegalArgumentException("floci.docker.breaker-failure-threshold "
-                    + "(FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD) must be 0 or more, got: " + threshold);
-        }
-        return threshold;
+        return requireAtLeastZero(threshold, "floci.docker.breaker-failure-threshold",
+                "FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD");
     }
 
     static int validateBreakerProbeIntervalSeconds(int seconds) {
