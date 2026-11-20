@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.rds.RdsService;
@@ -114,8 +115,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
     /**
-     * What an update that kept a DB instance needs for {@link #rollbackUpdate}: the region, the VPC
-     * security groups the instance had when the update changed them, and whether it changed anything
+     * What an update that kept a DB instance or cluster needs for {@link #rollbackUpdate}: the region,
+     * the VPC security groups it had when the update changed them, and whether it changed anything
      * else, which has no rollback here.
      */
     static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
@@ -247,6 +248,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
      * instance gone since the update fails the rollback, and a retried one tries again.
      */
+    // Also restores a DB cluster's groups, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
@@ -263,8 +265,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
-            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(), resource.getPhysicalId(),
-                    groupIds);
+            if (prior.path("cluster").asBoolean(false)) {
+                rdsService.setDbClusterRequestSettings(resource.getPhysicalId(), prior.path("region").asText(),
+                        groupIds, null, null);
+            } else {
+                rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
+                        resource.getPhysicalId(), groupIds);
+            }
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
@@ -657,6 +664,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         boolean deletionProtection = parseStrictBoolProp(props, "DeletionProtection", engine);
         boolean created = cluster == null;
+        String backupWindow = resolveOptional(props, "PreferredBackupWindow", engine);
+        String maintenanceWindow = resolveOptional(props, "PreferredMaintenanceWindow", engine);
+        if (created) {
+            // validated before the cluster exists, so a bad window leaves none behind
+            String[] windows = BackupWindows.effectiveWindows(true, backupWindow, maintenanceWindow, null, null);
+            backupWindow = windows[0];
+            maintenanceWindow = windows[1];
+        }
+        List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -683,6 +699,27 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted, null, deletionProtection);
         }
+        if (securityGroupIds.isEmpty()) {
+            // A list the previous template declared and this one drops puts the cluster on its VPC's
+            // default group, as AWS's handler does, and leaves them when there is none. Groups the
+            // stack never declared, and the other settings, keep what is stored.
+            List<String> defaultGroup = !created && ctx.previouslyDeclared("VpcSecurityGroupIds")
+                    ? rdsService.defaultClusterVpcSecurityGroupIds(region, cluster.getDbClusterIdentifier())
+                    : List.of();
+            securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
+        }
+        // The groups an in-place update changes are saved, for rollbackUpdate, as an instance's are.
+        r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        if (!created && securityGroupIds != null
+                && !Set.copyOf(securityGroupIds).equals(Set.copyOf(cluster.getVpcSecurityGroupIds()))) {
+            ObjectNode saved = MAPPER.createObjectNode().put("region", region).put("cluster", true)
+                    .put("otherChanges", true);
+            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
+            cluster.getVpcSecurityGroupIds().forEach(priorGroups::add);
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
+        }
+        rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
+                securityGroupIds, backupWindow, maintenanceWindow);
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         // EnableHttpEndpoint updates with no interruption; a template that leaves it out wants it off.

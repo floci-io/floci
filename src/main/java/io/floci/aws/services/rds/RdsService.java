@@ -4388,6 +4388,13 @@ public class RdsService implements Resettable, ResourceProvider {
                 : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion).getVpcId();
     }
 
+    /** As {@link #defaultVpcSecurityGroupIds(String, String, String)} for a DB cluster. */
+    public List<String> defaultClusterVpcSecurityGroupIds(String region, String clusterId) {
+        String effectiveRegion = effectiveRegion(region);
+        return RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion,
+                getDbCluster(clusterId, effectiveRegion).getVpcId());
+    }
+
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
     }
@@ -4430,46 +4437,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * the instance's.
      */
     private static DbInstanceSettings withEffectiveWindows(DbInstanceSettings settings, DbInstance current) {
-        String backup = settings.preferredBackupWindow();
-        String maintenance = settings.preferredMaintenanceWindow();
-        boolean backupGiven = backup != null;
-        boolean maintenanceGiven = maintenance != null;
-        if (current == null) {
-            if (!backupGiven) {
-                backup = maintenanceGiven && DbInstanceSettings.windowsOverlap(
-                        DbInstanceSettings.DEFAULT_BACKUP_WINDOW, maintenance)
-                        ? DbInstanceSettings.backupWindowAfter(maintenance)
-                        : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
-            }
-            if (!maintenanceGiven) {
-                maintenance = backupGiven && DbInstanceSettings.windowsOverlap(
-                        backup, DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
-                        ? DbInstanceSettings.maintenanceWindowAfter(backup)
-                        : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
-            }
-            // a derived window is clear unless the given one leaves no 30-minute gap at all
-            if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
-                if (!maintenanceGiven) {
-                    throw DbInstanceSettings.noRoomForMaintenanceWindow();
-                }
-                if (!backupGiven) {
-                    throw DbInstanceSettings.noRoomForBackupWindow();
-                }
-            }
-        } else {
-            if (!backupGiven) {
-                backup = current.getPreferredBackupWindow() != null
-                        ? current.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
-            }
-            if (!maintenanceGiven) {
-                maintenance = current.getPreferredMaintenanceWindow() != null
-                        ? current.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
-            }
-        }
-        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
-            throw DbInstanceSettings.overlappingWindows();
-        }
-        return settings.withWindows(backup, maintenance);
+        String[] windows = BackupWindows.effectiveWindows(current == null, settings.preferredBackupWindow(),
+                settings.preferredMaintenanceWindow(),
+                current == null ? null : current.getPreferredBackupWindow(),
+                current == null ? null : current.getPreferredMaintenanceWindow());
+        return settings.withWindows(windows[0], windows[1]);
     }
 
     /**
@@ -5909,6 +5881,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
         cluster.setVpcId(placement.vpcId());
+        // none named yet: AWS puts the cluster in its VPC's default group; EC2 without one leaves none
+        cluster.setVpcSecurityGroupIds(RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion, placement.vpcId()));
         cluster.setAvailabilityZone(placement.availabilityZone());
         cluster.setMultiAz(placement.multiAz());
         cluster.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
@@ -12079,6 +12053,26 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
                 AwsArnUtils.regionOrDefault(cluster.getDbClusterArn(), regionResolver.getDefaultRegion()), memberId);
         return member == null ? 1 : member.getPromotionTier();
+    }
+
+    /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
+    public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
+            List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(id, effectiveRegion);
+        BackupWindows.effectiveWindows(false, backupWindow, maintenanceWindow,
+                cluster.getPreferredBackupWindow(), cluster.getPreferredMaintenanceWindow());
+        if (vpcSecurityGroupIds != null) {
+            cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (backupWindow != null) {
+            cluster.setPreferredBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            cluster.setPreferredMaintenanceWindow(BackupWindows.lowerCase(maintenanceWindow));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");

@@ -293,6 +293,40 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void dbClusterPassesTemplateGroupsProtectionAndWindowsToTheRequestSettings() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "VpcSecurityGroupIds":["sg-a","sg-b"],"DeletionProtection":true,
+                 "PreferredBackupWindow":"03:00-04:00","PreferredMaintenanceWindow":"Mon:05:00-Mon:06:00"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings("mycluster", "us-east-1", List.of("sg-a", "sg-b"),
+                "03:00-04:00", "Mon:05:00-Mon:06:00");
+    }
+
+    @Test
+    void dbClusterWithoutTemplateGroupsLeavesGroupsToTheServiceDefault() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings(eq("mycluster"), eq("us-east-1"), isNull(),
+                nullable(String.class), nullable(String.class));
+    }
+
+    @Test
     void dbClusterEnableHttpEndpointIsAppliedOnCreateAndUpdate() {
         createDbClusterEchoesRequestedId();
         DbCluster enabled = mock(DbCluster.class);
