@@ -14,6 +14,8 @@ import java.util.Map;
  */
 final class BedrockAgentCoreTagValidation {
 
+    private static final int MAX_TAGS = 50;
+
     private BedrockAgentCoreTagValidation() {
     }
 
@@ -21,8 +23,9 @@ final class BedrockAgentCoreTagValidation {
         if (tags == null || tags.isNull()) {
             return;
         }
-        if (!tags.isObject() || tags.size() > 50) {
-            throw new AwsException("ValidationException", "tags must be an object with at most 50 entries", 400);
+        if (!tags.isObject() || tags.size() > MAX_TAGS) {
+            throw new AwsException("ValidationException",
+                    "tags must be an object with at most " + MAX_TAGS + " entries", 400);
         }
         tags.fields().forEachRemaining(entry -> {
             String key = entry.getKey();
@@ -36,8 +39,9 @@ final class BedrockAgentCoreTagValidation {
     }
 
     static void validateTagMap(Map<String, String> tags) {
-        if (tags == null || tags.size() > 50) {
-            throw new AwsException("ValidationException", "tags must be an object with at most 50 entries", 400);
+        if (tags == null || tags.size() > MAX_TAGS) {
+            throw new AwsException("ValidationException",
+                    "tags must be an object with at most " + MAX_TAGS + " entries", 400);
         }
         tags.forEach((key, value) -> {
             validateKey(key);

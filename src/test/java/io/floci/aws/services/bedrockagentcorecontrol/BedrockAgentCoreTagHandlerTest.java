@@ -16,11 +16,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.invalidTagMaps;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.malformedTagBodies;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.numberedTags;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
@@ -68,18 +70,8 @@ class BedrockAgentCoreTagHandlerTest {
         return "arn:aws-cn:bedrock-agentcore:" + CUSTOM_REGION + ":" + ACCOUNT + ":" + prefix + "abc123";
     }
 
-    private static Map<String, String> numberedTags(int count) {
-        Map<String, String> tags = new LinkedHashMap<>();
-        for (int i = 0; i < count; i++) {
-            tags.put("key" + i, "value");
-        }
-        return tags;
-    }
-
     static Stream<Arguments> invalidTagRequests() {
-        List<Map<String, String>> invalid = new ArrayList<>(List.of(numberedTags(51), Map.of("", "value"),
-                Map.of("k".repeat(129), "value"), Map.of("bad#key", "value"), Map.of("key", "v".repeat(257)),
-                Map.of("key", "bad#value")));
+        List<Map<String, String>> invalid = new ArrayList<>(invalidTagMaps());
         Map<String, String> nullValue = new HashMap<>();
         nullValue.put("key", null);
         invalid.add(nullValue);
@@ -97,8 +89,7 @@ class BedrockAgentCoreTagHandlerTest {
     }
 
     static Stream<Arguments> malformedTagRequests() {
-        List<String> bodies = List.of("{}", "{\"tags\":null}", "{\"tags\":[]}",
-                "{\"tags\":{\"key\":1}}", "{\"tags\":{\"key\":null}}", "[]");
+        List<String> bodies = malformedTagBodies();
         return RESOURCE_PREFIXES.stream().flatMap(prefix -> bodies.stream().map(body -> Arguments.of(prefix, body)));
     }
 

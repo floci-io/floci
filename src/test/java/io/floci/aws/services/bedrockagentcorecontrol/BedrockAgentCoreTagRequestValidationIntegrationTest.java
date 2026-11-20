@@ -7,46 +7,39 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.invalidTagMaps;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.malformedTagBodies;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreTagFixtures.numberedTags;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class BedrockAgentCoreTagRequestValidationIntegrationTest {
 
-    private static Map<String, String> numberedTags(int count) {
-        Map<String, String> tags = new LinkedHashMap<>();
-        for (int i = 0; i < count; i++) {
-            tags.put("key" + i, "value");
-        }
-        return tags;
-    }
-
     @Test
     void rejectedTagRequestsLeaveTheRuntimeTagsUnchangedAndBoundaryValuesAreAccepted() {
+        String runtimeName = "tagValidation" + UUID.randomUUID().toString().replace("-", "");
         ExtractableResponse<Response> runtime = given().contentType("application/json").body("""
                 {
-                  "agentRuntimeName": "tagRequestValidation",
+                  "agentRuntimeName": "%s",
                   "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
                   "networkConfiguration": {"networkMode": "PUBLIC"},
                   "roleArn": "arn:aws:iam::000000000000:role/agent",
                   "tags": {"existing": "kept"}
                 }
-                """).when().put("/runtimes/").then().statusCode(202).extract();
+                """.formatted(runtimeName)).when().put("/runtimes/").then().statusCode(202).extract();
         String arn = runtime.path("agentRuntimeArn");
         String runtimeId = runtime.path("agentRuntimeId");
         try {
             List<Object> requests = new ArrayList<>();
-            for (Map<String, String> tags : List.of(numberedTags(51), Map.of("", "value"),
-                    Map.of("k".repeat(129), "value"), Map.of("bad#key", "value"),
-                    Map.of("key", "v".repeat(257)), Map.of("key", "bad#value"))) {
+            for (Map<String, String> tags : invalidTagMaps()) {
                 requests.add(Map.of("tags", tags));
             }
-            requests.addAll(List.of("{}", "{\"tags\":null}", "{\"tags\":[]}",
-                    "{\"tags\":{\"key\":1}}", "{\"tags\":{\"key\":null}}", "[]"));
+            requests.addAll(malformedTagBodies());
             for (Object request : requests) {
                 RequestSpecification spec = given().contentType("application/json");
                 if (request instanceof String rawJson) {
