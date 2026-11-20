@@ -126,6 +126,22 @@ public class TableDefinition {
         return wcu > 0 ? wcu : 5;
     }
 
+    /** The warm read units an index reports: its baseline, or a higher value the index was given. */
+    public long gsiWarmReadUnits(GlobalSecondaryIndex gsi) {
+        long baseline = "PAY_PER_REQUEST".equals(billingMode)
+                ? defaultWarmReadUnits(billingMode, null) : gsi.getProvisionedThroughput().getReadCapacityUnits();
+        Long stored = gsi.getWarmReadUnitsPerSecond();
+        return stored != null && stored > baseline ? stored : baseline;
+    }
+
+    /** The warm write units an index reports: its baseline, or a higher value the index was given. */
+    public long gsiWarmWriteUnits(GlobalSecondaryIndex gsi) {
+        long baseline = "PAY_PER_REQUEST".equals(billingMode)
+                ? defaultWarmWriteUnits(billingMode, null) : gsi.getProvisionedThroughput().getWriteCapacityUnits();
+        Long stored = gsi.getWarmWriteUnitsPerSecond();
+        return stored != null && stored > baseline ? stored : baseline;
+    }
+
     public String getTableName() { return tableName; }
     public void setTableName(String tableName) { this.tableName = tableName; }
 
