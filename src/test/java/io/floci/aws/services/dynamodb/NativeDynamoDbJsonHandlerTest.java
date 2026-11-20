@@ -1110,6 +1110,35 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateTableKeepsIndexWarmThroughputThroughACapacityCut() throws Exception {
+        createWarmTable("warm-index-cut", false, null, null);
+        String capacityUpdate = """
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [{"Update": {"IndexName": "gsi1",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}}]}
+                """;
+        updateWarm(capacityUpdate.formatted(20, 30));
+        updateWarm(capacityUpdate.formatted(7, 8));
+
+        assertWarm(warmThroughputOf(describedGsi("warm-index-cut", "gsi1")), 20, 30, "ACTIVE");
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 19}}}]}
+                """));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than " + CURRENT_REASON, ex.getMessage());
+    }
+
+    @Test
+    void createTableReportsAnExistingTableBeforeAnyWarmThroughputCheck() throws Exception {
+        createWarmTable("warm-create-order", true, null, null);
+
+        AwsException ex = warmFailure("CreateTable",
+                warmTableRequest("warm-create-order", true, "{\"ReadUnitsPerSecond\": 1}", null));
+
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
     void updateTableRejectsEmptyTableWarmThroughputWithInternalFailure() throws Exception {
         createWarmTable("warm-empty-table", true, null, null);
 

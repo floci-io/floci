@@ -144,14 +144,13 @@ public class NativeDynamoDbTableService {
                     + "disabled, UpdateViewType should not be specified", 400);
         }
 
-        requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode));
-
         TableDefinition table = dynamoDbService.createTable(tableName, request.keySchema(),
                 request.attributeDefinitions(),
                 throughput != null ? throughput.readCapacityUnits() : null,
                 throughput != null ? throughput.writeCapacityUnits() : null,
                 request.globalSecondaryIndexes(), request.localSecondaryIndexes(), request.vectorIndexes(),
-                billingMode, region);
+                billingMode, region,
+                () -> requireCreateWarmThroughput(request, "PAY_PER_REQUEST".equals(billingMode)));
         table.setTableStatus(initialStatus);
 
         table.setDeletionProtectionEnabled(Boolean.TRUE.equals(settings.deletionProtectionEnabled()));
@@ -459,6 +458,9 @@ public class NativeDynamoDbTableService {
             GlobalSecondaryIndex gsi = table.findGsi(update.indexName()).orElseThrow();
             Throughput gsiThroughput = update.provisionedThroughput();
             if (gsiThroughput != null) {
+                // A capacity cut leaves the index's warm throughput where it was.
+                gsi.setWarmReadUnitsPerSecond(table.gsiWarmReadUnits(gsi));
+                gsi.setWarmWriteUnitsPerSecond(table.gsiWarmWriteUnits(gsi));
                 if (gsiThroughput.readCapacityUnits() != null) {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiThroughput.readCapacityUnits());
                 }
@@ -681,7 +683,11 @@ public class NativeDynamoDbTableService {
                     onDemand, provisioned != null ? provisioned.readCapacityUnits() : null,
                     provisioned != null ? provisioned.writeCapacityUnits() : null);
         }
-        for (GlobalSecondaryIndex gsi : request.globalSecondaryIndexes()) {
+        requireNewIndexWarmThroughput(request.globalSecondaryIndexes(), onDemand);
+    }
+
+    private static void requireNewIndexWarmThroughput(List<GlobalSecondaryIndex> indexes, boolean onDemand) {
+        for (GlobalSecondaryIndex gsi : indexes) {
             requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
                     gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
                     gsi.getProvisionedThroughput().getWriteCapacityUnits());
@@ -734,12 +740,7 @@ public class NativeDynamoDbTableService {
                     warm.writeUnitsPerSecond(), table.gsiWarmReadUnits(gsi), table.gsiWarmWriteUnits(gsi),
                     CURRENT_WARM_REASON, CURRENT_WARM_REASON);
         }
-        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
-        for (GlobalSecondaryIndex gsi : request.gsiCreates()) {
-            requireCreateWarmThroughput("index " + gsi.getIndexName(), gsi.getWarmReadUnitsPerSecond(),
-                    gsi.getWarmWriteUnitsPerSecond(), onDemand, gsi.getProvisionedThroughput().getReadCapacityUnits(),
-                    gsi.getProvisionedThroughput().getWriteCapacityUnits());
-        }
+        requireNewIndexWarmThroughput(request.gsiCreates(), "PAY_PER_REQUEST".equals(table.getBillingMode()));
     }
 
     private static void requireWarmThroughputAtLeast(String target, Long read, Long write, long minimumRead,
