@@ -787,6 +787,24 @@ class RedshiftContainerManagerTest {
         verify(stream).close();
     }
 
+    // Catches: the cluster's last log lines lost, since the forced removal leaves its polled log nothing to read.
+    @Test
+    void stopReadsThePolledLogBeforeTheRemoval() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
+                new ContainerInfo("cont-owned", Map.of(5432, new EndpointInfo("localhost", 5432))));
+        RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "owned", "admin", "pass");
+        Closeable stream = mock(Closeable.class);
+        handle.setLogStream(stream);
+
+        manager.stop(ACCOUNT_ID, "owned");
+
+        InOrder order = inOrder(lifecycleManager);
+        order.verify(lifecycleManager).readLogBeforeRemoval(stream);
+        order.verify(lifecycleManager).removeIfExistsStrict("cont-owned", true);
+    }
+
     @Test
     void staleRemovalFailurePreventsReplacementCreation() {
         doThrow(new IllegalStateException("Docker unavailable")).when(lifecycleManager)

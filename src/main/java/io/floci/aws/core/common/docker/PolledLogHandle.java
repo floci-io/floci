@@ -33,6 +33,11 @@ import java.util.function.BiConsumer;
  * so a repeated record is skipped and a new one with the same timestamp is not, which a "last timestamp
  * plus a nanosecond" cursor would drop. A line split across reads is held per stream until its newline.
  *
+ * <p>Docker applies {@code since} by reading the log from its start, so once a record has been seen each
+ * read also asks for only the last {@link #TAIL_LINES} records. That read still begins with a record
+ * already seen unless more than that many arrived since the last one; when its first record is new
+ * instead, the read is dropped and made again without the bound, so no record is skipped.
+ *
  * <p>{@link #drainBeforeRemove} reads once more on the caller's thread, for the container's last lines
  * between its stop and its removal; {@link #close} reads a last time without blocking and then flushes
  * any unterminated line.
@@ -42,6 +47,7 @@ final class PolledLogHandle implements Closeable {
     private static final Logger LOG = Logger.getLogger(PolledLogHandle.class);
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(2);
     private static final int TIMESTAMP_MAX_BYTES = 40;
+    static final int TAIL_LINES = 1000;
 
     // Idle threads time out, as the close-drain scheduler's do, so the poller pins no classloader.
     private static final ScheduledThreadPoolExecutor POLLER = poller();
@@ -69,6 +75,9 @@ final class PolledLogHandle implements Closeable {
     private int recordsAtCursor;
     private int seenAtCursor;
     private boolean finished;
+    private boolean boundedRead;
+    private boolean awaitingFirstRecord;
+    private boolean overflowed;
     private volatile boolean stopped;
     private ScheduledFuture<?> schedule;
 
@@ -101,8 +110,11 @@ final class PolledLogHandle implements Closeable {
             schedule.cancel(false);
         }
         POLLER.execute(() -> {
-            read();
-            finish();
+            try {
+                readSafely();
+            } finally {
+                finish();
+            }
         });
     }
 
@@ -117,43 +129,72 @@ final class PolledLogHandle implements Closeable {
     /** One {@code logs?since=} read; returns quietly when the container is gone, and stops reading it. */
     void read() {
         synchronized (readLock) {
-            if (!beginRead()) {
-                return;
-            }
-            ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
-                @Override
-                public void onNext(Frame frame) {
-                    if (frame != null && frame.getPayload() != null) {
-                        accept(frame.getStreamType(), frame.getPayload());
-                    }
-                }
-            };
-            try (LogContainerCmd command = docker.logContainerCmd(containerId)
-                    .withStdOut(true)
-                    .withStdErr(true)
-                    .withFollowStream(false)
-                    .withTimestamps(true)
-                    .withSince(sinceSeconds())) {
-                if (!command.exec(callback).awaitCompletion(READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
-                    LOG.debugv("Reading the log of container {0} took over {1} s; the next read resumes it",
-                            containerId, READ_TIMEOUT.toSeconds());
-                }
-            } catch (NotFoundException e) {
-                stopReading();
-                finish();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                closeQuietly(callback);
+            if (readOnce(true)) {
+                readOnce(false);
             }
         }
     }
 
-    /** Starts counting the records at the cursor afresh for a new read; false once finished. */
-    boolean beginRead() {
+    /** True when a bounded read began past the cursor, so records may lie between them and it must be made again. */
+    private boolean readOnce(boolean allowTail) {
+        if (!beginRead(allowTail)) {
+            return false;
+        }
+        ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                if (frame != null && frame.getPayload() != null) {
+                    accept(frame.getStreamType(), frame.getPayload());
+                }
+            }
+        };
+        try (LogContainerCmd command = docker.logContainerCmd(containerId)
+                .withStdOut(true)
+                .withStdErr(true)
+                .withFollowStream(false)
+                .withTimestamps(true)
+                .withSince(sinceSeconds())) {
+            if (isBoundedRead()) {
+                command.withTail(TAIL_LINES);
+            }
+            if (!command.exec(callback).awaitCompletion(READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.debugv("Reading the log of container {0} took over {1} s; the next read resumes it",
+                        containerId, READ_TIMEOUT.toSeconds());
+            }
+        } catch (NotFoundException e) {
+            stopReading();
+            finish();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            closeQuietly(callback);
+        }
+        return hasOverflowed();
+    }
+
+    /**
+     * Starts counting the records at the cursor afresh for a new read; false once finished. The read asks for
+     * only the last {@link #TAIL_LINES} records when {@code allowTail} is set and a record has been seen.
+     */
+    boolean beginRead(boolean allowTail) {
         synchronized (stateLock) {
             seenAtCursor = 0;
+            boundedRead = allowTail && recordsAtCursor > 0;
+            awaitingFirstRecord = true;
+            overflowed = false;
             return !finished;
+        }
+    }
+
+    private boolean isBoundedRead() {
+        synchronized (stateLock) {
+            return boundedRead;
+        }
+    }
+
+    boolean hasOverflowed() {
+        synchronized (stateLock) {
+            return overflowed;
         }
     }
 
@@ -166,7 +207,7 @@ final class PolledLogHandle implements Closeable {
     /** One frame of a timestamped read: records of {@code <RFC 3339 timestamp> <content>}, each up to its newline. */
     void accept(StreamType stream, byte[] payload) {
         synchronized (stateLock) {
-            if (finished) {
+            if (finished || overflowed) {
                 return;
             }
             int offset = 0;
@@ -205,6 +246,13 @@ final class PolledLogHandle implements Closeable {
                 emit(stream, payload, start, end);
             }
             return;
+        }
+        if (awaitingFirstRecord) {
+            awaitingFirstRecord = false;
+            if (boundedRead && timestamp.isAfter(cursor)) {
+                overflowed = true;
+                return;
+            }
         }
         boolean include = isNew(timestamp);
         includeContinuation.put(stream, include);
