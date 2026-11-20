@@ -336,7 +336,8 @@ class RequestResourcesTest {
     /**
      * An ARN naming another account whose service acts on that account's resource for the caller (the sink an OAM
      * link is made to, a RAM invitation sent to it) is that resource alone, never the caller's of that name too; one
-     * the service holds no such resource under is still checked as the caller's own too.
+     * the service holds no such resource under is still checked as the caller's own too. The link {@code CreateLink}
+     * makes is the caller's.
      */
     @Test
     void anArnOfAnotherAccountItsServiceActsOnThereIsCheckedAsGivenAlone() {
@@ -345,13 +346,15 @@ class RequestResourcesTest {
         String link = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\"}";
         String accept = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
 
-        assertEquals(List.of(sink), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+        String made = "arn:aws:oam:us-east-1:000000000000:link/*";
+        assertEquals(List.of(sink, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
                 "000000000000", reaching("oam", sink)));
         assertEquals(List.of(invitation), RequestResources.of("ram:AcceptResourceShareInvitation", json(accept), "aws",
                 "us-east-1", "000000000000", reaching("ram", invitation)));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), RequestResources.of("oam:CreateLink",
-                json(link), "aws", "us-east-1", "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), of("oam:CreateLink", json(link)));
+        String own = "arn:aws:oam:us-east-1:000000000000:sink/abc";
+        assertEquals(List.of(sink, own, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+                "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
+        assertEquals(List.of(sink, own, made), of("oam:CreateLink", json(link)));
     }
 
     /**

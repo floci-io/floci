@@ -25,6 +25,7 @@ client that talks to the control plane does not reach it by accident.
 | `VerifyCardValidationData` | Verify a card verification value against the one the issuer holds, on `POST /cardvalidationdata/verify` |
 | `GenerateAuthRequestCryptogram` | Generate the cryptogram an authorization request carries, on `POST /cryptogram/generate` |
 | `VerifyAuthRequestCryptogram` | Verify the cryptogram an authorization request carries, on `POST /cryptogram/verify` |
+| `GenerateAs2805KekValidation` | Make or answer the AS2805 KEK validation of a key encryption key, on `POST /as2805kekvalidation/generate` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -145,10 +146,6 @@ client that talks to the control plane does not reach it by accident.
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
-- **The AS2805 key validation is not served.** The reference publishes the operation
-  `GenerateAs2805KekValidation`, which answers with the two random numbers the AS2805
-  ceremony makes of one, and this service has no route for it: a request for it does not
-  reach a payment cryptography operation at all.
 - **The UnionPay session key derivation is not made.** The reference's model names six ways
   of deriving the session key of an authorization request, and this service makes three of
   them: the EMV common session key, the Mastercard one and the Visa one, which derives none.
@@ -216,6 +213,33 @@ client that talks to the control plane does not reach it by accident.
   wrong cryptogram is the one outcome worse than an error. The EMV 4.1 tree derivation, the
   one the `Emv2000` attributes ask for, is refused as well: it is over the master key and
   the ATC, and this service does not implement that construction.
+- **The KEK validation is the AS2805 ceremony two nodes use to prove they hold the same
+  key.** The node that starts the exchange makes a random number of eight, sixteen or
+  twenty-four bytes, gives every byte the odd parity the standard's Single DES asks for,
+  and enciphers it under a variant of the key it holds: the key exclusive-ored with the
+  mask the request names, repeated over the key's length. The node that answers deciphers
+  that number, inverts every bit of it, and enciphers the inverted value under the other
+  variant of its own key. The first node compares the answer with the one it computed, so
+  two nodes whose keys differ do not agree. The random number is enciphered a block at a
+  time, in Triple DES, the cipher AS2805's cryptography is made of, and it is sixteen bytes
+  long when the request does not name a length.
+- **The key of a KEK validation is a Triple DES key encryption key.** It is the one AS2805
+  calls the terminal major key, the usage `TR31_K0_KEY_ENCRYPTION_KEY`. The reference does
+  not name the usage the key must have for this operation, so the one the service's own
+  AS2805 import gives that key is the one it asks for. AS2805's cryptography is all TDES,
+  so a key of another family is refused. The request form enciphers, so the key must allow
+  `Encrypt`; the response form deciphers and enciphers the inverted number, so it must
+  allow `Decrypt` and `Encrypt`.
+- **The two variant masks are the standard's two forms of the ceremony.** The `82` form is
+  the one an independent implementation of the ceremony confirms, byte for byte. The `82C0`
+  form is the same ceremony under the longer of the two masks the reference names, and the
+  mask of its inverted number is that form's `84C0`: two nodes validating under it agree
+  with each other, but not with the reference.
+- **The requests the ceremony does not fit are refused.** The derived key is the variant of
+  the key the request names, so the algorithm the request names has to be the algorithm of
+  that key, and a request that names another one is refused. The random number is
+  enciphered in whole Triple DES blocks, and the three lengths the model names are whole
+  numbers of them.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
   sequence number is two: the EMV ones, as the model states them. A formatted account

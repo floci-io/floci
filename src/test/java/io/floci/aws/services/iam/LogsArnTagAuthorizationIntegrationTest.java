@@ -123,11 +123,18 @@ class LogsArnTagAuthorizationIntegrationTest {
         assertTags(local, expectedTags(action));
     }
 
+    /**
+     * A plain name where AWS takes an ARN names nothing the generated table reads, so the call is checked on
+     * {@code *}; the handler still reads it as the literal name of a historical group.
+     */
     @ParameterizedTest
     @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
     void incompleteArnPrefixRemainsALiteralLegacyName(String action) {
         String name = historicalGroupNamed("arn:archive-" + UUID.randomUUID(), Map.of("team", "blue"));
-        String caller = user(statement("Allow", "logs:" + action, arn(name)));
+        String scoped = user(statement("Allow", "logs:" + action, arn(name)));
+        invoke(scoped, action, name).statusCode(400).body(containsString("AccessDeniedException"));
+        assertTags(name, Map.of("team", "blue"));
+        String caller = user(statement("Allow", "logs:" + action, "*"));
         assertSuccess(invoke(caller, action, name), action);
         assertTags(name, expectedTags(action));
     }

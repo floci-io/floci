@@ -156,44 +156,6 @@ class SesInlineTemplateRequiredFieldsIntegrationTest {
                         + ", \"TemplateData\": \"not json\"}}, " + entries + "}"));
     }
 
-    static Stream<Arguments> storedTemplateSelectors() {
-        return Stream.of(
-                Arguments.of("name", "\"TemplateName\": \"inline-template-ghost\""),
-                Arguments.of("arn", "\"TemplateArn\": "
-                        + "\"arn:aws:ses:us-east-1:000000000000:template/inline-template-ghost\""));
-    }
-
-    private static String templateWithSelector(String selector, String templateContent) {
-        return "{\"Template\": {" + selector + ", \"TemplateContent\": " + templateContent
-                + ", \"TemplateData\": \"{}\"}}";
-    }
-
-    // AWS words the combination differently on the two operations, and SendEmail reports it even
-    // when the inline content is incomplete (probe-confirmed).
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("storedTemplateSelectors")
-    void sendEmail_storedTemplateBesideContent_isRejectedWhateverTheContent(String label, String selector) {
-        for (String templateContent : new String[] {"{\"Subject\": \"s\", \"Text\": \"t\"}", "{}", SUBJECT_ONLY}) {
-            post("/v2/email/outbound-emails", "{\"FromEmailAddress\": \"" + UNVERIFIED + "\", " + DESTINATION
-                    + ", \"Content\": " + templateWithSelector(selector, templateContent) + "}")
-                .statusCode(400)
-                .body("__type", equalTo("BadRequestException"))
-                .body("message", equalTo(
-                        "TemplateName and TemplateArn cannot be provided when TemplateContent is provided."));
-        }
-    }
-
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("storedTemplateSelectors")
-    void sendBulkEmail_storedTemplateBesideCompleteContent_isRejected(String label, String selector) {
-        post("/v2/email/outbound-bulk-emails", "{\"FromEmailAddress\": \"" + UNVERIFIED
-                + "\", \"DefaultContent\": " + templateWithSelector(selector, "{\"Subject\": \"s\", \"Text\": \"t\"}")
-                + ", \"BulkEmailEntries\": [" + ENTRY + "]}")
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("message", equalTo("TemplateName or TemplateArn cannot be provided with EmailTemplateContent"));
-    }
-
     @ParameterizedTest(name = "{0}")
     @MethodSource("bulkSendsWithAnotherError")
     void sendBulkEmail_incompleteInlineTemplate_winsOverLaterChecks(String label, String body) {

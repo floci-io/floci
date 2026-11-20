@@ -800,6 +800,25 @@ class EmrServiceTest {
         assertEquals(Map.of("ErrorCode", "INVALID_JOB_SHUT_DOWN"), refused.getExtendedData());
     }
 
+    /**
+     * No more core and task nodes are built than {@code yarn-max-worker-nodes}, 4 in the fixture, however many a
+     * cluster asks for: core nodes first, and none past the setting, so a cluster asking for billions costs no more
+     * than one asking for 4.
+     */
+    @Test
+    void noMoreWorkerNodesAreBuiltThanTheSettingAllowsHoweverManyAClusterAsksFor() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrCluster requested = cluster("huge", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", Integer.MAX_VALUE),
+                group("TASK", Integer.MAX_VALUE)));
+        EmrCluster cluster = fixture.service.runJobFlow(requested, REGION);
+
+        List<ClusterStorage.Node> nodes = fixture.service.workerNodes(cluster);
+
+        assertEquals(4, nodes.size());
+        assertTrue(nodes.stream().allMatch(ClusterStorage.Node::core), nodes.toString());
+    }
+
     /** ModifyInstanceFleet's answer for a cluster that is starting or bootstrapping. */
     private static void assertNotRunningOrWaiting(AwsException refused) {
         assertEquals("InvalidRequestException", refused.getErrorCode());
