@@ -750,6 +750,14 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Reads what a polled log has not seen yet, for a caller that force-removes its container itself
+     * instead of going through {@link #stopAndRemove}: once the container is gone its log cannot be read.
+     */
+    public void readLogBeforeRemoval(Closeable logStream) {
+        readLastLogLines(logStream);
+    }
+
+    /**
      * Stops a container and leaves it in place, for its output to be read before it is removed: one that
      * had already exited, or is gone, counts as stopped.
      *

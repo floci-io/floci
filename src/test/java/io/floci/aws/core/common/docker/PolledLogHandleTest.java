@@ -12,21 +12,26 @@ import org.mockito.Answers;
 import org.mockito.InOrder;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PolledLogHandleTest {
 
-    private final List<String> lines = new ArrayList<>();
+    private final List<String> lines = Collections.synchronizedList(new ArrayList<>());
 
     private PolledLogHandle handle(Instant since) {
         return new PolledLogHandle(mock(DockerClient.class), "c1", since,
@@ -38,7 +43,7 @@ class PolledLogHandleTest {
     }
 
     private static void read(PolledLogHandle handle, StreamType stream, byte[]... frames) {
-        handle.beginRead();
+        handle.beginRead(true);
         for (byte[] frame : frames) {
             handle.accept(stream, frame);
         }
@@ -95,6 +100,55 @@ class PolledLogHandleTest {
         read(handle, StreamType.STDOUT, record("2026-11-19T10:00:02.000000000Z", "late\n"));
 
         assertEquals(List.of("STDOUT:shutting down"), lines);
+    }
+
+    private static LogContainerCmd logRead(byte[]... records) {
+        LogContainerCmd command = mock(LogContainerCmd.class, Answers.RETURNS_SELF);
+        when(command.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            for (byte[] record : records) {
+                callback.onNext(new Frame(StreamType.STDOUT, record));
+            }
+            callback.onComplete();
+            return callback;
+        });
+        return command;
+    }
+
+    // Catches: every read after the first decoding the container's whole log again (no tail bound), or a
+    // bounded read that more records than the bound arrived for skipping the ones before its first.
+    @Test
+    void aBoundedReadThatBeginsPastTheCursorIsMadeAgainWithoutTheBound() {
+        String t1 = "2026-11-19T10:00:00.100000000Z";
+        String t2 = "2026-11-19T10:00:00.200000000Z";
+        String t3 = "2026-11-19T10:00:00.300000000Z";
+        LogContainerCmd first = logRead(record(t1, "a\n"));
+        LogContainerCmd bounded = logRead(record(t3, "c\n"));
+        LogContainerCmd unbounded = logRead(record(t1, "a\n"), record(t2, "b\n"), record(t3, "c\n"));
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.logContainerCmd("c1")).thenReturn(first, bounded, unbounded);
+        PolledLogHandle handle = new PolledLogHandle(docker, "c1", null, (stream, line) -> lines.add(line));
+
+        handle.read();
+        handle.read();
+
+        assertEquals(List.of("a", "b", "c"), lines);
+        verify(first, never()).withTail(anyInt());
+        verify(bounded).withTail(PolledLogHandle.TAIL_LINES);
+        verify(unbounded, never()).withTail(anyInt());
+    }
+
+    // Catches: a final read that fails at close skipping the flush of the unterminated last line.
+    @Test
+    void closeFlushesTheUnterminatedLineWhenTheLastReadFails() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.logContainerCmd("c1")).thenThrow(new IllegalStateException("daemon gone"));
+        PolledLogHandle handle = new PolledLogHandle(docker, "c1", null, (stream, line) -> lines.add(line));
+        read(handle, StreamType.STDOUT, record("2026-11-19T10:00:00.100000000Z", "shutting down"));
+
+        handle.close();
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> lines.equals(List.of("shutting down")));
     }
 
     // Catches: a polled container's last lines lost, since a removed container's log can no longer be read.
