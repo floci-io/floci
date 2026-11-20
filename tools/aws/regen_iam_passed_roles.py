@@ -85,7 +85,7 @@ NAMESPACES = (
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
     "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
-    "transcribe", "transfer", "translate",
+    "transcribe", "transfer", "translate", "wafv2",
 )
 
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
@@ -285,6 +285,8 @@ NOT_READ = {
     "ssm:StartChangeRequestExecution": RUNBOOK_PARAMETER,
     "ssm:UpdateDocument": NO_ROLE_MEMBER,
     "ssm:UpdateServiceSetting": "a role is only ever a setting's value, which the request names by SettingId",
+    "wafv2:CreateWebACL": NO_ROLE_MEMBER,
+    "wafv2:UpdateWebACL": NO_ROLE_MEMBER,
 }
 
 # A member the rule reads that passes no role, by operation, or by namespace for all its operations.
