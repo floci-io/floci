@@ -6,14 +6,12 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /** Exact code, message and status of the not-found, already-exists and invalid-state refusals. */
 @QuarkusTest
 class EventBridgeErrorMessagesIntegrationTest {
 
-    private static final String CT = "application/x-amz-json-1.1";
     private static final String BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/";
 
     @BeforeAll
@@ -22,8 +20,7 @@ class EventBridgeErrorMessagesIntegrationTest {
     }
 
     private static ValidatableResponse call(String op, String body) {
-        return given().contentType(CT).header("X-Amz-Target", "AWSEvents." + op)
-                .body(body).when().post("/").then();
+        return RestAssuredJsonUtils.awsAction("AWSEvents", op, body).then();
     }
 
     private static void ok(String op, String body) {

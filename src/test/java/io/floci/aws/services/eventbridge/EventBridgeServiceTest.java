@@ -2414,4 +2414,11 @@ class EventBridgeServiceTest {
         assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", null).get("Resources")).size());
         assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", " ").get("Resources")).size());
     }
+
+    @Test
+    void findConnectionByArnKeepsThePlainMessageForInternalCallers() {
+        String arn = "arn:aws:events:us-east-1:000000000000:connection/nope/abc";
+        AwsException e = assertThrows(AwsException.class, () -> service.findConnectionByArn(arn, "us-east-1"));
+        assertEquals("Connection " + arn + " does not exist.", e.getMessage());
+    }
 }
