@@ -656,6 +656,12 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         if (imageCatalog == null || name == null || !name.startsWith(PUBLIC_PARAMETER_PREFIX)) {
             return Optional.empty();
         }
+        boolean eksReleaseVersion = name.startsWith(EKS_OPTIMIZED_AMI_PREFIX)
+                && name.endsWith(EKS_RECOMMENDED_RELEASE_VERSION);
+        // A custom catalog may name a Kubernetes version Floci has no node image for, and so no patch version.
+        if (eksReleaseVersion && eksNodeImage(name) == null) {
+            return Optional.empty();
+        }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
             String value = image.imageId;
             if (name.startsWith(ECS_AL2023_RECOMMENDED)
@@ -673,7 +679,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                 value = name.equals(recommendedName) ? metadata.toString()
                         : metadata.required(name.substring(recommendedName.length() + 1)).asText();
             }
-            if (name.startsWith(EKS_OPTIMIZED_AMI_PREFIX) && name.endsWith(EKS_RECOMMENDED_RELEASE_VERSION)) {
+            if (eksReleaseVersion) {
                 value = eksReleaseVersion(name, image.creationDate);
             }
             Parameter parameter = new Parameter(name, value, "String");
@@ -689,11 +695,15 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      * creation date.
      */
     private static String eksReleaseVersion(String name, String creationDate) {
-        String minorVersion = name.substring(EKS_OPTIMIZED_AMI_PREFIX.length()).split("/")[0];
-        String nodeImage = EksClusterManager.SUPPORTED_K8S_VERSIONS.get(minorVersion);
+        String nodeImage = eksNodeImage(name);
         String tag = nodeImage.substring(nodeImage.indexOf(":v") + 2);
         String patchVersion = tag.substring(0, tag.indexOf('-'));
         return patchVersion + "-" + EKS_AMI_BUILD_DATE.format(Instant.parse(creationDate));
+    }
+
+    private static String eksNodeImage(String name) {
+        String minorVersion = name.substring(EKS_OPTIMIZED_AMI_PREFIX.length()).split("/")[0];
+        return EksClusterManager.SUPPORTED_K8S_VERSIONS.get(minorVersion);
     }
 
     public List<Parameter> getParametersByPath(String path, boolean recursive,
