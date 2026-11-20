@@ -1614,22 +1614,6 @@ public class ResourceArnBuilder {
         }
     }
 
-    // ── STS ─────────────────────────────────────────────────────────────────────
-    /**
-     * Uses the serving operation, as {@link #buildLogResources} does: {@code AssumeRole} is
-     * authorized against the role it names, so a policy can allow assuming one role and not another.
-     * Every other operation keeps {@code *}, so a {@code RoleArn} it never reads cannot choose its resource.
-     */
-    public List<String> buildStsResources(String action, ContainerRequestContext ctx) {
-        return List.of("sts:AssumeRole".equals(action) ? buildAssumeRoleArn(ctx) : "*");
-    }
-
-    private String buildAssumeRoleArn(ContainerRequestContext ctx) {
-        String roleArn = firstFormParam(ctx, "RoleArn");
-        // Untrimmed: the handler assumes the role named by this exact string.
-        return roleArn == null || roleArn.isBlank() ? "*" : roleArn;
-    }
-
     /**
      * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
      * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never

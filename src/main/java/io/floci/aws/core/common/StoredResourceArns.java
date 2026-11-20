@@ -165,9 +165,10 @@ public interface StoredResourceArns {
     /**
      * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
      * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
-     * to, a RAM invitation sent to the caller or a share another account owns), so a request naming it is checked on
-     * that ARN alone; false when that account holds no such resource. Whether the caller may use it is the handler's
-     * to answer after the check. Read by the ARN alone, as it runs on every such request.
+     * to, a RAM invitation sent to the caller, a share another account owns or a role STS assumes in its account), so
+     * a request naming it is checked on that ARN alone; false when that account holds no such resource. Whether the
+     * caller may use it is the handler's to answer after the check. Read by the ARN alone, as it runs on every such
+     * request.
      */
     default boolean reachedInItsAccount(String arn, String accountId) {
         return false;
