@@ -87,6 +87,11 @@ final class LaunchBulkheadDockerHttpClient implements DockerHttpClient {
         return slots.availablePermits();
     }
 
+    /** Launches waiting for a slot; an estimate, as {@link Semaphore#getQueueLength()} is. */
+    int queuedLaunches() {
+        return slots.getQueueLength();
+    }
+
     private static String route(String path) {
         int query = path.indexOf('?');
         return query < 0 ? path : path.substring(0, query);

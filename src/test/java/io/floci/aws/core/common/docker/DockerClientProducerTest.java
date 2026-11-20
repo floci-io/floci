@@ -717,6 +717,21 @@ class DockerClientProducerTest {
     }
 
     @Test
+    void validateMaxConcurrentLaunches_negative_throwsNamingTheSetting() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateMaxConcurrentLaunches(-1));
+
+        assertThat(e.getMessage(), containsString("floci.docker.max-concurrent-launches"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES"));
+    }
+
+    @Test
+    void validateMaxConcurrentLaunches_zeroOrPositive_returnsItUnchanged() {
+        assertEquals(0, DockerClientProducer.validateMaxConcurrentLaunches(0));
+        assertEquals(8, DockerClientProducer.validateMaxConcurrentLaunches(8));
+    }
+
+    @Test
     void validateImagePullTimeoutSeconds_positive_returnsItUnchanged() {
         assertEquals(1, DockerClientProducer.validateImagePullTimeoutSeconds(1));
         assertEquals(1800, DockerClientProducer.validateImagePullTimeoutSeconds(1800));

@@ -428,11 +428,8 @@ public class DockerClientProducer {
 
     /** 0 turns the pool gauge lines off; a negative interval names no schedule. */
     static int validatePoolGaugeIntervalSeconds(int seconds) {
-        if (seconds < 0) {
-            throw new IllegalArgumentException("floci.docker.pool-gauge-interval-seconds "
-                    + "(FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS) must be 0 or more, got: " + seconds);
-        }
-        return seconds;
+        return requireAtLeastZero(seconds, "floci.docker.pool-gauge-interval-seconds",
+                "FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS");
     }
 
     /** 0 turns the Docker circuit breaker off; a negative threshold is a misconfiguration. */
@@ -451,16 +448,21 @@ public class DockerClientProducer {
 
     /** 0 means the default, twice the CPUs Floci sees and at least 4; a negative value is a misconfiguration. */
     static int validateMaxConcurrentLaunches(int value) {
-        if (value < 0) {
-            throw new IllegalArgumentException("floci.docker.max-concurrent-launches "
-                    + "(FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES) must be 0 or more, got: " + value);
-        }
-        return value;
+        return requireAtLeastZero(value, "floci.docker.max-concurrent-launches", "FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES");
     }
 
     private static int requireAtLeastOne(int value, String setting, String envVar) {
-        if (value < 1) {
-            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
+        return requireAtLeast(1, value, setting, envVar);
+    }
+
+    private static int requireAtLeastZero(int value, String setting, String envVar) {
+        return requireAtLeast(0, value, setting, envVar);
+    }
+
+    private static int requireAtLeast(int minimum, int value, String setting, String envVar) {
+        if (value < minimum) {
+            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least " + minimum
+                    + ", got: " + value);
         }
         return value;
     }

@@ -76,7 +76,7 @@ class LaunchBulkheadDockerHttpClientTest {
                 launches.add(pool.submit(() -> bulkhead.execute(post("/v1.47/containers/create?name=c"))));
             }
             awaitEquals(2, inFlight::get, "two launches should be in flight");
-            Thread.sleep(100);
+            awaitEquals(3, bulkhead::queuedLaunches, "the other three should be waiting for a slot");
             assertEquals(2, inFlight.get(), "a size-2 bulkhead must hold the other three back");
 
             release.countDown();
