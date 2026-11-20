@@ -100,6 +100,20 @@ class CodeDeployServiceTest {
     }
 
     @Test
+    void deletingAnApplicationDeletesItsDeploymentGroupsAndTheirTags() {
+        String groupArn = service.deploymentGroupArn(REGION, "grouped-app", "group");
+        service.createApplication(REGION, "grouped-app", "Server", null);
+        service.createDeploymentGroup(REGION, "grouped-app", "group", null, ROLE_ARN, Map.of(),
+                List.of(Map.of("Key", "team", "Value", "core")));
+
+        service.deleteApplication(REGION, "grouped-app");
+        service.createApplication(REGION, "grouped-app", "Server", null);
+
+        assertEquals(List.of(), service.listDeploymentGroups(REGION, "grouped-app"));
+        assertEquals(List.of(), service.listTagsForResource(groupArn));
+    }
+
+    @Test
     void createApplicationValidatesTheNameAndComputePlatformAsCodeDeployDoes() {
         assertEquals("ApplicationNameRequiredException", assertThrows(AwsException.class,
                 () -> service.createApplication(REGION, null, null, null)).getErrorCode());

@@ -414,6 +414,12 @@ public class CodeDeployService {
         }
         persistRegion(applications, region);
         tags.remove(applicationArn(region, name));
+        // As on AWS, the application's deployment groups go with it.
+        Map<String, DeploymentGroup> groups = deploymentGroupsFor(region).remove(name);
+        if (groups != null) {
+            groups.keySet().forEach(group -> tags.remove(deploymentGroupArn(region, name, group)));
+            persistRegion(deploymentGroups, region);
+        }
     }
 
     public List<String> listApplications(String region) {
