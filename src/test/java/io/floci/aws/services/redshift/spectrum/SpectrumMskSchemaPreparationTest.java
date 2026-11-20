@@ -3,6 +3,7 @@ package io.floci.aws.services.redshift.spectrum;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.glue.GlueService;
+import io.floci.aws.services.kinesis.KinesisService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -36,6 +38,7 @@ class SpectrumMskSchemaPreparationTest {
     private ExternalCatalogRegistry glueSchemas;
     private KinesisSchemaRegistry kinesisSchemas;
     private MskSchemaRegistry mskSchemas;
+    private KinesisService kinesisService;
     private ExternalTableMaterializer materializer;
     private BackendSql backend;
     private SpectrumQueryPreparation preparation;
@@ -45,13 +48,14 @@ class SpectrumMskSchemaPreparationTest {
         glueSchemas = mock(ExternalCatalogRegistry.class);
         kinesisSchemas = new KinesisSchemaRegistry(AccountAwareStorageBackend.<KinesisSchemaBinding>inMemory(ACCOUNT));
         mskSchemas = new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory(ACCOUNT));
+        kinesisService = mock(KinesisService.class);
         materializer = mock(ExternalTableMaterializer.class);
         backend = mock(BackendSql.class);
         when(backend.permitsCachePublication()).thenReturn(true);
         ExternalMetadataWriter metadata = new ExternalMetadataWriter(mock(GlueService.class), new ObjectMapper());
         KinesisStreamingViews views = new KinesisStreamingViews(
                 new KinesisViewRegistry(AccountAwareStorageBackend.<KinesisViewBinding>inMemory(ACCOUNT)),
-                null, null, null, Clock.systemUTC());
+                kinesisService, null, null, Clock.systemUTC());
         preparation = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, mskSchemas, materializer,
                 new ExternalStatementParser(), mock(GlueService.class), metadata, new ExternalCatalogLocks(),
                 views, (accountId, clusterIdentifier) -> null);
@@ -257,6 +261,7 @@ class SpectrumMskSchemaPreparationTest {
     void refusesAMixedKinesisAndMskMaterializedViewBeforeTouchingKinesisOrTheBackend() {
         preparation.prepare(CREATE, SESSION, backend);
         kinesisSchemas.bind(new KinesisSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "kds", null, ROLE));
+        clearInvocations(backend);
         String mixed = "CREATE MATERIALIZED VIEW mv AS SELECT * FROM kds.events WHERE EXISTS (SELECT 1 FROM msk.orders)";
 
         assertThat(preparation.handlesDdl(mixed, SESSION), equalTo(true));
@@ -265,7 +270,7 @@ class SpectrumMskSchemaPreparationTest {
 
         assertThat(error.sqlState(), equalTo("0A000"));
         assertThat(error.getMessage(), containsString("Streaming materialized views over MSK"));
-        verify(backend, never()).execute(argThat(sql -> sql.contains("CREATE TABLE")));
+        verifyNoInteractions(kinesisService, backend);
     }
 
     @Test

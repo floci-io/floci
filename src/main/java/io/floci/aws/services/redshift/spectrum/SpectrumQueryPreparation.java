@@ -227,15 +227,15 @@ public class SpectrumQueryPreparation {
             dropMskSchema(schema, msk.get(schema.schemaName()), session, backend);
             return true;
         }
-        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
-                && !ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
-            throw new SpectrumSqlException("0A000",
-                    "Streaming materialized views over MSK external schemas are not supported");
-        }
-        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
-                && streamSource(view.select(), session).isPresent()) {
-            createStreamingView(view, kinesis, session, backend);
-            return true;
+        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view) {
+            if (!ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
+                throw new SpectrumSqlException("0A000",
+                        "Streaming materialized views over MSK external schemas are not supported");
+            }
+            if (!ExternalReferenceScanner.scan(view.select(), kinesis.keySet()).isEmpty()) {
+                createStreamingView(view, kinesis, msk, session, backend);
+                return true;
+            }
         }
         if (statement.orElse(null) instanceof ExternalStatement.RefreshView refresh) {
             Optional<KinesisViewBinding> view = views.find(session, refresh.viewSchema(), refresh.viewName());
@@ -614,8 +614,13 @@ public class SpectrumQueryPreparation {
     }
 
     private void createStreamingView(ExternalStatement.CreateStreamingView view,
-                                     Map<String, KinesisSchemaBinding> kinesis, SpectrumSession session,
-                                     BackendSql backend) {
+                                     Map<String, KinesisSchemaBinding> kinesis,
+                                     Map<String, MskSchemaBinding> msk,
+                                     SpectrumSession session, BackendSql backend) {
+        if (!ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
+            throw new SpectrumSqlException("0A000",
+                    "Streaming materialized views over MSK external schemas are not supported");
+        }
         if (session.inTransaction()) {
             throw new SpectrumSqlException("0A000",
                     "CREATE MATERIALIZED VIEW over a stream inside a transaction is not supported");
