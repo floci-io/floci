@@ -238,6 +238,8 @@ checked against the instance's other window. Modifications apply immediately —
 and the enabled CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration`
 enable and disable deltas; omitted fields preserve their values, including an explicit
 false snapshot-copy flag. Create, modify and describe return the stored settings.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` also set `DeletionProtection`
+on the new cluster, defaulting to false.
 
 Aurora member instances retain `PromotionTier` from create and modify, defaulting
 to 1 and accepting 0 through 15. Both the instance response and the cluster member

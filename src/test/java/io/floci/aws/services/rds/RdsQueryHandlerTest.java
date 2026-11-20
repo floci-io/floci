@@ -2943,9 +2943,9 @@ class RdsQueryHandlerTest {
         when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
                 any(), any(), any(), any(), any(), any(), isNull(), isNull())).thenReturn(makeInstance("restored"));
         when(service.restoreDbClusterFromSnapshot(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         for (String invalid : List.of("yes", "", "not-a-boolean")) {
             MultivaluedMap<String, String> p = params();
             p.putSingle("DBInstanceIdentifier", "restored");
@@ -3022,10 +3022,10 @@ class RdsQueryHandlerTest {
         Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
         when(service.restoreDbClusterFromSnapshot(eq("restored"), eq("snapshot"), eq("aurora-postgresql"),
                 isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(eq("restored"), eq("source"), isNull(), isNull(),
                 isNull(), eq(true), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBClusterIdentifier", "restored");
         p.putSingle("SnapshotIdentifier", "snapshot");
@@ -3036,12 +3036,12 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("RestoreDBClusterFromSnapshot", p).getStatus());
         verify(service).restoreDbClusterFromSnapshot("restored", "snapshot", "aurora-postgresql",
-                null, null, null, null, null, null, enabled, null, Map.of(), null);
+                null, null, null, null, null, null, enabled, null, false, Map.of(), null);
         p.putSingle("SourceDBClusterIdentifier", "source");
         p.putSingle("UseLatestRestorableTime", "true");
         assertEquals(200, handler.handle("RestoreDBClusterToPointInTime", p).getStatus());
         verify(service).restoreDbClusterToPointInTime("restored", "source", null, null, null, true,
-                null, null, null, enabled, null, Map.of(), null);
+                null, null, null, enabled, null, false, Map.of(), null);
     }
 
     @Test
