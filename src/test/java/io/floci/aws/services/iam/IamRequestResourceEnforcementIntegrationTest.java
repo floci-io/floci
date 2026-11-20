@@ -1759,6 +1759,35 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Pricing Calculator holds on the workload estimate a request
+     * names by its id, the ones it was created with, so an allow on one team's tag lets the caller read that team's
+     * estimate and not another's.
+     */
+    @Test
+    void aPricingCalculatorResourceTagConditionReadsTheTagsOfTheWorkloadEstimate() {
+        String tagged = workloadEstimate("data");
+        String other = workloadEstimate("web");
+
+        User user = user("res-estimate-team");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"bcm-pricing-calculator:GetWorkloadEstimate\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + other + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /** A workload estimate an administrator creates, tagged with {@code team}, deleted after the test; its id. */
+    private String workloadEstimate(String team) {
+        String id = adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.CreateWorkloadEstimate", "1.0")
+                .body("{\"name\":\"res-estimate-" + team + "\",\"clientToken\":\"" + suffix() + "\",\"tags\":"
+                        + "{\"team\":\"" + team + "\"}}").post("/").then().statusCode(200).extract().path("id");
+        cleanup.register(() -> adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.DeleteWorkloadEstimate",
+                "1.0").body("{\"identifier\":\"" + id + "\"}").post("/").then().statusCode(200));
+        return id;
+    }
+
+    /**
      * A Cost Explorer anomaly monitor or subscription is checked on its ARN, which carries no Region, and a list of
      * them on each ARN its list gives.
      */
