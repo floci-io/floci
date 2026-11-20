@@ -69,8 +69,11 @@ class S3VectorsTaggingIntegrationTest {
             client.tagResource(request -> request.resourceArn(arn).tags(tags));
             Map<String, String> before = client.listTagsForResource(request -> request.resourceArn(arn)).tags();
             assertEquals(50, before.size());
-            assertThrows(ValidationException.class, () -> client.tagResource(request -> request.resourceArn(arn)
-                    .tags(Map.of("overflow", "value", "created", "should-not-change"))));
+            ValidationException overLimit = assertThrows(ValidationException.class,
+                    () -> client.tagResource(request -> request.resourceArn(arn)
+                            .tags(Map.of("overflow", "value", "created", "should-not-change"))));
+            assertEquals("1 validation error detected: Value at 'tags' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 50", overLimit.awsErrorDetails().errorMessage());
             assertEquals(before, client.listTagsForResource(request -> request.resourceArn(arn)).tags());
             client.tagResource(request -> request.resourceArn(arn).tags(Map.of("created", "replaced")));
             assertEquals("replaced", client.listTagsForResource(request -> request.resourceArn(arn)).tags().get("created"));
@@ -88,19 +91,29 @@ class S3VectorsTaggingIntegrationTest {
             for (Map<String, String> tags : List.of(
                     Map.of("", "value"), Map.of("x".repeat(129), "value"), Map.of("invalid!", "value"),
                     Map.of("aws:reserved", "value"), Map.of("valid", "x".repeat(257)), Map.of("valid", "invalid!"))) {
-                assertThrows(ValidationException.class, () -> client.tagResource(request -> request
-                        .resourceArn(arn).tags(tags)));
+                ValidationException invalid = assertThrows(ValidationException.class,
+                        () -> client.tagResource(request -> request.resourceArn(arn).tags(tags)));
+                assertTrue(invalid.awsErrorDetails().errorMessage().startsWith("1 validation error detected: "));
+                assertTrue(invalid.awsErrorDetails().errorMessage().contains("'tags."));
             }
-            assertThrows(ValidationException.class, () -> client.untagResource(request -> request
-                    .resourceArn(arn).tagKeys("")));
+            ValidationException invalidKey = assertThrows(ValidationException.class,
+                    () -> client.untagResource(request -> request.resourceArn(arn).tagKeys("")));
+            assertTrue(invalidKey.awsErrorDetails().errorMessage().startsWith("1 validation error detected: "));
+            assertTrue(invalidKey.awsErrorDetails().errorMessage().contains("'tagKeys'"));
             assertEquals(Map.of("created", "original", "keep", "value"),
                     client.listTagsForResource(request -> request.resourceArn(arn)).tags());
             String missing = index ? fixture.bucketArn() + "/index/missing" : fixture.bucketArn() + "-missing";
-            assertThrows(NotFoundException.class, () -> client.listTagsForResource(request -> request.resourceArn(missing)));
-            assertThrows(NotFoundException.class, () -> client.tagResource(request -> request
-                    .resourceArn(missing).tags(Map.of("key", "value"))));
-            assertThrows(NotFoundException.class, () -> client.untagResource(request -> request
-                    .resourceArn(missing).tagKeys("key")));
+            String missingMessage = index ? "The specified index could not be found"
+                    : "The specified vector bucket could not be found";
+            NotFoundException missingList = assertThrows(NotFoundException.class,
+                    () -> client.listTagsForResource(request -> request.resourceArn(missing)));
+            NotFoundException missingTag = assertThrows(NotFoundException.class,
+                    () -> client.tagResource(request -> request.resourceArn(missing).tags(Map.of("key", "value"))));
+            NotFoundException missingUntag = assertThrows(NotFoundException.class,
+                    () -> client.untagResource(request -> request.resourceArn(missing).tagKeys("key")));
+            assertEquals(missingMessage, missingList.awsErrorDetails().errorMessage());
+            assertEquals(missingMessage, missingTag.awsErrorDetails().errorMessage());
+            assertEquals(missingMessage, missingUntag.awsErrorDetails().errorMessage());
         }
     }
 

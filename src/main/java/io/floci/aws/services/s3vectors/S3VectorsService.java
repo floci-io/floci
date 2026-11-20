@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -557,9 +558,9 @@ public class S3VectorsService implements StoredResourceArns {
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
         if (tagKeys == null) {
-            throw new AwsException("ValidationException", "TagKeys must not be null.", 400);
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tagKeys"));
         }
-        tagKeys.forEach(this::validateTagKey);
+        tagKeys.forEach(key -> validateTagKey(key, "tagKeys"));
         TaggedResource resource = taggedResource(resourceArn, region);
         synchronized (lockFor(resource.bucketName(), resource.region())) {
             VectorBucket bucket = taggedBucket(resource, resourceArn);
@@ -572,29 +573,41 @@ public class S3VectorsService implements StoredResourceArns {
 
     private void validateTags(Map<String, String> tags) {
         if (tags == null) {
-            throw new AwsException("ValidationException", "Tags must not be null.", 400);
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tags"));
         }
         validateTagCount(tags);
         tags.forEach((key, value) -> {
-            validateTagKey(key);
-            if (value == null || value.codePointCount(0, value.length()) > 256
-                    || !TAG_CHARACTERS.matcher(value).matches()) {
-                throw new AwsException("ValidationException", "Tag values must contain at most 256 valid characters.", 400);
-            }
+            validateTagKey(key, "tags.key");
+            validateTagString(value, "tags.value", 0, 256);
         });
     }
 
     private void validateTagCount(Map<String, String> tags) {
-        if (tags.size() > 50) {
-            throw new AwsException("ValidationException", "A resource can have at most 50 tags.", 400);
+        String violation = SmithyValidationErrors.sizeOutOfRange("tags", tags.size(), 0, 50);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
         }
     }
 
-    private void validateTagKey(String key) {
-        if (key == null || key.isEmpty() || key.codePointCount(0, key.length()) > 128
-                || !TAG_CHARACTERS.matcher(key).matches() || key.regionMatches(true, 0, "aws:", 0, 4)) {
-            throw new AwsException("ValidationException",
-                    "Tag keys must contain 1 to 128 valid characters and must not start with aws:.", 400);
+    private void validateTagKey(String key, String path) {
+        validateTagString(key, path, 1, 128);
+        if (key.regionMatches(true, 0, "aws:", 0, 4)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.Violations.QUOTED
+                    .constraint(path, key, "Member must not start with aws:"));
+        }
+    }
+
+    private void validateTagString(String value, String path, int minLength, int maxLength) {
+        if (value == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
+        }
+        String violation = SmithyValidationErrors.lengthOutOfRange(path, value, minLength, maxLength);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+        if (!TAG_CHARACTERS.matcher(value).matches()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.pattern(path, value, TAG_CHARACTERS.pattern()));
         }
     }
 
@@ -617,7 +630,7 @@ public class S3VectorsService implements StoredResourceArns {
         String storedArn = resource.indexName() == null ? bucket.getVectorBucketArn()
                 : getIndex(bucket, resource.indexName()).getIndexArn();
         if (!resourceArn.equals(storedArn)) {
-            throw new AwsException("NotFoundException", "The S3 Vectors resource does not exist.", 404);
+            throw new AwsException("NotFoundException", resource.indexName() == null ? NO_SUCH_BUCKET : NO_SUCH_INDEX, 404);
         }
         return bucket;
     }
