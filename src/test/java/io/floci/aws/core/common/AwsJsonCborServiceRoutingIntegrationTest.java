@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -27,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @QuarkusTest
-@TestProfile(AwsJsonCborServiceRoutingIntegrationTest.RoutingProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class AwsJsonCborServiceRoutingIntegrationTest {
 
@@ -231,16 +228,4 @@ class AwsJsonCborServiceRoutingIntegrationTest {
     private record Operation(String action, String request, int status) {
     }
 
-    public static final class RoutingProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "quarkus.http.test-port", "0",
-                    "floci.services.lambda.reconcile-containers-on-startup", "false",
-                    "floci.services.ec2.reconcile-containers-on-startup", "false",
-                    "floci.services.ecs.reconcile-containers-on-startup", "false",
-                    "floci.services.emr.reconcile-containers-on-startup", "false",
-                    "floci.services.emrserverless.reconcile-containers-on-startup", "false");
-        }
-    }
 }

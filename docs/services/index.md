@@ -14,7 +14,9 @@ select this protocol use the same operations, accounts, regions, and IAM checks 
 
 Modeled blobs use CBOR byte strings. Modeled timestamps use tag 1 with epoch seconds, including
 members whose JSON form is an ISO date. An operation without an output shape returns no body or
-content type. The existing root-path, `X-Amz-Target` legacy CBOR routes retain their own dialect;
+content type. Event-stream operations retain AWS event-stream framing and encode each event payload
+as CBOR, including modeled binary records and timestamps. The existing root-path, `X-Amz-Target`
+legacy CBOR routes retain their own dialect;
 its timestamp conventions do not change.
 
 ## Service Matrix

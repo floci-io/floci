@@ -21,7 +21,6 @@ JSON_ONLY_PREFIXES = {"DynamoDB_20111205", "CloudWatchVersion20130116"}
 MODEL_ALIASES = {"AmazonApiGatewayV2": "apigatewayv2", "CloudTrail_20131101": "cloudtrail",
                  "SNS_20100331": "sns"}
 AGENT_PREFIX = "AmazonSSMMessageDeliveryService"
-AGENT_OPERATIONS = ("GetMessages", "AcknowledgeMessage", "SendReply", "FailMessage", "DeleteMessage", "GetEndpoint")
 # The agent facade has no pinned botocore model. MDS Message fields, including CreatedDate and Payload, are strings.
 # aws/amazon-ssm-agent agent/runcommand/mds/mdsservice.go, immutable blob:
 # https://api.github.com/repos/aws/amazon-ssm-agent/git/blobs/f3e4d67147e5027ca2568d597077e56310921610
@@ -72,8 +71,14 @@ def project_model(model: dict, json_facade: bool = False) -> dict:
     operations = {}
     for name, operation in sorted(model["operations"].items()):
         roots = {direction: operation.get(direction, {}).get("shape") for direction in ("input", "output")}
-        operations[name] = {key: root if root in kept else None for key, root in roots.items()}
-        operations[name]["hasOutput"] = "output" in operation
+        entry = {key: root if root in kept else None for key, root in roots.items()}
+        entry["hasOutput"] = "output" in operation
+        output = shapes.get(roots["output"], {})
+        for member in output.get("members", {}).values():
+            if shapes[member["shape"]].get("eventstream"):
+                entry["eventStream"] = member["shape"]
+        if entry != {"input": None, "output": None, "hasOutput": True}:
+            operations[name] = entry
     return {"timestampFormat": "iso8601" if not json_facade and model["metadata"].get("protocol") in {"rest-json", "query"}
             else "unixTimestamp", "operations": operations, "shapes": projected}
 
@@ -99,9 +104,7 @@ def build(data: Path, catalog: Path, provenance: str) -> dict:
                 aliases[alias] = name
     aliases.update({prefix: name for prefix, name in MODEL_ALIASES.items() if prefix in prefixes})
     aliases["AWS Marketplace Entitlement Service"] = "marketplace-entitlement"
-    services["ec2messages"] = {"timestampFormat": "unixTimestamp", "shapes": {},
-                               "operations": {operation: {"input": None, "output": None, "hasOutput": True}
-                                              for operation in AGENT_OPERATIONS}}
+    services["ec2messages"] = {"timestampFormat": "unixTimestamp", "shapes": {}, "operations": {}}
     aliases[AGENT_PREFIX] = "ec2messages"
     missing = prefixes - aliases.keys()
     if missing:
@@ -109,6 +112,30 @@ def build(data: Path, catalog: Path, provenance: str) -> dict:
     return {"_source": {"generator": "tools/aws/regen_rpcv2_cbor_shapes.py", "botocore": provenance,
                          "ec2messages": "aws/amazon-ssm-agent agent/runcommand/mds/mdsservice.go blob f3e4d67147e5027ca2568d597077e56310921610"},
             "aliases": dict(sorted(aliases.items())), "services": dict(sorted(services.items()))}
+
+
+def render(document: dict) -> str:
+    """Keep each alias, operation and shape on one line, like the other vendored wire models."""
+    lines = ["{", f'  "_source": {json.dumps(document["_source"])},', '  "aliases": {']
+    aliases = list(document["aliases"].items())
+    for index, (name, service) in enumerate(aliases):
+        comma = "," if index < len(aliases) - 1 else ""
+        lines.append(f"    {json.dumps(name)}: {json.dumps(service)}{comma}")
+    lines += ["  },", '  "services": {']
+    services = list(document["services"].items())
+    for index, (name, service) in enumerate(services):
+        lines.append(f"    {json.dumps(name)}: {{")
+        lines.append(f'      "timestampFormat": {json.dumps(service["timestampFormat"])},')
+        for group in ("operations", "shapes"):
+            lines.append(f"      {json.dumps(group)}: {{")
+            entries = list(service[group].items())
+            for position, (key, value) in enumerate(entries):
+                comma = "," if position < len(entries) - 1 else ""
+                lines.append(f"        {json.dumps(key)}: {json.dumps(value)}{comma}")
+            lines.append("      }" + ("," if group == "operations" else ""))
+        lines.append("    }" + ("," if index < len(services) - 1 else ""))
+    lines += ["  }", "}"]
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
@@ -125,7 +152,7 @@ def main() -> int:
             print(f"error: {args.output} is stale; run tools/aws/regen_rpcv2_cbor_shapes.py")
             return 1
     else:
-        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        args.output.write_text(render(result))
     return 0
 
 

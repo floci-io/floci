@@ -12,18 +12,22 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Converts only members whose wire types are identified by the vendored operation model. */
 final class RpcV2CborCodec {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JsonNode metadata;
 
     private RpcV2CborCodec(JsonNode metadata) {
@@ -56,6 +60,62 @@ final class RpcV2CborCodec {
     byte[] encodeResponse(String serviceId, String operation, JsonNode body) throws IOException {
         JsonNode service = service(serviceId);
         String root = service.path("operations").path(operation).path("output").asText(null);
+        return encode(service, root, body);
+    }
+
+    /** Reframes JSON handler events with CBOR payloads, preserving their event names and order. */
+    byte[] encodeEventStream(String serviceId, String operation, byte[] frames) throws IOException {
+        JsonNode service = service(serviceId);
+        JsonNode model = service.path("operations").path(operation);
+        JsonNode events = shape(service, model.path("eventStream").asText(null));
+        ByteBuffer input = ByteBuffer.wrap(frames);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        while (input.hasRemaining()) {
+            int start = input.position();
+            if (input.remaining() < 16) {
+                throw new IOException("Incomplete handler event-stream frame");
+            }
+            int length = input.getInt();
+            int headerLength = input.getInt();
+            input.getInt(); // The encoder replaces the prelude checksum along with the payload.
+            if (length < 16 || length > frames.length - start || headerLength < 0 || headerLength > length - 16) {
+                throw new IOException("Invalid handler event-stream frame length");
+            }
+            int headerEnd = input.position() + headerLength;
+            LinkedHashMap<String, String> headers = new LinkedHashMap<>();
+            while (input.position() < headerEnd) {
+                String name = frameText(input, Byte.toUnsignedInt(input.get()), headerEnd);
+                if (headerEnd - input.position() < 3 || input.get() != 7) {
+                    throw new IOException("Handler event-stream headers must be strings");
+                }
+                int valueLength = Short.toUnsignedInt(input.getShort());
+                headers.put(name, frameText(input, valueLength, headerEnd));
+            }
+            byte[] payload = new byte[length - headerLength - 16];
+            input.get(payload);
+            input.getInt(); // The encoder also replaces the message checksum.
+            String type = headers.getOrDefault(":event-type", headers.get(":exception-type"));
+            String root = "initial-response".equals(type) ? model.path("output").asText(null)
+                    : events.path("members").path(type == null ? "" : type).path("shape").asText(null);
+            if (!"application/json".equals(headers.get(":content-type"))) {
+                throw new IOException("Handler event-stream payload must be JSON");
+            }
+            headers.put(":content-type", "application/cbor");
+            output.write(AwsEventStreamEncoder.encodeMessage(headers, encode(service, root, JSON.readTree(payload))));
+        }
+        return output.toByteArray();
+    }
+
+    private static String frameText(ByteBuffer input, int length, int end) throws IOException {
+        if (length > end - input.position()) {
+            throw new IOException("Invalid handler event-stream header length");
+        }
+        byte[] bytes = new byte[length];
+        input.get(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private byte[] encode(JsonNode service, String root, JsonNode body) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (CBORGenerator generator = (CBORGenerator) CBOR.getFactory().createGenerator(bytes)) {
             encode(generator, service, root, body, null);

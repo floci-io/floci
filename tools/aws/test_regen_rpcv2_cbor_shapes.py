@@ -39,7 +39,7 @@ def test_projection_preserves_json_member_names_and_timestamp_overrides():
 def test_an_ordinary_output_without_special_types_is_not_unit():
     result = project_model(model({"Root": {"type": "structure", "members": {}}}, {
         "Read": {"output": {"shape": "Root"}}, "Delete": {}}))
-    assert result["operations"]["Read"] == {"input": None, "output": None, "hasOutput": True}
+    assert "Read" not in result["operations"]
     assert result["operations"]["Delete"] == {"input": None, "output": None, "hasOutput": False}
 
 
@@ -70,3 +70,14 @@ def test_check_command_ignores_provenance_and_detects_data_drift(tmp_path, monke
     assert generator.main() == 0
     output.write_text(json.dumps({**expected, "aliases": {}}))
     assert generator.main() == 1
+
+
+def test_projection_records_the_output_event_stream_union():
+    result = project_model(model({
+        "Root": {"type": "structure", "members": {"Events": {"shape": "Events"}}},
+        "Events": {"type": "structure", "eventstream": True,
+                   "members": {"DataEvent": {"shape": "Event"}}},
+        "Event": {"type": "structure", "members": {"Data": {"shape": "Blob"}}},
+        "Blob": {"type": "blob"}}))
+    assert result["operations"]["Read"]["eventStream"] == "Events"
+    assert result["shapes"]["Events"]["members"]["DataEvent"]["shape"] == "Event"

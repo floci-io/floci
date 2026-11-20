@@ -8,7 +8,6 @@ import com.fasterxml.jackson.dataformat.cbor.CBORParser;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.SdkBytes;
@@ -42,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(AwsJsonCborServiceRoutingIntegrationTest.RoutingProfile.class)
 class AwsJsonCborTypedShapesIntegrationTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());

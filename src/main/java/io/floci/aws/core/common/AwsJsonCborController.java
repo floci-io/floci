@@ -29,6 +29,7 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
@@ -62,6 +63,7 @@ public class AwsJsonCborController {
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
     private static final RpcV2CborCodec RPC_CODEC = RpcV2CborCodec.load();
     private static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
+    private static final String EVENT_STREAM_MEDIA_TYPE = "application/vnd.amazon.eventstream";
     private static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
 
     /** The RPC v2 path parameters {@link IamEnforcementFilter} authorizes, as this endpoint dispatches them. */
@@ -333,7 +335,7 @@ public class AwsJsonCborController {
     @POST
     @Path("service/{serviceId}/operation/{operation}")
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
-    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE, EVENT_STREAM_MEDIA_TYPE})
     @RunOnVirtualThread
     public Response handleSmithyRpcV2Cbor(
             @PathParam(RPC_V2_SERVICE_PARAMETER) String serviceId,
@@ -364,6 +366,12 @@ public class AwsJsonCborController {
                     .header(HttpHeaders.CONTENT_LENGTH, null)
                     .header("X-Amz-Crc32", null)
                     .header("smithy-protocol", "rpc-v2-cbor");
+            if (delegated.getMediaType() != null
+                    && MediaType.valueOf(EVENT_STREAM_MEDIA_TYPE).isCompatible(delegated.getMediaType())
+                    && delegated.getEntity() instanceof byte[] frames) {
+                return response.type(EVENT_STREAM_MEDIA_TYPE)
+                        .entity(RPC_CODEC.encodeEventStream(serviceId, operation, frames)).build();
+            }
             if (modeled && successful && !RPC_CODEC.hasOutput(serviceId, operation)) {
                 return response.entity(null).type((String) null).build();
             }
