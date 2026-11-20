@@ -427,6 +427,15 @@ final class EmrServiceFixture {
                 iam);
     }
 
+    /** A new service on the same storage and clock, as {@link #restart} builds, with this default release label. */
+    EmrService withDefaultReleaseLabel(String label) {
+        EmulatorConfig config = config(false);
+        when(config.services().emr().defaultReleaseLabel()).thenReturn(label);
+        return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
+                iam);
+    }
+
     private EmulatorConfig config(boolean reconcile) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
