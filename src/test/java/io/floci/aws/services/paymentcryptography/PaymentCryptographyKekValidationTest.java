@@ -128,7 +128,7 @@ class PaymentCryptographyKekValidationTest {
         PaymentCryptographyKey kek = kek();
 
         Map<String, Object> asked = validation.generate(request(kek.getArn(), null,
-                "BYTES_16", mask), "us-east-1");
+                "BYTES_16", mask, "TDES_2KEY"), "us-east-1");
         String send = (String) asked.get("RandomKeySend");
         String receive = (String) asked.get("RandomKeyReceive");
 
@@ -136,8 +136,8 @@ class PaymentCryptographyKekValidationTest {
         assertTrue(send.matches("[0-9A-F]{32}"), send);
         assertTrue(receive.matches("[0-9A-F]{32}"), receive);
 
-        Map<String, Object> answered = validation.generate(request(kek.getArn(), send, null, mask),
-                "us-east-1");
+        Map<String, Object> answered = validation.generate(request(kek.getArn(), send, null, mask,
+                "TDES_2KEY"), "us-east-1");
 
         assertEquals(send, answered.get("RandomKeySend"));
         assertEquals(receive, answered.get("RandomKeyReceive"));
@@ -189,14 +189,9 @@ class PaymentCryptographyKekValidationTest {
     @Test
     void aRequestThatNamesNoVariantIsRefused() {
         PaymentCryptographyKey kek = kek();
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode body = mapper.createObjectNode();
-        body.put("KeyIdentifier", kek.getArn());
-        body.put("RandomKeySendVariantMask", "VARIANT_MASK_82");
-        body.set("KekValidationType", mapper.createObjectNode());
 
-        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(body,
-                "us-east-1"));
+        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
+                requestWithoutAVariant(kek.getArn()), "us-east-1"));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
@@ -204,17 +199,9 @@ class PaymentCryptographyKekValidationTest {
     @Test
     void aMaskTheModelDoesNotNameIsRefused() {
         PaymentCryptographyKey kek = kek();
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode body = mapper.createObjectNode();
-        body.put("KeyIdentifier", kek.getArn());
-        body.put("RandomKeySendVariantMask", "VARIANT_MASK_42");
-        ObjectNode type = mapper.createObjectNode();
-        ObjectNode request = mapper.createObjectNode();
-        request.put("DeriveKeyAlgorithm", "TDES_2KEY");
-        type.set("KekValidationRequest", request);
-        body.set("KekValidationType", type);
 
-        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(body,
+        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
+                request(kek.getArn(), null, "BYTES_16", "VARIANT_MASK_42", "TDES_2KEY"),
                 "us-east-1"));
 
         assertEquals("ValidationException", refused.getErrorCode());
@@ -223,17 +210,9 @@ class PaymentCryptographyKekValidationTest {
     @Test
     void aDerivedAlgorithmThatIsNotTheKeysIsRefused() {
         PaymentCryptographyKey kek = kek();
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode body = mapper.createObjectNode();
-        body.put("KeyIdentifier", kek.getArn());
-        body.put("RandomKeySendVariantMask", "VARIANT_MASK_82");
-        ObjectNode type = mapper.createObjectNode();
-        ObjectNode request = mapper.createObjectNode();
-        request.put("DeriveKeyAlgorithm", "AES_256");
-        type.set("KekValidationRequest", request);
-        body.set("KekValidationType", type);
 
-        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(body,
+        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
+                request(kek.getArn(), null, "BYTES_16", "VARIANT_MASK_82", "AES_256"),
                 "us-east-1"));
 
         assertEquals("ValidationException", refused.getErrorCode());
@@ -250,14 +229,14 @@ class PaymentCryptographyKekValidationTest {
      * number is given.
      */
     private static JsonNode request(String keyIdentifier, String incoming, String length) {
-        return request(keyIdentifier, incoming, length, "VARIANT_MASK_82");
+        return request(keyIdentifier, incoming, length, "VARIANT_MASK_82", "TDES_2KEY");
     }
 
     /**
-     * A request of the operation under one of the masks the model names.
+     * A request of the operation under the mask and the algorithm the request names.
      */
     private static JsonNode request(String keyIdentifier, String incoming, String length,
-                                    String mask) {
+                                    String mask, String algorithm) {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode body = mapper.createObjectNode();
         body.put("KeyIdentifier", keyIdentifier);
@@ -265,7 +244,7 @@ class PaymentCryptographyKekValidationTest {
         ObjectNode type = mapper.createObjectNode();
         if (incoming == null) {
             ObjectNode attributes = mapper.createObjectNode();
-            attributes.put("DeriveKeyAlgorithm", "TDES_2KEY");
+            attributes.put("DeriveKeyAlgorithm", algorithm);
             attributes.put("RandomKeyMaxLength", length);
             type.set("KekValidationRequest", attributes);
         } else {
@@ -274,6 +253,18 @@ class PaymentCryptographyKekValidationTest {
             type.set("KekValidationResponse", attributes);
         }
         body.set("KekValidationType", type);
+        return body;
+    }
+
+    /**
+     * A request whose validation type names no variant at all.
+     */
+    private static JsonNode requestWithoutAVariant(String keyIdentifier) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = mapper.createObjectNode();
+        body.put("KeyIdentifier", keyIdentifier);
+        body.put("RandomKeySendVariantMask", "VARIANT_MASK_82");
+        body.set("KekValidationType", mapper.createObjectNode());
         return body;
     }
 }
