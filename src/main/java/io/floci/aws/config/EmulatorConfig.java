@@ -4497,9 +4497,11 @@ public interface EmulatorConfig {
         int poolGaugeIntervalSeconds();
 
         /**
-         * Consecutive Docker calls that must fail at the transport (an I/O error or an unusable
-         * socket, never an HTTP response) before Floci pings the daemon and, when the ping fails too,
-         * fails every Docker call at once until the daemon answers again. 0 turns this off.
+         * Consecutive Docker call attempts that must fail at the transport (an I/O error or an
+         * unusable socket, never an HTTP response) before Floci pings the daemon and, when the ping
+         * fails too, fails every Docker call at once until the daemon answers again. Each retry of a
+         * call is an attempt, so one call the retry layer replays can reach the threshold alone; the
+         * ping keeps that from opening the breaker over a daemon that answers. 0 turns this off.
          */
         @WithDefault("3")
         int breakerFailureThreshold();

@@ -134,7 +134,7 @@ floci:
     max-connections: 1024                    # Docker client connection pool for short calls
     streaming-max-connections: 3072          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
     pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
-    breaker-failure-threshold: 3             # Consecutive Docker transport failures before Floci pings the daemon and fails calls fast if it is gone; 0 = off
+    breaker-failure-threshold: 3             # Consecutive Docker call attempts (each retry counts) failing at the transport before Floci pings the daemon and fails calls fast if it is gone; 0 = off
     breaker-probe-interval-seconds: 5        # Seconds between pings while the daemon is unreachable
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries

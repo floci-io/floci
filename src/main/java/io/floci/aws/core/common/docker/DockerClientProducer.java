@@ -55,9 +55,13 @@ public class DockerClientProducer {
 
     private static final ObjectMapper DOCKER_CONTEXT_JSON_MAPPER = new ObjectMapper();
 
+    /** Bounds the connect and the answer of the Docker circuit breaker's confirming ping. */
+    static final Duration PING_TIMEOUT = Duration.ofSeconds(5);
+
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
     private final DockerCircuitBreaker breaker;
+    private FlociDockerHttpClient pingTransport;
 
     @Inject
     public DockerClientProducer(EmulatorConfig config) {
@@ -486,7 +490,42 @@ public class DockerClientProducer {
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
         gaugeLogger.unregister("control-plane");
         breaker.close();
+        closePingTransport();
         client.close();
+    }
+
+    /**
+     * Gives the breaker a ping transport of its own, made once by whichever client is built first. Its
+     * one connection is used only by the breaker's single probe thread, so a ping never waits for a
+     * pooled connection behind the calls whose failures it is confirming, and {@link #PING_TIMEOUT}
+     * bounds the connect and the answer, so a daemon that accepts a connection but never answers holds a
+     * ping for seconds rather than the API timeout.
+     */
+    private synchronized void usePingTransport(DefaultDockerClientConfig clientConfig) {
+        if (!breaker.isEnabled() || pingTransport != null) {
+            return;
+        }
+        pingTransport = newPingTransport(clientConfig, PING_TIMEOUT);
+        breaker.useProbe(DockerCircuitBreaker.pingOver(pingTransport));
+    }
+
+    /** One connection whose connect, lease and answer are each bounded by {@code timeout}. */
+    static FlociDockerHttpClient newPingTransport(DefaultDockerClientConfig clientConfig, Duration timeout) {
+        return new FlociDockerHttpClient.Builder()
+                .dockerHost(clientConfig.getDockerHost())
+                .sslConfig(clientConfig.getSSLConfig())
+                .maxConnections(1)
+                .connectionTimeout(timeout)
+                .responseTimeout(timeout)
+                .connectionRequestTimeout(timeout)
+                .build();
+    }
+
+    private synchronized void closePingTransport() throws IOException {
+        if (pingTransport != null) {
+            pingTransport.close();
+            pingTransport = null;
+        }
     }
 
     void disposeStreamingDockerClient(@Disposes @StreamingDocker DockerClient client) throws IOException {
@@ -539,8 +578,7 @@ public class DockerClientProducer {
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
-        // The control-plane transport pings for the breaker; the streaming one only until it exists.
-        breaker.useProbe(DockerCircuitBreaker.pingOver(transport), "control-plane".equals(role));
+        usePingTransport(clientConfig);
         return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout, breaker));
     }
 

@@ -1,8 +1,10 @@
 package io.floci.aws.core.common.docker;
 
+import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.transport.DockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient.Request;
 import com.github.dockerjava.transport.DockerHttpClient.Response;
+import io.floci.aws.core.common.docker.DockerCircuitBreaker.PingResult;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -10,6 +12,8 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.SocketException;
 import java.nio.file.NoSuchFileException;
 import java.time.Duration;
@@ -25,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -48,8 +53,8 @@ class DockerCircuitBreakerTest {
         AtomicInteger pings = new AtomicInteger();
         breaker.useProbe(() -> {
             pings.incrementAndGet();
-            return false;
-        }, true);
+            return PingResult.UNREACHABLE;
+        });
         CountingTransport transport = CountingTransport.failing(() -> true);
         DockerHttpClient client = new CircuitBreakingDockerHttpClient(transport, breaker);
 
@@ -68,23 +73,79 @@ class DockerCircuitBreakerTest {
 
     // Catches: a burst of broken pipes during a fan-out build taking Docker away from every service.
     @Test
-    void staysClosedWhenThePingAnswers() throws InterruptedException {
+    void staysClosedWhenThePingAnswers() {
         breaker = new DockerCircuitBreaker(3, Duration.ofMillis(50));
         AtomicInteger pings = new AtomicInteger();
         breaker.useProbe(() -> {
             pings.incrementAndGet();
-            return true;
-        }, true);
+            return PingResult.ANSWERED;
+        });
         DockerHttpClient client = new CircuitBreakingDockerHttpClient(CountingTransport.failing(() -> true), breaker);
 
         for (int i = 0; i < 3; i++) {
             assertThrows(RuntimeException.class, () -> client.execute(GET_INFO));
         }
-        awaitTrue(() -> pings.get() == 1, "the third failure should ping the daemon");
-        Thread.sleep(200);
+        awaitTrue(() -> breaker.probesRun() == 1, "the third failure should ping the daemon");
 
         assertFalse(breaker.isOpen(), "a daemon that answers the ping must not open the breaker");
-        assertEquals(1, pings.get(), "a closed breaker should not keep pinging");
+        assertFalse(breaker.isProbeScheduled(), "a closed breaker should not schedule another ping");
+        assertEquals(1, pings.get());
+    }
+
+    // Catches: a daemon that answers its ping with an error status (a 500, a 503) being taken for gone.
+    @Test
+    void aPingAnsweredWithAnErrorStatusKeepsTheBreakerClosed() {
+        DockerCircuitBreaker.Probe ping = DockerCircuitBreaker.pingOver(
+                new CountingTransport(() -> new StatusResponse(500)));
+        assertEquals(PingResult.ANSWERED, ping.ping());
+
+        breaker = new DockerCircuitBreaker(1, Duration.ofMillis(50));
+        breaker.useProbe(ping);
+        DockerHttpClient client = new CircuitBreakingDockerHttpClient(CountingTransport.failing(() -> true), breaker);
+        assertThrows(RuntimeException.class, () -> client.execute(GET_INFO));
+        awaitTrue(() -> breaker.probesRun() == 1, "the failure should ping the daemon");
+
+        assertFalse(breaker.isOpen(), "an HTTP status from the ping is an answer");
+    }
+
+    // Catches: a ping that only waited for a pooled connection, during the fan-out the ping is there
+    // for, opening the breaker over a healthy daemon.
+    @Test
+    void aPingThatOnlyWaitsForAConnectionNeitherOpensNorStopsLaterPings() {
+        DockerCircuitBreaker.Probe ping = DockerCircuitBreaker.pingOver(new CountingTransport(() -> {
+            throw new RuntimeException(new ConnectionRequestTimeoutException("lease"));
+        }));
+        assertEquals(PingResult.INCONCLUSIVE, ping.ping());
+        assertEquals(PingResult.UNREACHABLE,
+                DockerCircuitBreaker.pingOver(CountingTransport.failing(() -> true)).ping());
+
+        breaker = new DockerCircuitBreaker(1, Duration.ofMillis(50));
+        breaker.useProbe(ping);
+        DockerHttpClient client = new CircuitBreakingDockerHttpClient(CountingTransport.failing(() -> true), breaker);
+        assertThrows(RuntimeException.class, () -> client.execute(GET_INFO));
+        awaitTrue(() -> breaker.probesRun() == 1, "the failure should ping the daemon");
+        assertFalse(breaker.isOpen(), "a ping that never reached the daemon must not open the breaker");
+
+        assertThrows(RuntimeException.class, () -> client.execute(GET_INFO));
+        awaitTrue(() -> breaker.probesRun() == 2, "the next transport failure should ping again");
+    }
+
+    // Catches: the confirming ping waiting out the API timeout (300 s by default) on a daemon that
+    // accepts the connection and never answers, while every call keeps entering the transport.
+    @Test
+    void thePingTransportGivesUpOnASilentDaemonWithinItsTimeout() throws IOException {
+        try (ServerSocket silent = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            DefaultDockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
+                    .withDockerHost("tcp://127.0.0.1:" + silent.getLocalPort())
+                    .withDockerTlsVerify(false)
+                    .build();
+            try (FlociDockerHttpClient transport = DockerClientProducer.newPingTransport(config, Duration.ofMillis(300))) {
+                DockerCircuitBreaker.Probe ping = DockerCircuitBreaker.pingOver(transport);
+                PingResult result = assertTimeoutPreemptively(Duration.ofSeconds(10), ping::ping,
+                        "the ping must give up after its own timeout, not the API timeout");
+                assertEquals(PingResult.UNREACHABLE, result);
+            }
+        }
     }
 
     // Catches: a daemon that answers with an error status (a 500, a 404) being treated as gone.
@@ -94,8 +155,8 @@ class DockerCircuitBreakerTest {
         AtomicBoolean pinged = new AtomicBoolean();
         breaker.useProbe(() -> {
             pinged.set(true);
-            return false;
-        }, true);
+            return PingResult.UNREACHABLE;
+        });
         AtomicInteger call = new AtomicInteger();
         CountingTransport transport = new CountingTransport(() -> {
             if (call.incrementAndGet() % 2 == 1) {
@@ -121,7 +182,7 @@ class DockerCircuitBreakerTest {
     @Test
     void theRetryLayerOverAnOpenBreakerMakesOneAttemptAndNeverBacksOff() {
         breaker = new DockerCircuitBreaker(1, Duration.ofMillis(50));
-        breaker.useProbe(() -> false, true);
+        breaker.useProbe(() -> PingResult.UNREACHABLE);
         CountingTransport transport = CountingTransport.failing(() -> true);
         DockerHttpClient breaking = new CircuitBreakingDockerHttpClient(transport, breaker);
         assertThrows(RuntimeException.class, () -> breaking.execute(GET_INFO));
@@ -140,7 +201,7 @@ class DockerCircuitBreakerTest {
     void aPingThatAnswersClosesAnOpenBreaker() {
         breaker = new DockerCircuitBreaker(1, Duration.ofMillis(50));
         AtomicBoolean daemonBack = new AtomicBoolean();
-        breaker.useProbe(daemonBack::get, true);
+        breaker.useProbe(() -> daemonBack.get() ? PingResult.ANSWERED : PingResult.UNREACHABLE);
         AtomicBoolean failing = new AtomicBoolean(true);
         CountingTransport transport = CountingTransport.failing(failing::get);
         DockerHttpClient client = new CircuitBreakingDockerHttpClient(transport, breaker);
@@ -172,7 +233,7 @@ class DockerCircuitBreakerTest {
     @Test
     void producerPutsTheBreakerUnderTheRetryLayerOfBothTransports() {
         breaker = new DockerCircuitBreaker(1, Duration.ofMillis(50));
-        breaker.useProbe(() -> false, true);
+        breaker.useProbe(() -> PingResult.UNREACHABLE);
         CountingTransport transport = CountingTransport.failing(() -> true);
         DockerHttpClient control = DockerClientProducer.wrapForRole(transport, "control-plane",
                 Duration.ofSeconds(30), breaker);
