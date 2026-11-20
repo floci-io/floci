@@ -96,6 +96,10 @@ final class SesServiceTestBuilder {
         return identityStore;
     }
 
+    InMemoryStorage<String, EmailTemplate> templateStore() {
+        return templateStore;
+    }
+
     InMemoryStorage<String, SentEmail> emailStore() {
         return emailStore;
     }
