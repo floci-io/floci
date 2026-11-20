@@ -1743,6 +1743,9 @@ public class SqsService implements Resettable, ResourceProvider {
             throw invalidReceiptHandle(receiptHandle,
                     "Message does not exist or is not available for visibility timeout change", inBatch);
         }
+        if (result == GuardedMessageQueue.HandleResult.APPLIED && visibilityTimeout == 0) {
+            notifyReceivers(storageKey);
+        }
         return result == GuardedMessageQueue.HandleResult.APPLIED;
     }
 
