@@ -1,13 +1,13 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -27,18 +27,11 @@ class IamEntityMessagesIntegrationTest {
         return UUID.randomUUID().toString().substring(0, 8);
     }
 
-    private static RequestSpecification request() {
-        return given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
-                        + "/20260215/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc");
-    }
-
+    /** {@code params} lead with {@code "Action", <name>}, as every call site writes them. */
     private static void call(int status, String code, String message, String... params) {
-        RequestSpecification req = request();
-        for (int i = 0; i < params.length; i += 2) {
-            req = req.formParam(params[i], params[i + 1]);
-        }
-        ValidatableResponse resp = req.when().post("/").then().statusCode(status);
+        ValidatableResponse resp = QueryRequests
+                .request(ACCOUNT, "iam", params[1], Arrays.copyOfRange(params, 2, params.length))
+                .when().post("/").then().statusCode(status);
         if (code != null) {
             resp.body("ErrorResponse.Error.Code", equalTo(code))
                     .body("ErrorResponse.Error.Message", equalTo(message));
@@ -46,9 +39,8 @@ class IamEntityMessagesIntegrationTest {
     }
 
     private static String createPolicy(String name) {
-        return request()
-                .formParam("Action", "CreatePolicy").formParam("PolicyName", name)
-                .formParam("PolicyDocument", DOC)
+        return QueryRequests.request(ACCOUNT, "iam", "CreatePolicy",
+                        new String[] {"PolicyName", name, "PolicyDocument", DOC})
                 .when().post("/").then().statusCode(200)
                 .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
     }
