@@ -127,6 +127,28 @@ final class PaymentCryptographyKeyRules {
     }
 
     /**
+     * The Triple DES algorithm an AS2805 key has to have.
+     *
+     * <p>AS2805's cryptography is all TDES: the ceremony runs over Single DES blocks, the
+     * key variants are DES key variants, and the random numbers the standard names are
+     * whole DES blocks. A key of another family is refused rather than read as bytes it is
+     * not.
+     *
+     * @param algorithmName the algorithm of the key
+     * @param role what the key is, for the message
+     * @return the algorithm
+     */
+    static PaymentCryptographyKeyAlgorithm requireTdes(String algorithmName, String role) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(algorithmName);
+        if (algorithm == null || !algorithm.isTdes()) {
+            throw new AwsException("ValidationException",
+                    "an AS2805 key is a TDES key, but the " + role + " is " + algorithmName, 400);
+        }
+        return algorithm;
+    }
+
+    /**
      * The mode of use a key has to have to derive from it.
      *
      * <p>A derivation reads the key, so the key has to allow it. A key with no modes

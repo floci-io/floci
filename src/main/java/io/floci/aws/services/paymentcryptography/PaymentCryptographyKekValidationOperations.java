@@ -24,9 +24,10 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttri
  * form is the node that answers: it deciphers the number it was given, inverts it and
  * enciphers the inverted value, which is the answer the first node compares.
  *
- * <p>The key is a key encryption key, the one AS2805 calls the terminal major key. The
- * reference does not name the usage the key must have for this operation, so the one the
- * service's own AS2805 import gives that key is the one it asks for.
+ * <p>The key is a Triple DES key encryption key, the one AS2805 calls the terminal major
+ * key. The reference does not name the usage the key must have for this operation, so the
+ * one the service's own AS2805 import gives that key is the one it asks for, and AS2805's
+ * cryptography is all TDES, so a key of another family is refused.
  */
 @ApplicationScoped
 public class PaymentCryptographyKekValidationOperations {
@@ -95,7 +96,7 @@ public class PaymentCryptographyKekValidationOperations {
         if ("KekValidationRequest".equals(form)) {
             // The node that starts the exchange enciphers under the key.
             PaymentCryptographyKeyRules.requireMode(key, "Encrypt",
-                    "encrypting a random number for a KEK validation");
+                    "enciphering a random number for a KEK validation");
             JsonNode attributes = type.get("KekValidationRequest");
             requireAlgorithm(key, algorithm, text(attributes, "DeriveKeyAlgorithm"));
             byte[] rn = PaymentCryptographyKekValidation.oddParity(
@@ -104,9 +105,11 @@ public class PaymentCryptographyKekValidationOperations {
             receive = PaymentCryptographyKekValidation.encrypt(
                     PaymentCryptographyKekValidation.invert(rn), variantNotRn, algorithm);
         } else {
-            // The node that answers deciphers under the key.
+            // The node that answers deciphers the number and enciphers the inverted one.
             PaymentCryptographyKeyRules.requireMode(key, "Decrypt",
                     "deciphering a random number for a KEK validation");
+            PaymentCryptographyKeyRules.requireMode(key, "Encrypt",
+                    "enciphering the inverted number for a KEK validation");
             send = HEX.parseHex(text(type.get("KekValidationResponse"), "RandomKeySend"));
             byte[] rn = PaymentCryptographyKekValidation.decrypt(send, variantRn, algorithm);
             receive = PaymentCryptographyKekValidation.encrypt(
@@ -150,15 +153,13 @@ public class PaymentCryptographyKekValidationOperations {
 
     /**
      * The algorithm of the key, which is the algorithm the variant is used with.
+     *
+     * <p>AS2805's cryptography is all TDES: the ceremony runs over Single DES blocks and
+     * the key variants are DES key variants, so a key of another family is refused.
      */
     private static PaymentCryptographyKeyAlgorithm algorithmOf(PaymentCryptographyKey key) {
-        PaymentCryptographyKeyAlgorithm algorithm =
-                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
-        if (algorithm == null || !algorithm.symmetric()) {
-            throw validation("the key " + key.getArn() + " is a " + key.getKeyAlgorithm()
-                    + " key, and a KEK validation is made with a symmetric one");
-        }
-        return algorithm;
+        return PaymentCryptographyKeyRules.requireTdes(key.getKeyAlgorithm(),
+                "key " + key.getArn());
     }
 
     /**

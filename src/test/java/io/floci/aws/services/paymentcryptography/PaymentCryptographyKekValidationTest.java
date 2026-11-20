@@ -118,6 +118,10 @@ class PaymentCryptographyKekValidationTest {
                 PaymentCryptographyKekValidation.oddParity(new byte[] {0x7E}));
         assertArrayEquals(new byte[] {0x7F},
                 PaymentCryptographyKekValidation.oddParity(new byte[] {0x7F}));
+        // A byte whose lowest bit is already set and whose count is even is the one the
+        // rule has to correct: setting the bit alone would leave the byte even.
+        assertArrayEquals(new byte[] {0x02},
+                PaymentCryptographyKekValidation.oddParity(new byte[] {0x03}));
     }
 
     // ---- the operation -------------------------------------------------------
@@ -173,6 +177,33 @@ class PaymentCryptographyKekValidationTest {
 
         AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
                 request(wrong.getArn(), null, "BYTES_16"), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatMayNotEncryptIsRefusedInTheResponseForm() {
+        // The node that answers enciphers the inverted number, so a key that may only
+        // decipher is refused there as well.
+        PaymentCryptographyKey wrong = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY",
+                "TR31_K0_KEY_ENCRYPTION_KEY", "Decrypt");
+
+        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
+                request(wrong.getArn(), RN, null, "VARIANT_MASK_82", "TDES_2KEY"), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatIsNotTdesIsRefused() {
+        // AS2805's cryptography is all TDES, so a key of another family is refused before
+        // any random material is made.
+        PaymentCryptographyKey wrong = PaymentCryptographyTestFixtures.createKey(service, "AES_128",
+                "TR31_K0_KEY_ENCRYPTION_KEY", "Encrypt", "Decrypt");
+
+        AwsException refused = assertThrows(AwsException.class, () -> validation.generate(
+                request(wrong.getArn(), null, "BYTES_16", "VARIANT_MASK_82", "AES_128"),
+                "us-east-1"));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
