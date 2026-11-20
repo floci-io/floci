@@ -38,6 +38,7 @@ name: IAM Data Drift
 on:
   pull_request:
     paths:
+      - 'Makefile'
       - 'src/main/resources/aws/iam-service-namespaces.json'
       - 'src/main/resources/aws/iam-action-resources.json'
       - 'tools/aws/regen_service_namespaces.py'
