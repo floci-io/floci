@@ -12,9 +12,6 @@ import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
-import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.s3.S3ControlArnUtils;
 import io.floci.aws.services.s3.S3ObjectKeys;
@@ -216,43 +213,6 @@ public class ResourceArnBuilder {
             }
         }
         return null;
-    }
-
-    /** Uses the serving operation and the same raw names as the handler. */
-    public List<String> buildLogResources(String action, ContainerRequestContext ctx,
-                                          String region, String accountId, String partition) {
-        // Operations the vendored table reads take their resources from it.
-        if (RequestResources.reads(action)) {
-            return namedResources("logs", action, ctx, region, accountId, partition);
-        }
-        boolean stream = "logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action);
-        boolean group = switch (action) {
-            case "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
-                    "logs:DeleteRetentionPolicy" -> true;
-            default -> false;
-        };
-        if (!stream && !group && !LogGroupTagTarget.supports(action)) {
-            return List.of("*");
-        }
-        JsonNode body = readJsonBody(ctx);
-        if (body == null) {
-            return List.of("*");
-        }
-        if (LogGroupTagTarget.supports(action)) {
-            String resourceArn = body.path("resourceArn").asText();
-            // A delivery source, destination or delivery is tagged through the same operations.
-            if (CloudWatchLogsDeliveryService.isDeliveryResourceArn(resourceArn)) {
-                return List.of(resourceArn);
-            }
-            if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
-                return List.of(resourceArn);
-            }
-            return List.of(LogGroupTagTarget.resolve(resourceArn, region, accountId, partition).arn());
-        }
-        String name = body.path("logGroupName").asText();
-        String resource = "log-group:" + name + (stream
-                ? ":log-stream:" + body.path("logStreamName").asText() : ":*");
-        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId, resource).toString());
     }
 
     // ── IAM ─────────────────────────────────────────────────────────────────────
