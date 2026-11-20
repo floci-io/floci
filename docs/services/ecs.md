@@ -522,6 +522,34 @@ a `nextToken`. A service joins the namespace its Service Connect configuration n
 cluster's default when it names none, at the time the configuration is set: a later change to the
 cluster default does not move it.
 
+Each `services[]` entry of a Service Connect configuration is an endpoint, and Floci creates a
+Cloud Map service for it in the namespace the service joined, named its `discoveryName` or,
+without one, its `portName`, as AWS does. A client configuration, with no entries, gets one Cloud
+Map service for the client, `aws-ecs-sc.client.<UUID>.<service name>`, as on AWS; Floci derives the
+UUID from the service's ARN, since how AWS derives its own isn't documented. Each Cloud Map service
+is of type `HTTP`, with no DNS records, since Service Connect does not use Route 53, is described as
+`Managed by <ECS service ARN>` and is tagged `AmazonECSManaged=true`, as ECS creates them. The
+deployments of `DescribeServices` report them as `serviceConnectResources` (`discoveryName`, and the
+Cloud Map service's ARN as `discoveryArn`). An `UpdateService` keeps the Cloud Map service of an
+endpoint it keeps, creates the new ones and deletes the ones it drops, and `DeleteService` deletes
+them all, so the namespace can be deleted afterwards; AWS deletes them within a minute or so, Floci
+in the call. A deployment rollback brings them in line with the configuration it restores, or, when
+another service took one of its discovery names meanwhile, leaves the service without endpoints.
+
+A discovery name is up to 64 lowercase letters, numbers, underscores and hyphens, not beginning with
+a hyphen, and unique in its namespace, compared as Cloud Map compares names (without case in a DNS
+namespace). `CreateService` refuses a configuration that breaks this with `ClientException`, and
+`UpdateService` with `InvalidParameterException`, each with ECS's message, and the request then
+changes nothing: a name outside the rule; a name the configuration gives twice ("The following
+discoveryNames are defined more than once: [...]"); a name another ECS service's endpoint holds ("SC
+service is already used by" the namespace's ARN); or one a Cloud Map service created outside ECS
+holds, refused with Cloud Map's "Service already exists.", which ECS passes on. The Cloud Map
+services are created when `CreateService` or `UpdateService` sets the configuration, in the
+namespace it joins then, so a configuration whose namespace Cloud Map does not hold at that point
+gets none. Floci registers
+no task in them and does not route the `clientAliases`: a task reaches another service's tasks
+through `serviceRegistries` and DNS, not through Service Connect's names.
+
 With persistent storage, services survive a restart but their tasks do not: task state is
 held in memory. The service scheduler starts at boot, so within a few seconds of startup every
 persisted service is brought back to its `desiredCount`, re-registering load balancer targets

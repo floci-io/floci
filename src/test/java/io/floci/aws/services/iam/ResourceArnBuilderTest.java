@@ -882,21 +882,28 @@ class ResourceArnBuilderTest {
         }).when(ctx).setEntityStream(any(InputStream.class));
     }
 
+    /**
+     * A Resource Groups request is checked on the group its Group names, by its name or its ARN, in the request's
+     * partition, from the table; CreateGroup acts on no resource type in the Service Reference and is checked on every
+     * resource.
+     */
     @Test
-    void resourceGroupTargetsUseNamesOrArnsInTheRequestPartition() {
+    void resourceGroupTargetsAreTheGroupItsNameOrArnNamesFromTheTable() {
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/get-group");
         for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
-            String arn = "arn:" + AwsRegions.partitionFor(region) + ":resource-groups:"
-                    + region + ":" + ACCOUNT + ":group/pool";
-            for (String selector : List.of("Name", "GroupName", "Group")) {
-                when(uriInfo.getPath()).thenReturn(selector.equals("Name") ? "_rg/groups" : "_rg/get-group");
-                setJsonBody("{\"" + selector + "\":\"pool\"}");
-                assertEquals(List.of(arn), builder.buildResources("resource-groups", ctx, region, ACCOUNT));
+            String partition = AwsRegions.partitionFor(region);
+            String arn = "arn:" + partition + ":resource-groups:" + region + ":" + ACCOUNT + ":group/pool";
+            for (String group : List.of("pool", arn)) {
+                setJsonBody("{\"Group\":\"" + group + "\"}");
+                assertEquals(List.of(arn), builder.buildResources("resource-groups", "resource-groups:GetGroup", ctx,
+                        region, ACCOUNT, partition));
             }
-            setJsonBody("{\"Group\":\"" + arn + "\"}");
-            assertEquals(List.of(arn), builder.buildResources("resource-groups", ctx, region, ACCOUNT));
         }
-        setJsonBody("{}");
-        assertEquals(List.of("*"), builder.buildResources("resource-groups", ctx, "us-east-1", ACCOUNT));
+        request("/groups");
+        setJsonBody("{\"Name\":\"pool\"}");
+        assertEquals(List.of("*"), builder.buildResources("resource-groups", "resource-groups:CreateGroup", ctx,
+                "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
