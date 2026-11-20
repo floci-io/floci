@@ -4,7 +4,6 @@ import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -120,7 +119,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo(errorCode));
         // The real call, without DryRun, is refused the same way.
-        request(action).formParams(params(query)).post("/").then()
+        QueryRequests.request(account, "ec2", action).formParams(params(query)).post("/").then()
                 .statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo(errorCode));
     }
@@ -138,7 +137,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "EnableEbsEncryptionByDefault, ''"
     })
     void aDryRunValueThatIsNotABooleanIsRefused(String action, String value) {
-        request(action).formParam("DryRun", value)
+        QueryRequests.request(account, "ec2", action).formParam("DryRun", value)
                 .formParam("TransitGatewayId", TGW).formParam("KeyName", "k")
                 .formParam("LaunchTemplateName", "t").formParam("ClientVpnEndpointId", CLIENT_VPN)
                 .post("/").then()
@@ -251,7 +250,8 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     }
 
     private Response dryRun(String action, String query) {
-        return request(action).formParams(params(query)).formParam("DryRun", "true").post("/");
+        return QueryRequests.request(account, "ec2", action).formParams(params(query))
+                .formParam("DryRun", "true").post("/");
     }
 
     private static Map<String, String> params(String query) {
@@ -266,10 +266,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     }
 
     private XmlPath ec2(String action, String... params) {
-        return request(action, params).post("/").then().statusCode(200).extract().xmlPath();
-    }
-
-    private RequestSpecification request(String action, String... params) {
-        return QueryRequests.request(account, "ec2", action, params);
+        return QueryRequests.request(account, "ec2", action, params).post("/").then().statusCode(200)
+                .extract().xmlPath();
     }
 }
