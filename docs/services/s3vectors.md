@@ -94,9 +94,12 @@ component"), and one of another account with an `AccessDeniedException`.
 Encryption settings are stored and returned; Floci does not perform KMS encryption.
 `TagResource`, `UntagResource`, and `ListTagsForResource` work with vector bucket
 and index ARNs. Tagging merges keys and replaces the values of existing keys;
-untagging removes only the requested keys. Each resource can have up to 50 tags.
-Invalid tags or updates that exceed that limit leave its tags unchanged. Tag changes use the configured
-storage backend and survive restarts in persistent storage modes.
+untagging removes only the requested keys. Each resource can have up to 50 tags,
+including tags supplied during creation. Invalid tags or updates that exceed that limit
+leave its tags unchanged. A legacy resource above the limit can still be listed and
+untagged until it is within the limit. Tag operations apply the ARN scope checks above
+and reject malformed JSON, including trailing content, before changing tags.
+Tag changes use the configured storage backend and survive restarts in persistent storage modes.
 
 ## CloudFormation
 

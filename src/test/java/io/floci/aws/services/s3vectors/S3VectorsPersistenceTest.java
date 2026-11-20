@@ -45,8 +45,8 @@ class S3VectorsPersistenceTest {
             indexArn = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(),
                     null, Map.of("remove", "old"), REGION).getIndexArn();
             for (String arn : List.of(bucketArn, indexArn)) {
-                service.tagResource(arn, Map.of("persisted", "value"));
-                service.untagResource(arn, List.of("remove"));
+                service.tagResource(arn, Map.of("persisted", "value"), REGION);
+                service.untagResource(arn, List.of("remove"), REGION);
             }
         } finally {
             StorageTestBackends.close(first);
@@ -54,8 +54,8 @@ class S3VectorsPersistenceTest {
         StorageBackend<String, VectorBucket> second = open(mode, snapshot);
         try {
             S3VectorsService restarted = service(second, Clock.fixed(MIGRATION_TIME, ZoneOffset.UTC));
-            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(bucketArn));
-            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(indexArn));
+            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(bucketArn, REGION));
+            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(indexArn, REGION));
         } finally {
             StorageTestBackends.close(second);
         }

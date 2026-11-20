@@ -184,11 +184,11 @@ class S3VectorsWriteLockTest {
         setUp(copyOnAccess);
         createIndex();
         String arn = service.getIndex("bucket", "index", REGION).getIndexArn();
-        overlap(() -> service.tagResource(arn, Map.of("first", "value")),
-                () -> service.tagResource(arn, Map.of("second", "value")));
-        assertEquals(Map.of("first", "value", "second", "value"), service.listTagsForResource(arn));
-        overlap(() -> service.untagResource(arn, List.of("first")), () -> putVector("stored"));
-        assertEquals(Map.of("second", "value"), service.listTagsForResource(arn));
+        overlap(() -> service.tagResource(arn, Map.of("first", "value"), REGION),
+                () -> service.tagResource(arn, Map.of("second", "value"), REGION));
+        assertEquals(Map.of("first", "value", "second", "value"), service.listTagsForResource(arn, REGION));
+        overlap(() -> service.untagResource(arn, List.of("first"), REGION), () -> putVector("stored"));
+        assertEquals(Map.of("second", "value"), service.listTagsForResource(arn, REGION));
         assertEquals(1, service.getVectors("bucket", "index", List.of("stored"), REGION).size());
     }
 

@@ -39,16 +39,16 @@ public class S3VectorsTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return service.listTagsForResource(arn);
+        return service.listTagsForResource(arn, region);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        service.tagResource(arn, tags);
+        service.tagResource(arn, tags, region);
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        service.untagResource(arn, tagKeys);
+        service.untagResource(arn, tagKeys, region);
     }
 }

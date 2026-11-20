@@ -9,15 +9,20 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
+import software.amazon.awssdk.services.s3vectors.model.AccessDeniedException;
 import software.amazon.awssdk.services.s3vectors.model.NotFoundException;
 import software.amazon.awssdk.services.s3vectors.model.ValidationException;
 
 import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
@@ -129,13 +134,64 @@ class S3VectorsTaggingIntegrationTest {
             assertEquals("first", firstTags.get("owner"));
             assertEquals("second", secondTags.get("owner"));
 
-            assertThrows(NotFoundException.class, () -> firstClient.listTagsForResource(request -> request.resourceArn(secondArn)));
-            assertThrows(NotFoundException.class, () -> firstClient.tagResource(request -> request
+            assertThrows(AccessDeniedException.class, () -> firstClient.listTagsForResource(request -> request.resourceArn(secondArn)));
+            assertThrows(AccessDeniedException.class, () -> firstClient.tagResource(request -> request
                     .resourceArn(secondArn).tags(Map.of("owner", "changed"))));
-            assertThrows(NotFoundException.class, () -> firstClient.untagResource(request -> request
+            assertThrows(AccessDeniedException.class, () -> firstClient.untagResource(request -> request
                     .resourceArn(secondArn).tagKeys("owner")));
             assertEquals(firstTags, firstClient.listTagsForResource(request -> request.resourceArn(firstArn)).tags());
             assertEquals(secondTags, secondClient.listTagsForResource(request -> request.resourceArn(secondArn)).tags());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-west-2", "us-gov-west-1", "cn-north-1"})
+    void tagOperationsRejectResourcesOutsideTheRequestRegion(String resourceRegion) {
+        try (S3VectorsClient eastClient = client("us-east-1");
+                S3VectorsClient owner = client(resourceRegion);
+                Fixture fixture = fixture(owner)) {
+            for (String arn : List.of(fixture.bucketArn(), fixture.indexArn())) {
+                Map<String, String> before = owner.listTagsForResource(request -> request.resourceArn(arn)).tags();
+                assertThrows(ValidationException.class, () -> eastClient.listTagsForResource(request -> request.resourceArn(arn)));
+                assertThrows(ValidationException.class, () -> eastClient.tagResource(request -> request
+                        .resourceArn(arn).tags(Map.of("created", "changed"))));
+                assertThrows(ValidationException.class, () -> eastClient.untagResource(request -> request
+                        .resourceArn(arn).tagKeys("created")));
+                assertEquals(before, owner.listTagsForResource(request -> request.resourceArn(arn)).tags());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tagOperationsRejectAnArnWithTheWrongPartition(boolean index) {
+        try (S3VectorsClient client = client("us-east-1"); Fixture fixture = fixture(client)) {
+            String arn = index ? fixture.indexArn() : fixture.bucketArn();
+            String invalid = arn.replace("arn:aws:", "arn:aws-cn:");
+            assertThrows(ValidationException.class, () -> client.listTagsForResource(request -> request.resourceArn(invalid)));
+            assertThrows(ValidationException.class, () -> client.tagResource(request -> request
+                    .resourceArn(invalid).tags(Map.of("created", "changed"))));
+            assertThrows(ValidationException.class, () -> client.untagResource(request -> request
+                    .resourceArn(invalid).tagKeys("created")));
+            assertEquals(Map.of("created", "original", "keep", "value"),
+                    client.listTagsForResource(request -> request.resourceArn(arn)).tags());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void malformedJsonDoesNotChangeTags(boolean index) {
+        try (S3VectorsClient client = client("us-east-1"); Fixture fixture = fixture(client)) {
+            String arn = index ? fixture.indexArn() : fixture.bucketArn();
+            String path = "tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+            Map<String, String> before = client.listTagsForResource(request -> request.resourceArn(arn)).tags();
+            for (String trailing : List.of("garbage", "{}", "null")) {
+                given().urlEncodingEnabled(false).contentType("application/json")
+                        .body("{\"tags\":{\"created\":\"changed\"}} " + trailing)
+                        .when().post(endpoint.resolve(path))
+                        .then().statusCode(400).body(containsString("ValidationException"));
+                assertEquals(before, client.listTagsForResource(request -> request.resourceArn(arn)).tags());
+            }
         }
     }
 

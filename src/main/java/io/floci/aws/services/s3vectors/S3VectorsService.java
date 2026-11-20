@@ -106,6 +106,7 @@ public class S3VectorsService implements StoredResourceArns {
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration,
                                           Map<String, String> tags, String region) {
         requireValidName(bucketName, "vectorBucketName", "Invalid vector bucket name");
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             String key = buildStorageKey(region, bucketName);
             if (store.get(key).isPresent()) {
@@ -405,6 +406,7 @@ public class S3VectorsService implements StoredResourceArns {
                                    String distanceMetric, List<String> nonFilterableMetadataKeys,
                                    Object encryptionConfiguration, Map<String, String> tags, String region) {
         requireValidName(indexName, "indexName", "Invalid index name");
+        validateTags(tags);
         if (dimension < 1 || dimension > 4096) {
             throw new AwsException("ValidationException", "Dimension must be between 1 and 4096.", 400);
         }
@@ -473,6 +475,7 @@ public class S3VectorsService implements StoredResourceArns {
     }
 
     public void replaceBucketTags(String bucketName, Map<String, String> tags, String region) {
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             bucket.setTags(new ConcurrentHashMap<>(tags));
@@ -481,6 +484,7 @@ public class S3VectorsService implements StoredResourceArns {
     }
 
     public void replaceIndexTags(String bucketName, String indexName, Map<String, String> tags, String region) {
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             VectorIndex index = getIndex(bucket, indexName);
@@ -530,18 +534,47 @@ public class S3VectorsService implements StoredResourceArns {
         return new LinkedHashMap<>(tags);
     }
 
-    public Map<String, String> listTagsForResource(String resourceArn) {
-        TaggedResource resource = taggedResource(resourceArn);
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        TaggedResource resource = taggedResource(resourceArn, region);
         synchronized (lockFor(resource.bucketName(), resource.region())) {
             VectorBucket bucket = taggedBucket(resource, resourceArn);
             return Map.copyOf(resourceTags(bucket, resource));
         }
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        validateTags(tags);
+        TaggedResource resource = taggedResource(resourceArn, region);
+        synchronized (lockFor(resource.bucketName(), resource.region())) {
+            VectorBucket bucket = taggedBucket(resource, resourceArn);
+            Map<String, String> merged = new LinkedHashMap<>(resourceTags(bucket, resource));
+            merged.putAll(tags);
+            validateTagCount(merged);
+            setResourceTags(bucket, resource, merged);
+            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        if (tagKeys == null) {
+            throw new AwsException("ValidationException", "TagKeys must not be null.", 400);
+        }
+        tagKeys.forEach(this::validateTagKey);
+        TaggedResource resource = taggedResource(resourceArn, region);
+        synchronized (lockFor(resource.bucketName(), resource.region())) {
+            VectorBucket bucket = taggedBucket(resource, resourceArn);
+            Map<String, String> remaining = new LinkedHashMap<>(resourceTags(bucket, resource));
+            tagKeys.forEach(remaining::remove);
+            setResourceTags(bucket, resource, remaining);
+            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
+        }
+    }
+
+    private void validateTags(Map<String, String> tags) {
         if (tags == null) {
             throw new AwsException("ValidationException", "Tags must not be null.", 400);
         }
+        validateTagCount(tags);
         tags.forEach((key, value) -> {
             validateTagKey(key);
             if (value == null || value.codePointCount(0, value.length()) > 256
@@ -549,31 +582,11 @@ public class S3VectorsService implements StoredResourceArns {
                 throw new AwsException("ValidationException", "Tag values must contain at most 256 valid characters.", 400);
             }
         });
-        TaggedResource resource = taggedResource(resourceArn);
-        synchronized (lockFor(resource.bucketName(), resource.region())) {
-            VectorBucket bucket = taggedBucket(resource, resourceArn);
-            Map<String, String> merged = new LinkedHashMap<>(resourceTags(bucket, resource));
-            merged.putAll(tags);
-            if (merged.size() > 50) {
-                throw new AwsException("ValidationException", "A resource can have at most 50 tags.", 400);
-            }
-            setResourceTags(bucket, resource, merged);
-            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
-        }
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
-        if (tagKeys == null) {
-            throw new AwsException("ValidationException", "TagKeys must not be null.", 400);
-        }
-        tagKeys.forEach(this::validateTagKey);
-        TaggedResource resource = taggedResource(resourceArn);
-        synchronized (lockFor(resource.bucketName(), resource.region())) {
-            VectorBucket bucket = taggedBucket(resource, resourceArn);
-            Map<String, String> remaining = new LinkedHashMap<>(resourceTags(bucket, resource));
-            tagKeys.forEach(remaining::remove);
-            setResourceTags(bucket, resource, remaining);
-            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
+    private void validateTagCount(Map<String, String> tags) {
+        if (tags.size() > 50) {
+            throw new AwsException("ValidationException", "A resource can have at most 50 tags.", 400);
         }
     }
 
@@ -585,7 +598,7 @@ public class S3VectorsService implements StoredResourceArns {
         }
     }
 
-    private TaggedResource taggedResource(String resourceArn) {
+    private TaggedResource taggedResource(String resourceArn, String region) {
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(resourceArn);
@@ -594,10 +607,9 @@ public class S3VectorsService implements StoredResourceArns {
         }
         boolean index = arn.resource().contains(INDEX_SEGMENT);
         String[] parts = arnParts(resourceArn, index, "ValidationException");
-        if (arn.region().isBlank() || arn.accountId().isBlank()) {
-            throw new AwsException("ValidationException", "Expected a vector bucket or vector index ARN.", 400);
-        }
-        return new TaggedResource(arn.region(), parts[1], index ? parts[3] : null);
+        ResolvedBucket bucket = inRequestScope(bucketOfArn(resourceArn, parts,
+                regionResolver::partitionForRegion, "ValidationException"), region);
+        return new TaggedResource(bucket.region(), bucket.bucketName(), index ? parts[3] : null);
     }
 
     private VectorBucket taggedBucket(TaggedResource resource, String resourceArn) {
