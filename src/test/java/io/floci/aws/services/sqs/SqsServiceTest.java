@@ -1001,6 +1001,68 @@ class SqsServiceTest {
     }
 
     @Test
+    void changeMessageVisibility_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        String handle = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst().getReceiptHandle();
+
+        service.changeMessageVisibility(queue.getQueueUrl(), handle, 0, "us-east-1");
+
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    @Test
+    void changeMessageVisibilityBatch_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared-batch", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        String handle = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst().getReceiptHandle();
+
+        List<SqsService.BatchResultEntry> results = service.changeMessageVisibilityBatch(queue.getQueueUrl(),
+                List.of(new SqsService.ChangeVisibilityBatchEntry("e", handle, 0)), "us-east-1");
+
+        assertTrue(results.getFirst().success(), results.getFirst().errorCode() + ": " + results.getFirst().errorMessage());
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    @Test
+    void changeMessageVisibilityIfUnchanged_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared-conditional", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        Message received = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst();
+
+        boolean changed = service.changeMessageVisibilityIfUnchanged(
+                queue.getQueueUrl(), received.getReceiptHandle(), received.getVisibleAt(), 0, "us-east-1");
+
+        assertTrue(changed);
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    /**
+     * A service whose storage is scoped to {@code caller}'s account, which a test can switch between calls. Queue
+     * URLs name account 111111111111, which creates the queues.
+     */
+    private SqsService accountScopedService(RequestContext caller) {
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        when(requestContextInstance.get()).thenReturn(caller);
+        return new SqsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"),
+                null, null, 30, 1048576, BASE_URL, new RegionResolver("us-east-1", "111111111111"), false, null, clock);
+    }
+
+    @Test
     void getQueueAttributes() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("test-queue", null, region);
