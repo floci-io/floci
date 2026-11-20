@@ -101,7 +101,7 @@ public class EksController {
                 throw new AwsException("SerializationException", e.getOriginalMessage(), 400);
             }
         }
-        Cluster cluster = eksService.createCluster(request);
+        Cluster cluster = eksService.createCluster(request, body);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 

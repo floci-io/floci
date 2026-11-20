@@ -2,6 +2,7 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -74,6 +75,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -736,16 +738,22 @@ class EksServiceTest {
         EksService before = persistentEksService(directory, null);
         CreateClusterRequest original = clusterRequest("persisted-token-cluster");
         original.setClientRequestToken("persisted-token");
-        Cluster created = before.createCluster(original);
+        ObjectNode rawRequest = new ObjectMapper().createObjectNode().put("deletionProtection", true);
+        Cluster created = before.createCluster(original, rawRequest);
 
         EksService after = persistentEksService(directory, null);
         CreateClusterRequest retry = clusterRequest("persisted-token-cluster");
         retry.setClientRequestToken("persisted-token");
-        Cluster retried = after.createCluster(retry);
+        ObjectNode rawRetry = new ObjectMapper().createObjectNode().put("deletionProtection", true);
+        Cluster retried = after.createCluster(retry, rawRetry);
 
         assertEquals(created.getArn(), retried.getArn());
         assertEquals(created.getCreatedAt(), retried.getCreatedAt());
         assertEquals(List.of("persisted-token-cluster"), after.listClusters());
+
+        rawRetry.put("deletionProtection", false);
+        AwsException changed = assertThrows(AwsException.class, () -> after.createCluster(retry, rawRetry));
+        assertEquals("InvalidParameterException", changed.getErrorCode());
     }
 
     @Test
@@ -3654,5 +3662,40 @@ class EksServiceTest {
         assertEquals(created.getCreatedAt(), retried.getCreatedAt());
         verify(oidc, times(1)).newIssuerUrl("us-east-1");
         assertEquals(List.of("retry-while-creating"), service.listClusters());
+    }
+
+    @Test
+    void aConcurrentRetryEndsWhenTheFirstCreateThrowsAnError() throws Exception {
+        EksOidcService oidc = mock(EksOidcService.class);
+        CountDownLatch building = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(oidc.newIssuerUrl(anyString())).thenAnswer(invocation -> {
+            building.countDown();
+            release.await();
+            throw new AssertionError("failed during cluster creation");
+        });
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, null, oidc,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest request = clusterRequest("failed-in-flight-create");
+        request.setClientRequestToken("failed-in-flight-token");
+        CompletableFuture<Cluster> first = CompletableFuture.supplyAsync(() -> service.createCluster(request));
+        assertTrue(building.await(5, TimeUnit.SECONDS));
+        AtomicReference<Thread> retryThread = new AtomicReference<>();
+        CompletableFuture<Cluster> retry = CompletableFuture.supplyAsync(() -> {
+            retryThread.set(Thread.currentThread());
+            return service.createCluster(request);
+        });
+        try {
+            ThreadStates.awaitBlockedOrDone(retryThread, retry);
+        } finally {
+            release.countDown();
+        }
+
+        ExecutionException firstFailure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
+        assertEquals(AssertionError.class, firstFailure.getCause().getClass());
+        ExecutionException retryFailure = assertThrows(ExecutionException.class,
+                () -> retry.get(2, TimeUnit.SECONDS));
+        assertEquals(AssertionError.class, retryFailure.getCause().getClass());
     }
 }

@@ -33,8 +33,7 @@ class EksRegionScopingIntegrationTest {
         String name = "http-token-retry";
         String token = "http-retry-token";
         String otherAccount = "135792468025";
-        Map<String, String> request = Map.of("name", name,
-                "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/cluster", "clientRequestToken", token);
+        Map<String, Object> request = clusterBody(name, ACCOUNT, "cluster", token);
         try {
             Response created = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
             Response retried = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
@@ -49,16 +48,24 @@ class EksRegionScopingIntegrationTest {
                     retried.jsonPath().getString("cluster.createdAt"));
 
             eks(ACCOUNT, "eu-west-1")
-                    .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/other",
-                            "clientRequestToken", token))
+                    .body(clusterBody(name, ACCOUNT, "other", token))
                     .post("/clusters").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+
+            Map<String, Object> changedProtection = new HashMap<>(request);
+            changedProtection.put("deletionProtection", true);
+            eks(ACCOUNT, "eu-west-1").body(changedProtection).post("/clusters").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+
+            Map<String, Object> changedEgress = new HashMap<>(request);
+            changedEgress.put("resourcesVpcConfig", Map.of("controlPlaneEgressMode", "CUSTOMER_ROUTED"));
+            eks(ACCOUNT, "eu-west-1").body(changedEgress).post("/clusters").then().statusCode(400)
                     .body("__type", equalTo("InvalidParameterException"));
 
             eks(ACCOUNT, "eu-central-1").body(request).post("/clusters").then().statusCode(200)
                     .body("cluster.arn", equalTo("arn:aws:eks:eu-central-1:" + ACCOUNT + ":cluster/" + name));
             eks(otherAccount, "eu-west-1")
-                    .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + otherAccount + ":role/cluster",
-                            "clientRequestToken", token))
+                    .body(clusterBody(name, otherAccount, "cluster", token))
                     .post("/clusters").then().statusCode(200)
                     .body("cluster.arn", equalTo("arn:aws:eks:eu-west-1:" + otherAccount + ":cluster/" + name));
         } finally {
@@ -66,6 +73,12 @@ class EksRegionScopingIntegrationTest {
             eks(ACCOUNT, "eu-central-1").delete("/clusters/" + name);
             eks(otherAccount, "eu-west-1").delete("/clusters/" + name);
         }
+    }
+
+    private static Map<String, Object> clusterBody(String name, String account, String role, String token) {
+        return Map.of("name", name, "roleArn", "arn:aws:iam::" + account + ":role/" + role,
+                "clientRequestToken", token, "deletionProtection", false,
+                "resourcesVpcConfig", Map.of("controlPlaneEgressMode", "AWS_MANAGED"));
     }
 
     @Test

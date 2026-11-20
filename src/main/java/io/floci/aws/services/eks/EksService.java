@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -740,6 +741,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public Cluster createCluster(CreateClusterRequest request) {
+        return createCluster(request, null);
+    }
+
+    Cluster createCluster(CreateClusterRequest request, JsonNode rawRequest) {
         String name = request.getName();
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "Cluster name is required", 400);
@@ -759,6 +764,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             return createClusterWithNameReservation(request, name, null);
         }
         JsonNode requestSnapshot = MAPPER.valueToTree(request);
+        if (rawRequest != null) {
+            includeUnmodeledRequestFields(requestSnapshot, rawRequest);
+        }
         String tokenKey = regionResolver.getAccountId() + "/" + regionResolver.getRegion() + "/" + token;
         ClusterCreateClaim claim = new ClusterCreateClaim(requestSnapshot, new CompletableFuture<>());
         ClusterCreateClaim pending = pendingClusterCreates.putIfAbsent(tokenKey, claim);
@@ -768,6 +776,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 return pending.result().join();
             } catch (CompletionException e) {
                 if (e.getCause() instanceof RuntimeException cause) {
+                    throw cause;
+                }
+                if (e.getCause() instanceof Error cause) {
                     throw cause;
                 }
                 throw e;
@@ -785,7 +796,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             claim.result().complete(cluster);
             return cluster;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             claim.result().completeExceptionally(e);
             throw e;
         } finally {
@@ -793,10 +804,24 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    private static void includeUnmodeledRequestFields(JsonNode bound, JsonNode raw) {
+        if (!(bound instanceof ObjectNode object) || !raw.isObject()) {
+            return;
+        }
+        raw.fields().forEachRemaining(field -> {
+            JsonNode value = object.get(field.getKey());
+            if (value == null || (value.isNull() && !field.getValue().isNull())) {
+                object.set(field.getKey(), field.getValue().deepCopy());
+            } else {
+                includeUnmodeledRequestFields(value, field.getValue());
+            }
+        });
+    }
+
     private static void requireMatchingClusterRequest(JsonNode original, JsonNode retry) {
         if (!retry.equals(original)) {
             throw new AwsException("InvalidParameterException",
-                    "clientRequestToken was already used with different parameters", 400);
+                    EksAddonService.TOKEN_REUSED, 400);
         }
     }
 
