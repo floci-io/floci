@@ -4,6 +4,7 @@ import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -165,6 +167,20 @@ class AccountAwareStorageBackendTest {
                 "111111111111", "resource", "owned"::equals).orElseThrow());
         assertTrue(raw.get("resource").isEmpty());
         assertEquals("owned", raw.get("111111111111/resource").orElseThrow());
+    }
+
+    @Test
+    void failedLegacyMigrationStillReturnsTheOriginalReadableValue() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<>());
+        raw.put("legacy", "legacy-value");
+        doThrow(new UncheckedIOException(new java.io.IOException("disk full")))
+                .when(raw).put("111111111111/legacy", "legacy-value");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        assertEquals(Optional.of("legacy-value"), storage.get("legacy"));
+        assertEquals(Optional.of("legacy-value"), raw.get("legacy"));
+        assertTrue(raw.get("111111111111/legacy").isEmpty());
     }
 
     @Test

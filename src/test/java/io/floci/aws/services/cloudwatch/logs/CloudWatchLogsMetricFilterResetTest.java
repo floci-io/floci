@@ -96,7 +96,7 @@ class CloudWatchLogsMetricFilterResetTest {
     }
 
     @Test
-    void failedStorageResetStillResumesAndCancelsOldQueue() {
+    void failedStorageResetStillResumesAfterClearingServiceState() {
         f.put("reset", "ERROR", "3", 7.0);
         sink.fail = true;
         f.ingest(TIME, "INFO");

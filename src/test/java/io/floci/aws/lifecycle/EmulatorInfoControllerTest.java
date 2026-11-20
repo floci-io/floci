@@ -172,7 +172,28 @@ class EmulatorInfoControllerTest {
 
         verify(resettable).beforeReset();
         verify(resettable).afterReset();
-        verify(resettable, never()).clear();
+        verify(resettable).clear();
+    }
+
+    @Test
+    @DisplayName("Should attempt every service clear hook when one clear hook fails")
+    void reset_attemptsEveryServiceClearHookWhenOneFails() {
+        Resettable failing = mock(Resettable.class);
+        Resettable later = mock(Resettable.class);
+        doThrow(new IllegalStateException("service clear failed")).when(failing).clear();
+        when(containerTeardowns.iterator()).thenReturn(List.<ContainerTeardown>of().iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, failing, later).iterator());
+
+        assertThrows(IllegalStateException.class, controller::reset);
+
+        InOrder order = inOrder(storageFactory, resettable, failing, later);
+        order.verify(storageFactory).clearAll();
+        order.verify(resettable).clear();
+        order.verify(failing).clear();
+        order.verify(later).clear();
+        order.verify(later).afterReset();
+        order.verify(failing).afterReset();
+        order.verify(resettable).afterReset();
     }
 
     @Test

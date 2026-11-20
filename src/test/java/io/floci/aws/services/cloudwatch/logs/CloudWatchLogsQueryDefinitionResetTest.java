@@ -139,13 +139,14 @@ class CloudWatchLogsQueryDefinitionResetTest {
     }
 
     @Test
-    void failedStorageResetStillResumesWrites() {
-        String id = service.putQueryDefinition(new QueryDefinition(null, "saved", "fields @message", List.of(),
+    void failedStorageResetStillResumesWritesAfterClearingServiceState() {
+        service.putQueryDefinition(new QueryDefinition(null, "saved", "fields @message", List.of(),
                 null, List.of(), 0, null), REGION);
         doThrow(new IllegalStateException("wipe failed")).when(factory).clearAll();
 
         assertThrows(IllegalStateException.class, () -> controller(List.of(service)).reset());
-        assertTrue(service.deleteQueryDefinition(id, REGION));
+        assertTrue(service.putQueryDefinition(new QueryDefinition(null, "fresh", "fields @message", List.of(),
+                null, List.of(), 0, null), REGION) != null);
     }
 
     @SuppressWarnings("unchecked")

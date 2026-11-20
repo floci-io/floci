@@ -108,9 +108,9 @@ public class PipesService implements TagHandler, ResourceProvider {
         pipe.setDesiredState(effectiveDesiredState);
         pipe.setCurrentState(effectiveDesiredState == DesiredState.RUNNING ? PipeState.RUNNING : PipeState.STOPPED);
         pipe.setEnrichment(enrichment);
-        pipe.setSourceParameters(sourceParameters);
-        pipe.setTargetParameters(targetParameters);
-        pipe.setEnrichmentParameters(enrichmentParameters);
+        pipe.setSourceParameters(sourceParameters == null ? null : sourceParameters.deepCopy());
+        pipe.setTargetParameters(targetParameters == null ? null : targetParameters.deepCopy());
+        pipe.setEnrichmentParameters(enrichmentParameters == null ? null : enrichmentParameters.deepCopy());
         pipe.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
         pipe.setCreationTime(now);
         pipe.setLastModifiedTime(now);
@@ -122,12 +122,13 @@ public class PipesService implements TagHandler, ResourceProvider {
         if (pipe.getCurrentState() == PipeState.RUNNING) {
             poller.startPolling(pipe);
         }
-        return pipe;
+        return copyPipe(pipe);
     }
 
     public Pipe describePipe(String name, String region) {
         String key = region + "::" + name;
         return storage.get(key)
+                .map(PipesService::copyPipe)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
     }
@@ -167,8 +168,8 @@ public class PipesService implements TagHandler, ResourceProvider {
      * value, which is what putting a pipe back to a configuration recorded in full needs; that
      * configuration was accepted when it was written, so only the update path validates.
      *
-     * <p>Validation runs on the same retrieved pipe the write then mutates, so a pipe replaced
-     * between two lookups cannot be validated as one pipe and updated as another.
+     * <p>Validation and mutation run against one detached snapshot, so a failed storage write
+     * cannot expose a partially updated object through the previously stored value.
      */
     private Pipe writePipeConfiguration(String name, String target, String roleArn, String description,
                                         DesiredState desiredState, String enrichment,
@@ -176,9 +177,10 @@ public class PipesService implements TagHandler, ResourceProvider {
                                         JsonNode enrichmentParameters, String region,
                                         boolean clearUnsetProperties) {
         String key = region + "::" + name;
-        Pipe pipe = storage.get(key)
+        Pipe previousPipe = storage.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
+        Pipe pipe = copyPipe(previousPipe);
 
         if (!clearUnsetProperties) {
             validateSourceConfiguration(pipe.getSource(),
@@ -191,26 +193,53 @@ public class PipesService implements TagHandler, ResourceProvider {
         writeProperty(roleArn, clearUnsetProperties, pipe::setRoleArn);
         writeProperty(description, clearUnsetProperties, pipe::setDescription);
         writeProperty(enrichment, clearUnsetProperties, pipe::setEnrichment);
-        writeProperty(sourceParameters, clearUnsetProperties, pipe::setSourceParameters);
-        writeProperty(targetParameters, clearUnsetProperties, pipe::setTargetParameters);
-        writeProperty(enrichmentParameters, clearUnsetProperties, pipe::setEnrichmentParameters);
+        writeProperty(sourceParameters == null ? null : sourceParameters.deepCopy(),
+                clearUnsetProperties, pipe::setSourceParameters);
+        writeProperty(targetParameters == null ? null : targetParameters.deepCopy(),
+                clearUnsetProperties, pipe::setTargetParameters);
+        writeProperty(enrichmentParameters == null ? null : enrichmentParameters.deepCopy(),
+                clearUnsetProperties, pipe::setEnrichmentParameters);
         // A pipe always has a desired state: createPipe defaults it to RUNNING and currentState is
         // read off it. A null therefore leaves both alone on either path, rather than clearing a
         // state the poller and currentState would then contradict.
         if (desiredState != null) {
             pipe.setDesiredState(desiredState);
             pipe.setCurrentState(desiredState == DesiredState.RUNNING ? PipeState.RUNNING : PipeState.STOPPED);
-            if (desiredState == DesiredState.RUNNING) {
-                poller.startPolling(pipe);
-            } else {
-                poller.stopPolling(pipe);
-            }
         }
 
         pipe.setLastModifiedTime(Instant.now());
         storage.put(key, pipe);
+        // The poller holds the Pipe snapshot it was started with. Replace that snapshot only
+        // after the new configuration is durably stored.
+        poller.stopPolling(previousPipe);
+        if (pipe.getDesiredState() == DesiredState.RUNNING) {
+            poller.startPolling(pipe);
+        }
         LOG.infov("Updated pipe: {0}", name);
-        return pipe;
+        return copyPipe(pipe);
+    }
+
+    /** Copy mutable persisted state before changing it, so a failed write cannot leak through the old value. */
+    private static Pipe copyPipe(Pipe source) {
+        Pipe copy = new Pipe();
+        copy.setName(source.getName());
+        copy.setArn(source.getArn());
+        copy.setSource(source.getSource());
+        copy.setTarget(source.getTarget());
+        copy.setRoleArn(source.getRoleArn());
+        copy.setDescription(source.getDescription());
+        copy.setDesiredState(source.getDesiredState());
+        copy.setCurrentState(source.getCurrentState());
+        copy.setEnrichment(source.getEnrichment());
+        copy.setSourceParameters(source.getSourceParameters() == null ? null : source.getSourceParameters().deepCopy());
+        copy.setTargetParameters(source.getTargetParameters() == null ? null : source.getTargetParameters().deepCopy());
+        copy.setEnrichmentParameters(source.getEnrichmentParameters() == null ? null : source.getEnrichmentParameters().deepCopy());
+        copy.setTags(source.getTags() == null ? null : new HashMap<>(source.getTags()));
+        copy.setCreationTime(source.getCreationTime());
+        copy.setLastModifiedTime(source.getLastModifiedTime());
+        copy.setStateReason(source.getStateReason());
+        copy.setAccountId(source.getAccountId());
+        return copy;
     }
 
     /** Applies one property under the unset meaning {@code clearUnsetProperties} selects. */
@@ -225,9 +254,9 @@ public class PipesService implements TagHandler, ResourceProvider {
         Pipe pipe = storage.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
+        storage.delete(key);
         poller.stopPolling(pipe);
         poller.forget(pipe);
-        storage.delete(key);
         LOG.infov("Deleted pipe: {0}", name);
     }
 
@@ -235,6 +264,7 @@ public class PipesService implements TagHandler, ResourceProvider {
                                 DesiredState desiredState, PipeState currentState, String region) {
         String regionPrefix = region + "::";
         return storage.scan(key -> key.startsWith(regionPrefix)).stream()
+                .map(PipesService::copyPipe)
                 .filter(pipe -> namePrefix == null || pipe.getName().startsWith(namePrefix))
                 .filter(pipe -> sourcePrefix == null || pipe.getSource().startsWith(sourcePrefix))
                 .filter(pipe -> targetPrefix == null || pipe.getTarget().startsWith(targetPrefix))
@@ -245,32 +275,35 @@ public class PipesService implements TagHandler, ResourceProvider {
 
     public Pipe startPipe(String name, String region) {
         String key = region + "::" + name;
-        Pipe pipe = storage.get(key)
+        Pipe previousPipe = storage.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
+        Pipe pipe = copyPipe(previousPipe);
 
         pipe.setDesiredState(DesiredState.RUNNING);
         pipe.setCurrentState(PipeState.RUNNING);
         pipe.setLastModifiedTime(Instant.now());
         storage.put(key, pipe);
+        poller.stopPolling(previousPipe);
         poller.startPolling(pipe);
         LOG.infov("Started pipe: {0}", name);
-        return pipe;
+        return copyPipe(pipe);
     }
 
     public Pipe stopPipe(String name, String region) {
         String key = region + "::" + name;
-        Pipe pipe = storage.get(key)
+        Pipe previousPipe = storage.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
+        Pipe pipe = copyPipe(previousPipe);
 
-        poller.stopPolling(pipe);
         pipe.setDesiredState(DesiredState.STOPPED);
         pipe.setCurrentState(PipeState.STOPPED);
         pipe.setLastModifiedTime(Instant.now());
         storage.put(key, pipe);
+        poller.stopPolling(previousPipe);
         LOG.infov("Stopped pipe: {0}", name);
-        return pipe;
+        return copyPipe(pipe);
     }
 
     @Override
@@ -303,7 +336,7 @@ public class PipesService implements TagHandler, ResourceProvider {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        Pipe pipe = findByArn(arn, region);
+        Pipe pipe = copyPipe(findByArn(arn, region));
         if (pipe.getTags() == null) {
             pipe.setTags(new HashMap<>());
         }
@@ -314,7 +347,7 @@ public class PipesService implements TagHandler, ResourceProvider {
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        Pipe pipe = findByArn(arn, region);
+        Pipe pipe = copyPipe(findByArn(arn, region));
         if (pipe.getTags() != null && tagKeys != null) {
             tagKeys.forEach(pipe.getTags()::remove);
         }
@@ -325,7 +358,7 @@ public class PipesService implements TagHandler, ResourceProvider {
     @Override
     public Map<String, String> listTags(String region, String arn) {
         Pipe pipe = findByArn(arn, region);
-        return pipe.getTags() != null ? pipe.getTags() : Map.of();
+        return pipe.getTags() != null ? Map.copyOf(pipe.getTags()) : Map.of();
     }
 
     private Pipe findByArn(String arn, String region) {

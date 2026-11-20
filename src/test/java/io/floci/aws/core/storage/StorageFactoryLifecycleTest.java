@@ -113,6 +113,24 @@ class StorageFactoryLifecycleTest {
         reloaded.shutdownAll();
     }
 
+    @Test
+    void clearAllAttemptsEveryBackendWhenOnePersistentClearFails() throws IOException {
+        StorageFactory factory = newFactory("persistent");
+        AccountAwareStorageBackend<String> failing = factory.create("first", "first.json", TYPE);
+        AccountAwareStorageBackend<String> succeeding = factory.create("second", "second.json", TYPE);
+        failing.put("key", "old-first");
+        succeeding.put("key", "old-second");
+
+        Path failingFile = tempDir.resolve("first.json");
+        Files.delete(failingFile);
+        Files.createDirectory(failingFile);
+
+        assertThrows(RuntimeException.class, factory::clearAll);
+        assertEquals(Optional.of("old-first"), failing.get("key"),
+                "the failed backend must retain its prior in-memory value");
+        assertTrue(succeeding.isEmpty(), "a failure in one backend must not skip later backends");
+    }
+
     private long walSize() throws IOException {
         Path wal = tempDir.resolve("svc.wal");
         return Files.exists(wal) ? Files.size(wal) : 0L;
