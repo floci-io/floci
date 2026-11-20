@@ -539,6 +539,13 @@ public class NativeDynamoDbTableService {
      */
     public KinesisDestination enableKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return enableKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination enableKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -558,9 +565,6 @@ public class NativeDynamoDbTableService {
         KinesisStreamingDestination destination;
         if (existing.isPresent()) {
             destination = existing.get();
-            // The precision goes in before the status. A concurrent Disable gets past its
-            // already-disabled check only once the status reads ACTIVE, so writing the status last
-            // means that call can no longer read the precision this one is replacing.
             destination.setApproximateCreationDateTimePrecision(precision);
             destination.setDestinationStatusDescription("Kinesis streaming is enabled for this table");
             destination.setDestinationStatus("ACTIVE");
@@ -582,6 +586,12 @@ public class NativeDynamoDbTableService {
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return disableKinesisStreamingDestinationLocked(tableName, streamArn, region);
+        }
+    }
+
+    private KinesisDestination disableKinesisStreamingDestinationLocked(String tableName, String streamArn, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -613,12 +623,22 @@ public class NativeDynamoDbTableService {
      * does. Forwarding never stops: records already captured are still delivered, and the forwarder
      * stamps each later write with the new precision.
      *
-     * @param precision an already validated ApproximateCreationDateTimePrecision
+     * @param precision an already validated ApproximateCreationDateTimePrecision, or null to retain it
      * @return a snapshot of what this call left on the destination, with the canonical table name
      */
     public KinesisDestination updateKinesisStreamingDestination(String tableName, String streamArn, String precision,
                                                                 String region) {
+        synchronized (dynamoDbService.tableControlLock(tableName, region)) {
+            return updateKinesisStreamingDestinationLocked(tableName, streamArn, precision, region);
+        }
+    }
+
+    private KinesisDestination updateKinesisStreamingDestinationLocked(String tableName, String streamArn,
+                                                                       String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        if (AwsArnUtils.looksLikeArn(tableName) && !tableName.equals(table.getTableArn())) {
+            throw DynamoDbService.resourceNotFoundException(table.getTableName());
+        }
         String resolvedTableName = table.getTableName();
 
         Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
@@ -631,8 +651,10 @@ public class NativeDynamoDbTableService {
                     "Kinesis streaming destination is not active for stream: " + streamArn, 400);
         }
 
-        existing.get().setApproximateCreationDateTimePrecision(precision);
-        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
+        KinesisStreamingDestination destination = existing.get();
+        String effectivePrecision = precision != null ? precision : destination.getApproximateCreationDateTimePrecision();
+        destination.setApproximateCreationDateTimePrecision(effectivePrecision);
+        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", effectivePrecision);
         dynamoDbService.persistTable(resolvedTableName, table, region);
         return updated;
     }
