@@ -492,7 +492,8 @@ class RequestResourceMembersTest {
                 .map(resource -> DynamicTest.dynamicTest(operation.getKey() + " " + resource, () -> {
                     String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
                     String name = operation.getKey().substring(namespace.length() + 1);
-                    ArnFormat format = table.formats().get(namespace).get(resource.types().getFirst());
+                    String type = exampleType(resource, operation.getValue());
+                    ArnFormat format = table.formats().get(namespace).get(type);
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
                     String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
@@ -536,7 +537,7 @@ class RequestResourceMembersTest {
                     });
                     List<String> named = operation.getValue().stream()
                             .filter(other -> (other == resource || named(other) || sharesAMember(other, given)
-                                    || fillsFromTheArn(other, resource)
+                                    || fillsFromTheArn(other, resource, type)
                                     || !other.find().isEmpty() && other.find().equals(resource.find())
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
@@ -629,12 +630,25 @@ class RequestResourceMembersTest {
     /**
      * Whether a resource fills its variables from the ARN the other's member holds, as that ARN's type's variable alone
      * (a permission set made in the instance an {@code InstanceArn} names), so a request naming the other by an ARN of
-     * its first type, which the test gives, names it too.
+     * the type the test gives names it too.
      */
-    private static boolean fillsFromTheArn(Resource resource, Resource other) {
+    private static boolean fillsFromTheArn(Resource resource, Resource other, String type) {
         return other.arn() != null && !resource.fill().isEmpty()
                 && resource.fill().values().stream().allMatch(other.arn()::equals)
-                && other.types().getFirst().equals(resource.arnOf().get(other.arn().path()));
+                && type.equals(resource.arnOf().get(other.arn().path()));
+    }
+
+    /**
+     * The type of the ARN the test gives a resource's member: for an ARN member that also fills a resource of one of
+     * the types it is read as, that resource's type, as the member holds one of those (OAM's {@code CreateLink} reads
+     * its {@code SinkIdentifier} as a link or a sink and fills the sink from it); else its first type.
+     */
+    private static String exampleType(Resource resource, List<Resource> resources) {
+        return resource.arn() == null ? resource.types().getFirst() : resources.stream()
+                .filter(other -> other.arn() == null && other.fill().containsValue(resource.arn())
+                        && !other.arnOf().containsKey(resource.arn().path())
+                        && resource.types().contains(other.types().getFirst()))
+                .map(other -> other.types().getFirst()).findFirst().orElse(resource.types().getFirst());
     }
 
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
