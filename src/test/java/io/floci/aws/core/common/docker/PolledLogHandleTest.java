@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -63,6 +64,32 @@ class PolledLogHandleTest {
                 record(t2, "d\n"), record(t3, "e\n"));
 
         assertEquals(List.of("STDOUT:a", "STDOUT:b", "STDOUT:c", "STDOUT:d", "STDOUT:e"), lines);
+    }
+
+    // Catches: docker-java handing a Docker frame on in reads of up to 1024 bytes, one of which ends inside
+    // a record's timestamp, so that neither piece parses as a record and the line is dropped or forwarded
+    // with Docker's timestamp in front of it.
+    @Test
+    void aRecordCutAnywhereByTheTransportIsForwardedOnceWithoutItsTimestamp() {
+        byte[] stream = (String.join("", "2026-11-19T10:00:00.100000000Z first\n",
+                "2026-11-19T10:00:00.200000000Z second line\n", "2026-11-19T10:00:01.000000000Z third\n"))
+                .getBytes(StandardCharsets.UTF_8);
+        List<String> expected = List.of("STDOUT:first", "STDOUT:second line", "STDOUT:third");
+
+        for (int cut = 1; cut < stream.length; cut++) {
+            lines.clear();
+            read(handle(null), StreamType.STDOUT, Arrays.copyOfRange(stream, 0, cut),
+                    Arrays.copyOfRange(stream, cut, stream.length));
+            assertEquals(expected, lines, "cut at byte " + cut);
+        }
+
+        lines.clear();
+        PolledLogHandle byteAtATime = handle(null);
+        byteAtATime.beginRead(true);
+        for (byte b : stream) {
+            byteAtATime.accept(StreamType.STDOUT, new byte[] {b});
+        }
+        assertEquals(expected, lines);
     }
 
     // Catches: a line the container had not finished writing at one read being split in two, or its

@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
@@ -71,6 +72,8 @@ final class PolledLogHandle implements Closeable {
     private final Object stateLock = new Object();
     private final Map<StreamType, LogLineBuffer> buffers = new EnumMap<>(StreamType.class);
     private final Map<StreamType, Boolean> includeContinuation = new EnumMap<>(StreamType.class);
+    private final Map<StreamType, Boolean> atRecordStart = new EnumMap<>(StreamType.class);
+    private final Map<StreamType, byte[]> pendingRecordStart = new EnumMap<>(StreamType.class);
     private Instant cursor;
     private int recordsAtCursor;
     private int seenAtCursor;
@@ -179,6 +182,8 @@ final class PolledLogHandle implements Closeable {
     boolean beginRead(boolean allowTail) {
         synchronized (stateLock) {
             seenAtCursor = 0;
+            atRecordStart.clear();
+            pendingRecordStart.clear();
             boundedRead = allowTail && recordsAtCursor > 0;
             awaitingFirstRecord = true;
             overflowed = false;
@@ -204,25 +209,65 @@ final class PolledLogHandle implements Closeable {
         }
     }
 
-    /** One frame of a timestamped read: records of {@code <RFC 3339 timestamp> <content>}, each up to its newline. */
+    /**
+     * One payload of a timestamped read: records of {@code <RFC 3339 timestamp> <content>}, each up to its
+     * newline. docker-java hands a Docker frame on in reads of up to 1024 bytes, so a payload can end inside
+     * a record's timestamp: a record start that reaches the payload's end holding only timestamp characters
+     * is held and read again with the stream's next payload.
+     */
     void accept(StreamType stream, byte[] payload) {
         synchronized (stateLock) {
             if (finished || overflowed) {
                 return;
             }
+            byte[] data = payload;
+            boolean atStart = atRecordStart.getOrDefault(stream, true);
+            byte[] pending = pendingRecordStart.remove(stream);
+            if (pending != null) {
+                data = new byte[pending.length + payload.length];
+                System.arraycopy(pending, 0, data, 0, pending.length);
+                System.arraycopy(payload, 0, data, pending.length, payload.length);
+                atStart = true;
+            }
             int offset = 0;
-            while (offset < payload.length) {
+            while (offset < data.length) {
                 int end = offset;
-                while (end < payload.length && payload[end] != '\n') {
+                while (end < data.length && data[end] != '\n') {
                     end++;
                 }
-                if (end < payload.length) {
+                boolean terminated = end < data.length;
+                if (terminated) {
                     end++;
+                } else if (atStart && isTimestampPrefix(data, offset, end)) {
+                    pendingRecordStart.put(stream, Arrays.copyOfRange(data, offset, end));
+                    atRecordStart.put(stream, true);
+                    return;
                 }
-                acceptRecord(stream, payload, offset, end);
+                acceptRecord(stream, data, offset, end);
+                if (overflowed) {
+                    return;
+                }
+                atStart = terminated;
                 offset = end;
             }
+            atRecordStart.put(stream, atStart);
         }
+    }
+
+    /** Whether {@code data[start, end)} could be the beginning of a record's timestamp, cut before its space. */
+    private static boolean isTimestampPrefix(byte[] data, int start, int end) {
+        if (end - start >= TIMESTAMP_MAX_BYTES) {
+            return false;
+        }
+        for (int i = start; i < end; i++) {
+            byte b = data[i];
+            boolean timestampChar = (b >= '0' && b <= '9') || b == '-' || b == ':' || b == '.' || b == 'T'
+                    || b == 'Z' || b == '+';
+            if (!timestampChar) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void acceptRecord(StreamType stream, byte[] payload, int start, int end) {
