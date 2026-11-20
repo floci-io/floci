@@ -1590,13 +1590,17 @@ class IamRestRouteEnforcementIntegrationTest {
         String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
                 + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
 
+        String links = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/*";
+
         // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
-        // own is no grant on it.
-        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        // own is no grant on it. The link it makes is the caller's, and is checked too.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)) + "," + allow(action, links));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, "*") + "," + deny(action, sink));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink) + "," + allow(action, links));
         String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
         cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
     }
