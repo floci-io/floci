@@ -61,7 +61,6 @@ public class DockerClientProducer {
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
     private final DockerCircuitBreaker breaker;
-    private FlociDockerHttpClient pingTransport;
 
     @Inject
     public DockerClientProducer(EmulatorConfig config) {
@@ -490,23 +489,28 @@ public class DockerClientProducer {
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
         gaugeLogger.unregister("control-plane");
         breaker.close();
-        closePingTransport();
         client.close();
     }
 
     /**
-     * Gives the breaker a ping transport of its own, made once by whichever client is built first. Its
-     * one connection is used only by the breaker's single probe thread, so a ping never waits for a
-     * pooled connection behind the calls whose failures it is confirming, and {@link #PING_TIMEOUT}
-     * bounds the connect and the answer, so a daemon that accepts a connection but never answers holds a
-     * ping for seconds rather than the API timeout.
+     * Gives the breaker a ping that opens a one-connection transport of its own for each ping and closes it
+     * after, so a ping never waits for a pooled connection behind the calls whose failures it is confirming,
+     * {@link #PING_TIMEOUT} bounds the connect and the answer, and no transport outlives the client whose
+     * build set the probe. Pings are rare: one after a run of transport failures, then one per probe
+     * interval while the breaker is open.
      */
-    private synchronized void usePingTransport(DefaultDockerClientConfig clientConfig) {
-        if (!breaker.isEnabled() || pingTransport != null) {
+    private void usePingTransport(DefaultDockerClientConfig clientConfig) {
+        if (!breaker.isEnabled()) {
             return;
         }
-        pingTransport = newPingTransport(clientConfig, PING_TIMEOUT);
-        breaker.useProbe(DockerCircuitBreaker.pingOver(pingTransport));
+        breaker.useProbe(() -> {
+            try (FlociDockerHttpClient transport = newPingTransport(clientConfig, PING_TIMEOUT)) {
+                return DockerCircuitBreaker.pingOver(transport).ping();
+            } catch (IOException e) {
+                LOG.debugv("Closing the Docker breaker's ping transport failed: {0}", e.getMessage());
+                return DockerCircuitBreaker.PingResult.INCONCLUSIVE;
+            }
+        });
     }
 
     /** One connection whose connect, lease and answer are each bounded by {@code timeout}. */
@@ -519,13 +523,6 @@ public class DockerClientProducer {
                 .responseTimeout(timeout)
                 .connectionRequestTimeout(timeout)
                 .build();
-    }
-
-    private synchronized void closePingTransport() throws IOException {
-        if (pingTransport != null) {
-            pingTransport.close();
-            pingTransport = null;
-        }
     }
 
     void disposeStreamingDockerClient(@Disposes @StreamingDocker DockerClient client) throws IOException {
