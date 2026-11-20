@@ -20,6 +20,7 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -159,6 +160,23 @@ class Route53ResolverIntegrationTest {
                         .formatted(vpc) + "[0].OwnerId", notNullValue())
                 .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
                         .formatted(vpc) + "[0].ValidationStatus", equalTo("ENABLED"));
+
+            dnssec("ListResolverDnssecConfigs", "{\"Filters\":[{\"Name\":\"ResourceId\","
+                    + "\"Values\":[\"" + vpc + "\"]}]}")
+                .statusCode(200)
+                .body("ResolverDnssecConfigs.size()", equalTo(1))
+                .body("ResolverDnssecConfigs[0].ResourceId", equalTo(vpc));
+
+            String nextToken = dnssec("ListResolverDnssecConfigs", "{\"MaxResults\":1}")
+                    .statusCode(200)
+                    .body("ResolverDnssecConfigs.size()", lessThanOrEqualTo(1))
+                    .extract().path("NextToken");
+            if (nextToken != null) {
+                dnssec("ListResolverDnssecConfigs", "{\"NextToken\":\"" + nextToken + "\"}")
+                        .statusCode(200);
+            }
+            dnssec("ListResolverDnssecConfigs", "{\"NextToken\":\"no-such-token\"}")
+                    .statusCode(400).body("__type", equalTo("InvalidNextTokenException"));
         } finally {
             ec2Ok("DeleteVpc", "VpcId", vpc);
         }

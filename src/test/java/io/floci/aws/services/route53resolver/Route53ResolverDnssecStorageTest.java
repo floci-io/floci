@@ -1,7 +1,9 @@
 package io.floci.aws.services.route53resolver;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
@@ -58,12 +60,63 @@ class Route53ResolverDnssecStorageTest {
         service.updateResolverDnssecConfig(objectMapper.createObjectNode()
                 .put("ResourceId", "vpc-west").put("Validation", "ENABLE"), "us-west-2", accountId);
 
-        List<ObjectNode> east = service.listResolverDnssecConfigs("us-east-1");
+        ObjectNode result = service.listResolverDnssecConfigs(null, null, null, "us-east-1");
+        JsonNode east = result.path("ResolverDnssecConfigs");
         assertEquals(1, east.size());
         assertEquals("vpc-east", east.get(0).path("ResourceId").asText());
         assertEquals(accountId, east.get(0).path("OwnerId").asText());
         assertEquals("ENABLED", east.get(0).path("ValidationStatus").asText());
         assertTrue(east.get(0).path("Id").asText().startsWith("rdsc-"));
-        assertTrue(service.listResolverDnssecConfigs("eu-west-1").isEmpty());
+        assertTrue(service.listResolverDnssecConfigs(null, null, null, "eu-west-1")
+                .path("ResolverDnssecConfigs").isEmpty());
+    }
+
+    @Test
+    void listResolverDnssecConfigs_filtersByResourceId() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
+        String accountId = "000000000000";
+        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
+                .put("ResourceId", "vpc-a").put("Validation", "ENABLE"), "us-east-1", accountId);
+        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
+                .put("ResourceId", "vpc-b").put("Validation", "ENABLE"), "us-east-1", accountId);
+
+        ObjectNode filter = objectMapper.createObjectNode();
+        filter.put("Name", "ResourceId");
+        filter.set("Values", objectMapper.createArrayNode().add("vpc-b"));
+        ObjectNode result = service.listResolverDnssecConfigs(
+                objectMapper.createArrayNode().add(filter), null, null, "us-east-1");
+        JsonNode matched = result.path("ResolverDnssecConfigs");
+        assertEquals(1, matched.size());
+        assertEquals("vpc-b", matched.get(0).path("ResourceId").asText());
+        assertTrue(result.path("NextToken").isMissingNode());
+    }
+
+    @Test
+    void listResolverDnssecConfigs_pagesByMaxResultsWithNextToken() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
+        String accountId = "000000000000";
+        for (String vpc : List.of("vpc-a", "vpc-b", "vpc-c")) {
+            service.updateResolverDnssecConfig(objectMapper.createObjectNode()
+                    .put("ResourceId", vpc).put("Validation", "ENABLE"), "us-east-1", accountId);
+        }
+
+        ObjectNode firstPage = service.listResolverDnssecConfigs(null,
+                objectMapper.getNodeFactory().numberNode(2), null, "us-east-1");
+        assertEquals(2, firstPage.path("ResolverDnssecConfigs").size());
+        String token = firstPage.path("NextToken").asText(null);
+        assertTrue(token != null && !token.isBlank());
+
+        ObjectNode secondPage = service.listResolverDnssecConfigs(null, null, token, "us-east-1");
+        assertEquals(1, secondPage.path("ResolverDnssecConfigs").size());
+        assertTrue(secondPage.path("NextToken").isMissingNode());
+
+        assertThrows(AwsException.class, () -> service.listResolverDnssecConfigs(null,
+                objectMapper.getNodeFactory().numberNode(101), null, "us-east-1"));
     }
 }
