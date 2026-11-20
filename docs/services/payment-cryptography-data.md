@@ -231,7 +231,7 @@ client that talks to the control plane does not reach it by accident.
 - **The two variant masks are the standard's two forms of the ceremony.** The `82` form is
   the one an independent implementation of the ceremony confirms, byte for byte. The `82C0`
   form is the same ceremony under the longer of the two masks the reference names, and the
-  mask of its inverted number is that form's `84`: two nodes validating under it agree
+  mask of its inverted number is that form's `84C0`: two nodes validating under it agree
   with each other, but not with the reference.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
