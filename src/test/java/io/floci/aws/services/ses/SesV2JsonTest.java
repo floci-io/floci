@@ -73,6 +73,20 @@ class SesV2JsonTest {
     }
 
     @Test
+    void remapCvetException_restatesAMissingTemplateAndRemapsTheRest() {
+        AwsException missing = SesV2Json.remapCvetException(new AwsException(
+                "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400), "welcome");
+        assertEquals("NotFoundException", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+        assertEquals("Custom verification email template <welcome> does not exist", missing.getMessage());
+
+        AwsException other = SesV2Json.remapCvetException(
+                new AwsException("InvalidParameterValue", "m", 400), "welcome");
+        assertEquals("BadRequestException", other.getErrorCode());
+        assertEquals("m", other.getMessage());
+    }
+
+    @Test
     void requireJsonObject_rejectsNullAndNonObjects() {
         assertNull(assertAws("SerializationException", 400,
                 () -> SesV2Json.requireJsonObject(null)).getMessage());

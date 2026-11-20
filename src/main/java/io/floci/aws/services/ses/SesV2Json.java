@@ -66,6 +66,17 @@ final class SesV2Json {
                 "Custom verification email template <" + templateName + "> does not exist", 404);
     }
 
+    /**
+     * {@link #remapV1Exception} for an operation that names a custom verification email template:
+     * the service throws a v1 sentence for a missing one, which v2 restates around the requested name.
+     */
+    static AwsException remapCvetException(AwsException e, String templateName) {
+        if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
+            return cvetNotFound(templateName);
+        }
+        return remapV1Exception(e);
+    }
+
     /** A request body that is not a JSON object: AWS names a list and answers anything else without a message. */
     static void requireJsonObject(JsonNode root) {
         if (root != null && root.isObject()) {

@@ -27,6 +27,7 @@ import org.jboss.logging.Logger;
 import static io.floci.aws.services.ses.SesV2Json.cvetNotFound;
 import static io.floci.aws.services.ses.SesV2Json.parseTagsArray;
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
+import static io.floci.aws.services.ses.SesV2Json.remapCvetException;
 import static io.floci.aws.services.ses.SesV2Json.remapV1Exception;
 
 /**
@@ -131,17 +132,6 @@ public class SesCvetController {
             throw cvetNotFound(templateName);
         }
         return Response.ok(objectMapper.createObjectNode()).build();
-    }
-
-    /**
-     * The service throws the v1 sentence, which names no template; v2 answers a missing template
-     * with its own wording around the requested name (probed on Get and Delete).
-     */
-    private static AwsException remapCvetException(AwsException e, String templateName) {
-        if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
-            return cvetNotFound(templateName);
-        }
-        return remapV1Exception(e);
     }
 
     private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
