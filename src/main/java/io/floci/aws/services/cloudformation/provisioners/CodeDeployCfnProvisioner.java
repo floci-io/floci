@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.codedeploy.CodeDeployService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -80,6 +81,11 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         if (snapshot == null) {
             return false;
         }
+        // An application the update created because the prior one was gone is deleted instead.
+        if (CfnRollback.undoCreatedByUpdate(resource, snapshot, SNAPSHOT_ATTR, null,
+                (createdId, region) -> delete(TYPE, createdId, region))) {
+            return true;
+        }
         restoreTags(snapshot);
         Ec2Tags.restoreRecord(resource, TAG_KEYS_ATTR, snapshot);
         resource.getAttributes().remove(SNAPSHOT_ATTR);
@@ -117,11 +123,16 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         // holds the dispatcher's stub, which names no application: taking over its id is a create.
         boolean stub = CfnResourceDispatcher.isStub(priorPhysicalId, attributesBefore);
         r.setPhysicalId(name);
-        if (ctx.reusesPriorEntity(name) && !stub) {
+        boolean reuses = ctx.reusesPriorEntity(name) && !stub;
+        if (reuses && applicationExists(ctx.region(), name)) {
             updateTagsInPlace(r, ctx, name, tags);
         } else {
             codeDeployService.createApplication(ctx.region(), name, ctx.resolveOptionalWritten(props, "ComputePlatform"),
                     toTagList(tags));
+            if (reuses) {
+                // The application the update started from is gone, so this one is the update's to undo.
+                CfnRollback.recordCreatedByUpdate(r, ctx, SNAPSHOT_ATTR);
+            }
         }
         Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, tags);
         if (stub) {
@@ -149,6 +160,19 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
         CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreTags(snapshot),
                 () -> reconcileTags(arn, Ec2Tags.touched(owned, desired), desired));
+    }
+
+    /** Whether the application an update starts from still exists; any failure but not-found propagates. */
+    private boolean applicationExists(String region, String name) {
+        try {
+            codeDeployService.getApplication(region, name);
+            return true;
+        } catch (AwsException e) {
+            if ("ApplicationDoesNotExistException".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
     }
 
     private void restoreTags(JsonNode snapshot) {

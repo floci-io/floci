@@ -393,6 +393,41 @@ class CodeDeployCfnProvisionerTest {
     }
 
     @Test
+    void anUpdateOverAVanishedApplicationCreatesItAndARollbackDeletesIt() {
+        when(codeDeploy.getApplication("us-east-1", "my-app"))
+                .thenThrow(new AwsException("ApplicationDoesNotExistException", "gone", 400));
+        when(codeDeploy.createApplication(eq("us-east-1"), eq("my-app"), any(), any())).thenReturn(app("my-app"));
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
+        props.putArray("Tags").add(mapper.createObjectNode().put("Key", "team").put("Value", "core"));
+        StackResource r = owning("team");
+
+        provisioner.provision(r, props, ctx("my-app", props.deepCopy()));
+
+        verify(codeDeploy).createApplication("us-east-1", "my-app", null,
+                List.of(Map.of("Key", "team", "Value", "core")));
+        verify(codeDeploy, never()).tagResource(anyString(), any());
+        verify(codeDeploy, never()).untagResource(anyString(), any());
+        assertEquals("my-app", r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(codeDeploy).deleteApplication("us-east-1", "my-app");
+        assertEquals("my-app", r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey(CodeDeployCfnProvisioner.SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aFailureReadingThePriorApplicationPropagatesAndCreatesNothing() {
+        when(codeDeploy.getApplication("us-east-1", "my-app"))
+                .thenThrow(new AwsException("ThrottlingException", "slow down", 400));
+
+        assertThrows(AwsException.class, () -> provisioner.provision(owning(),
+                mapper.createObjectNode().put("ApplicationName", "my-app"), ctx("my-app")));
+
+        verify(codeDeploy, never()).createApplication(anyString(), anyString(), any(), any());
+    }
+
+    @Test
     void deleteRemovesTheApplication() {
         provisioner.delete("AWS::CodeDeploy::Application", "my-app", "us-east-1");
         verify(codeDeploy).deleteApplication("us-east-1", "my-app");
