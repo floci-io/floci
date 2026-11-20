@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
 import java.util.HexFormat;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,6 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * {@code tr34-vectors/} beside this test's resources. They are the standard's own
  * byte values, not ones this branch produced, so a codec that drifts from the
  * published encoding fails here even when it still round-trips its own blocks.
+ *
+ * <p>What is under test is the key block reader. The first sample is a key block in
+ * the clear and the second is one inside an envelope, so the reader answers two key
+ * blocks the standard published rather than one.
  */
 public class PaymentCryptographyTr34VectorTest {
 
@@ -26,10 +31,17 @@ public class PaymentCryptographyTr34VectorTest {
     /** The key the standard's AES samples carry, in clear. */
     private static final String STANDARD_KEY = "0123456789ABCDEFFEDCBA9876543210";
 
+    /** The digests the standard's samples have, so a changed vector is named. */
+    private static final Map<String, String> DIGESTS = Map.of(
+            "tr34-2019-annex-b-aes-key-block.der",
+            "eceeedaa129dc583df2ac6a0d68d9b89247ea9e18b005eff4cdb617a5f0e7fc2",
+            "tr34-2019-annex-b-aes-enveloped-data.der",
+            "fb3e8b94bf22c4b456804d7145832315e4366937296c773f5cbc26dd39adbf71");
+
     @Test
     void readsTheStandardAesKeyBlock() throws Exception {
         // B.2.2.2.4: the clear AES key block, with its header in the clear.
-        Tr34.Recovered recovered = Tr34.readKeyBlock(resource("tr34-2019-annex-b-aes-key-block.der"));
+        Tr34.Recovered recovered = Tr34.readKeyBlock(vector("tr34-2019-annex-b-aes-key-block.der"));
         assertEquals(STANDARD_KEY, recovered.keyHex);
         assertEquals("D0256K0AB00E0000", recovered.header);
     }
@@ -37,7 +49,12 @@ public class PaymentCryptographyTr34VectorTest {
     @Test
     void opensTheStandardAesEnvelopedDataUnderThePublishedEphemeralKey() throws Exception {
         // B.2.2.3.2: the AES key block encrypted under the published ephemeral key.
-        byte[] envelope = resource("tr34-2019-annex-b-aes-enveloped-data.der");
+        //
+        // The sample is opened here rather than by the codec's reader, because the
+        // sample is a standard CMS EnvelopedData and the reader takes the shape the
+        // reference writes. What the reader is given is the key block the sample
+        // carries, which is the codec under test.
+        byte[] envelope = vector("tr34-2019-annex-b-aes-enveloped-data.der");
         byte[] iv = envelopeIv(envelope);
         byte[] ciphertext = envelopeCiphertext(envelope);
 
@@ -75,10 +92,15 @@ public class PaymentCryptographyTr34VectorTest {
     /**
      * The content-encryption sequence of the sample's EnvelopedData.
      *
-     * <p>The EnvelopedData is a sequence of the version, the recipients and the encrypted
-     * content information, and that last one names the content encryption and carries the
-     * IV and the ciphertext beside the algorithm's name. That is the layout the service's
-     * own reader expects of a TR-34 envelope, and the one this sample is written in.
+     * <p>The sample is a standard CMS EnvelopedData: a sequence of the version, the
+     * recipients and the encrypted content information, and that last one names the
+     * content encryption and carries the IV and the ciphertext beside the algorithm's
+     * name.
+     *
+     * <p>This is not the shape the codec's reader takes. The reference writes the
+     * envelope as three bare objects, the version, the recipients and the encrypted
+     * content information, and the reader reads it that way, so it would refuse this
+     * sample.
      */
     private static ASN1Sequence contentEncryption(byte[] envelope) {
         ASN1Sequence encryptedContentInfo = ASN1Sequence.getInstance(
@@ -86,11 +108,20 @@ public class PaymentCryptographyTr34VectorTest {
         return ASN1Sequence.getInstance(encryptedContentInfo.getObjectAt(1));
     }
 
-    /** A vector, by the file name beside this test's resources. */
-    private static byte[] resource(String name) throws Exception {
+    /**
+     * A vector, by the file name beside this test's resources.
+     *
+     * <p>The digest is checked as the vector is read, so one that was altered or
+     * mangled in the tree is named as such rather than failing as a parse error.
+     */
+    private static byte[] vector(String name) throws Exception {
+        byte[] bytes;
         try (InputStream in = PaymentCryptographyTr34VectorTest.class
                 .getResourceAsStream("tr34-vectors/" + name)) {
-            return in.readAllBytes();
+            bytes = in.readAllBytes();
         }
+        assertEquals(DIGESTS.get(name), HEX.formatHex(Tr34.digest(bytes)),
+                "the vector " + name + " is not the one the standard published");
+        return bytes;
     }
 }
