@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
+import static io.floci.aws.services.ses.SesV2Json.remapCvetException;
 import static io.floci.aws.services.ses.SesV2Json.remapV1Exception;
 
 /**
@@ -370,13 +371,7 @@ public class SesSendController {
             result.put("MessageId", messageId);
             return Response.ok(result).build();
         } catch (AwsException e) {
-            // AWS returns a longer not-found message on v2 than the v1 send message ("Template <name>
-            // does not exist"); the service throws the v1-native form, so restate it in the v2 wording.
-            if ("CustomVerificationEmailTemplateDoesNotExist".equals(e.getErrorCode())) {
-                throw new AwsException("NotFoundException",
-                        "Custom verification email template <" + templateName + "> does not exist", 404);
-            }
-            throw remapV1Exception(e);
+            throw remapCvetException(e, templateName);
         }
     }
 

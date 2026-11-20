@@ -2332,7 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-DynamoDB, SSM, KMS, IAM, Resource Groups, API Gateway
+DynamoDB, SSM, KMS, IAM, API Gateway
 and CloudWatch Logs. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS and Amazon EKS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS and AWS Resource Groups they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -3537,8 +3537,9 @@ floci populates:
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
   Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
   queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
-  Aurora DSQL for its clusters and EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
-  associations and access entries. Tag keys differing only in case are one condition key holding every value.
+  Aurora DSQL for its clusters, EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
+  associations and access entries and Resource Groups for its groups. Tag keys differing only in case are one condition
+  key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

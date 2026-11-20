@@ -13,11 +13,15 @@ import io.vertx.core.VertxOptions;
 import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.net.NetServer;
+import io.vertx.core.net.NetSocket;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -111,6 +115,44 @@ class ElbV2HealthCheckerTest {
         } finally {
             close(server);
         }
+    }
+
+    @Test
+    void tcpCheckPassesOnAnOpenConnectionWithoutSpeakingHttp() throws Exception {
+        NetServer server = vertx.createNetServer().connectHandler(NetSocket::close)
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        try {
+            ElbV2HealthChecker checker = healthChecker();
+            TargetGroup targetGroup = tcpTargetGroup(server.actualPort());
+            TargetDescription target = target("127.0.0.1", server.actualPort());
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals("healthy",
+                    checker.getHealth(targetGroup.getTargetGroupArn(), target.getId(), target.getPort()).state()));
+        } finally {
+            server.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void tcpCheckFailsWhenTheConnectionIsRefused() throws Exception {
+        int closedPort;
+        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            closedPort = socket.getLocalPort();
+        }
+        ElbV2HealthChecker checker = healthChecker();
+        TargetGroup targetGroup = tcpTargetGroup(closedPort);
+        TargetDescription target = target("127.0.0.1", closedPort);
+
+        checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+            ElbV2HealthChecker.TargetHealthStatus health = checker.getHealth(
+                    targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
+            assertEquals("unhealthy", health.state());
+            assertEquals("Target.FailedHealthChecks", health.reason());
+        });
     }
 
     @Test
@@ -520,6 +562,13 @@ class ElbV2HealthCheckerTest {
         targetGroup.setHealthCheckTimeoutSeconds(1);
         targetGroup.setHealthyThresholdCount(healthyThreshold);
         targetGroup.setUnhealthyThresholdCount(unhealthyThreshold);
+        return targetGroup;
+    }
+
+    private static TargetGroup tcpTargetGroup(int port) {
+        TargetGroup targetGroup = targetGroup(port, "200", 1, 1);
+        targetGroup.setProtocol("TCP");
+        targetGroup.setHealthCheckProtocol("TCP");
         return targetGroup;
     }
 
