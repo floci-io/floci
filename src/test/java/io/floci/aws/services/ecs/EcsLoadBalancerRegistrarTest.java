@@ -61,7 +61,7 @@ class EcsLoadBalancerRegistrarTest {
     private String createTargetGroup(String name, String targetType) {
         TargetGroup tg = elbV2Service.createTargetGroup(REGION, name, "HTTP", "HTTP1",
                 8080, "vpc-regtest", targetType,
-                null, null, false, null, null, null, null, null, null, null, Map.of());
+                null, null, true, null, null, null, null, null, null, null, Map.of());
         return tg.getTargetGroupArn();
     }
 

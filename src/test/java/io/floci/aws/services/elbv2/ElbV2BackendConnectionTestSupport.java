@@ -16,6 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.testing.AlbFixtures.HEALTH_CHECK_PATH;
 import static io.floci.aws.testing.AlbFixtures.createListener;
 import static io.floci.aws.testing.AlbFixtures.createLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.createTargetGroup;
@@ -23,6 +24,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteListener;
 import static io.floci.aws.testing.AlbFixtures.deleteLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -40,7 +42,7 @@ abstract class ElbV2BackendConnectionTestSupport {
     private String listenerArn;
 
     void startBackend(Handler<HttpServerRequest> handler) throws Exception {
-        backend = vertx.createHttpServer().requestHandler(handler)
+        backend = vertx.createHttpServer().requestHandler(withHealthCheck(handler))
                 .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         listenerPort = FreePorts.anyInterfacePort();
         loadBalancerArn = createLoadBalancer("backend-connection-lb");
@@ -53,6 +55,22 @@ abstract class ElbV2BackendConnectionTestSupport {
                 socket.setSoTimeout(1000);
             }
         });
+    }
+
+    @Test
+    void healthProbesDoNotReachTheApplicationHandler() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        startBackend(request -> {
+            requests.incrementAndGet();
+            request.response().end("application");
+        });
+
+        given().baseUri("http://127.0.0.1").port(backend.actualPort())
+                .get(HEALTH_CHECK_PATH).then().statusCode(200);
+        assertEquals(0, requests.get());
+        assertEquals("application", given().baseUri("http://127.0.0.1").port(listenerPort)
+                .get("/application").asString());
+        assertEquals(1, requests.get());
     }
 
     @Test

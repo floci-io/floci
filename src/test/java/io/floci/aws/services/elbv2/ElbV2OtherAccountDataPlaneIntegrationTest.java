@@ -19,6 +19,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteListener;
 import static io.floci.aws.testing.AlbFixtures.deleteLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -43,7 +44,7 @@ class ElbV2OtherAccountDataPlaneIntegrationTest {
     @Test
     void listenerForwardsAndIsRestoredForItsOwnAccount() throws Exception {
         HttpServer backend = vertx.createHttpServer()
-                .requestHandler(request -> request.response().end("other-account"))
+                .requestHandler(withHealthCheck(request -> request.response().end("other-account")))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
         int listenerPort = FreePorts.anyInterfacePort();

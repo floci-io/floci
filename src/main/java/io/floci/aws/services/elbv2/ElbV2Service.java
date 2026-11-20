@@ -583,6 +583,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             throw new AwsException("ValidationError", "A port must be specified", 400);
         }
         validateHealthCheckPort(healthCheckPort);
+        validateHealthCheckEnabled(targetType, healthCheckEnabled);
         Map<String, TargetGroup> regionTgs = targetGroups.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionTgs.values().stream()
                 .anyMatch(tg -> tg.getTargetGroupName().equals(name));
@@ -606,7 +607,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         tg.setRegion(region);
 
         // health check defaults
-        tg.setHealthCheckEnabled(healthCheckEnabled != null ? healthCheckEnabled : true);
+        tg.setHealthCheckEnabled(healthCheckEnabled != null ? healthCheckEnabled : !"lambda".equals(targetType));
         tg.setHealthCheckProtocol(healthCheckProtocol != null ? healthCheckProtocol : "HTTP");
         tg.setHealthCheckPort(healthCheckPort != null ? healthCheckPort : "traffic-port");
         tg.setHealthCheckPath(healthCheckPath != null ? healthCheckPath : "/");
@@ -678,6 +679,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         validateHealthCheckTimeout(healthCheckTimeout);
         TargetGroup tg = requireTargetGroup(region, arn);
         validateHealthCheckPort(healthCheckPort);
+        validateHealthCheckEnabled(tg.getTargetType(), healthCheckEnabled);
+        Integer previousInterval = tg.getHealthCheckIntervalSeconds();
         if (healthCheckProtocol != null) tg.setHealthCheckProtocol(healthCheckProtocol);
         if (healthCheckPort != null)     tg.setHealthCheckPort(healthCheckPort);
         if (healthCheckEnabled != null)  tg.setHealthCheckEnabled(healthCheckEnabled);
@@ -688,6 +691,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         if (unhealthyThreshold != null)  tg.setUnhealthyThresholdCount(unhealthyThreshold);
         if (matcher != null)             tg.setMatcher(matcher);
         persistRegion(targetGroups, region);
+        if (!Objects.equals(previousInterval, tg.getHealthCheckIntervalSeconds())) {
+            healthChecker.startMonitoring(tg);
+        }
+    }
+
+    private static void validateHealthCheckEnabled(String targetType, Boolean enabled) {
+        if (Boolean.FALSE.equals(enabled) && !"lambda".equals(targetType)) {
+            throw new AwsException("ValidationError", "Health checks cannot be disabled for non-Lambda targets", 400);
+        }
     }
 
     private static void validateHealthCheckTimeout(Integer timeout) {
@@ -1242,7 +1254,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             th.setTarget(t);
             if (isLambdaTg) {
                 th.setHealthCheckPort("N/A");
-                th.setState("healthy");
+                if (Boolean.FALSE.equals(tg.getHealthCheckEnabled())) {
+                    th.setState("unavailable");
+                    th.setReason("Target.HealthCheckDisabled");
+                    th.setDescription("Health checks are disabled for the target group");
+                } else {
+                    th.setState("healthy");
+                }
                 return th;
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
