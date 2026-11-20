@@ -584,6 +584,7 @@ iam-action-resources-verify: ## CI gate (online): every vendored IAM action reso
 # module that generator imports. Given CHANGED, the paths a pull request changes, iam-data-verify
 # runs only the checks covering one of them, so a pull request is not failed by drift in a file it
 # leaves alone; without it, as on the weekly run, it runs every check.
+# CHANGED_FILE carries the same paths without putting a large diff in argv or the environment.
 IAM_PASSED_ROLES_GENERATOR := tools/aws/regen_iam_passed_roles.py tools/aws/regen_iam_authorized_actions.py \
 	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
@@ -624,9 +625,11 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
 	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; requestkeys=0; routes=0; \
+	changed="$(strip $(CHANGED))"; \
+	if [ -n "$(CHANGED_FILE)" ]; then changed=$$(cat "$(CHANGED_FILE)") || exit 1; fi; \
 	covers() { \
-		[ -z "$(strip $(CHANGED))" ] && return 0; \
-		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
+		[ -z "$$changed" ] && return 0; \
+		for path in $$changed; do case " $$1 " in *" $$path "*) return 0;; esac; done; \
 		echo "not checked, as the change touches none of its files: $$2"; \
 		return 1; \
 	}; \
