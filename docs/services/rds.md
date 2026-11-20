@@ -538,9 +538,10 @@ RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-R
 otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
 default group. A modify that moves an instance to another VPC without naming groups puts it on the
 new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
-its cluster's (see [Cluster settings read-back](#cluster-settings-read-back)), so the member keeps none. `DescribeDBInstances` reports the VPC's
-default group for an instance that keeps none, such as a cluster member or an instance stored before
-these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
+its cluster's (see [Cluster settings read-back](#cluster-settings-read-back)), so the member keeps none and
+`DescribeDBInstances` reports its cluster's groups. It reports the VPC's default group for an instance
+that keeps none otherwise, such as a member of a cluster stored before clusters kept groups or an
+instance stored before these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
 before it changes anything, and a rollback leaves the groups of an instance the update moved to
 another VPC, which it does not move back.
 

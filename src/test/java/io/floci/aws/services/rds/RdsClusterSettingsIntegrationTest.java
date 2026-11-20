@@ -4,12 +4,14 @@ import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DbClusterNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
 
 import java.util.List;
@@ -17,6 +19,7 @@ import java.util.List;
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.Ec2Requests.defaultSecurityGroupId;
 import static io.floci.aws.testing.RdsRequests.rdsClient;
+import static io.floci.aws.testing.RdsRequests.vpcSecurityGroupIds;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -37,7 +40,27 @@ class RdsClusterSettingsIntegrationTest {
     private static final String CLUSTER = "settings-cluster";
     private static final String DEFAULTS = "settings-defaults";
     private static final String REFUSED = "settings-refused";
+    private static final String MEMBER = "settings-member";
     private static final String ROLE = "arn:aws:iam::" + ACCOUNT + ":role/rds-monitoring";
+
+    /** Frees the proxy ports the clusters hold, which later tests in the same run count on. */
+    @AfterEach
+    void cleanUp() {
+        try (RdsClient rds = rdsClient("us-east-1", ACCOUNT)) {
+            try {
+                rds.deleteDBInstance(request -> request.dbInstanceIdentifier(MEMBER).skipFinalSnapshot(true));
+            } catch (DbInstanceNotFoundException ignored) {
+                // the test failed before it created the member, or already deleted it
+            }
+            for (String id : List.of(CLUSTER, DEFAULTS, REFUSED)) {
+                try {
+                    rds.deleteDBCluster(request -> request.dbClusterIdentifier(id).skipFinalSnapshot(true));
+                } catch (DbClusterNotFoundException ignored) {
+                    // never created, refused, or already deleted by the test
+                }
+            }
+        }
+    }
 
     @Test
     void clusterSettingsRoundTripThroughCreateAndModify() {
@@ -107,6 +130,28 @@ class RdsClusterSettingsIntegrationTest {
                     .dbClusterIdentifier(CLUSTER).monitoringInterval(7)));
             assertEquals(List.of(other), groups(describe(rds, CLUSTER)));
             assertEquals("06:30-07:30", describe(rds, CLUSTER).preferredBackupWindow());
+
+            // A refused setting refuses the whole modify, so the other changes it names are not stored.
+            assertAwsError("InvalidParameterCombination", 400, () -> rds.modifyDBCluster(request -> request
+                    .dbClusterIdentifier(CLUSTER).backupRetentionPeriod(14).deletionProtection(true)
+                    .vpcSecurityGroupIds(elsewhere)));
+            DBCluster unchanged = describe(rds, CLUSTER);
+            assertEquals(1, unchanged.backupRetentionPeriod());
+            assertFalse(unchanged.deletionProtection());
+
+            // An Aurora member keeps no groups of its own and reports its cluster's.
+            rds.createDBInstance(request -> request.dbInstanceIdentifier(MEMBER).dbClusterIdentifier(CLUSTER)
+                    .engine("aurora-postgresql").dbInstanceClass("db.r5.large"));
+            assertEquals(List.of(other), vpcSecurityGroupIds(rds, MEMBER));
+            rds.modifyDBCluster(request -> request.dbClusterIdentifier(CLUSTER).vpcSecurityGroupIds(app));
+            assertEquals(List.of(app), vpcSecurityGroupIds(rds, MEMBER));
+
+            // A retained automated backup reports the window of the cluster it was taken from.
+            rds.deleteDBInstance(request -> request.dbInstanceIdentifier(MEMBER).skipFinalSnapshot(true));
+            rds.deleteDBCluster(request -> request.dbClusterIdentifier(CLUSTER).skipFinalSnapshot(true)
+                    .deleteAutomatedBackups(false));
+            assertEquals("06:30-07:30", rds.describeDBClusterAutomatedBackups(request -> request
+                    .dbClusterIdentifier(CLUSTER)).dbClusterAutomatedBackups().getFirst().preferredBackupWindow());
 
             assertAwsError("InvalidParameterCombination", 400, () -> rds.createDBCluster(request -> request
                     .dbClusterIdentifier(REFUSED).engine("aurora-postgresql")

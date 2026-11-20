@@ -4343,11 +4343,18 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The default security group of {@code instance}'s VPC, which describe reports for an instance that
-     * keeps no groups: an Aurora member, whose groups are its cluster's, or one stored before RDS gave
-     * one. No group when its VPC is unknown or gone.
+     * The groups describe reports for an instance that keeps none: an Aurora member reports its
+     * cluster's groups, and otherwise, or for one stored before RDS gave one, the default security
+     * group of its VPC. No group when its VPC is unknown or gone.
      */
     public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
+        if (!isBlank(instance.getDbClusterIdentifier())) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbClusterIdentifier());
+            if (cluster != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
+                return List.copyOf(cluster.getVpcSecurityGroupIds());
+            }
+        }
         try {
             return RdsSecurityGroups.vpcDefault(ec2Service, regionResolver.regionOf(instance.getDbInstanceArn()),
                     instance.getVpcId());
@@ -12070,9 +12077,28 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public synchronized DbCluster setClusterSettings(String region, String clusterId,
                                                      DbClusterSettings settings, boolean create) {
-        settings.validate();
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        applyClusterSettings(cluster, settings, create, effectiveRegion);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Runs every check {@link #setClusterSettings} runs, against the cluster as it stands, without
+     * storing anything, so a ModifyDBCluster can refuse the request before any of its other changes
+     * is applied.
+     */
+    public synchronized void validateClusterSettings(String region, String clusterId,
+                                                     DbClusterSettings settings, boolean create) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster copy = RESPONSE_COPIER.convertValue(getDbCluster(clusterId, effectiveRegion), DbCluster.class);
+        applyClusterSettings(copy, settings, create, effectiveRegion);
+    }
+
+    private void applyClusterSettings(DbCluster cluster, DbClusterSettings settings, boolean create,
+                                      String effectiveRegion) {
+        settings.validate();
 
         String backup = settings.preferredBackupWindow() != null
                 ? BackupWindows.lowerCase(settings.preferredBackupWindow())
@@ -12144,8 +12170,6 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setPerformanceInsightsEnabled(piEnabled);
         cluster.setPerformanceInsightsRetentionPeriod(piEnabled ? piRetention : null);
         cluster.setDatabaseInsightsMode(insightsMode);
-        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
-        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
     public static void validatePromotionTier(Integer tier) {

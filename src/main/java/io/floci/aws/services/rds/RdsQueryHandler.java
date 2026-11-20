@@ -1653,7 +1653,10 @@ public class RdsQueryHandler {
             }
             Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             DbClusterSettings clusterSettings = clusterSettings(params);
-            clusterSettings.validate();
+            if (!clusterSettings.isEmpty()) {
+                // Checked against the cluster before any change of this request is stored.
+                service.validateClusterSettings(region, id, clusterSettings, false);
+            }
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
@@ -3298,7 +3301,8 @@ public class RdsQueryHandler {
            .elem("EngineVersion", c.getEngineVersion())
            .elem("DBClusterArn", c.getDbClusterArn())
            .elem("BackupRetentionPeriod", backup.getBackupRetentionPeriod())
-           .elem("PreferredBackupWindow", "04:00-06:00")
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
            .elem("EngineMode", c.getEngineMode() != null ? c.getEngineMode() : "provisioned");
         if (c.getEndpoint() != null) {
             xml.elem("Port", c.getEndpoint().port());
