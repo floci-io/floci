@@ -17,11 +17,12 @@ name: IAM Data Drift
 # Two triggers, for two different failures:
 #
 #   - On a pull request that touches a vendored file or its generator, which is where a
-#     hand-typed or mistyped entry would enter the repository. A pull request that does not touch
-#     them cannot introduce one, so it does not run and cannot be failed by an outage. For the same
-#     reason, one that does checks only the files it touches, each with its generator and the
-#     modules that generator imports (the paths in the Makefile, above iam-data-verify): drift in a
-#     file it leaves alone is not its doing, and the weekly run reports it.
+#     hand-typed or mistyped entry would enter the repository. It checks only the files it touches,
+#     each with its generator and the modules that generator imports (the paths in the Makefile,
+#     above iam-data-verify): drift in a file it leaves alone is not its doing, and the weekly run
+#     reports it. Changes to Makefile, this workflow or the selector tests also trigger the job
+#     so the selector regression tests run. Those changes alone select no live-data checks and
+#     cannot be failed by an upstream data outage.
 #   - Weekly, because the files also go stale without anyone touching them: AWS ships services
 #     and actions, and occasionally retires them. Tying the only upstream check to pull request
 #     activity would mean a quiet month is a month with no drift detection at all.
