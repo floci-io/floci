@@ -1,6 +1,7 @@
 package io.floci.aws.services.ses;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
 import io.floci.aws.services.ses.model.MessageTag;
@@ -26,12 +27,10 @@ import org.apache.james.mime4j.dom.address.Mailbox;
 import org.apache.james.mime4j.dom.address.MailboxList;
 import org.apache.james.mime4j.dom.field.FieldName;
 import org.apache.james.mime4j.field.address.AddressFormatter;
-import org.apache.james.mime4j.message.DefaultMessageBuilder;
 import org.apache.james.mime4j.message.DefaultMessageWriter;
 import org.apache.james.mime4j.stream.Field;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -236,10 +235,19 @@ public class SmtpRelay {
 
     /**
      * A raw RFC 5322 message to relay verbatim. {@code destinations} is the envelope recipient
-     * list; when empty the MIME To / Cc / Bcc headers are used instead.
+     * list; when empty the MIME To / Cc / Bcc headers are used instead. {@code message} is the
+     * parsed message, {@code null} when the parser could not read it, in which case nothing is
+     * relayed. mime4j parses header fields lazily and without synchronization, so the relay
+     * thread owns {@code message} once it is handed over: the caller must not read it afterwards.
      */
     public record RawRelayMessage(String from, String returnPath, List<String> destinations,
-                                  String rawMessage, String messageId) {
+                                  Message message, String messageId) {
+
+        /** Parses {@code rawMessage} (plain or base64-encoded) for callers that hold only the text. */
+        public RawRelayMessage(String from, String returnPath, List<String> destinations,
+                               String rawMessage, String messageId) {
+            this(from, returnPath, destinations, SesMimeParser.parse(tryBase64Decode(rawMessage)), messageId);
+        }
     }
 
     /**
@@ -412,9 +420,12 @@ public class SmtpRelay {
 
     private void doRelayRaw(RawRelayMessage relayMessage) {
         try {
-            byte[] mimeBytes = tryBase64Decode(relayMessage.rawMessage());
-            DefaultMessageBuilder builder = new DefaultMessageBuilder();
-            Message message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
+            Message message = relayMessage.message();
+            if (message == null) {
+                LOG.warnv("SMTP raw relay skipped (message could not be parsed) for from={0}, messageId={1}",
+                        relayMessage.from(), relayMessage.messageId());
+                return;
+            }
 
             MailMessage mail = new MailMessage();
 
@@ -464,6 +475,10 @@ public class SmtpRelay {
         } catch (TimeoutException e) {
             LOG.warnv("SMTP raw relay timed out after {0}s for from={1}",
                     RELAY_TIMEOUT_SECONDS, relayMessage.from());
+        } catch (StackOverflowError e) {
+            // A message can nest shallowly enough to parse and still overflow the writer that
+            // re-serializes its embedded messages; the trace is thousands of identical frames.
+            LOG.warnv("SMTP raw relay skipped (message nested too deeply) for from={0}", relayMessage.from());
         } catch (Exception e) {
             LOG.warnv(e, "SMTP raw relay failed for from={0}", relayMessage.from());
         }
@@ -729,20 +744,9 @@ public class SmtpRelay {
             return new ParsedRawMessage(new byte[0], null, RawMessageHeaders.empty());
         }
         byte[] mimeBytes = tryBase64Decode(rawMessage);
-        Message message = parseMime(mimeBytes);
+        Message message = SesMimeParser.parse(mimeBytes);
         return new ParsedRawMessage(mimeBytes, message,
                 message == null ? RawMessageHeaders.empty() : headersOf(message));
-    }
-
-    /** Parses MIME bytes, or returns {@code null} for anything the parser cannot read. */
-    static Message parseMime(byte[] mimeBytes) {
-        try {
-            return new DefaultMessageBuilder().parseMessage(new ByteArrayInputStream(mimeBytes));
-        } catch (Exception | StackOverflowError ignored) {
-            // The caller treats an unparseable message as such; there is nothing to diagnose here,
-            // and mime4j nests a reader per forwarded message, so a hostile depth overflows too.
-            return null;
-        }
     }
 
     private static RawMessageHeaders headersOf(Message message) {

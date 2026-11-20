@@ -137,7 +137,7 @@ class ContainerLifecycleManagerCpuLimitTest {
         ImageCacheService imageCacheService = mock(ImageCacheService.class);
         when(imageCacheService.ensureImageExists(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        new ContainerLifecycleManager(dockerClient, imageCacheService, mock(ContainerDetector.class), config)
+        new ContainerLifecycleManager(dockerClient, dockerClient, imageCacheService, mock(ContainerDetector.class), config)
                 .create(spec);
 
         verify(createCmd).withHostName("ip-10-1-0-1.ec2.internal");
@@ -162,7 +162,7 @@ class ContainerLifecycleManagerCpuLimitTest {
         ImageCacheService imageCacheService = mock(ImageCacheService.class);
         when(imageCacheService.ensureImageExists(any())).thenAnswer(invocation -> invocation.getArgument(0));
         ContainerLifecycleManager manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, mock(ContainerDetector.class), config);
+                dockerClient, dockerClient, imageCacheService, mock(ContainerDetector.class), config);
 
         manager.create(spec);
 

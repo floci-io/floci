@@ -115,7 +115,7 @@ public class ElastiCacheContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
-                        + "operations keep working and replication groups still reach 'available', "
+                        + "operations keep working and replication groups still reach ''available'', "
                         + "but they have no backing Valkey container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }
@@ -128,13 +128,7 @@ public class ElastiCacheContainerManager {
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image, String region) {

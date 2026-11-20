@@ -48,6 +48,9 @@ public class DbCluster {
     private String engineMode;
     private boolean storageEncrypted;
     private int backupRetentionPeriod = 1;
+    private boolean deletionProtection;
+    private boolean copyTagsToSnapshot;
+    private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
     private String kmsKeyId;
 
     private String dockerVolumeName;
@@ -210,6 +213,9 @@ public class DbCluster {
     public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
     public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
 
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
+
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
 
@@ -253,4 +259,11 @@ public class DbCluster {
     public void setServerlessV2SecondsUntilAutoPause(Integer serverlessV2SecondsUntilAutoPause) {
         this.serverlessV2SecondsUntilAutoPause = serverlessV2SecondsUntilAutoPause;
     }
+    public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
+    public void setCopyTagsToSnapshot(boolean value) { copyTagsToSnapshot = value; }
+    public List<String> getEnabledCloudwatchLogsExports() { return enabledCloudwatchLogsExports; }
+    public void setEnabledCloudwatchLogsExports(List<String> value) {
+        enabledCloudwatchLogsExports = value == null ? new ArrayList<>() : new ArrayList<>(value);
+    }
+
 }

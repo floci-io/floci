@@ -1117,7 +1117,10 @@ def test_the_vendored_file_is_well_formed():
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"s3", "sqs"}
+    assert set(document["handBuilt"]) >= {"s3"}
+    # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
+    assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
+    assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -1611,6 +1614,16 @@ def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
     # A String member's id-like value names no type, and without examples nothing is known.
     assert r.id_prefixes({"ec2": ec2}, ("lb",), examples) == {}
     assert r.id_prefixes({"ec2": ec2}, ("security-group",)) == {}
+
+
+
+def test_vpc_endpoint_prefix_remains_unknown_when_botocore_has_none():
+    ec2 = model({"DescribeVpcEndpoints": {"VpcEndpointIds": "VpcEndpointIdList"}}, "ec2")
+    ec2["shapes"]["VpcEndpointId"] = {"type": "string"}
+    ec2["shapes"]["VpcEndpointIdList"] = {"type": "list", "member": {"shape": "VpcEndpointId"}}
+    assert r.id_prefixes({"ec2": ec2}, ("vpc-endpoint",)) == {}
+    assert r.namespace_id_prefixes("ec2", {"ec2": ec2}) == {}
+    assert r.namespace_id_prefixes("other", {"ec2": ec2}) is None
 
 
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():
@@ -2454,6 +2467,27 @@ def test_being_ends_a_types_name_in_documentation():
     assert not r.doc_names("name of the workflowrun being run", "workflow", formats)
 
 
+def test_a_url_of_the_type_is_found_by_its_service():
+    # "The URL of the Amazon SQS queue to which a message is sent", SQS's SendMessage's QueueUrl: a URL names the type,
+    # but is neither its name nor its id.
+    formats = {"queue": "arn:${Partition}:sqs:${Region}:${Account}:${QueueName}"}
+    assert r.doc_names("the url of the queue to which a message is sent", "queue", formats)
+    assert r.doc_kind("the url of the queue to which a message is sent") == "url"
+    assert r.kind_of("QueueUrl") == "url"
+    assert not r.compatible("QueueUrl", "QueueName")
+    # "The URL of a dead-letter queue", ListDeadLetterSourceQueues' QueueUrl: a hyphenated word qualifies the type.
+    assert r.doc_names("the url of a dead-letter queue", "queue", formats)
+
+
+def test_a_lead_drops_its_own_service_name():
+    model = {"metadata": {"serviceFullName": "Amazon Simple Queue Service", "serviceAbbreviation": "Amazon SQS"}}
+    assert r._without_service_name("the url of the amazon sqs queue to delete", model) == "the url of the queue to delete"
+    assert r._without_service_name("the url of the amazon simple queue service queue", model) == "the url of the queue"
+    # Another service's name, or this one's at the end, stays.
+    assert r._without_service_name("the arn of the amazon sns topic", model) == "the arn of the amazon sns topic"
+    assert r._without_service_name("a queue of amazon sqs", model) == "a queue of amazon sqs"
+
+
 def widget_model(tags: bool) -> dict:
     """A create whose action acts on the widget's kind alone, naming the widget it makes in `WidgetInput.Name`, and
     carrying tags when asked, as Glue's CreateConnection does."""
@@ -2650,3 +2684,81 @@ def test_the_statements_are_built_checked_offline_and_verified_against_aws_and_t
     page["https://example.com/page"] = "a changed page"
     assert r.verify_statements(document, documents) == [
         "https://example.com/page no longer gives what source.json holds for svc:GetThing: run fetch.py"]
+
+
+@pytest.mark.parametrize("operation", ["DeleteWidget", "CreateWidgetVersion"])
+def test_documented_alternate_name_resolves_an_optional_id(operation):
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    docs = {"WidgetId": "<p>The ID of the widget.</p>",
+            "WidgetName": "<p>The name of the widget.</p> <p>Specify either the widget ID or the widget name, "
+                          "but not both.</p>"}
+    resource = {"type": "widget", "fill": {"WidgetId": "WidgetId"}}
+    models = cluster_model(operation, docs)
+    assert r.with_documented("svc:" + operation, ["widget"], formats, models, [resource]) == [
+        resource, {"type": "widget", "fill": {}, "find": ["WidgetName"], "when": {"WidgetId": [None]}}]
+    # A required id, an ordinary rename, and a create's new name are not alternate selectors.
+    assert r.with_documented("svc:" + operation, ["widget"], formats,
+                             cluster_model(operation, docs, ("WidgetId",)), [resource]) == [resource]
+    docs["WidgetName"] = "<p>The name of the widget.</p>"
+    assert r.with_documented("svc:" + operation, ["widget"], formats,
+                             cluster_model(operation, docs), [resource]) == [resource]
+
+
+def test_create_name_does_not_look_up_an_existing_id():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    docs = {"WidgetId": "<p>The ID of the widget.</p>",
+            "WidgetName": "<p>The name of the widget.</p> <p>Specify either the widget ID or the widget name, "
+                          "but not both.</p>"}
+    resource = {"type": "widget", "fill": {"WidgetId": "WidgetId"}}
+    assert r.with_documented("svc:CreateWidget", ["widget"], formats,
+                             cluster_model("CreateWidget", docs), [resource]) == [resource]
+
+
+def test_a_name_for_a_new_resource_does_not_select_an_existing_id():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    models = cluster_model("CreateWidget", {"WidgetName": "<p>A name for the widget.</p>"})
+    resource = {"type": "widget", "fill": {}}
+    assert r.with_documented("svc:CreateWidget", ["widget"], formats, models, [resource]) == [resource]
+
+
+def test_paired_added_and_removed_id_lists_both_name_acted_on_resources():
+    formats = {"security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"}
+    named = members("AddSecurityGroupIds[]", "RemoveSecurityGroupIds[]")
+    shapes = {name: "VpcEndpointSecurityGroupIdList" for name in named}
+    resources = r.resources_for("ec2:ModifyVpcEndpoint", ["security-group"], formats, named, shapes=shapes)
+    assert resources == [
+        {"type": "security-group", "fill": {"SecurityGroupId": "AddSecurityGroupIds[]"}},
+        {"type": "security-group", "fill": {"SecurityGroupId": "RemoveSecurityGroupIds[]"}}]
+    shapes["RemoveSecurityGroupIds"] = "UnrelatedList"
+    assert len(r.resources_for("ec2:ModifyVpcEndpoint", ["security-group"], formats, named, shapes=shapes)) == 1
+
+
+def test_nested_record_id_finds_only_containing_and_adjacent_resource_types():
+    formats = {kind: "arn:${Partition}:svc:${Region}:${Account}:" + kind + "/${Id}"
+               for kind in ("interface", "instance", "subnet")}
+    shapes = {
+        "String": {"type": "string"},
+        "Interface": {"type": "structure", "members": {
+            "InterfaceId": {"shape": "String"}, "SubnetId": {"shape": "String"},
+            "Attachment": {"shape": "InterfaceAttachment"}}},
+        "InterfaceAttachment": {"type": "structure", "members": {
+            "AttachmentId": {"shape": "String"}, "InstanceId": {"shape": "String"}}}}
+    shapes["Request"] = {"type": "structure", "members": {"AttachmentId": {"shape": "String"}}}
+    models = {"svc": {"shapes": shapes, "metadata": {"protocol": "json"},
+                      "operations": {"DetachInterface": {"input": {"shape": "Request"}}}}}
+    expected = [{"type": kind, "fill": {}, "find": ["AttachmentId"]} for kind in ("instance", "interface")]
+    assert r.read_resources("svc:DetachInterface", list(formats), formats, models) == expected
+    assert r.with_nested_record_find([], list(formats), formats, members("UnrelatedId"), models) == []
+    existing = [{"type": "interface", "fill": {"Id": "InterfaceId"}}]
+    assert r.with_nested_record_find(existing, list(formats), formats, members("AttachmentId"), models) == [
+        *existing, expected[0]]
+    instance = shapes["InterfaceAttachment"]["members"].pop("InstanceId")
+    assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []
+    shapes["InterfaceAttachment"]["members"]["InstanceId"] = instance
+    shapes["Interface"]["members"]["OtherAttachment"] = {"shape": "OtherAttachment"}
+    shapes["OtherAttachment"] = {"type": "structure", "members": {
+        "OtherAttachmentId": {"shape": "String"}, "InstanceId": {"shape": "String"}}}
+    assert r.with_nested_record_find([], list(formats), formats,
+                                     members("AttachmentId", "OtherAttachmentId"), models) == []
+    shapes["DescribeInterfaceResponse"] = shapes.pop("Interface")
+    assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []

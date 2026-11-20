@@ -40,11 +40,17 @@ operations keep their existing resource builders, including batch, transaction a
 | `BatchGetItem` | Read up to 100 items across tables |
 | `TransactWriteItems` | ACID write transaction |
 | `TransactGetItems` | ACID read transaction |
+| `ExecuteStatement` | Run one PartiQL `SELECT`, `INSERT`, `UPDATE` or `DELETE` statement |
+| `BatchExecuteStatement` | Run several PartiQL statements, each answered or failed on its own |
+| `ExecuteTransaction` | Run PartiQL statements as one transaction, all reads or all writes |
 | `DescribeTimeToLive` | Get TTL configuration |
 | `UpdateTimeToLive` | Enable/disable TTL on a table |
 | `TagResource` | Tag a table |
 | `UntagResource` | Remove tags |
 | `ListTagsOfResource` | List tags |
+| `PutResourcePolicy` | Attach or replace a table's resource-based policy, optionally only at an `ExpectedRevisionId` |
+| `GetResourcePolicy` | Get a table's resource-based policy and its revision ID |
+| `DeleteResourcePolicy` | Delete a table's resource-based policy, optionally only at an `ExpectedRevisionId` |
 | `DescribeContinuousBackups` | Get the point-in-time recovery status and restore window |
 | `UpdateContinuousBackups` | Enable or disable point-in-time recovery |
 | `UpdateContributorInsights` | Enable or disable CloudWatch Contributor Insights on a table or global secondary index |
@@ -58,6 +64,7 @@ operations keep their existing resource builders, including batch, transaction a
 | `RestoreTableFromBackup` | Create a new table from a backup |
 | `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
+| `UpdateKinesisStreamingDestination` | Update timestamp precision on an active Kinesis destination |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
 | `ExportTableToPointInTime` | Export table data, or the changes of a period, to S3 |
 | `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
@@ -69,6 +76,8 @@ operations keep their existing resource builders, including batch, transaction a
 | `ImportTable` | Create a table and load DynamoDB JSON from S3 into it |
 | `DescribeImport` | Get import status and metadata |
 | `ListImports` | List imports, optionally filtered by table ARN |
+
+`CreateTable` and `UpdateTable` store the `WarmThroughput` of a table and of its global secondary indexes, and DescribeTable reports it. Pre-warming finishes at once, so DescribeTable always shows `ACTIVE`.
 
 ## Legacy 2011-12-05 clients
 
@@ -626,12 +635,20 @@ record as `dynamodb.ApproximateCreationDateTimePrecision`, and reported by
 `DescribeKinesisStreamingDestination` as well as in the `EnableKinesisStreamingConfiguration` member of
 the `EnableKinesisStreamingDestination` and `DisableKinesisStreamingDestination` responses.
 
+On the native backend, `UpdateKinesisStreamingDestination` changes an active destination's precision without stopping
+forwarding. Its response carries `UpdateKinesisStreamingConfiguration`, and subsequent item changes
+use the updated precision. Omitting the configuration or its precision retains the current value.
+The update accepts a table name or table ARN, persists across restarts, and rejects missing tables,
+missing destinations, inactive destinations, and precision values other than `MILLISECOND` or
+`MICROSECOND`.
+
 Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
 Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
 
 Both calls take effect at once, so `EnableKinesisStreamingDestination` answers `ACTIVE` and
 `DisableKinesisStreamingDestination` answers `DISABLED`. AWS reports the transitional `ENABLING` and
 `DISABLING` first, because it enables and disables the destination in the background.
+Updates also apply at once and answer `ACTIVE`; AWS can report `UPDATING` while applying a change.
 
 ### Delivery contract
 

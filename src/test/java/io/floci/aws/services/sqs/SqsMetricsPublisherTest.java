@@ -270,7 +270,7 @@ class SqsMetricsPublisherTest {
 
         Instant ended = Instant.parse("2026-10-22T12:00:00Z");
         List<Datapoint> points = cloudWatch.getMetricStatistics("AWS/SQS", "NumberOfMessagesSent",
-                List.of(new Dimension("QueueName", "stamped")), ended, ended, 60, List.of("Sum"), null, REGION);
+                List.of(new Dimension("QueueName", "stamped")), ended, ended.plusSeconds(60), 1, List.of("Sum"), null, REGION);
         assertEquals(1, points.size());
         assertEquals(ended, points.getFirst().timestamp());
     }
@@ -296,7 +296,7 @@ class SqsMetricsPublisherTest {
     }
 
     private List<Datapoint> points(String namespace, List<Dimension> dimensions, Instant at) {
-        return cloudWatch.getMetricStatistics(namespace, "NumberOfMessagesSent", dimensions, at, at, 60,
+        return cloudWatch.getMetricStatistics(namespace, "NumberOfMessagesSent", dimensions, at, at.plusSeconds(60), 60,
                 List.of("Sum"), null, REGION);
     }
 
@@ -332,7 +332,7 @@ class SqsMetricsPublisherTest {
     private Datapoint datapoint(String queueName, String metricName, Instant tick) {
         Instant minute = tick.minusSeconds(30).truncatedTo(ChronoUnit.MINUTES);
         List<Datapoint> points = cloudWatch.getMetricStatistics("AWS/SQS", metricName,
-                List.of(new Dimension("QueueName", queueName)), minute, minute, 60, List.of("Sum"), null, REGION);
+                List.of(new Dimension("QueueName", queueName)), minute, minute.plusSeconds(60), 60, List.of("Sum"), null, REGION);
         assertTrue(points.size() <= 1, metricName + " has " + points.size() + " datapoints");
         return points.isEmpty() ? null : points.getFirst();
     }

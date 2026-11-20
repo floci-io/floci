@@ -129,6 +129,17 @@ public class Instance {
         return true;
     }
 
+    /**
+     * Moves the instance to {@code terminated} and starts its retention clock. The clock starts
+     * once: terminating an already terminated record never extends how long it stays listed.
+     */
+    public synchronized void markTerminated(long nowMillis) {
+        state = InstanceState.terminated();
+        if (terminatedAt <= 0) {
+            terminatedAt = nowMillis;
+        }
+    }
+
     public String getStateTransitionReason() { return stateTransitionReason; }
     public void setStateTransitionReason(String stateTransitionReason) { this.stateTransitionReason = stateTransitionReason; }
 

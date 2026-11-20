@@ -135,6 +135,66 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code elasticloadbalancing:ResourceTag} or {@code aws:ResourceTag} condition reads the tags Elastic Load
+     * Balancing holds on the target group or the Classic Load Balancer a request names, as a tag call or the create
+     * leaves them, so an allow on one team's tag lets the caller change that team's resources and not another's.
+     */
+    @Test
+    void anElbResourceTagConditionReadsTheTagsOfTheTargetGroupAndTheClassicLoadBalancer() {
+        String tagged = elbTargetGroup();
+        String other = elbTargetGroup();
+        admin("elasticloadbalancing").formParam("Action", "AddTags").formParam("Version", "2015-12-01")
+                .formParam("ResourceArns.member.1", tagged).formParam("Tags.member.1.Key", "team")
+                .formParam("Tags.member.1.Value", "data").post("/").then().statusCode(200);
+        String taggedLoadBalancer = classicLoadBalancer("data");
+        String otherLoadBalancer = classicLoadBalancer("web");
+
+        User user = user("res-elb-team");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"elasticloadbalancing:ModifyTargetGroupAttributes\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"elasticloadbalancing:ResourceTag/team\":"
+                + "\"data\"}}},{\"Effect\":\"Allow\",\"Action\":\"elasticloadbalancing:ConfigureHealthCheck\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        modifyAttributes(user, tagged).statusCode(200);
+        refused(modifyAttributes(user, other), "elasticloadbalancing:ModifyTargetGroupAttributes");
+        configureHealthCheck(user, taggedLoadBalancer).statusCode(200);
+        refused(configureHealthCheck(user, otherLoadBalancer), "elasticloadbalancing:ConfigureHealthCheck");
+    }
+
+    /** An IP target group an administrator creates, deleted after the test; its ARN. */
+    private String elbTargetGroup() {
+        String arn = admin("elasticloadbalancing").formParam("Action", "CreateTargetGroup")
+                .formParam("Version", "2015-12-01").formParam("Name", "res-tg-team-" + suffix())
+                .formParam("Protocol", "HTTP").formParam("Port", "80").formParam("TargetType", "ip").post("/").then()
+                .statusCode(200).extract()
+                .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+        cleanup.register(() -> admin("elasticloadbalancing").formParam("Action", "DeleteTargetGroup")
+                .formParam("Version", "2015-12-01").formParam("TargetGroupArn", arn).post("/").then().statusCode(200));
+        return arn;
+    }
+
+    /** A Classic Load Balancer an administrator creates, tagged with {@code team}, deleted after the test; its name. */
+    private String classicLoadBalancer(String team) {
+        String name = "res-clb-" + suffix();
+        admin("elasticloadbalancing").formParam("Action", "CreateLoadBalancer").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerName", name).formParam("Listeners.member.1.Protocol", "TCP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "443")
+                .formParam("Listeners.member.1.InstancePort", "443").formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", team).post("/").then()
+                .statusCode(200);
+        cleanup.register(() -> admin("elasticloadbalancing").formParam("Action", "DeleteLoadBalancer")
+                .formParam("Version", "2012-06-01").formParam("LoadBalancerName", name).post("/").then()
+                .statusCode(200));
+        return name;
+    }
+
+    private static ValidatableResponse configureHealthCheck(User user, String loadBalancerName) {
+        return user.query("elasticloadbalancing", "ConfigureHealthCheck").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerName", loadBalancerName).formParam("HealthCheck.Target", "TCP:443")
+                .formParam("HealthCheck.Interval", "10").formParam("HealthCheck.Timeout", "3")
+                .formParam("HealthCheck.HealthyThreshold", "2").formParam("HealthCheck.UnhealthyThreshold", "2")
+                .post("/").then();
+    }
+
+    /**
      * The AWS Load Balancer Controller's policy creates on {@code *} with its cluster tag, and tags at creation only
      * a target group or an application or network load balancer, as {@code elasticloadbalancing:CreateAction}
      * says; these statements are the published policy's.
@@ -907,6 +967,116 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags + "}").post("/").then().statusCode(200);
     }
 
+    /**
+     * An SQS request is checked on the queue its QueueUrl reaches, over the Query and the JSON protocol alike, so a
+     * grant on one queue's ARN does not reach another; and an {@code aws:ResourceTag} condition reads the tags SQS
+     * holds on that queue, as TagQueue leaves them.
+     */
+    @Test
+    void anSqsRequestIsCheckedOnTheQueueItsUrlReachesWithItsTags() {
+        String tagged = sqsQueue("res-queue-" + suffix());
+        String other = sqsQueue("res-queue-" + suffix());
+        admin("sqs").formParam("Action", "TagQueue").formParam("QueueUrl", tagged).formParam("Tag.1.Key", "team")
+                .formParam("Tag.1.Value", "data").post("/").then().statusCode(200);
+        String queues = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":";
+
+        User user = user("res-queue");
+        user.policy(allowOn("sqs:SendMessage", queues + tagged.substring(tagged.lastIndexOf('/') + 1)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"sqs:GetQueueAttributes\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        user.query("sqs", "SendMessage").formParam("QueueUrl", tagged).formParam("MessageBody", "x").post("/").then()
+                .statusCode(200);
+        refused(user.query("sqs", "SendMessage").formParam("QueueUrl", other).formParam("MessageBody", "x")
+                .post("/").then(), "sqs:SendMessage");
+        refusedJson(user.json("sqs", "AmazonSQS.SendMessage", "1.0").body("{\"QueueUrl\":\"" + other
+                + "\",\"MessageBody\":\"x\"}").post("/").then(), "sqs:SendMessage");
+        user.json("sqs", "AmazonSQS.GetQueueAttributes", "1.0").body("{\"QueueUrl\":\"" + tagged + "\"}").post("/")
+                .then().statusCode(200);
+        refusedJson(user.json("sqs", "AmazonSQS.GetQueueAttributes", "1.0").body("{\"QueueUrl\":\"" + other + "\"}")
+                .post("/").then(), "sqs:GetQueueAttributes");
+        refused(user.query("sqs", "GetQueueAttributes").formParam("QueueUrl", other).post("/").then(),
+                "sqs:GetQueueAttributes");
+    }
+
+    /** An SQS queue an administrator creates, deleted after the test; its URL. */
+    private String sqsQueue(String name) {
+        String url = admin("sqs").formParam("Action", "CreateQueue").formParam("QueueName", name).post("/").then()
+                .statusCode(200).extract().path("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        cleanup.register(() -> admin("sqs").formParam("Action", "DeleteQueue").formParam("QueueUrl", url).post("/")
+                .then().statusCode(200));
+        return url;
+    }
+
+    /**
+     * An SNS request is checked on the topic its TopicArn names, from the generated table, so a grant on one topic
+     * does not reach another; and an {@code aws:ResourceTag} condition reads the tags SNS holds on that topic, as
+     * TagResource leaves them.
+     */
+    @Test
+    void anSnsRequestIsCheckedOnTheTopicItNamesWithItsTags() {
+        String tagged = snsTopic("res-topic-" + suffix());
+        String other = snsTopic("res-topic-" + suffix());
+        admin("sns").formParam("Action", "TagResource").formParam("ResourceArn", tagged)
+                .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "data").post("/").then()
+                .statusCode(200);
+
+        User user = user("res-topic");
+        user.policy(allowOn("sns:Publish", tagged) + ",{\"Effect\":\"Allow\",\"Action\":\"sns:GetTopicAttributes\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        user.query("sns", "Publish").formParam("TopicArn", tagged).formParam("Message", "x").post("/").then()
+                .statusCode(200);
+        refused(user.query("sns", "Publish").formParam("TopicArn", other).formParam("Message", "x").post("/")
+                .then(), "sns:Publish");
+        user.query("sns", "GetTopicAttributes").formParam("TopicArn", tagged).post("/").then().statusCode(200);
+        refused(user.query("sns", "GetTopicAttributes").formParam("TopicArn", other).post("/").then(),
+                "sns:GetTopicAttributes");
+    }
+
+    /** An SNS topic an administrator creates, deleted after the test; its ARN. */
+    private String snsTopic(String name) {
+        String arn = admin("sns").formParam("Action", "CreateTopic").formParam("Name", name).post("/").then()
+                .statusCode(200).extract().path("CreateTopicResponse.CreateTopicResult.TopicArn");
+        cleanup.register(() -> admin("sns").formParam("Action", "DeleteTopic").formParam("TopicArn", arn).post("/")
+                .then().statusCode(200));
+        return arn;
+    }
+
+    /**
+     * A Kinesis request is checked on the stream its StreamName or StreamARN names, from the generated table, so a
+     * grant on one stream does not reach another; and an {@code aws:ResourceTag} condition reads the tags Kinesis
+     * holds on that stream, as AddTagsToStream leaves them.
+     */
+    @Test
+    void aKinesisRequestIsCheckedOnTheStreamItNamesWithItsTags() {
+        String tagged = kinesisStream("res-stream-" + suffix());
+        String other = kinesisStream("res-stream-" + suffix());
+        adminJson("kinesis", "Kinesis_20131202.AddTagsToStream").body("{\"StreamName\":\"" + tagged
+                + "\",\"Tags\":{\"team\":\"data\"}}").post("/").then().statusCode(200);
+        String streams = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT + ":stream/";
+
+        User user = user("res-stream");
+        user.policy(allowOn("kinesis:DescribeStreamSummary", streams + tagged) + ",{\"Effect\":\"Allow\","
+                + "\"Action\":\"kinesis:ListShards\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "kinesis", "Kinesis_20131202.DescribeStreamSummary", "1.1", "{\"StreamName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "kinesis", "Kinesis_20131202.DescribeStreamSummary", "1.1",
+                "{\"StreamARN\":\"" + streams + other + "\"}"), "kinesis:DescribeStreamSummary");
+        send(user, "kinesis", "Kinesis_20131202.ListShards", "1.1", "{\"StreamName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "kinesis", "Kinesis_20131202.ListShards", "1.1", "{\"StreamName\":\"" + other + "\"}"),
+                "kinesis:ListShards");
+    }
+
+    /** A Kinesis stream of one shard an administrator creates, deleted after the test; its name. */
+    private String kinesisStream(String name) {
+        adminJson("kinesis", "Kinesis_20131202.CreateStream").body("{\"StreamName\":\"" + name
+                + "\",\"ShardCount\":1}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("kinesis", "Kinesis_20131202.DeleteStream").body("{\"StreamName\":\""
+                + name + "\"}").post("/").then().statusCode(200));
+        return name;
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());
@@ -988,10 +1158,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void aPipelineAndAWebhookAreCheckedOnTheArnsTheirNamesGive() {
         String name = "res-pipeline-" + suffix();
-        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                .then().statusCode(200);
-        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                .body("{\"name\":\"" + name + "\"}").post("/"));
+        createPipeline(name, null);
         String pipelineArn = adminJson("codepipeline", "CodePipeline_20150709.GetPipeline")
                 .body("{\"name\":\"" + name + "\"}").post("/").then().statusCode(200).extract().path("metadata.pipelineArn");
         assertEquals("arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + name, pipelineArn);
@@ -1013,6 +1180,38 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.policy(allowOn("codepipeline:DeleteWebhook", hookArn));
         refusedJson(codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "-other\"}"), "codepipeline:DeleteWebhook");
         codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "\"}").statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CodePipeline holds on the pipeline a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's pipeline and not
+     * another's.
+     */
+    @Test
+    void aCodePipelineResourceTagConditionReadsTheTagsOfThePipeline() {
+        String web = "[{\"key\":\"team\",\"value\":\"web\"}]";
+        String tagged = "res-pipeline-tagged-" + suffix();
+        String other = "res-pipeline-other-" + suffix();
+        createPipeline(tagged, web);
+        createPipeline(other, web);
+        adminJson("codepipeline", "CodePipeline_20150709.TagResource")
+                .body("{\"resourceArn\":\"arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + tagged
+                        + "\",\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-pipeline-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"codepipeline:GetPipeline\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        codePipeline(user, "GetPipeline", "{\"name\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(codePipeline(user, "GetPipeline", "{\"name\":\"" + other + "\"}"), "codepipeline:GetPipeline");
+    }
+
+    /** Creates the pipeline {@code name} as an administrator, with the {@code tags} list if any, deleted afterwards. */
+    private void createPipeline(String name, String tags) {
+        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name, tags)).post("/")
+                .then().statusCode(200);
+        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
     }
 
     /** {@code StartPipelineExecution} names its pipeline by a bare {@code name}, on which it is checked. */
@@ -1037,12 +1236,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void anUpdateIsCheckedOnThePipelineItNamesNotOneItsRoleHolds() {
         String allowed = "res-pipeline-" + suffix();
         String other = allowed + "-other";
-        for (String name : List.of(allowed, other)) {
-            adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                    .then().statusCode(200);
-            cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                    .body("{\"name\":\"" + name + "\"}").post("/"));
-        }
+        createPipeline(allowed, null);
+        createPipeline(other, null);
         String allowedArn = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + allowed;
         User user = user("res-pipeline-update");
         user.policy(allowOn("codepipeline:UpdatePipeline", allowedArn) + ","
@@ -1056,10 +1251,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void aWebhooksTagsAreCheckedOnTheWebhookNotItsPipeline() {
         String name = "res-pipeline-" + suffix();
-        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                .then().statusCode(200);
-        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                .body("{\"name\":\"" + name + "\"}").post("/"));
+        createPipeline(name, null);
         String hook = "res-hook-" + suffix();
         String codePipeline = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":";
         User user = user("res-webhook-tags");
@@ -1092,6 +1284,66 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(user.json("servicediscovery", "Route53AutoNaming_v20170314.CreateService", "1.1")
                 .body("{\"Name\":\"res-svc\",\"NamespaceId\":null," + dnsConfig + "}").post("/").then(),
                 "servicediscovery:CreateService");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cloud Map holds on the namespace or the service a request
+     * names by its id, as a tag call or the create leaves them, so an allow on one team's tag lets the caller read that
+     * team's namespace and service and not another's.
+     */
+    @Test
+    void aCloudMapResourceTagConditionReadsTheTagsOfTheNamespaceAndTheService() {
+        String tagged = cloudMapNamespace("res-ns-team-" + suffix());
+        String other = cloudMapNamespace("res-ns-team-" + suffix());
+        adminJson("servicediscovery", "Route53AutoNaming_v20170314.TagResource").body("{\"ResourceARN\":\""
+                + "arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":namespace/" + tagged + "\",\"Tags\":"
+                + teamTag("data") + "}").post("/").then().statusCode(200);
+        String taggedService = cloudMapService(tagged, "data");
+        String otherService = cloudMapService(other, "web");
+
+        User user = user("res-cloud-map-team");
+        user.policy(onTeam("servicediscovery:GetNamespace") + "," + onTeam("servicediscovery:GetService"));
+        cloudMap(user, "GetNamespace", tagged).statusCode(200);
+        refusedJson(cloudMap(user, "GetNamespace", other), "servicediscovery:GetNamespace");
+        cloudMap(user, "GetService", taggedService).statusCode(200);
+        refusedJson(cloudMap(user, "GetService", otherService), "servicediscovery:GetService");
+    }
+
+    /**
+     * Cloud Map's handlers find a namespace by its id in every Region, so a request sent to another Region acts on it
+     * and is checked with its tags: a deny on its team's tag holds there too.
+     */
+    @Test
+    void aCloudMapTagDenyHoldsForARequestSentToAnotherRegion() {
+        String namespaceId = cloudMapNamespace("res-ns-deny-" + suffix());
+        adminJson("servicediscovery", "Route53AutoNaming_v20170314.TagResource").body("{\"ResourceARN\":\""
+                + "arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":namespace/" + namespaceId + "\",\"Tags\":"
+                + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-cloud-map-deny");
+        user.policy(allowOn("servicediscovery:GetNamespace", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"servicediscovery:GetNamespace\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(given().header("Authorization", auth(user.accessKeyId(), "us-west-2", "servicediscovery"))
+                .header("X-Amz-Target", "Route53AutoNaming_v20170314.GetNamespace")
+                .contentType("application/x-amz-json-1.1").body("{\"Id\":\"" + namespaceId + "\"}").post("/").then(),
+                "servicediscovery:GetNamespace");
+    }
+
+    /** An allow of {@code action} on every resource whose {@code team} tag is {@code data}. */
+    private static String onTeam(String action) {
+        return "{\"Effect\":\"Allow\",\"Action\":\"" + action + "\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}";
+    }
+
+    /** A Cloud Map service in the namespace, tagged with the team when created and deleted after the test; its id. */
+    private String cloudMapService(String namespaceId, String team) {
+        String id = adminJson("servicediscovery", "Route53AutoNaming_v20170314.CreateService")
+                .body("{\"Name\":\"res-svc-" + suffix() + "\",\"NamespaceId\":\"" + namespaceId + "\",\"Tags\":"
+                        + teamTag(team) + "}").post("/").then().statusCode(200).extract().path("Service.Id");
+        cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteService")
+                .body("{\"Id\":\"" + id + "\"}").post("/").then().statusCode(200));
+        return id;
     }
 
     /** A service's tags are checked on the service it creates, not on the namespace it creates it in. */
@@ -1222,9 +1474,47 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void anApplicationIsCheckedOnTheArnItsNameGives() {
         String name = "res-app-" + suffix();
+        String arn = application(name, null);
+        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
+
+        User user = user("res-application");
+        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
+        describeApplication(user, name).statusCode(200);
+        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Managed Service for Apache Flink holds on the application a
+     * request names, as TagResource leaves them, so an allow on one team's tag lets the caller describe that team's
+     * application and not another's.
+     */
+    @Test
+    void aKinesisAnalyticsResourceTagConditionReadsTheTagsOfTheApplication() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-app-tagged-" + suffix();
+        String other = "res-app-other-" + suffix();
+        String taggedArn = application(tagged, web);
+        application(other, web);
+        adminJson("kinesisanalytics", "KinesisAnalytics_20180523.TagResource")
+                .body("{\"ResourceARN\":\"" + taggedArn + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-application-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"kinesisanalytics:DescribeApplication\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeApplication(user, tagged).statusCode(200);
+        refusedJson(describeApplication(user, other), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * The ARN of the application {@code name} an administrator creates, with the {@code tags} list if any, deleted
+     * afterwards.
+     */
+    private String application(String name, String tags) {
         String arn = adminJson("kinesisanalytics", "KinesisAnalytics_20180523.CreateApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"RuntimeEnvironment\":\"FLINK-1_18\","
-                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\"}")
+                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\""
+                        + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
                 .post("/").then().statusCode(200).extract().path("ApplicationDetail.ApplicationARN");
         cleanup.register(() -> adminJson("kinesisanalytics", "KinesisAnalytics_20180523.DeleteApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"CreateTimestamp\":"
@@ -1232,12 +1522,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                         .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then().statusCode(200).extract()
                         .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
                         .getString("ApplicationDetail.CreateTimestamp") + "}").post("/"));
-        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
-
-        User user = user("res-application");
-        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
-        describeApplication(user, name).statusCode(200);
-        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+        return arn;
     }
 
     /**
@@ -1445,6 +1730,40 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Cost Explorer holds on the anomaly monitor a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's monitor and not
+     * another's.
+     */
+    @Test
+    void aCostExplorerResourceTagConditionReadsTheTagsOfTheAnomalyMonitor() {
+        String tagged = anomalyMonitor("[{\"Key\":\"team\",\"Value\":\"web\"}]");
+        String other = anomalyMonitor("[{\"Key\":\"team\",\"Value\":\"web\"}]");
+        adminJson("ce", "AWSInsightsIndexService.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"ResourceTags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-monitor-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ce:GetAnomalyMonitors\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1",
+                "{\"MonitorArnList\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1",
+                "{\"MonitorArnList\":[\"" + other + "\"]}"), "ce:GetAnomalyMonitors");
+    }
+
+    /** The ARN of a custom anomaly monitor an administrator creates with the {@code tags} list, deleted afterwards. */
+    private String anomalyMonitor(String tags) {
+        String arn = adminJson("ce", "AWSInsightsIndexService.CreateAnomalyMonitor").body("{\"AnomalyMonitor\":"
+                + "{\"MonitorName\":\"res-monitor-" + suffix() + "\",\"MonitorType\":\"CUSTOM\","
+                + "\"MonitorSpecification\":{\"Dimensions\":{\"Key\":\"LINKED_ACCOUNT\",\"Values\":[\"" + ACCOUNT
+                + "\"]}}},\"ResourceTags\":" + tags + "}")
+                .post("/").then().statusCode(200).extract().path("MonitorArn");
+        cleanup.register(() -> adminJson("ce", "AWSInsightsIndexService.DeleteAnomalyMonitor")
+                .body("{\"MonitorArn\":\"" + arn + "\"}").post("/"));
+        return arn;
+    }
+
+    /**
      * A Cost Explorer cost read is checked on the billing view its {@code BillingViewArn} gives, and Floci answers the
      * costs of none but the caller's primary view: another is refused, so a grant on it does not reach the account's
      * costs, nor does one on the primary view reach another's.
@@ -1483,14 +1802,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void aTrailIsCheckedOnTheArnItsNameGives() {
         String name = "res-trail-" + suffix();
         String other = name + "-other";
-        for (String trail : List.of(name, other)) {
-            adminJson("cloudtrail", "CloudTrail_20131101.CreateTrail")
-                    .body("{\"Name\":\"" + trail + "\",\"S3BucketName\":\"res-trail-logs\"}").post("/").then()
-                    .statusCode(200);
-            cleanup.register(() -> adminJson("cloudtrail", "CloudTrail_20131101.DeleteTrail")
-                    .body("{\"Name\":\"" + trail + "\"}").post("/"));
-        }
-        String arn = "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":trail/" + name;
+        String arn = trail(name, null);
+        trail(other, null);
 
         User user = user("res-trail");
         user.policy(allowOn("cloudtrail:GetTrailStatus", arn) + "," + allowOn("cloudtrail:AddTags", arn));
@@ -1505,6 +1818,41 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .statusCode(200);
         refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.AddTags", "1.1",
                 "{\"ResourceId\":\"" + arn + "-other" + tags), "cloudtrail:AddTags");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CloudTrail holds on the trail a request names, as AddTags
+     * leaves them, so an allow on one team's tag lets the caller read that team's trail status and not another's.
+     */
+    @Test
+    void aCloudTrailResourceTagConditionReadsTheTagsOfTheTrail() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-trail-tagged-" + suffix();
+        String other = "res-trail-untagged-" + suffix();
+        String taggedArn = trail(tagged, web);
+        trail(other, web);
+        adminJson("cloudtrail", "CloudTrail_20131101.AddTags")
+                .body("{\"ResourceId\":\"" + taggedArn + "\",\"TagsList\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-trail-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cloudtrail:GetTrailStatus\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1", "{\"Name\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1",
+                "{\"Name\":\"" + other + "\"}"), "cloudtrail:GetTrailStatus");
+    }
+
+    /** The ARN of the trail {@code name} an administrator creates, with the {@code tags} list if any, deleted after. */
+    private String trail(String name, String tags) {
+        adminJson("cloudtrail", "CloudTrail_20131101.CreateTrail")
+                .body("{\"Name\":\"" + name + "\",\"S3BucketName\":\"res-trail-logs\""
+                        + (tags == null ? "" : ",\"TagsList\":" + tags) + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("cloudtrail", "CloudTrail_20131101.DeleteTrail")
+                .body("{\"Name\":\"" + name + "\"}").post("/"));
+        return "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":trail/" + name;
     }
 
     /** A CloudTrail dashboard is checked on the one its {@code DashboardId}, a name or an ARN, names. */
@@ -1528,11 +1876,7 @@ class IamRequestResourceEnforcementIntegrationTest {
      */
     @Test
     void anAcceleratorIsCheckedOnItsArnNotOnAnEndpointGroupOfIt() {
-        String arn = adminJson("globalaccelerator", "GlobalAccelerator_V20180706.CreateAccelerator")
-                .body("{\"Name\":\"res-accelerator\",\"IdempotencyToken\":\"" + suffix() + "\",\"Enabled\":false}")
-                .post("/").then().statusCode(200).extract().path("Accelerator.AcceleratorArn");
-        cleanup.register(() -> adminJson("globalaccelerator", "GlobalAccelerator_V20180706.DeleteAccelerator")
-                .body("{\"AcceleratorArn\":\"" + arn + "\"}").post("/"));
+        String arn = accelerator(null);
         assertTrue(arn.startsWith("arn:aws:globalaccelerator::" + ACCOUNT + ":accelerator/"), arn);
 
         User user = user("res-accelerator");
@@ -1548,13 +1892,45 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body(not(containsString("not authorized")));
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Global Accelerator holds on the accelerator a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller describe that team's accelerator and
+     * not another's.
+     */
+    @Test
+    void aGlobalAcceleratorResourceTagConditionReadsTheTagsOfTheAccelerator() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = accelerator(web);
+        String other = accelerator(web);
+        adminJson("globalaccelerator", "GlobalAccelerator_V20180706.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-accelerator-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"globalaccelerator:DescribeAccelerator\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + other + "\"}"), "globalaccelerator:DescribeAccelerator");
+    }
+
+    /** The ARN of a disabled accelerator an administrator creates, with the {@code tags} list if any, deleted after. */
+    private String accelerator(String tags) {
+        String arn = adminJson("globalaccelerator", "GlobalAccelerator_V20180706.CreateAccelerator")
+                .body("{\"Name\":\"res-accelerator\",\"IdempotencyToken\":\"" + suffix() + "\",\"Enabled\":false"
+                        + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("Accelerator.AcceleratorArn");
+        cleanup.register(() -> adminJson("globalaccelerator", "GlobalAccelerator_V20180706.DeleteAccelerator")
+                .body("{\"AcceleratorArn\":\"" + arn + "\"}").post("/"));
+        return arn;
+    }
+
     /** A Timestream for InfluxDB parameter group is checked on {@code db-parameter-group/<id>}, the id it was given. */
     @Test
     void aParameterGroupIsCheckedOnTheArnItsIdGives() {
-        String id = adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.CreateDbParameterGroup", "1.0")
-                .body("{\"name\":\"res-group-" + suffix() + "\"}").post("/").then().statusCode(200).extract()
-                .path("id");
-        String arn = "arn:aws:timestream-influxdb:" + REGION + ":" + ACCOUNT + ":db-parameter-group/" + id;
+        String id = influxParameterGroup(null);
+        String arn = influxParameterGroupArn(id);
 
         User user = user("res-group");
         user.policy(allowOn("timestream-influxdb:GetDbParameterGroup", arn));
@@ -1562,6 +1938,39 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"identifier\":\"" + id + "\"}").statusCode(200).body("arn", equalTo(arn));
         refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
                 "{\"identifier\":\"res" + suffix() + "\"}"), "timestream-influxdb:GetDbParameterGroup");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Timestream for InfluxDB holds on the resource a request
+     * names, as TagResource leaves them, so an allow on one team's tag lets the caller read that team's parameter group
+     * and not another's.
+     */
+    @Test
+    void aTimestreamInfluxDbResourceTagConditionReadsTheTagsOfTheParameterGroup() {
+        String tagged = influxParameterGroup("{\"team\":\"web\"}");
+        String other = influxParameterGroup("{\"team\":\"web\"}");
+        adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.TagResource", "1.0")
+                .body("{\"resourceArn\":\"" + influxParameterGroupArn(tagged) + "\",\"tags\":{\"team\":\"data\"}}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-group-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"timestream-influxdb:GetDbParameterGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"" + other + "\"}"), "timestream-influxdb:GetDbParameterGroup");
+    }
+
+    /** The id of a parameter group an administrator creates, with the {@code tags} object if any. */
+    private static String influxParameterGroup(String tags) {
+        return adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.CreateDbParameterGroup", "1.0")
+                .body("{\"name\":\"res-group-" + suffix() + "\"" + (tags == null ? "" : ",\"tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("id");
+    }
+
+    private static String influxParameterGroupArn(String id) {
+        return "arn:aws:timestream-influxdb:" + REGION + ":" + ACCOUNT + ":db-parameter-group/" + id;
     }
 
     /** A Timestream for InfluxDB cluster reboot is checked on each member instance its {@code instanceIds} names. */
@@ -1587,14 +1996,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void aBudgetIsCheckedOnTheArnItsNameGives() {
         String name = "res-budget-" + suffix();
         String other = name + "-other";
-        for (String budget : List.of(name, other)) {
-            adminJson("budgets", "AWSBudgetServiceGateway.CreateBudget")
-                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"Budget\":" + budget(budget, null) + "}").post("/")
-                    .then().statusCode(200);
-            cleanup.register(() -> adminJson("budgets", "AWSBudgetServiceGateway.DeleteBudget")
-                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + budget + "\"}").post("/"));
-        }
-        String arn = "arn:aws:budgets::" + ACCOUNT + ":budget/" + name;
+        String arn = createdBudget(name, null);
+        createdBudget(other, null);
         adminJson("budgets", "AWSBudgetServiceGateway.TagResource").body("{\"ResourceARN\":\"" + arn
                 + "\",\"ResourceTags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}").post("/").then().statusCode(200);
 
@@ -1608,6 +2011,40 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + budget(other, arn) + "}"), "budgets:ModifyBudget");
         budgets(user, "UpdateBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"NewBudget\":" + budget(name, null) + "}")
                 .statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Budgets holds on the budget a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller read that team's budget and not another's.
+     */
+    @Test
+    void aBudgetsResourceTagConditionReadsTheTagsOfTheBudget() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-budget-tagged-" + suffix();
+        String other = "res-budget-untagged-" + suffix();
+        String taggedArn = createdBudget(tagged, web);
+        createdBudget(other, web);
+        adminJson("budgets", "AWSBudgetServiceGateway.TagResource").body("{\"ResourceARN\":\"" + taggedArn
+                + "\",\"ResourceTags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}").post("/").then().statusCode(200);
+
+        User user = user("res-budget-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"budgets:ViewBudget\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + other
+                + "\"}"), "budgets:ViewBudget");
+    }
+
+    /** The ARN of the budget {@code name} an administrator creates, with the {@code tags} list if any. */
+    private String createdBudget(String name, String tags) {
+        adminJson("budgets", "AWSBudgetServiceGateway.CreateBudget")
+                .body("{\"AccountId\":\"" + ACCOUNT + "\",\"Budget\":" + budget(name, null)
+                        + (tags == null ? "" : ",\"ResourceTags\":" + tags) + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("budgets", "AWSBudgetServiceGateway.DeleteBudget")
+                .body("{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + name + "\"}").post("/"));
+        return "arn:aws:budgets::" + ACCOUNT + ":budget/" + name;
     }
 
     /**
@@ -1896,10 +2333,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** A DataSync agent is checked on its ARN, which ends in the id DataSync gave it, to describe it or to tag it. */
     @Test
     void aDataSyncAgentIsCheckedOnItsArn() {
-        String arn = adminJson("datasync", "FmrsService.CreateAgent").body("{\"ActivationKey\":\"RES-ACTIVATION\"}")
-                .post("/").then().statusCode(200).extract().path("AgentArn");
-        cleanup.register(() -> adminJson("datasync", "FmrsService.DeleteAgent")
-                .body("{\"AgentArn\":\"" + arn + "\"}").post("/"));
+        String arn = dataSyncAgent(null);
         String agents = "arn:aws:datasync:" + REGION + ":" + ACCOUNT + ":agent/";
         assertTrue(arn.startsWith(agents + "agent-"), arn);
         String other = agents + "agent-0123456789abcdef0";
@@ -1911,6 +2345,36 @@ class IamRequestResourceEnforcementIntegrationTest {
         String tags = "\",\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}";
         dataSync(user, "TagResource", "{\"ResourceArn\":\"" + arn + tags).statusCode(200);
         refusedJson(dataSync(user, "TagResource", "{\"ResourceArn\":\"" + other + tags), "datasync:TagResource");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags DataSync holds on the agent a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller describe that team's agent and not another's.
+     */
+    @Test
+    void aDataSyncResourceTagConditionReadsTheTagsOfTheAgent() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = dataSyncAgent(web);
+        String other = dataSyncAgent(web);
+        adminJson("datasync", "FmrsService.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-agent-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"datasync:DescribeAgent\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + other + "\"}"), "datasync:DescribeAgent");
+    }
+
+    /** The ARN of an agent an administrator creates, with the {@code tags} list if any, deleted afterwards. */
+    private String dataSyncAgent(String tags) {
+        String arn = adminJson("datasync", "FmrsService.CreateAgent")
+                .body("{\"ActivationKey\":\"RES-ACTIVATION\"" + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("AgentArn");
+        cleanup.register(() -> adminJson("datasync", "FmrsService.DeleteAgent")
+                .body("{\"AgentArn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /**
@@ -1954,6 +2418,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         emr(user, "DescribeCluster", "{\"ClusterId\":\"" + tagged + "\"}").statusCode(200);
         refusedJson(emr(user, "DescribeCluster", "{\"ClusterId\":\"" + other + "\"}"),
                 "elasticmapreduce:DescribeCluster");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR holds on the session a request names, those it started
+     * with, so an allow on one team's tag lets the caller read that team's session and not another's.
+     */
+    @Test
+    void anEmrResourceTagConditionReadsTheTagsOfTheSession() {
+        String clusterId = adminJson("elasticmapreduce", "ElasticMapReduce.RunJobFlow")
+                .body("{\"Name\":\"res-emr-sessions\",\"ReleaseLabel\":\"emr-spark-8.0.0\",\"Applications\":[{\"Name\":"
+                        + "\"Spark\"}],\"SessionEnabled\":true,\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                        + "\"InstanceGroups\":[{\"Name\":\"primary\",\"InstanceRole\":\"MASTER\",\"InstanceType\":"
+                        + "\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .post("/").then().statusCode(200).extract().path("JobFlowId");
+        cleanup.register(() -> adminJson("elasticmapreduce", "ElasticMapReduce.TerminateJobFlows")
+                .body("{\"JobFlowIds\":[\"" + clusterId + "\"]}").post("/"));
+        String tagged = emrSession(clusterId, "data");
+        String other = emrSession(clusterId, "web");
+
+        User user = user("res-emr-session-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"elasticmapreduce:GetSession\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        emr(user, "GetSession", "{\"ClusterId\":\"" + clusterId + "\",\"SessionId\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(emr(user, "GetSession", "{\"ClusterId\":\"" + clusterId + "\",\"SessionId\":\"" + other + "\"}"),
+                "elasticmapreduce:GetSession");
+    }
+
+    /** The id of a session an administrator starts on the cluster, tagged with the team. */
+    private static String emrSession(String clusterId, String team) {
+        return adminJson("elasticmapreduce", "ElasticMapReduce.StartSession")
+                .body("{\"ClusterId\":\"" + clusterId + "\",\"Name\":\"res-" + team + "\",\"Tags\":[{\"Key\":\"team\","
+                        + "\"Value\":\"" + team + "\"}]}")
+                .post("/").then().statusCode(200).extract().path("Id");
     }
 
     /** The id of the cluster {@code arn} names, tagged with the team by an administrator. */
@@ -2678,12 +3176,18 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /** A pipeline with a source and a build stage, the two stages CodePipeline requires. */
     private static String pipeline(String name) {
+        return pipeline(name, null);
+    }
+
+    /** A CreatePipeline or UpdatePipeline body for the pipeline {@code name}, with the {@code tags} list if any. */
+    private static String pipeline(String name, String tags) {
         return "{\"pipeline\":{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/codepipeline-role\","
                 + "\"artifactStore\":{\"type\":\"S3\",\"location\":\"codepipeline-artifacts\"},\"stages\":["
                 + "{\"name\":\"Source\",\"actions\":[{\"name\":\"SourceAction\",\"actionTypeId\":{\"category\":\"Source\","
                 + "\"owner\":\"AWS\",\"provider\":\"S3\",\"version\":\"1\"},\"runOrder\":1}]},"
                 + "{\"name\":\"Build\",\"actions\":[{\"name\":\"BuildAction\",\"actionTypeId\":{\"category\":\"Build\","
-                + "\"owner\":\"AWS\",\"provider\":\"CodeBuild\",\"version\":\"1\"},\"runOrder\":1}]}]}}";
+                + "\"owner\":\"AWS\",\"provider\":\"CodeBuild\",\"version\":\"1\"},\"runOrder\":1}]}]}"
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}";
     }
 
     private static RequestSpecification tagged(RequestSpecification request) {

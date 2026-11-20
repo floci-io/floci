@@ -18,6 +18,16 @@ public interface DnsRecordSource {
         return Optional.empty();
     }
 
+    /** Supplies the receiving listener's address to sources that resolve local alias targets. */
+    default Optional<DnsAnswer> resolveAuthoritative(String name, int type, String listenerAddress) {
+        return resolveAuthoritative(name, type);
+    }
+
+    /** Resolves a stored resource's alias target without recursive DNS or suffix substitution. */
+    default Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type, String listenerAddress) {
+        return Optional.empty();
+    }
+
     /**
      * Resolves a query name to IPv4 addresses and their TTL. An empty optional means this
      * source does not own the name. The name arrives without a trailing dot and in the case the client sent.

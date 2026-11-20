@@ -1,6 +1,7 @@
 package io.floci.aws.services.ses.address;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.ses.mime.SesEncodedWord;
 import io.floci.aws.services.ses.model.BulkEmailEntry;
 import io.floci.aws.services.ses.model.EmailContent;
 import io.floci.aws.services.ses.model.SendEmailRequest;

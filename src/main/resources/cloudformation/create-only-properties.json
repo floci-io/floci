@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"

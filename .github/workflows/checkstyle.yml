@@ -20,10 +20,6 @@ on:
       - 'tools/checkstyle/**'
       - 'pom.xml'
       - '.github/workflows/checkstyle.yml'
-  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
-  # apply to merge_group, so a queued PR is always checked.
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
@@ -53,6 +49,13 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: |
             maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Run Checkstyle
         run: ./mvnw -B checkstyle:check

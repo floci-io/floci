@@ -83,6 +83,7 @@ class EmrBootstrapRunnerTest {
     void setUp() {
         when(builder.newContainer(anyString())).thenReturn(spec);
         when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(lifecycle.getStreamingDockerClient()).thenReturn(docker);
         when(lifecycle.createAndStart(any()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo(CONTAINER, Map.of()));
         when(roleCredentials.forRole(any(), any(), any())).thenReturn(Optional.empty());
@@ -102,6 +103,20 @@ class EmrBootstrapRunnerTest {
                     }
                     return null;
                 });
+    }
+
+    // Catches: a bootstrap action, a user's script with no timeout, holding a control-plane connection for
+    // as long as it runs instead of a streaming one.
+    @Test
+    void eachActionsOutputStreamsOnTheStreamingClient() {
+        DockerClient streaming = mock(DockerClient.class);
+        when(lifecycle.getStreamingDockerClient()).thenReturn(streaming);
+        ContainerExecStubs.completeEveryExec(docker, streaming, CONTAINER, 0, "installed\n", "");
+
+        runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"),
+                action("s3n://bucket/bootstrap/jars.sh")), () -> false);
+
+        verify(streaming, times(2)).execStartCmd(anyString());
     }
 
     @Test

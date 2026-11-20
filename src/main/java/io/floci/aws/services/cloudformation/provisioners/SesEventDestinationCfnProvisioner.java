@@ -43,7 +43,6 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
         if (resolved == null || !resolved.isObject()) {
             throw invalid("Properties must be an object.");
         }
-        CfnPropertyTypes.rejectUnknownMembers(TYPE, resolved);
         if (resolved.has("Id")) {
             throw invalid("Unknown property: Id");
         }
@@ -54,7 +53,6 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
         if (!definition.isObject()) {
             throw invalid("EventDestination must be an object.");
         }
-        validateNonblankRequiredValues(definition);
         String explicitName = optionalText(definition, "Name");
         Address prior = priorAddress(resource, ctx);
         String name = explicitName != null && !explicitName.isBlank() ? explicitName
@@ -151,31 +149,6 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
                 if (dimension.isNull()) {
                     throw invalid("DimensionConfigurations entries must be objects.");
                 }
-            }
-        }
-    }
-
-    private static void validateNonblankRequiredValues(JsonNode definition) {
-        // HandlerReader checks schema types and missing members; these reject blank strings and nulls it omits.
-        if (!definition.has("MatchingEventTypes")) {
-            throw invalid("MatchingEventTypes is required.");
-        }
-        if (definition.path("SnsDestination").isObject()) {
-            requiredText(definition.get("SnsDestination"), "TopicARN");
-        }
-        if (definition.path("KinesisFirehoseDestination").isObject()) {
-            requiredText(definition.get("KinesisFirehoseDestination"), "IAMRoleARN");
-            requiredText(definition.get("KinesisFirehoseDestination"), "DeliveryStreamARN");
-        }
-        if (definition.path("EventBridgeDestination").isObject()) {
-            requiredText(definition.get("EventBridgeDestination"), "EventBusArn");
-        }
-        JsonNode dimensions = definition.path("CloudWatchDestination").path("DimensionConfigurations");
-        if (dimensions.isArray()) {
-            for (JsonNode dimension : dimensions) {
-                requiredText(dimension, "DimensionName");
-                requiredText(dimension, "DimensionValueSource");
-                requiredText(dimension, "DefaultDimensionValue");
             }
         }
     }

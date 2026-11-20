@@ -144,10 +144,8 @@ AWS::CloudTrail::Trail	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationCriteria	accepted and ignored
-AWS::CloudWatch::Alarm	EvaluationInterval	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationWindow	accepted and ignored
 AWS::CloudWatch::Alarm	ExtendedStatistic	accepted and ignored
-AWS::CloudWatch::Alarm	Metrics	accepted and ignored
 AWS::CloudWatch::Alarm	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ThresholdMetricId	accepted and ignored
 AWS::CloudWatch::Alarm	WarmUpConfiguration	accepted and ignored
@@ -156,6 +154,7 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
+AWS::DSQL::Cluster	MetricGroups	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -289,23 +288,18 @@ AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
-AWS::EKS::Cluster	AccessConfig	accepted and ignored
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
 AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
-AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
-AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
-AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
 AWS::EKS::Cluster	StorageConfig	accepted and ignored
 AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
@@ -453,7 +447,6 @@ AWS::RDS::DBCluster	DBClusterInstanceClass	accepted and ignored
 AWS::RDS::DBCluster	DBInstanceParameterGroupName	accepted and ignored
 AWS::RDS::DBCluster	DatabaseInsightsMode	accepted and ignored
 AWS::RDS::DBCluster	DeleteAutomatedBackups	accepted and ignored
-AWS::RDS::DBCluster	DeletionProtection	accepted and ignored
 AWS::RDS::DBCluster	Domain	accepted and ignored
 AWS::RDS::DBCluster	DomainIAMRoleName	accepted and ignored
 AWS::RDS::DBCluster	EnableCloudwatchLogsExports	accepted and ignored

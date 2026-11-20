@@ -3,6 +3,7 @@ package io.floci.aws.services.rds;
 import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -62,6 +63,7 @@ class RdsQueryHandlerTest {
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
+    private final RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
     @BeforeEach
     void setUp() {
@@ -77,7 +79,8 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
+        handler = new RdsQueryHandler(service, exportTaskService, config, regionResolver, docDbHandler,
+                neptuneHandler);
     }
 
     @ParameterizedTest
@@ -449,6 +452,36 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_standardStorageReportsZeroThroughput() {
+        // The API refuses StorageType=standard, so only a stored record can carry it.
+        DbInstance instance = makeInstance("std");
+        instance.setStorageType("standard");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<StorageThroughput>0</StorageThroughput>"), body);
+    }
+
+    @Test
+    void describeDbInstances_oracleGp3BaselineStepsUpAt200GiB() {
+        // Floci cannot create an Oracle instance, so the Oracle threshold is reachable only from here.
+        // An upper-case identifier on a stored record must still read as SQL Server (always the lower tier).
+        for (int[] row : new int[][] {{200, 12000, 500}, {199, 3000, 125}, {500, 3000, 125}}) {
+            DbInstance instance = makeInstance("ora");
+            instance.setEngineIdentifier(row[0] == 500 ? "SQLSERVER-SE" : "oracle-ee");
+            instance.setStorageType("gp3");
+            instance.setAllocatedStorage(row[0]);
+            when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+            String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+            assertTrue(body.contains("<Iops>" + row[1] + "</Iops>"), body);
+            assertTrue(body.contains("<StorageThroughput>" + row[2] + "</StorageThroughput>"), body);
+        }
+    }
+
+    @Test
     void describeDbInstances_echoesPubliclyAccessible() {
         // AWS returns the requested value; a hard-coded false read back as drift for any client
         // that persists it (Terraform's aws_db_instance re-issued ModifyDBInstance every apply).
@@ -791,7 +824,7 @@ class RdsQueryHandlerTest {
     void describeDbInstances_dbSubnetGroupUsesSubnetTag() {
         DbInstance instance = makeInstance("mydb");
         instance.setDbSubnetGroupName("custom-group");
-        when(service.getDbSubnetGroup("custom-group", null)).thenReturn(customSubnetGroup());
+        when(service.getDbSubnetGroup("custom-group", "us-east-1")).thenReturn(customSubnetGroup());
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
 
         Response response = handler.handle("DescribeDBInstances", params());
@@ -894,7 +927,7 @@ class RdsQueryHandlerTest {
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false)))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), eq(false)))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -914,7 +947,7 @@ class RdsQueryHandlerTest {
         verify(service).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false));
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), eq(false));
     }
 
     @Test
@@ -922,7 +955,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -939,7 +972,7 @@ class RdsQueryHandlerTest {
     void createDbClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenThrow(new ContainerRejectedException(
                         new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
 
@@ -960,7 +993,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
         // Another request associated the role between the create and the roles being added.
         when(service.addRolesToNewDbCluster(any(), eq("mycluster"), anyList()))
@@ -1082,7 +1115,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         instance.setDbSubnetGroupName("sample-db-subnets");
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
-        when(service.getDbSubnetGroup("sample-db-subnets", null)).thenReturn(new DbSubnetGroup(
+        when(service.getDbSubnetGroup("sample-db-subnets", "us-east-1")).thenReturn(new DbSubnetGroup(
                 "sample-db-subnets", "test subnets", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                 Map.of("subnet-aaa", "us-east-1a", "subnet-bbb", "us-east-1b")));
 
@@ -2910,9 +2943,9 @@ class RdsQueryHandlerTest {
         when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
                 any(), any(), any(), any(), any(), any(), isNull(), isNull())).thenReturn(makeInstance("restored"));
         when(service.restoreDbClusterFromSnapshot(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         for (String invalid : List.of("yes", "", "not-a-boolean")) {
             MultivaluedMap<String, String> p = params();
             p.putSingle("DBInstanceIdentifier", "restored");
@@ -2989,10 +3022,10 @@ class RdsQueryHandlerTest {
         Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
         when(service.restoreDbClusterFromSnapshot(eq("restored"), eq("snapshot"), eq("aurora-postgresql"),
                 isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(eq("restored"), eq("source"), isNull(), isNull(),
                 isNull(), eq(true), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBClusterIdentifier", "restored");
         p.putSingle("SnapshotIdentifier", "snapshot");
@@ -3003,12 +3036,12 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("RestoreDBClusterFromSnapshot", p).getStatus());
         verify(service).restoreDbClusterFromSnapshot("restored", "snapshot", "aurora-postgresql",
-                null, null, null, null, null, null, enabled, null, Map.of(), null);
+                null, null, null, null, null, null, enabled, null, false, Map.of(), null);
         p.putSingle("SourceDBClusterIdentifier", "source");
         p.putSingle("UseLatestRestorableTime", "true");
         assertEquals(200, handler.handle("RestoreDBClusterToPointInTime", p).getStatus());
         verify(service).restoreDbClusterToPointInTime("restored", "source", null, null, null, true,
-                null, null, null, enabled, null, Map.of(), null);
+                null, null, null, enabled, null, false, Map.of(), null);
     }
 
     @Test

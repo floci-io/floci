@@ -20,6 +20,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.core.common.docker.RunLabelledContainers;
+import io.floci.aws.core.common.docker.StreamingDocker;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.floci.aws.services.codebuild.model.Build;
@@ -76,6 +77,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     private static final int FAILURE_OUTPUT_CHARS = 512;
 
     private final DockerClient dockerClient;
+    /** Carries a phase's output, a stream that stays open for as long as the phase runs. */
+    private final DockerClient streamingDockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
@@ -90,12 +93,14 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     private final VpcContainerLeases vpcLeases;
     /** This run's build containers, so a later run knows the ones a crash leaves for leftovers. */
     private final RunLabelledContainers runContainers;
+    private final CodeBuildRoleCredentials roleCredentials;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
+                           @StreamingDocker DockerClient streamingDockerClient,
                            ContainerBuilder containerBuilder,
                            ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer,
@@ -106,8 +111,10 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
                            ContainerReachableEndpoint containerEndpoint,
-                           Ec2Service ec2Service) {
+                           Ec2Service ec2Service,
+                           CodeBuildRoleCredentials roleCredentials) {
         this.dockerClient = dockerClient;
+        this.streamingDockerClient = streamingDockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -120,6 +127,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         this.containerEndpoint = containerEndpoint;
         this.vpcLeases = new VpcContainerLeases(ec2Service, "CodeBuild build", () -> dockerClient);
         this.runContainers = new RunLabelledContainers(lifecycleManager, config, "codebuild", RUN_LABEL, LOG);
+        this.roleCredentials = roleCredentials;
     }
 
     /**
@@ -184,10 +192,24 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
             if (stopFlag.get()) { finishStopped(build); return; }
 
-            // PROVISIONING
+            // PROVISIONING: the build's own session of its project's service role, before
+            // anything of its buildspec runs.
             beginPhase(build, "PROVISIONING");
             build.setCurrentPhase("PROVISIONING");
             workspace = Files.createTempDirectory("floci-codebuild-");
+            Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().codebuild().dockerNetwork());
+            CodeBuildRoleCredentials.BuildCredentials credentials;
+            try {
+                credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
+                        accountOf(project), network);
+            } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
+                finishFailed(build);
+                return;
+            } catch (RuntimeException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
+                throw e;
+            }
             completePhase(build, "PROVISIONING", "SUCCEEDED");
 
             if (stopFlag.get()) { finishStopped(build); return; }
@@ -236,11 +258,11 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "log-group:" + logGroup + ":log-stream:" + logStream).toString());
             build.setLogs(logsMap);
 
-            List<String> envList = buildEnvList(region, build, project, buildspec, logStream);
+            List<String> envList = buildEnvList(region, build, project, buildspec, logStream, credentials.env());
 
             // Keep the container alive so each phase can be run with docker exec.
             // No bind mount needed — source and artifacts are transferred with docker cp.
-            ContainerSpec spec = containerBuilder.newContainer(image)
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withCmd(List.of("sh", "-c", "tail -f /dev/null"))
                     .withEnv(envList)
                     .withDockerNetwork(config.services().codebuild().dockerNetwork())
@@ -248,8 +270,13 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
                     .withLogRotation()
-                    .withLabels(buildLabels(buildId, region))
-                    .build();
+                    .withLabels(buildLabels(buildId, region));
+            // Its own address in 169.254.0.0/16, without which the container has no route to the
+            // credentials endpoint's 169.254.170.2.
+            if (credentials.linkLocalAddress() != null) {
+                specBuilder.withLinkLocalIp(credentials.linkLocalAddress());
+            }
+            ContainerSpec spec = specBuilder.build();
 
             // Build state does not outlive the process, so a crash's build containers have nothing left to finish.
             runContainers.removeLeftovers();
@@ -407,14 +434,26 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             }
         } finally {
             stopFlags.remove(executionId);
+            // However the build ended, its session ends with it.
+            roleCredentials.revoke(executionId);
+            boolean containerGone = true;
             if (containerId != null && runningContainers.remove(executionId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
+                containerGone = lifecycleManager.stopAndConfirmRemoved(containerId, logHandle, 5, false);
+                // A failed removal leaves the log stream open for a retry, and a build has none.
+                if (!containerGone && logHandle != null) {
+                    try { logHandle.close(); } catch (Exception ignored) {}
+                }
             } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
             }
             // Whoever removed the container, shutdown included, its address goes back once Docker confirms it gone.
             if (containerId != null) {
                 vpcLeases.releaseIfGone(containerId);
+            }
+            // The address goes back to its network's pool only once no container holds it, as an
+            // ECS task's does; a container that survived removal keeps it reserved.
+            if (containerGone) {
+                roleCredentials.releaseAddress(executionId);
             }
             if (workspace != null) {
                 deleteDirectory(workspace);
@@ -501,8 +540,20 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
+    /** The account the project is in, which its role is looked up and its session minted in. */
+    private String accountOf(Project project) {
+        try {
+            return AwsArnUtils.parse(project.getArn()).accountId();
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Project {0} has no parsable ARN ({1}), so its service role is looked up in the default "
+                    + "account {2}", project.getName(), project.getArn(), regionResolver.getAccountId());
+            return regionResolver.getAccountId();
+        }
+    }
+
     private List<String> buildEnvList(String region, Build build, Project project,
-                                      ParsedBuildspec buildspec, String logStream) {
+                                      ParsedBuildspec buildspec, String logStream,
+                                      Map<String, String> credentials) {
         Map<String, String> env = new LinkedHashMap<>();
 
         env.put("CODEBUILD_BUILD_ID", build.getId());
@@ -515,9 +566,10 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         env.put("CODEBUILD_LOG_PATH", logStream);
         env.put("AWS_DEFAULT_REGION", region);
         env.put("AWS_REGION", region);
-        env.put("AWS_ACCESS_KEY_ID", "test");
-        env.put("AWS_SECRET_ACCESS_KEY", "test");
         env.put("AWS_ENDPOINT_URL", resolveEndpointUrl());
+        // The project's role, ahead of everything a project, its buildspec or the build's start
+        // sets, which still reaches the build as CodeBuild's own variables do.
+        env.putAll(credentials);
 
         env.putAll(buildspec.envVariables());
 
@@ -675,6 +727,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         String script = String.join("\n", commands);
         String[] cmd = {"sh", "-e", "-c", script};
 
+        Closeable phaseOutput = null;
         try {
             String execId = dockerClient.execCreateCmd(containerId)
                     .withCmd(cmd)
@@ -688,7 +741,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             CountDownLatch latch = new CountDownLatch(1);
             OutputTail outputCapture = new OutputTail();
 
-            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            phaseOutput = streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {
@@ -703,6 +756,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
             boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
             if (!completed) {
+                // Its output would otherwise hold a streaming connection for as long as the command runs on.
+                closePhaseOutput(phaseOutput);
                 return PhaseResult.ofFailure("Phase timed out after " + timeoutMinutes + " minutes");
             }
             if (stopFlag.get()) {
@@ -722,12 +777,24 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            closePhaseOutput(phaseOutput);
             return PhaseResult.ofStopped();
         } catch (Exception e) {
             if (stopFlag.get()) {
                 return PhaseResult.ofStopped();
             }
             return PhaseResult.ofFailure(e.getMessage());
+        }
+    }
+
+    private static void closePhaseOutput(Closeable phaseOutput) {
+        if (phaseOutput == null) {
+            return;
+        }
+        try {
+            phaseOutput.close();
+        } catch (IOException e) {
+            LOG.debugv(e, "Could not close a CodeBuild phase's output stream");
         }
     }
 
@@ -880,6 +947,11 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     }
 
     private void completePhaseWithError(Build build, String phaseType, String status, String message) {
+        completePhaseWithError(build, phaseType, status, "COMMAND_EXECUTION_ERROR", message);
+    }
+
+    private void completePhaseWithError(Build build, String phaseType, String status, String statusCode,
+                                        String message) {
         findPhase(build, phaseType).ifPresent(p -> {
             double end = EpochSeconds.fromMillis(System.currentTimeMillis());
             p.setPhaseStatus(status);
@@ -887,7 +959,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             p.setDurationInSeconds(Math.round(end - p.getStartTime()));
             if (message != null) {
                 String truncated = message.substring(0, Math.min(message.length(), 1024));
-                p.setContexts(List.of(Map.of("statusCode", "COMMAND_EXECUTION_ERROR", "message", truncated)));
+                p.setContexts(List.of(Map.of("statusCode", statusCode, "message", truncated)));
             }
         });
     }

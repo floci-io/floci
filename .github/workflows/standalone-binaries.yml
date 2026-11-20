@@ -3,12 +3,17 @@ name: Standalone Binaries
 # Builds and smoke-tests the macOS and Windows floci-aws binaries. The Linux release binaries are
 # the native artifacts release.yml builds for the images.
 #
+# Releases build darwin-amd64 and windows-amd64 only. darwin-arm64 cannot build on the free
+# macos-latest runner (native-image analysis needs about 6.6 GB, the runner gives it 5.68 GB), so
+# Apple Silicon Macs run the darwin-amd64 binary under Rosetta 2 until a larger runner is in place.
+#
 # release.yml calls this for every version tag, and publish-binaries there uploads what it built.
 # Run it by hand (Actions > Standalone Binaries > Run workflow) to try a branch, a runner or a
 # native-image setting without cutting a release: a manual run only uploads workflow artifacts,
 # it never writes to a GitHub Release. Examples:
 #   platforms: darwin-arm64     native-args: -Dquarkus.native.native-image-xmx=6g
 #   platforms: darwin-arm64     macos-runner: macos-latest-xlarge
+#   platforms: darwin-amd64     macos-amd64-runner: macos-latest   (builds under Rosetta 2)
 #
 # Mandrel has no macOS distribution, so every binary here uses GraalVM Community, which has no
 # -H:-AOTSingleCallsiteInline option to pass.
@@ -39,11 +44,17 @@ on:
         type: string
         default: ''
       macos-runner:
-        description: Runner label for both macOS builds
+        description: Runner label for the darwin-arm64 build
         required: false
         type: string
         default: macos-latest
+      macos-amd64-runner:
+        description: Runner label for the darwin-amd64 build (an Apple Silicon one builds under Rosetta 2)
+        required: false
+        type: string
+        default: macos-15-intel
       timeout-minutes:
+        # A manual run passes inputs as strings, so the jobs parse this with fromJSON.
         description: Job timeout for every build (0 keeps 60 for darwin-arm64 and 90 for the others)
         required: false
         type: number
@@ -77,7 +88,7 @@ jobs:
     needs: prepare
     if: contains(format(',{0},', inputs.platforms), ',darwin-arm64,')
     runs-on: ${{ inputs.macos-runner || 'macos-latest' }}
-    timeout-minutes: ${{ inputs.timeout-minutes || 60 }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.timeout-minutes || 0)) > 0 && fromJSON(format('{0}', inputs.timeout-minutes || 0)) || 60 }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,21 +121,24 @@ jobs:
           retention-days: 7
 
   build-binary-darwin-amd64:
-    name: Build standalone binary (darwin-amd64, Rosetta)
-    # native-image cannot cross-compile, and Intel macOS runners queue for hours, so an x86_64
-    # GraalVM runs under Rosetta 2 on the Apple Silicon runner (floci-cli's recipe).
+    name: Build standalone binary (darwin-amd64)
+    # native-image cannot cross-compile. The default Intel runner (macos-15-intel) builds natively;
+    # on an Apple Silicon runner the same steps run an x86_64 GraalVM under Rosetta 2.
+    # Built for x86-64-v2: GraalVM's default, x86-64-v3, asks for AVX2, BMI and FMA, which Rosetta 2
+    # does not provide, so the binary would not start on the Apple Silicon Macs it is published for.
     # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand: GraalVM
     # Community, like the other binaries, pinned to 25.0.1 (the last release with a macOS x64 build)
     # and checked against its published SHA-256 before anything built with it is signed.
     needs: prepare
     if: contains(format(',{0},', inputs.platforms), ',darwin-amd64,')
-    runs-on: ${{ inputs.macos-runner || 'macos-latest' }}
-    timeout-minutes: ${{ inputs.timeout-minutes || 90 }}
+    runs-on: ${{ inputs.macos-amd64-runner || 'macos-15-intel' }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.timeout-minutes || 0)) > 0 && fromJSON(format('{0}', inputs.timeout-minutes || 0)) || 90 }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rosetta 2
+        if: runner.arch == 'ARM64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
 
       - name: Install x86_64 GraalVM
@@ -140,13 +154,16 @@ jobs:
           echo "GRAALVM_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/graalvm-x64/Contents/Home/bin" >> "$GITHUB_PATH"
 
-      - name: Build native executable (x86_64 under Rosetta)
+      - name: Build native executable (x86_64)
         env:
           NATIVE_ARGS: ${{ inputs.native-args }}
+          ARCH_PREFIX: ${{ runner.arch == 'ARM64' && 'arch -x86_64' || '' }}
         # NATIVE_ARGS splits on spaces into separate Maven arguments.
         run: |
           read -ra extra <<< "$NATIVE_ARGS"
-          arch -x86_64 mvn clean package -Dnative -DskipTests -B ${extra[@]+"${extra[@]}"}
+          ${ARCH_PREFIX} mvn clean package -Dnative -DskipTests -B \
+            -Dquarkus.native.additional-build-args-append=-march=x86-64-v2 \
+            ${extra[@]+"${extra[@]}"}
 
       - name: Verify the binary is x86_64
         run: file target/*-runner | grep -q x86_64
@@ -154,7 +171,8 @@ jobs:
       - name: Smoke-test the standalone binary
         env:
           EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
-        run: arch -x86_64 .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$EXPECTED_VERSION"
+          ARCH_PREFIX: ${{ runner.arch == 'ARM64' && 'arch -x86_64' || '' }}
+        run: ${ARCH_PREFIX} .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$EXPECTED_VERSION"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -168,7 +186,7 @@ jobs:
     needs: prepare
     if: contains(format(',{0},', inputs.platforms), ',windows-amd64,')
     runs-on: windows-latest
-    timeout-minutes: ${{ inputs.timeout-minutes || 90 }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.timeout-minutes || 0)) > 0 && fromJSON(format('{0}', inputs.timeout-minutes || 0)) || 90 }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

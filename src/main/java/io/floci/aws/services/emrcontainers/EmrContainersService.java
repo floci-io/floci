@@ -16,6 +16,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.EksService;
@@ -54,7 +55,7 @@ import java.util.regex.Pattern;
  * starts with {@code _} are Floci's own and never leave the service.
  */
 @ApplicationScoped
-public class EmrContainersService implements Resettable {
+public class EmrContainersService implements Resettable, StoredResourceArns {
 
     static final String SERVICE = "emr-containers";
     static final String VIRTUAL_CLUSTERS = "/virtualclusters/";
@@ -590,6 +591,55 @@ public class EmrContainersService implements Resettable {
         }
         updated.set("tags", remaining);
         target.storage().put(resourceArn, updated);
+    }
+
+    @Override
+    public String namespace() {
+        return "emr-containers";
+    }
+
+    /** A request names each resource by the id its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the virtual cluster, job run, managed endpoint, job template or security configuration whose ARN is
+     * {@code arn}, in the request's account, where the handlers read: an ARN of another account names none. Each is
+     * stored under its ARN, so it is read in place under the ARN itself, a resource stored before storage was
+     * account-aware included, and matched on the ARN it records. Every write stores a new copy of the resource, so
+     * the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "emr-containers")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        AccountAwareStorageBackend<ObjectNode> store = storeOf(parsed.resource());
+        if (store == null || !parsed.accountId().equals(regionResolver.getAccountId())) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(store, parsed.accountId(), arn)
+                .filter(resource -> arn.equals(resource.path("arn").textValue()))
+                .map(EmrContainersService::tagMap)
+                .orElse(Map.of());
+    }
+
+    /** The store holding the kind of resource an ARN's resource part names, or null for none of them. */
+    private AccountAwareStorageBackend<ObjectNode> storeOf(String resource) {
+        Matcher nested = NESTED_ARN.matcher(resource);
+        if (nested.matches()) {
+            return "jobruns".equals(nested.group(2)) ? jobRuns : endpoints;
+        }
+        if (VIRTUAL_CLUSTER_ARN.matcher(resource).matches()) {
+            return virtualClusters;
+        }
+        if (resource.startsWith(JOB_TEMPLATES)) {
+            return jobTemplates;
+        }
+        return resource.startsWith(SECURITY_CONFIGURATIONS) ? securityConfigurations : null;
     }
 
     @Override

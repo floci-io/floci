@@ -97,8 +97,8 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
-| `DeleteDBCluster` | Delete a cluster |
-| `ModifyDBCluster` | Update cluster settings |
+| `DeleteDBCluster` | Delete a cluster; refused with `InvalidParameterCombination` while deletion protection is on |
+| `ModifyDBCluster` | Update cluster settings, including deletion protection |
 | `CreateDBParameterGroup` | Create a parameter group |
 | `DescribeDBParameterGroups` | List parameter groups |
 | `DeleteDBParameterGroup` | Delete a parameter group |
@@ -231,6 +231,21 @@ checked against the instance's other window. Modifications apply immediately —
     `InvalidDBInstanceState`. The dump runs in one transaction, so InnoDB tables are copied as of
     one moment; as with `mysqldump --single-transaction` elsewhere, a MyISAM or other
     non-transactional table written to during the snapshot may not be.
+
+## Cluster settings read-back
+
+`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot`, `DeletionProtection`
+and the enabled CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration`
+enable and disable deltas; omitted fields preserve their values, including an explicit
+false snapshot-copy flag. Create, modify and describe return the stored settings.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` also set `DeletionProtection`
+on the new cluster, defaulting to false.
+
+Aurora member instances retain `PromotionTier` from create and modify, defaulting
+to 1 and accepting 0 through 15. Both the instance response and the cluster member
+list report that value. Invalid tiers are rejected before other requested changes
+are applied. These additions cover configuration read-back; log shipping, snapshot
+tag-copy execution, restore settings and failover target selection are unchanged.
 
 ## Cluster parameter groups
 
@@ -579,12 +594,17 @@ restores, point-in-time copies and read replicas. It also survives persistent, h
 reloads. Legacy records without the member retain the existing `gp2` fallback.
 
 Storage type changes apply immediately to control-plane metadata; the backing container volume's
-performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+performance is unchanged. `MultiAZ` changes remain unimplemented. `Iops` and `StorageThroughput` are stored from Create and
+Modify and described for the storage types that carry them (`Iops` on io1, io2 and gp3, throughput on gp3);
+every other type reports `StorageThroughput` as `0`; a gp3 instance that named neither reports the
+[gp3 baseline](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage).
+`Iops` on a type without provisioned IOPS (`Iops=0` is allowed) and `StorageThroughput` on any type but gp3 are
+refused with `InvalidParameterCombination`; a create that names `Iops` and no type defaults to io1.
 Omitted create requests retain Floci's existing `gp2` default, which differs from the current
 [AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
 Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
 than applying the [AWS restore default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html).
-Floci does not enforce every engine-specific storage allocation, IOPS restriction or regional
+Floci does not enforce every engine-specific storage allocation, IOPS range or ratio, or regional
 storage-type availability. Magnetic `standard` storage is refused.
 
 ### Storage autoscaling threshold changes
@@ -678,10 +698,22 @@ one only Aurora has, is skipped with a warning in the database log. A formula va
 `require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
 to the server without TLS). When the server refuses a value and stops, the instance, or every
 member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
-the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes one value
-from its groups, layered and applied the same way: `rds.logical_replication` of `1` starts the
-server with `wal_level=logical`, as on RDS. Its other parameter group values, and those of SQL
-Server, are not applied yet.
+the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes two values
+from its groups. `rds.logical_replication` of `1`, layered and applied the same way, starts the
+server with `wal_level=logical`, as on RDS. `rds.force_ssl` is described below. Its other parameter
+group values, and those of SQL Server, are not applied yet.
+
+With `rds.force_ssl` set to `1` in a PostgreSQL instance's DB parameter group, or in an Aurora
+PostgreSQL cluster's DB cluster parameter group, the auth proxy refuses a connection that does not
+negotiate TLS, as AWS does, with `FATAL: no pg_hba.conf entry for host "...", user "...",
+database "...", no encryption` (SQLSTATE `28000`). The value is read for each new connection, so
+a change to the group applies without a reboot, as the parameter is dynamic on AWS. Floci keeps no
+pending-reboot state, so a change made with `ApplyMethod=pending-reboot`, or a newly associated
+group, also applies from the next connection, where AWS waits for a reboot. An Aurora cluster and
+its members read the value from the DB cluster parameter group only. Floci's
+default parameter groups hold no values, so a database without the override accepts plaintext
+connections even where AWS's default groups set `rds.force_ssl` to `1`: RDS for PostgreSQL 15 and
+later, and Aurora PostgreSQL 17 and later (Aurora PostgreSQL 16 and earlier default to `0`).
 
 ## Option Groups
 
@@ -1163,6 +1195,14 @@ so the password challenge is not emitted as separate header and payload writes.
 This supports PgBouncer logins over plaintext and TLS while keeping the same
 password, IAM and database-role checks.
 
+For PostgreSQL, the proxy logs in to the backend with whatever the backend asks for:
+trust, a cleartext or MD5 password, or SCRAM-SHA-256. With SCRAM, it checks the
+backend's server signature before it accepts the login, prepares the password
+with SASLprep as PostgreSQL does, and refuses a backend that switches to a
+cleartext or MD5 request, or starts a second exchange, once the first has begun.
+A backend login the proxy refuses reaches the client as
+`FATAL 08006 Backend database authentication failed`.
+
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
 Aurora members use their cluster's IAM database authentication setting and master
@@ -1228,7 +1268,9 @@ privileges it needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
-The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. The role's own `ALTER ROLE ... SET` defaults load as they do at login: the role-wide ones, then those for the database. They are the values `RESET` returns to, and they apply with the authority of whoever stored them, so a superuser-only default set by an administrator binds the role even after `RESET ALL`. To get this, a role with defaults has its backend session opened a second time, with the defaults as startup options. A default PostgreSQL refuses is skipped with a `WARNING`, as at login. A `role` default is checked against the role's memberships, and a `client_encoding` default applies unless the client chose an encoding; both are set once the session is the role's, so `RESET` does not return to them. Defaults stored on the master role itself are not undone for these sessions. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, three things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, a parameter that can only be set at connection start is refused with `cannot be set after connection start`, and `replication` connections are refused. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
+The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. The role's own `ALTER ROLE ... SET` defaults load as they do at login: the role-wide ones, then those for the database. They are the values `RESET` returns to, and they apply with the authority of whoever stored them, so a superuser-only default set by an administrator binds the role even after `RESET ALL`. To get this, a role with defaults has its backend session opened a second time, with the defaults as startup options. A default PostgreSQL refuses is skipped with a `WARNING`, as at login. A `role` default is checked against the role's memberships, and a `client_encoding` default applies unless the client chose an encoding; both are set once the session is the role's, so `RESET` does not return to them. Defaults stored on the master role itself are not undone for these sessions. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, two things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, and a parameter that can only be set at connection start is refused with `cannot be set after connection start`. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
+
+A logical replication connection (`replication=database`) can log in with an IAM token when the token's role may replicate: it is a member of `rds_replication`, directly or through another role, or has the `REPLICATION` attribute. Any other role is refused with `FATAL: permission denied to start WAL sender`. A physical replication connection (`replication=true`) is refused by the instance, as it is for a password login. On a logical replication connection, physical replication commands are refused, as on RDS, where `rds_replication` covers logical replication only: `BASE_BACKUP`, `START_REPLICATION` other than `START_REPLICATION SLOT ... LOGICAL`, `CREATE_REPLICATION_SLOT` other than a `LOGICAL` slot, `READ_REPLICATION_SLOT`, `TIMELINE_HISTORY` and `UPLOAD_MANIFEST` fail with `ERROR: permission denied to use physical replication` (SQLSTATE `42501`) and the session stays open. PostgreSQL raises that error from PL/pgSQL, so it carries a `CONTEXT` line. Two things differ from RDS. RDS accepts these logins only once `rds.iam_auth_for_replication` and `rds.logical_replication` are both set to 1 in the parameter group; Floci accepts them whenever IAM database authentication is enabled. And `rds_replication` is an ordinary role here, so it lets a role start a replication connection but not call the SQL slot functions such as `pg_create_logical_replication_slot()`, which PostgreSQL allows only to a role with the `REPLICATION` attribute; create slots with `CREATE_REPLICATION_SLOT` over the replication connection, or give the role `REPLICATION`.
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
@@ -1293,7 +1335,8 @@ a non-CA server certificate followed by Floci's shared root CA, so strict TLS
 clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
 The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
 or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
-`rds.endpointHost` resolves to.
+`rds.endpointHost` resolves to. A PostgreSQL database whose parameter group sets `rds.force_ssl`
+to `1` refuses connections that do not negotiate TLS; see [Parameter groups](#parameter-groups).
 
 The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
 `{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in

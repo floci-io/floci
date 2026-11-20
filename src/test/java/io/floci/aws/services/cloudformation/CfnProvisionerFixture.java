@@ -13,6 +13,7 @@ import io.floci.aws.services.appsync.AppSyncService;
 import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.backup.BackupService;
 import io.floci.aws.services.batch.BatchService;
+import io.floci.aws.services.bedrock.BedrockService;
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService;
 import io.floci.aws.services.cloudformation.provisioners.AcmCfnProvisioner;
@@ -33,6 +34,7 @@ import io.floci.aws.services.cloudformation.provisioners.AutoScalingScalingPolic
 import io.floci.aws.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.BedrockAgentCoreCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.BedrockCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -300,6 +302,7 @@ final class CfnProvisionerFixture {
         private CloudMapService cloudMapService;
         private EventBridgeV2Service eventBridgeV2Service;
         private GuardDutyService guardDutyService;
+        private BedrockService bedrockService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -584,6 +587,9 @@ final class CfnProvisionerFixture {
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
+            }
+            if (bedrockService != null) {
+                discovered.add(new BedrockCfnProvisioner(bedrockService));
             }
             if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
                 discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
@@ -949,6 +955,11 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder bedrock(BedrockService v) {
+            this.bedrockService = v;
             return this;
         }
 

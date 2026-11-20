@@ -1,6 +1,7 @@
 package io.floci.aws.services.emrserverless;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
@@ -43,6 +44,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -288,6 +290,26 @@ class EmrServerlessJobRunServiceTest {
         AwsException conflict = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, request));
         assertEquals("ConflictException", conflict.getErrorCode());
         assertEquals(409, conflict.getHttpStatus());
+    }
+
+    @Test
+    void anAttemptStoredBeforeItsManagedStorageWasKeptTakesItFromItsRun() throws Exception {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest unmanaged = request("BATCH", null);
+        unmanaged.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("managedPersistenceMonitoringConfiguration", Map.of("enabled", false))));
+        String unmanagedRun = service.startJobRun(applicationId, unmanaged).getJobRunId();
+        String managedRun = service.startJobRun(applicationId, request("BATCH", null)).getJobRunId();
+
+        // As an earlier Floci stored them: each attempt's destinations without whether its logs were managed.
+        for (String jobRunId : List.of(unmanagedRun, managedRun)) {
+            ObjectNode stored = objectMapper.valueToTree(store.get(jobRunId).orElseThrow());
+            stored.get("driverLogs").forEach(logs -> ((ObjectNode) logs).remove("managedStorage"));
+            store.put(jobRunId, objectMapper.treeToValue(stored, JobRunRecord.class));
+        }
+
+        assertFalse(service.dashboard(applicationId, unmanagedRun, 1).logs().inManagedStorage());
+        assertTrue(service.dashboard(applicationId, managedRun, 1).logs().inManagedStorage());
     }
 
     @Test

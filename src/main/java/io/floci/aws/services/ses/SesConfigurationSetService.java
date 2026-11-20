@@ -55,13 +55,11 @@ public class SesConfigurationSetService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetService.class);
 
-    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_CONFIG_SET_NAME_LENGTH = 64;
     private static final Set<String> VDM_FEATURE_STATES = Set.of("ENABLED", "DISABLED");
 
-    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
     private static final String INVALID_SNS_DESTINATION = "InvalidSNSDestination";
+    private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
+    private static final String DEFAULT_EVENT_BUS_RESOURCE = EVENT_BUS_RESOURCE_PREFIX + "default";
     private static final Pattern SNS_TOPIC_NAME = Pattern.compile("[A-Za-z0-9_-]{1,256}(\\.fifo)?");
     // The pattern SES declares for the stored value, quoted in the violation it answers on v2.
     private static final Pattern STORED_SNS_TOPIC_ARN = Pattern.compile(
@@ -402,7 +400,7 @@ public class SesConfigurationSetService implements SesTaggable {
 
     /** For guards that must not trip the key derivation's name validation (the tenant gate). */
     static boolean isValidName(String name) {
-        return name != null && name.length() <= MAX_CONFIG_SET_NAME_LENGTH && CONFIG_SET_NAME.matcher(name).matches();
+        return name != null && SesNames.isValid(name);
     }
 
     // ──────────────────────── Domain-pure option setters ────────────────────────
@@ -617,15 +615,8 @@ public class SesConfigurationSetService implements SesTaggable {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
         }
-        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
-        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Event destination name cannot exceed 64 characters.", 400);
-        }
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid event destination name");
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Event destination name");
     }
 
     static void validateEventDestination(EventDestination dest, String accountId, String region) {
@@ -751,9 +742,11 @@ public class SesConfigurationSetService implements SesTaggable {
                 + "> should have the form <arn:aws:sns:region:[account-id]:[topic-name]>", 400); // partition-literal: AWS's fixed wording
     }
 
-    // SES publishes email events only to the default EventBridge bus, so the
-    // EventBusArn member must name event-bus/default of the events service in the
-    // configuration set's account and region. All supported AWS partitions are accepted.
+    // SES publishes email events only to the default EventBridge bus of the configuration set's
+    // account and region. Probed 2026-11-18: each way the ARN can miss that has its own message.
+    // The probe broke one thing per call, so the order of the checks is Floci's. "Wrongly formatted"
+    // was seen for an SNS topic ARN only; the other shapes it answers here are Floci's reading. A
+    // missing or blank value never reached SES (the AWS CLI refuses it), so that message is Floci's.
     private static void validateEventBridgeDestination(
             EventBridgeDestination eventBridge, String accountId, String region) {
         String busArn = eventBridge.getEventBusArn();
@@ -765,23 +758,28 @@ public class SesConfigurationSetService implements SesTaggable {
         try {
             arn = AwsArnUtils.parse(busArn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn is not a valid ARN: " + busArn + ".", 400);
+            throw new AwsException("InvalidParameterValue", "Invalid event bus ARN provided.", 400);
         }
         if (!arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
                 || arn.region().isBlank()
                 || !arn.accountId().matches("[0-9]{12}")
                 || !"events".equals(arn.service())
-                || !"event-bus/default".equals(arn.resource())) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must be a valid default event bus ARN: "
-                            + busArn + ".", 400);
+                || !arn.resource().startsWith(EVENT_BUS_RESOURCE_PREFIX)) {
+            throw invalidEventBridgeDestination("event-bus ARN is wrongly formatted");
         }
-        if (!arn.accountId().equals(accountId) || !arn.region().equals(region)) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must match the configuration set's account and Region: "
-                            + busArn + ".", 400);
+        if (!arn.accountId().equals(accountId)) {
+            throw invalidEventBridgeDestination("cross account is not supported.");
         }
+        if (!arn.region().equals(region)) {
+            throw invalidEventBridgeDestination("must be in region <" + region + ">.");
+        }
+        if (!DEFAULT_EVENT_BUS_RESOURCE.equals(arn.resource())) {
+            throw invalidEventBridgeDestination("must be default bus.");
+        }
+    }
+
+    private static AwsException invalidEventBridgeDestination(String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid Event Bridge destination, " + reason, 400);
     }
 
     private static int countDestinations(EventDestination dest) {
@@ -809,15 +807,8 @@ public class SesConfigurationSetService implements SesTaggable {
             throw new AwsException("InvalidParameterValue",
                     "The configuration set name must be specified.", 400);
         }
-        if (name.length() > MAX_CONFIG_SET_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Configuration set name cannot exceed " + MAX_CONFIG_SET_NAME_LENGTH + " characters.", 400);
-        }
-        if (!CONFIG_SET_NAME.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid configuration set name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Configuration set name");
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid configuration set name");
     }
 
     private static String configSetKey(String region, String name) {

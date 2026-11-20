@@ -44,6 +44,16 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
     }
 
     @Override
+    public boolean strictTagValidation() {
+        return true;
+    }
+
+    @Override
+    public boolean allowEmptyTagKeys() {
+        return true;
+    }
+
+    @Override
     public Map<String, String> listTags(String region, String arn) {
         return switch (kind(region, arn)) {
             case GATEWAY -> gatewayService.getTagsByArn(region, arn);
@@ -56,7 +66,9 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        switch (kind(region, arn)) {
+        ResourceKind resourceKind = kind(region, arn);
+        BedrockAgentCoreTagValidation.validateTagMap(tags);
+        switch (resourceKind) {
             case GATEWAY -> gatewayService.tagByArn(region, arn, tags);
             case MEMORY -> memoryService.tagByArn(region, arn, tags);
             case RUNTIME -> runtimeService.tagByArn(region, arn, tags);

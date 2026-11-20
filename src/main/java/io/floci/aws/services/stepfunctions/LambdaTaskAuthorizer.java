@@ -240,7 +240,7 @@ public class LambdaTaskAuthorizer {
         if (target.isEmpty()) {
             // STS refuses a role that does not exist as it refuses one the caller may not assume,
             // and no policy of the role took part, so the message names none.
-            LOG.infov("Role {0} named by a task's Credentials does not exist", roleArn);
+            LOG.infov("Role {0} named by a task''s Credentials does not exist", roleArn);
             return Optional.of(denied(callerRoleArn, ASSUME_ROLE, roleArn, null));
         }
         String targetRoleArn = target.get().getArn();

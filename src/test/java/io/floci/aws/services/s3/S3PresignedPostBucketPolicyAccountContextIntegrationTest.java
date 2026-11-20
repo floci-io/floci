@@ -1,8 +1,8 @@
 package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.IamEnforcementFilter;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -31,7 +30,7 @@ import static org.hamcrest.Matchers.equalTo;
  * scoping.
  */
 @QuarkusTest
-@TestProfile(S3PresignedPostBucketPolicyAccountContextIntegrationTest.GlobalNamespaceIamOnlyProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 class S3PresignedPostBucketPolicyAccountContextIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -39,16 +38,6 @@ class S3PresignedPostBucketPolicyAccountContextIntegrationTest {
     private static final String NON_DEFAULT_ACCOUNT = "222233334444";
     private static final DateTimeFormatter AMZ_DATE_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
-
-    public static final class GlobalNamespaceIamOnlyProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.enforce-auth", "false",
-                    "floci.services.s3.global-bucket-namespace", "true");
-        }
-    }
 
     @Test
     void presignedPostSucceedsForNonDefaultAccountBucketAndSignerWhenOnlyBucketPolicyAllows() {

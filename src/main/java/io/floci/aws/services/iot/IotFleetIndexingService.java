@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -35,6 +34,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static io.floci.aws.services.iot.IotRequestBody.requireObject;
+import static io.floci.aws.services.iot.IotRequestBody.serializationError;
+import static io.floci.aws.services.iot.IotRequestBody.text;
 
 /**
  * AWS IoT fleet indexing: UpdateIndexingConfiguration, GetIndexingConfiguration, DescribeIndex and
@@ -117,9 +120,7 @@ public class IotFleetIndexingService {
     }
 
     public void updateIndexingConfiguration(JsonNode request, String region) {
-        if (!request.isObject()) {
-            throw serializationError("request body", JsonNodeType.OBJECT);
-        }
+        requireObject(request);
         String groupPrefix = "thingGroupIndexingConfiguration";
         JsonNode thingNode = object(request.path("thingIndexingConfiguration"), "thingIndexingConfiguration");
         JsonNode groupNode = object(request.path(groupPrefix), groupPrefix);
@@ -172,9 +173,7 @@ public class IotFleetIndexingService {
      * whatever was deleted before it. It also carries a checksum, so an edited token is invalid.
      */
     public IotService.Page<ObjectNode> searchIndex(JsonNode request, String accountId, String region) {
-        if (!request.isObject()) {
-            throw serializationError("request body", JsonNodeType.OBJECT);
-        }
+        requireObject(request);
         String queryString = text(request.path("queryString"), "queryString");
         JsonNode maxResults = request.path("maxResults");
         if (present(maxResults) && !maxResults.isNumber()) {
@@ -525,25 +524,8 @@ public class IotFleetIndexingService {
         return values;
     }
 
-    /** A string member, null when it is absent or null. */
-    private static String text(JsonNode node, String path) {
-        if (!present(node)) {
-            return null;
-        }
-        if (!node.isTextual()) {
-            throw serializationError(path, JsonNodeType.STRING);
-        }
-        return node.asText();
-    }
-
     private static boolean present(JsonNode node) {
         return !node.isMissingNode() && !node.isNull();
-    }
-
-    /** A member of the wrong JSON type fails before any validation, as AWS fails to deserialize it. */
-    private static AwsException serializationError(String path, JsonNodeType expected) {
-        return new AwsException("SerializationException",
-                path + " must be a JSON " + expected.name().toLowerCase(Locale.ROOT), 400);
     }
 
     private static AwsException invalid(String message) {

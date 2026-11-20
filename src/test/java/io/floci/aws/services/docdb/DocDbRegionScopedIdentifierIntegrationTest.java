@@ -1,6 +1,6 @@
 package io.floci.aws.services.docdb;
 
-import io.floci.aws.testing.DocDbMockProfile;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -20,9 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Checked against a live account: the same name creates in two regions, each with its own ARN,
  * and tagging one leaves the other untouched. Floci refused the second create, because its records
  * were keyed by identifier alone — so the name a caller used in one region was spent everywhere.
+ *
+ * <p>{@link IamEnforcementProfile} mocks the DocumentDB container layer and leaves RDS unmocked,
+ * so the shared RDS paths run as they are.
  */
 @QuarkusTest
-@TestProfile(DocDbMockProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class DocDbRegionScopedIdentifierIntegrationTest {
 
     @Inject

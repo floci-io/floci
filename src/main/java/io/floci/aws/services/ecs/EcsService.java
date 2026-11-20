@@ -66,6 +66,7 @@ import io.floci.aws.services.ecs.model.RegisterContainerInstanceRequest;
 import io.floci.aws.services.ecs.model.RegisterTaskDefinitionRequest;
 import io.floci.aws.services.ecs.model.RunTaskRequest;
 import io.floci.aws.services.ecs.model.RuntimePlatform;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import io.floci.aws.services.ecs.model.ServiceEvent;
 import io.floci.aws.services.ecs.model.ServiceRevision;
@@ -2905,7 +2906,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * @param defaultPageSize the page size when the request names none, which is not the same for
-     *                        every listing: ListServices answers with ten, the rest with a hundred.
+     *                        every listing: ListServices and ListServicesByNamespace answer with ten,
+     *                        the rest with a hundred.
      */
     private static ListPage paginate(List<String> arns, Integer maxResults, String nextToken,
                                       int defaultPageSize) {
@@ -2926,11 +2928,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (nextToken == null || nextToken.isBlank()) {
             return 0;
         }
+        int offset;
         try {
-            return Integer.parseInt(Base64Url.decode(nextToken));
+            offset = Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }
+        if (offset < 0) {
+            throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
+        }
+        return offset;
     }
 
     // ── Task Protection ───────────────────────────────────────────────────────
@@ -3127,6 +3134,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
                     ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
             svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+            svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc.getServiceConnectConfiguration(), cluster,
+                    region));
             svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
             svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
             svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
@@ -3147,8 +3156,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 svc.setTags(new LinkedHashMap<>(request.getTags()));
             }
 
+            // Last before the service is stored: a discovery name the namespace cannot take refuses
+            // the request with nothing created.
+            svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(),
+                    svc.getServiceConnectConfiguration(), svc.getServiceConnectNamespaceArn(), List.of(), region,
+                    "ClientException"));
             if ("CODE_DEPLOY".equals(controller)) {
-                createInitialTaskSet(svc, cluster, region);
+                try {
+                    createInitialTaskSet(svc, cluster, region);
+                } catch (RuntimeException e) {
+                    // The service isn't stored, so neither are the endpoints just made for it.
+                    if (discoveryRegistrar != null) {
+                        discoveryRegistrar.deleteServiceConnectServices(svc.getServiceConnectResources());
+                    }
+                    throw e;
+                }
             }
             services.put(key, svc);
             cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
@@ -3251,14 +3273,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 // launch fails without changing the service.
                 TaskDefinition resolved = request.getTaskDefinition() == null ? null
                         : resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
+                if (request.getDesiredCount() != null && request.getDesiredCount() < 0) {
+                    throw new AwsException("InvalidParameterException",
+                            "desiredCount cannot be a negative number.", 400);
+                }
+                // A Service Connect configuration's endpoints are taken last of the checks and before
+                // anything is applied, as nothing after them can refuse the request: one whose discovery
+                // names its namespace cannot take refuses it with the service unchanged.
+                Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
+                String namespaceArn = serviceConnectConfiguration == null ? null
+                        : serviceConnectNamespaceArn(serviceConnectConfiguration, cluster, region);
+                List<ServiceConnectServiceResource> serviceConnectResources = serviceConnectConfiguration == null
+                        ? null
+                        : syncServiceConnectResources(svc.getServiceArn(), serviceConnectConfiguration, namespaceArn,
+                                serviceConnectResourcesOf(svc), region, "InvalidParameterException");
                 // Settle the outgoing deployment against the service as it stands, before this request
                 // changes its desired count or task definition: one whose tasks are up has finished,
                 // whether or not anything read it. recordServiceDeployment stops it if it has not.
                 currentServiceDeployment(svc);
                 if (request.getDesiredCount() != null) {
-                    if (request.getDesiredCount() < 0) {
-                        throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
-                    }
                     svc.setDesiredCount(request.getDesiredCount());
                 }
                 // The members whose change starts new tasks, as UpdateService documents them: the network
@@ -3314,11 +3347,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
                 // triggers a new service deployment", so a real change rolls the deployment the way a
                 // task-definition change does. An omitted parameter is not a change and rolls nothing.
-                Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
                 boolean serviceConnectChanged = serviceConnectConfiguration != null
                         && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
                 if (serviceConnectConfiguration != null) {
                     svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+                    svc.setServiceConnectNamespaceArn(namespaceArn);
+                    svc.setServiceConnectResources(serviceConnectResources);
                 }
                 boolean taskDefChanged = false;
                 String platformVersionBefore = resolvePlatformVersion(svc.getPlatformVersion());
@@ -3519,6 +3553,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             svc.setStatus("INACTIVE");
             svc.setDesiredCount(0);
+            // Under the service's monitor, which a rollback holds while it brings the endpoints back.
+            synchronized (svc) {
+                if (discoveryRegistrar != null) {
+                    discoveryRegistrar.deleteServiceConnectServices(serviceConnectResourcesOf(svc));
+                }
+                svc.setServiceConnectResources(new ArrayList<>());
+            }
             cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
             services.put(key, svc);
             persistCluster(region, cluster);
@@ -3615,12 +3656,81 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
     }
 
-    public List<String> listServicesByNamespace(String namespace, String region) {
-        return services.values().stream()
-                .filter(s -> namespace.equals(s.getNamespace()))
-                .filter(s -> !"INACTIVE".equals(s.getStatus()))
+    /**
+     * Lists the Region's services whose Service Connect configuration joined the namespace a name or ARN gives, its
+     * own or, when it names none, its cluster's default. Pages ten at a time when the request names no
+     * {@code maxResults}, as ListServices does.
+     */
+    public ListPage listServicesByNamespace(String namespace, Integer maxResults, String nextToken, String region) {
+        if (namespace == null || namespace.isBlank()) {
+            throw new AwsException("InvalidParameterException", "namespace can not be blank.", 400);
+        }
+        if (AwsArnUtils.looksLikeArn(namespace) && !isNamespaceArn(namespace)) {
+            throw new AwsException("InvalidParameterException", "Namespace is not a valid namespace ARN.", 400);
+        }
+        String namespaceArn = discoveryRegistrar == null ? null : discoveryRegistrar.namespaceArn(namespace, region);
+        if (namespaceArn == null) {
+            throw new AwsException("NamespaceNotFoundException", "Failed to retrieve namespace for " + namespace, 400);
+        }
+        List<String> arns = services.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(region + "::"))
+                .map(Map.Entry::getValue)
+                .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> namespaceArn.equals(svc.getServiceConnectNamespaceArn()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
+        return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
+    }
+
+    private static boolean isNamespaceArn(String value) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+            return "servicediscovery".equals(arn.service()) && arn.resource().startsWith("namespace/");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The ARN of the namespace an enabled Service Connect configuration joins, its own or its cluster's default; null
+     * when it joins none.
+     */
+    private String serviceConnectNamespaceArn(Map<String, Object> config, EcsCluster cluster, String region) {
+        if (discoveryRegistrar == null || config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
+            return null;
+        }
+        Object namespace = config.get("namespace");
+        if (namespace == null || namespace.toString().isBlank()) {
+            Map<String, Object> defaults = cluster == null ? null : cluster.getServiceConnectDefaults();
+            namespace = defaults == null ? null : defaults.get("namespace");
+        }
+        return namespace == null || namespace.toString().isBlank()
+                ? null : discoveryRegistrar.namespaceArn(namespace.toString(), region);
+    }
+
+    /**
+     * Creates and deletes the Cloud Map services behind the Service Connect endpoints of the service
+     * {@code serviceArn}, which {@code current} holds, to match {@code configuration} in the namespace it joined,
+     * and returns them. A configuration ECS refuses is refused with {@code errorCode}: CreateService answers
+     * {@code ClientException} and UpdateService {@code InvalidParameterException} (measured on AWS).
+     */
+    private List<ServiceConnectServiceResource> syncServiceConnectResources(String serviceArn,
+                                                                            Map<String, Object> configuration,
+                                                                            String namespaceArn,
+                                                                            List<ServiceConnectServiceResource> current,
+                                                                            String region, String errorCode) {
+        EcsServiceDiscoveryRegistrar.validateDiscoveryNames(configuration, errorCode);
+        if (discoveryRegistrar == null) {
+            return new ArrayList<>();
+        }
+        return discoveryRegistrar.syncServiceConnectServices(current,
+                EcsServiceDiscoveryRegistrar.discoveryNames(configuration, serviceArn), namespaceArn, region,
+                serviceArn, errorCode);
+    }
+
+    /** A service stored before the field existed reads back with none. */
+    private static List<ServiceConnectServiceResource> serviceConnectResourcesOf(EcsServiceModel svc) {
+        return svc.getServiceConnectResources() != null ? svc.getServiceConnectResources() : List.of();
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
@@ -4916,6 +5026,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         d.setPlatformFamily(svc.getPlatformFamily());
         d.setNetworkConfiguration(svc.getNetworkConfiguration());
         d.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
+        d.setServiceConnectResources(serviceConnectResourcesOf(svc));
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
         // persisted services predate the field and fall back to the service creation time.
@@ -5332,6 +5443,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setServiceRegistries(revision.getServiceRegistries());
         svc.setNetworkConfiguration(revision.getNetworkConfiguration());
         svc.setServiceConnectConfiguration(revision.getServiceConnectConfiguration());
+        String region = serviceRegion(svc);
+        svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc.getServiceConnectConfiguration(),
+                resolveClusterByArn(svc.getClusterArn()), region));
+        if (!STATUS_INACTIVE.equals(svc.getStatus())) {
+            try {
+                svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(),
+                        svc.getServiceConnectConfiguration(), svc.getServiceConnectNamespaceArn(),
+                        serviceConnectResourcesOf(svc), region, "InvalidParameterException"));
+            } catch (AwsException e) {
+                // A rollback cannot be refused: when a discovery name was taken meanwhile, the service
+                // goes back without endpoints rather than keep the failed deployment's.
+                LOG.warnv("Service {0} rolled back without its Service Connect endpoints: {1}",
+                        svc.getServiceArn(), e.getMessage());
+                svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(), null, null,
+                        serviceConnectResourcesOf(svc), region, "InvalidParameterException"));
+            }
+        }
         svc.setDeploymentId("ecs-svc/" + taskSetId);
         svc.setLastDeploymentAt(revision.getCreatedAt());
         svc.setLastCompletedDeploymentId(null);
@@ -6576,7 +6704,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
      */
     private String regionOf(TaskDefinition td) {
-        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(td.getTaskDefinitionArn());
     }
 
     /**

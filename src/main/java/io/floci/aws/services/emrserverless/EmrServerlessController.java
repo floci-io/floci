@@ -2,7 +2,6 @@ package io.floci.aws.services.emrserverless;
 
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.ApplicationSummary;
@@ -59,18 +58,15 @@ public class EmrServerlessController {
     private final EmrServerlessService service;
     private final EmrServerlessJobRunService jobRuns;
     private final EmrServerlessSessionService sessions;
-    private final EmrServerlessDashboards dashboards;
-    private final RegionResolver regionResolver;
+    private final EmrServerlessAppUis appUis;
 
     @Inject
     public EmrServerlessController(EmrServerlessService service, EmrServerlessJobRunService jobRuns,
-                                   EmrServerlessSessionService sessions, EmrServerlessDashboards dashboards,
-                                   RegionResolver regionResolver) {
+                                   EmrServerlessSessionService sessions, EmrServerlessAppUis appUis) {
         this.service = service;
         this.jobRuns = jobRuns;
         this.sessions = sessions;
-        this.dashboards = dashboards;
-        this.regionResolver = regionResolver;
+        this.appUis = appUis;
     }
 
     @POST
@@ -189,7 +185,7 @@ public class EmrServerlessController {
 
     /**
      * The link to a run's application UI, for the attempt asked for or else the latest, the run and attempt checked as
-     * GetJobRun checks them ({@link EmrServerlessDashboards}). {@code accessSystemProfileLogs} is for jobs on Lake
+     * GetJobRun checks them ({@link EmrServerlessAppUis}). {@code accessSystemProfileLogs} is for jobs on Lake
      * Formation, which Floci runs none of, so it changes nothing.
      */
     @GET
@@ -199,8 +195,7 @@ public class EmrServerlessController {
                                                                @QueryParam("attempt") String attempt) {
         JobRun run = jobRuns.getJobRun(applicationId, jobRunId, EmrServerlessJobRunService.parseAttempt(attempt));
         GetDashboardForJobRunResponse response = new GetDashboardForJobRunResponse();
-        response.setUrl(dashboards.url(regionResolver.getAccountId(), regionResolver.getRegion(), applicationId,
-                jobRunId, run.getAttempt() != null ? run.getAttempt() : 1));
+        response.setUrl(appUis.jobRunUrl(applicationId, jobRunId, run.getAttempt() != null ? run.getAttempt() : 1));
         return response;
     }
 
@@ -294,7 +289,7 @@ public class EmrServerlessController {
     }
 
     /**
-     * The link to a session's application UI ({@link EmrServerlessDashboards}). {@code accessSystemProfileLogs} is for
+     * The link to a session's application UI ({@link EmrServerlessAppUis}). {@code accessSystemProfileLogs} is for
      * sessions on Lake Formation, which Floci runs none of, so it changes nothing.
      */
     @GET
@@ -304,8 +299,7 @@ public class EmrServerlessController {
                                                              @QueryParam("resourceType") String resourceType) {
         Session session = sessions.dashboardResource(applicationId, resourceId, resourceType);
         GetResourceDashboardResponse response = new GetResourceDashboardResponse();
-        response.setUrl(dashboards.sessionUrl(regionResolver.getAccountId(), regionResolver.getRegion(),
-                applicationId, session.getSessionId()));
+        response.setUrl(appUis.sessionUrl(applicationId, session));
         return response;
     }
 }

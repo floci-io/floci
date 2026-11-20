@@ -1,7 +1,7 @@
 package io.floci.aws.services.bedrockruntime;
 
 import io.floci.aws.services.bedrockruntime.backend.ProxyBackend;
-import io.floci.aws.testing.BedrockProxyBackendProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.floci.aws.testutil.LogCapture;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -21,7 +21,7 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.SimpleFormatter;
 
-import static io.floci.aws.testing.BedrockProxyBackendProfile.PORT;
+import static io.floci.aws.testing.SidecarContainersProfile.BEDROCK_PROXY_PORT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -34,12 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Verifies that an upstream error reaches the caller as ModelErrorException with a bounded
  * description, while the operational log keeps the status and leaves out the upstream body.
  *
- * <p>The backend URL and passthrough come from {@link BedrockProxyBackendProfile}, which this class
+ * <p>The backend URL and passthrough come from {@link SidecarContainersProfile}, which this class
  * shares with the other proxy classes that talk to a stand-in. The {@code fixture} model id is not
  * in that profile's mapping, so it reaches the stand-in through passthrough.
  */
 @QuarkusTest
-@TestProfile(BedrockProxyBackendProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class BedrockProxyLoggingIntegrationTest {
 
     @TestHTTPResource
@@ -52,7 +52,7 @@ class BedrockProxyLoggingIntegrationTest {
         String body = "{\"error\":\"" + marker + "\"}";
         String completeError = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                 + "Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n\r\n" + body;
-        try (StallingUpstream upstream = new StallingUpstream(PORT, completeError)) {
+        try (StallingUpstream upstream = new StallingUpstream(BEDROCK_PROXY_PORT, completeError)) {
             List<LogRecord> records = LogCapture.capture(ProxyBackend.class, () ->
                     given()
                             .contentType("application/json")
@@ -78,7 +78,7 @@ class BedrockProxyLoggingIntegrationTest {
     void errorBodyReadStopsAtTheCapWithoutWaitingForEof(String operation) throws Exception {
         String cappedError = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 32768\r\n\r\n"
                 + "x".repeat(8192);
-        try (StallingUpstream upstream = new StallingUpstream(PORT, cappedError);
+        try (StallingUpstream upstream = new StallingUpstream(BEDROCK_PROXY_PORT, cappedError);
              HttpClient client = HttpClient.newHttpClient()) {
             HttpResponse<String> response = client.send(ConverseRequests.to(base, operation),
                     HttpResponse.BodyHandlers.ofString());
@@ -98,7 +98,7 @@ class BedrockProxyLoggingIntegrationTest {
         String marker = "synthetic-private-upstream-content";
         String errorPrefix = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 32768\r\n\r\n"
                 + (marker + "\n").repeat(lines);
-        try (StallingUpstream upstream = new StallingUpstream(PORT, errorPrefix);
+        try (StallingUpstream upstream = new StallingUpstream(BEDROCK_PROXY_PORT, errorPrefix);
              HttpClient client = HttpClient.newHttpClient()) {
             HttpRequest request = ConverseRequests.to(base, operation);
             List<LogRecord> records = LogCapture.capture(ProxyBackend.class, () -> {

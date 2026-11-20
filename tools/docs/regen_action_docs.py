@@ -49,6 +49,20 @@ PLACEHOLDER = "-"
 SWITCH_CASE_RE = re.compile(r"^\s*case\s+([^{};]+?)\s*->", re.MULTILINE)
 SWITCH_LABEL_RE = re.compile(r'"([A-Z][a-z][A-Za-z0-9]*)"')
 
+# `Map.entry("ActionName", ...)` keys, for a handler that answers a fixed set of actions
+# from a lookup table instead of a switch arm each (Lightsail's empty-list answers). The
+# key has the same PascalCase head as a switch label.
+MAP_ENTRY_KEY_RE = re.compile(r'\bMap\.entry\(\s*"([A-Z][a-z][A-Za-z0-9]*)"')
+
+# A class implementing core.common.TagHandler: SharedTagsController and V1TagsController
+# serve tagging on /tags/{arn} and /v1/tags/{arn} for every service with one, so that
+# class is what gives a service the three tagging actions. A service naming one of them
+# differently (Backup's ListTags) renames it. A @TaggingApiOnly handler is left out of
+# those controllers (its service tags through routes of its own), so it gives none.
+TAG_HANDLER_RE = re.compile(r"\bclass\s+\w+[^{]*\bimplements\b[^{]*\bTagHandler\b")
+TAGGING_API_ONLY_RE = re.compile(r"^\s*@TaggingApiOnly\b", re.MULTILINE)
+TAG_HANDLER_ACTIONS = ("TagResource", "UntagResource", "ListTagsForResource")
+
 # REST controllers: a JAX-RS verb annotation followed by the public method it decorates,
 # inside a class that carries a class-level @Path. The action is ucfirst(methodName),
 # corrected per-service via rename_actions / exclude_actions (method names are not
@@ -60,12 +74,20 @@ PUBLIC_METHOD_RE = re.compile(r"^\s*public\s+\S+(?:<[^>]*>)?\s+([a-z][A-Za-z0-9]
 # Line/block-comment lines (Javadoc) that may sit between the verb annotation and the
 # method signature; skipped so they don't reset the `pending` flag mid-lookahead.
 COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*)")
+# A JAX-RS @Path value, and the class declaration that separates the class-level @Path
+# from the method-level ones; together they give each method its route.
+PATH_VALUE_RE = re.compile(r'^\s*(?:@\w+\s+)*@Path\(\s*"([^"]*)"')
+CLASS_DECLARATION_RE = re.compile(r"^\s*(?:public\s+)?(?:abstract\s+|final\s+)*class\s+\w+")
 
 
 @dataclass(frozen=True)
 class Source:
     path: Path
-    mode: str  # 'switch' | 'rest'
+    mode: str  # 'switch' | 'rest' | 'map_entries' | 'tag_handler'
+    # rest only: keep the methods whose route starts with route_prefix, or drop those whose
+    # route starts with skip_route_prefix (API Gateway serves v1 and /v2/ from one controller).
+    route_prefix: str | None = None
+    skip_route_prefix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,7 +95,9 @@ class ServiceEntry:
     service: str
     doc: Path
     sources: list[Source]
-    rename_actions: dict[str, str] = field(default_factory=dict)
+    # A list value is one method serving several actions, picked by a query parameter
+    # (Lambda's provisioned-concurrency GET answers Get... and List... by `List=ALL`).
+    rename_actions: dict[str, str | list[str]] = field(default_factory=dict)
     exclude_actions: frozenset[str] = field(default_factory=frozenset)
     handler: Path | None = None  # optional explicit handler path for excluded services
 
@@ -93,19 +117,51 @@ def extract_switch_actions(java_source: str) -> list[str]:
     return out
 
 
+def extract_map_entry_actions(java_source: str) -> list[str]:
+    """Action names keying `Map.entry("X", ...)` pairs, in source order."""
+    return MAP_ENTRY_KEY_RE.findall(java_source)
+
+
+def extract_tag_handler_actions(java_source: str) -> list[str]:
+    """The shared tagging actions, when the source declares a TagHandler implementation
+    the shared /tags controllers serve."""
+    if not TAG_HANDLER_RE.search(java_source) or TAGGING_API_ONLY_RE.search(java_source):
+        return []
+    return list(TAG_HANDLER_ACTIONS)
+
+
 CLASS_EXTENDS_RE = re.compile(r"public\s+(?:abstract\s+)?class\s+\w+\s+extends\s+([A-Za-z0-9_]+)")
 
 
-def _extract_raw_rest_methods(java_source: str) -> list[str]:
-    actions: list[str] = []
+def _join_route(class_path: str, method_path: str) -> str:
+    return "/" + "/".join(part.strip("/") for part in (class_path, method_path) if part.strip("/"))
+
+
+def _extract_raw_rest_routes(java_source: str) -> list[tuple[str, str]]:
+    """(action, route) of each JAX-RS method; the route joins the class and method @Path."""
+    routes: list[tuple[str, str]] = []
     pending = False
+    in_class = False
+    class_path = ""
+    method_path = ""
     for line in java_source.splitlines():
         if not line.strip():
+            continue
+        path_match = PATH_VALUE_RE.match(line)
+        if path_match:
+            if in_class:
+                method_path = path_match.group(1)
+            else:
+                class_path = path_match.group(1)
+        if not in_class and CLASS_DECLARATION_RE.match(line):
+            in_class = True
             continue
         if HTTP_ANNO_RE.match(line):
             pending = True
             continue
         if not pending:
+            if PUBLIC_METHOD_RE.match(line):
+                method_path = ""
             continue
         if ANNOTATION_LINE_RE.match(line):
             continue
@@ -114,37 +170,45 @@ def _extract_raw_rest_methods(java_source: str) -> list[str]:
         m = PUBLIC_METHOD_RE.match(line)
         if m:
             name = m.group(1)
-            actions.append(name[0].upper() + name[1:])
+            routes.append((name[0].upper() + name[1:], _join_route(class_path, method_path)))
         pending = False
-    return actions
+        method_path = ""
+    return routes
 
 
-def extract_rest_actions(java_source: str, source_path: Path | None = None) -> list[str]:
+def extract_rest_actions(java_source: str, source_path: Path | None = None,
+                         route_prefix: str | None = None, skip_route_prefix: str | None = None) -> list[str]:
     """ucfirst(method name) of @GET/@POST/@PUT/@DELETE/@PATCH methods, source order.
 
     Only applies to classes containing a class-level @Path. Returns [] otherwise.
     Inherited methods from a superclass in the same directory are included first.
+    route_prefix keeps only the methods whose route starts with it; skip_route_prefix
+    drops those whose route does.
     """
     if not CLASS_PATH_RE.search(java_source):
         return []
-    actions: list[str] = []
+    routes: list[tuple[str, str]] = []
     if source_path is not None:
         extends_match = CLASS_EXTENDS_RE.search(java_source)
         if extends_match:
             super_name = extends_match.group(1)
             super_path = source_path.parent / f"{super_name}.java"
             if super_path.exists():
-                actions.extend(_extract_raw_rest_methods(super_path.read_text(encoding="utf-8")))
-    actions.extend(_extract_raw_rest_methods(java_source))
-    return actions
+                routes.extend(_extract_raw_rest_routes(super_path.read_text(encoding="utf-8")))
+    routes.extend(_extract_raw_rest_routes(java_source))
+    return [
+        action for action, route in routes
+        if (route_prefix is None or route.startswith(route_prefix))
+        and (skip_route_prefix is None or not route.startswith(skip_route_prefix))
+    ]
 
 
 def extract_actions(entry: ServiceEntry) -> list[str]:
     """Merged, deduped, override-corrected action list for a service.
 
     Order: first appearance across the source list in registry order. rename_actions
-    is applied before dedup (so a renamed collision dedupes correctly); excluded
-    names are dropped after rename.
+    is applied before dedup (so a renamed collision dedupes correctly), a list value
+    standing for each action it names; excluded names are dropped after rename.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -153,16 +217,21 @@ def extract_actions(entry: ServiceEntry) -> list[str]:
         if source.mode == "switch":
             raw = extract_switch_actions(text)
         elif source.mode == "rest":
-            raw = extract_rest_actions(text, source.path)
+            raw = extract_rest_actions(text, source.path, source.route_prefix, source.skip_route_prefix)
+        elif source.mode == "map_entries":
+            raw = extract_map_entry_actions(text)
+        elif source.mode == "tag_handler":
+            raw = extract_tag_handler_actions(text)
         else:
             raise ValueError(f"unknown mode: {source.mode!r}")
-        for name in raw:
-            name = entry.rename_actions.get(name, name)
-            if name in entry.exclude_actions:
-                continue
-            if name not in seen:
-                seen.add(name)
-                out.append(name)
+        for raw_name in raw:
+            renamed = entry.rename_actions.get(raw_name, raw_name)
+            for name in renamed if isinstance(renamed, list) else [renamed]:
+                if name in entry.exclude_actions:
+                    continue
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
     return out
 
 

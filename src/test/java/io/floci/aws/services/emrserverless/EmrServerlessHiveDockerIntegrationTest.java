@@ -3,7 +3,7 @@ package io.floci.aws.services.emrserverless;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.S3TestClients;
@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * pulling; CI pulls it (2.7 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EmrServerlessHiveDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

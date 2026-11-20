@@ -106,7 +106,7 @@ class CognitoCustomEmailSenderTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 "http://localhost:4566", "cloudfront.net", regionResolver, lambda, mock(AcmService.class),
                 codes,
-                new CognitoMessageDispatcher(ses, sns, REGION), mock(TlsCertificateManager.class),
+                new CognitoMessageDispatcher(ses, sns, regionResolver), mock(TlsCertificateManager.class),
                 Clock.systemUTC(), true, new CustomSenderCodeEncryptor(kms));
     }
 

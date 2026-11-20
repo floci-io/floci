@@ -24,7 +24,7 @@ public class DataSyncTask implements DataSyncTaggable {
     private JsonNode manifestConfig;
     private JsonNode taskReportConfig;
     private Instant creationTime;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public String getTaskArn() {
         return taskArn;

@@ -1,7 +1,7 @@
 # S3 Vectors
 
 **Protocol:** REST JSON
-**Endpoint:** `POST /{OperationName}` (e.g. `POST /CreateVectorBucket`)
+**Endpoint:** `POST /{OperationName}` (e.g. `POST /CreateVectorBucket`); tagging uses `GET`, `POST`, and `DELETE /tags/{resourceArn}`
 
 Floci emulates the S3 Vectors API: vector buckets, vector indexes, and vector
 storage with similarity queries. All operations use the AWS REST JSON wire
@@ -14,6 +14,7 @@ shape, so the AWS SDK and CLI `s3vectors` clients work without modification.
 | **Vector buckets** | CreateVectorBucket, GetVectorBucket, ListVectorBuckets, DeleteVectorBucket, PutVectorBucketPolicy, GetVectorBucketPolicy, DeleteVectorBucketPolicy |
 | **Indexes** | CreateIndex, GetIndex, ListIndexes, DeleteIndex |
 | **Vectors** | PutVectors, GetVectors, ListVectors, DeleteVectors, QueryVectors |
+| **Tags** | TagResource, UntagResource, ListTagsForResource |
 
 ## Example
 
@@ -65,6 +66,13 @@ bucket default, or `AES256` when the bucket has no setting. Missing creation tim
 are set to the migration time and saved through the configured storage backend;
 the original creation time is unavailable. Later reads and restarts retain that value.
 
+Bucket and index names follow the same rules, as S3 Vectors applies them: 3 to 63
+characters, labels of lowercase letters, numbers and hyphens that begin and end with a
+letter or number, joined by single dots, not an IPv4 address, and without the prefix
+`sthree-` or the suffixes `-s3alias` and `--x-s3`. `CreateVectorBucket` and
+`CreateIndex` refuse any other name with a `ValidationException`, CloudFormation with a
+`ValidationError`.
+
 Index dimensions must be between 1 and 4096. Metadata configuration accepts up to
 10 unique non-filterable keys, each a non-blank string of 1 to 63 characters.
 Queries reject filters on these keys, including filters nested in logical expressions.
@@ -84,7 +92,14 @@ Vectors requires: one of another partition or Region is refused with a `Validati
 component"), and one of another account with an `AccessDeniedException`.
 
 Encryption settings are stored and returned; Floci does not perform KMS encryption.
-Standalone S3 Vectors tagging APIs are not implemented.
+`TagResource`, `UntagResource`, and `ListTagsForResource` work with vector bucket
+and index ARNs. Tagging merges keys and replaces the values of existing keys;
+untagging removes only the requested keys. Each resource can have up to 50 tags,
+including tags supplied during creation. Invalid tags or updates that exceed that limit
+leave its tags unchanged. A legacy resource above the limit can still be listed and
+untagged until it is within the limit. Tag operations apply the ARN scope checks above
+and reject malformed JSON, including trailing content, before changing tags.
+Tag changes use the configured storage backend and survive restarts in persistent storage modes.
 
 ## CloudFormation
 

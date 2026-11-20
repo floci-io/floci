@@ -1714,7 +1714,7 @@ public class CloudFormationService implements ResourceProvider {
                     current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
-                    + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
+                    + "replacement beyond the engine''s own decision: {2}", logicalId, resourceType, e.getMessage());
             return false;
         }
     }
@@ -1847,7 +1847,7 @@ public class CloudFormationService implements ResourceProvider {
                                          List<StackEvent> events,
                                          Map<String, ChangeSet> changeSets,
                                          Map<ChangeSet, ChangeSetState> changeSetStates,
-                                         String stackPolicyBody) {}
+                                         String stackPolicyBody, String originalTemplateBody) {}
 
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
@@ -1897,6 +1897,11 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (isCreate && cs.getStackPolicyBody() != null) {
                 existing.setStackPolicyBody(cs.getStackPolicyBody());
+            }
+            if (isCreate) {
+                // The stack has its template once CreateStack answers, as GetTemplate and GetTemplateSummary read
+                // it on AWS, not only once its creation starts, which waits for a free operation thread.
+                existing.setOriginalTemplateBody(cs.getTemplateBody());
             }
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
@@ -2260,7 +2265,8 @@ public class CloudFormationService implements ResourceProvider {
             states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
         }
         return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
-                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody());
+                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody(),
+                stack.getOriginalTemplateBody());
     }
 
     private void restore(Stack stack, StackMutationSnapshot snapshot) {
@@ -2270,6 +2276,7 @@ public class CloudFormationService implements ResourceProvider {
         stack.setStatus(snapshot.status());
         stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
         stack.setStackPolicyBody(snapshot.stackPolicyBody());
+        stack.setOriginalTemplateBody(snapshot.originalTemplateBody());
         stack.setEvents(new ArrayList<>(snapshot.events()));
         stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
         snapshot.changeSetStates().forEach((changeSet, state) -> {
@@ -2942,7 +2949,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn(), previousEngine);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

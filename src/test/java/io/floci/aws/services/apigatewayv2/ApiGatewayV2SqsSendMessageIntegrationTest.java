@@ -475,6 +475,20 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
+    void invokeResolvesRequestPathWithoutTheStage() {
+        String attributes = "{\"Path\":{\"DataType\":\"String\",\"StringValue\":\"${request.path}\"}}";
+        withSendMessageRoute("sqs-invoke-request-path",
+                queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$request.path",
+                        "MessageAttributes", attributes),
+                (sqs, queueUrl, api) -> {
+                    given().post("/execute-api/" + api + "/test/send").then().statusCode(200);
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(message.body(), equalTo("/send"));
+                    assertThat(message.messageAttributes().get("Path").stringValue(), equalTo("/send"));
+                });
+    }
+
+    @Test
     void invokeResolvesAccountDomainRequestIdAndRequestTimeContextVariables() {
         String attributes = "{\"Account\":{\"DataType\":\"String\",\"StringValue\":\"${context.accountId}\"},"
                 + "\"Domain\":{\"DataType\":\"String\",\"StringValue\":\"${context.domainName}\"},"

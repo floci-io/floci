@@ -190,6 +190,22 @@ public final class CfnRollback {
      */
     public static final String KMS_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociKmsKeyUpdateSnapshot";
 
+    /**
+     * The name, type, URI, identity source, cache TTL and Cognito pools an API Gateway authorizer
+     * carried before an in-place update changed them, or the authorizer an update created because the
+     * prior was gone, so a failed stack update can put them back or delete the created one. Written
+     * and spent by {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayAuthorizerUpdateSnapshot";
+
+    /**
+     * The deployment id and description an API Gateway stage carried before an in-place update, the
+     * stage an update created because the prior was gone, or the old API of a stage a RestApiId change
+     * moved, so a failed stack update can undo each. Written and spent by
+     * {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_STAGE_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayStageUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**

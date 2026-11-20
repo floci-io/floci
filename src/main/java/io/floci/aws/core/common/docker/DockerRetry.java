@@ -7,7 +7,9 @@ import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
+import java.time.Duration;
 import java.util.Locale;
+import java.util.function.LongSupplier;
 
 /**
  * Retry policy for docker daemon calls. Every docker command travels over the single shared
@@ -154,11 +156,35 @@ public final class DockerRetry {
      * immediately. A {@link RuntimeException} is rethrown as-is; a checked exception is wrapped.
      */
     public static <T> T call(int maxAttempts, long backoffMillis, DockerCall<T> call) {
+        return call(maxAttempts, backoffMillis, null, call);
+    }
+
+    /**
+     * As {@link #call(int, long, DockerCall)}, but with one {@code deadline} across every attempt and
+     * backoff, counted from the first attempt: no attempt starts, and no backoff is slept, that would
+     * begin past it. An attempt that times out at the deadline therefore ends the call, so a silent
+     * daemon fails it after about one attempt rather than {@code maxAttempts} of them. An attempt
+     * already running is not cut short. A null deadline means none.
+     */
+    public static <T> T call(int maxAttempts, long backoffMillis, Duration deadline, DockerCall<T> call) {
+        return call(maxAttempts, backoffMillis, deadline, System::nanoTime, Thread::sleep, call);
+    }
+
+    /** Pause between attempts; tests advance the clock instead of sleeping. */
+    @FunctionalInterface
+    interface BackoffWait {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    /** As {@link #call(int, long, Duration, DockerCall)}, reading time from {@code nanoTime} and pausing with {@code wait}. */
+    static <T> T call(int maxAttempts, long backoffMillis, Duration deadline, LongSupplier nanoTime,
+                      BackoffWait wait, DockerCall<T> call) {
         if (maxAttempts < 1) {
             // Zero or negative would run the call zero times and fall out of the loop returning
             // nothing, turning a misconfiguration into a silent no-op rather than a failure.
             throw new IllegalArgumentException("maxAttempts must be >= 1, got " + maxAttempts);
         }
+        long start = nanoTime.getAsLong();
         int attempt = 0;
         while (true) {
             attempt++;
@@ -172,9 +198,20 @@ public final class DockerRetry {
                 if (attempt >= maxAttempts || !isTransientIo(e)) {
                     throw asUnchecked(e);
                 }
+                long delay = backoffDelay(attempt, backoffMillis, BACKOFF_CAP_MS);
+                if (deadline != null && nanoTime.getAsLong() - start + delay * 1_000_000L >= deadline.toNanos()) {
+                    LOG.warnv("Transient docker I/O error on attempt {0}/{1}, not retried: the {2} ms "
+                            + "Docker call timeout would pass first: {3}",
+                            attempt, maxAttempts, deadline.toMillis(), e.getMessage());
+                    throw asUnchecked(e);
+                }
                 LOG.warnv("Transient docker I/O error on attempt {0}/{1}, retrying: {2}",
                         attempt, maxAttempts, e.getMessage());
-                sleep(backoffDelay(attempt, backoffMillis, BACKOFF_CAP_MS));
+                sleep(wait, delay);
+                if (deadline != null && nanoTime.getAsLong() - start >= deadline.toNanos()) {
+                    // The backoff overslept the deadline: no attempt starts past it.
+                    throw asUnchecked(e);
+                }
             }
         }
     }
@@ -191,12 +228,12 @@ public final class DockerRetry {
         return e instanceof RuntimeException re ? re : new RuntimeException(e);
     }
 
-    private static void sleep(long millis) {
+    private static void sleep(BackoffWait wait, long millis) {
         if (millis <= 0) {
             return;
         }
         try {
-            Thread.sleep(millis);
+            wait.sleep(millis);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while backing off before a docker retry", ie);

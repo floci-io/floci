@@ -2,14 +2,18 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,10 +21,14 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -62,7 +70,7 @@ class CloudWatchCfnProvisionerTest {
         r.setAttributes(new HashMap<>());
         provisioner.provision(r, props(json), ctx);
         ArgumentCaptor<MetricAlarm> alarm = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metrics).putMetricAlarm(alarm.capture(), eq(REGION));
+        verify(metrics).putMetricAlarm(alarm.capture(), eq(REGION), isNull());
         return alarm.getValue();
     }
 
@@ -82,7 +90,7 @@ class CloudWatchCfnProvisionerTest {
         assertTrue(r.getAttributes().containsKey("Arn"), "aws-cloudwatch-alarm.json declares Arn read-only");
 
         ArgumentCaptor<MetricAlarm> alarm = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metrics).putMetricAlarm(alarm.capture(), eq(REGION));
+        verify(metrics).putMetricAlarm(alarm.capture(), eq(REGION), isNull());
         assertEquals("CPUUtilization", alarm.getValue().getMetricName());
         assertEquals("AWS/EC2", alarm.getValue().getNamespace());
         assertEquals(80.5, alarm.getValue().getThreshold());
@@ -173,6 +181,63 @@ class CloudWatchCfnProvisionerTest {
                 """);
 
         assertEquals(0.0, alarm.getThreshold());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "60|60", "\"60\"|60", "\" 60 \"|60", "99999999999|99999999999",
+            "\"99999999999999999999\"|99999999999999999999",
+            "{\"Fn::If\": [\"C\", 60, {\"Ref\": \"AWS::NoValue\"}]}|NONE", "\"abc\"|FAIL", "60.0|FAIL", "\"\"|FAIL"})
+    void evaluationIntervalIsReadAsAnIntegerOfAnySize(String literal, String expected) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Alarm");
+        r.setResourceType("AWS::CloudWatch::Alarm");
+        r.setAttributes(new HashMap<>());
+        JsonNode props = props("""
+                {"AlarmName": "a", "MetricName": "Errors", "Namespace": "MyApp", "EvaluationInterval": %s}
+                """.formatted(literal));
+
+        if ("FAIL".equals(expected)) {
+            AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+            assertEquals("Value of property EvaluationInterval must be an integer.", refused.getMessage());
+            verify(metrics, never()).putMetricAlarm(any(), anyString(), any());
+            return;
+        }
+        provisioner.provision(r, props, ctx);
+
+        verify(metrics).putMetricAlarm(any(MetricAlarm.class), eq(REGION),
+                "NONE".equals(expected) ? isNull() : eq(new BigInteger(expected)));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "[{\"Id\": \"m1\", \"Expression\": \"1 + 1\"}]|60|REFUSED",
+            "[{\"Id\": \"m1\", \"Expression\": \"1 + 1\"}]|NONE|STORED",
+            "[]|60|STORED"})
+    void anIntervalWithMetricsInTheTemplateIsRefusedOnCreateAndUpdate(String metricsJson, String interval,
+            String expected) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Alarm");
+        r.setResourceType("AWS::CloudWatch::Alarm");
+        r.setAttributes(new HashMap<>());
+        JsonNode props = props("""
+                {"AlarmName": "a", "Metrics": %s%s}
+                """.formatted(metricsJson, "NONE".equals(interval) ? "" : ", \"EvaluationInterval\": " + interval));
+
+        if ("REFUSED".equals(expected)) {
+            for (ProvisionContext context : List.of(ctx, ctx.withPriorPhysicalId("a"))) {
+                AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(r, props, context));
+                assertEquals("InvalidParameterCombination", refused.getErrorCode());
+                assertEquals("EvaluationInterval cannot be specified for alarms configured with MetricName or "
+                        + "Metrics.", refused.getMessage());
+            }
+            verify(metrics, never()).putMetricAlarm(any(), anyString(), any());
+            return;
+        }
+        provisioner.provision(r, props, ctx);
+
+        verify(metrics).putMetricAlarm(any(MetricAlarm.class), eq(REGION),
+                "NONE".equals(interval) ? isNull() : eq(new BigInteger(interval)));
     }
 
     @Test

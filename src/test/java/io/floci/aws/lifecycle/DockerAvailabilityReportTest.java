@@ -92,6 +92,13 @@ class DockerAvailabilityReportTest {
     }
 
     @Test
+    void lambdaOnTheProcessExecutorIsNotReported() {
+        when(config.services().lambda().executor()).thenReturn("process");
+
+        assertThat(report.failOnUse(Set.of("lambda", "ecs")), contains("ecs"));
+    }
+
+    @Test
     void ec2RunsAsMetadataOnlyByDefault() {
         when(config.network().securityGroupEnforcement().enabled()).thenReturn(false);
 

@@ -50,6 +50,9 @@ import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.HttpServerStart;
 import io.vertx.core.http.HttpServerOptions;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.event.ObservesAsync;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -63,6 +66,7 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -335,6 +339,19 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elbV2Service).restorePersistedRuntime();
         inOrder.verify(ecsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void quarkusRunsTheBootRestoresWithoutWaitingForARequest() throws NoSuchMethodException {
+        // EcsService and EksService are created lazily, and creating them is what restores their
+        // persisted state; the tests above show onStart and onHttpStart do it. They only run at
+        // boot because the container fires them: onStart observes StartupEvent and onHttpStart
+        // observes HttpServerStart, on a bean the container manages.
+        assertTrue(EmulatorLifecycle.class.isAnnotationPresent(ApplicationScoped.class));
+        Method onStart = EmulatorLifecycle.class.getDeclaredMethod("onStart", StartupEvent.class);
+        assertTrue(onStart.getParameters()[0].isAnnotationPresent(Observes.class));
+        Method onHttpStart = EmulatorLifecycle.class.getDeclaredMethod("onHttpStart", HttpServerStart.class);
+        assertTrue(onHttpStart.getParameters()[0].isAnnotationPresent(ObservesAsync.class));
     }
 
     @Test

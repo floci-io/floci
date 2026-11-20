@@ -1186,6 +1186,21 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void scanOfAReloadedTableWithoutItemsReadsLikeAnEmptyTable() {
+        String region = "eu-west-1";
+        InMemoryStorage<String, TableDefinition> tables = new InMemoryStorage<>();
+        new DynamoDbService(tables).createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), null, null, List.of(), List.of(), List.of(),
+                "PAY_PER_REQUEST", region);
+        DynamoDbService reloaded = new DynamoDbService(tables);
+
+        assertEquals(List.of(0L, 0L, 0L, 0L),
+                reloaded.scan("Users", null, null, null, null, null, null, region).readBytes());
+        assertEquals(List.of(0L),
+                reloaded.scan("Users", null, null, null, null, null, null, null, 0, 4, region).readBytes());
+    }
+
+    @Test
     void operationsOnNonExistentTableThrow() {
         String region = "eu-west-1";
         assertThrows(AwsException.class, () -> service.putItem("NoTable", item("id", "1"), region));

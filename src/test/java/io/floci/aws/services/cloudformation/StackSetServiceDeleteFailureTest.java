@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+import static io.floci.aws.testing.StackSetErrors.assertNotFound;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -120,8 +121,7 @@ class StackSetServiceDeleteFailureTest {
         service.deleteStackSetWithInstances(SET);
         service.deleteStackSetWithInstances(SET);
 
-        AwsException missing = assertThrows(AwsException.class, () -> service.describeStackSet(SET));
-        assertEquals("StackSetNotFoundException", missing.getErrorCode());
+        assertNotFound(() -> service.describeStackSet(SET), SET);
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

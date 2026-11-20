@@ -268,7 +268,7 @@ public class LambdaController {
         }
 
         String clientContext = type == InvocationType.RequestResponse
-                ? decodeClientContext(headers.getHeaderString("X-Amz-Client-Context")) : null;
+                ? decodeClientContext(objectMapper, headers.getHeaderString("X-Amz-Client-Context")) : null;
         String durableExecutionName = headers.getHeaderString("X-Amz-Durable-Execution-Name");
 
         boolean logTail = type == InvocationType.RequestResponse
@@ -310,7 +310,7 @@ public class LambdaController {
         return builder.build();
     }
 
-    private String decodeClientContext(String encoded) {
+    static String decodeClientContext(ObjectMapper objectMapper, String encoded) {
         if (encoded == null || encoded.isEmpty()) {
             return null;
         }
@@ -908,7 +908,7 @@ public class LambdaController {
     }
 
     private String runtimeVersionArn(LambdaFunction fn) {
-        String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), regionResolver.getDefaultRegion());
+        String region = regionResolver.regionOf(fn.getFunctionArn());
         return AwsArnUtils.Arn.of("lambda", region, "", "runtime:" + runtimeVersionId(fn.getRuntime())).toString();
     }
 

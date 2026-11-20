@@ -5,6 +5,7 @@ import io.floci.aws.services.route53.Route53Service;
 import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.route53.Route53Client;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -157,6 +160,63 @@ class Route53DnsPacketIntegrationTest {
         assertNegative(query(DnsTestQuery.query(endpoint, 16, 0x1234)), name, 3, 900);
     }
 
+    @ParameterizedTest
+    @CsvSource({"A,1,192.0.2.7,192.0.2.8", "AAAA,28,2001:db8::7,2001:db8::8"})
+    void sdkAddressChangesAndDeletesReachAuthoritativeDns(
+            String recordType, int type, String first, String second) throws Exception {
+        String name = uniqueName() + ".amazonaws.com";
+        String id = createZone(name);
+        String endpoint = "address." + name;
+        try (Route53Client client = AwsTestClients.create(Route53Client.builder(), "test", Region.US_EAST_1)) {
+            for (String value : List.of(first, second)) {
+                client.changeResourceRecordSets(request -> request.hostedZoneId(id).changeBatch(batch -> batch
+                        .changes(change -> change.action("UPSERT").resourceRecordSet(record -> record
+                                .name(endpoint).type(recordType).ttl(17L)
+                                .resourceRecords(resource -> resource.value(value))))));
+                byte[] request = DnsTestQuery.query(endpoint, type, 0x1234);
+                byte[] response = query(request);
+                assertHeader(response, 0, true, 1, 0);
+                assertEquals(type, ByteBuffer.wrap(response).getShort(request.length + 2));
+                assertEquals(17, ByteBuffer.wrap(response).getInt(request.length + 6));
+                assertArrayEquals(new DnsRecord.Address(type, value).data(),
+                        Arrays.copyOfRange(response, request.length + 12, response.length));
+            }
+            client.changeResourceRecordSets(request -> request.hostedZoneId(id).changeBatch(batch -> batch
+                    .changes(change -> change.action("DELETE").resourceRecordSet(record -> record
+                            .name(endpoint).type(recordType).ttl(17L)
+                            .resourceRecords(resource -> resource.value(second))))));
+        }
+        assertNegative(query(DnsTestQuery.query(endpoint, type, 0x1234)), name, 3, 900);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"A,1,192.0.2.7,192.0.2.8", "AAAA,28,2001:db8::7,2001:db8::8"})
+    void publicAddressSetsRetainValuesTtlAndNegativeAuthority(
+            String recordType, int type, String first, String second) throws Exception {
+        String name = uniqueName() + ".example";
+        String id = createZone(name);
+        String endpoint = "address." + name;
+        change(id, "CREATE", record(endpoint, recordType, 23, first, second));
+        byte[] request = DnsTestQuery.query(endpoint, type, 0x1234);
+        byte[] response = query(request);
+        assertHeader(response, 0, true, 2, 0);
+        ByteBuffer packet = ByteBuffer.wrap(response);
+        packet.position(request.length);
+        for (String value : List.of(first, second)) {
+            assertEquals(endpoint, EmbeddedDnsServer.readName(packet, response));
+            assertEquals(type, packet.getShort());
+            assertEquals(1, packet.getShort());
+            assertEquals(23, packet.getInt());
+            byte[] address = new byte[Short.toUnsignedInt(packet.getShort())];
+            packet.get(address);
+            assertArrayEquals(new DnsRecord.Address(type, value).data(), address);
+        }
+        assertEquals(0, packet.remaining());
+        int otherAddressType = type == 1 ? 28 : 1;
+        assertNegative(query(DnsTestQuery.query(endpoint, otherAddressType, 0x1234)), name, 0, 900);
+        assertNegative(query(DnsTestQuery.query("missing." + name, type, 0x1234)), name, 3, 900);
+    }
+
     @Test
     void delegationNamesAndSoaUseTheStoredZone() throws Exception {
         String name = uniqueName() + ".example";
@@ -224,14 +284,13 @@ class Route53DnsPacketIntegrationTest {
         change(id, "CREATE", weighted);
         change(id, "CREATE", record("alias." + name, "CNAME", 60, "target.example."));
         change(id, "CREATE", record("delegated." + name, "NS", 60, "other.example."));
-        for (int type : List.of(1, 28, 15, 5)) {
+        for (int type : List.of(15, 5)) {
             assertTrue(source.resolveAuthoritative(name, type).isEmpty());
         }
         String awsName = uniqueName() + ".amazonaws.com";
         createZone(awsName);
         byte[] address = query(DnsTestQuery.query(awsName, 1, 0x1234));
-        assertArrayEquals(new byte[]{127, 0, 0, 1},
-                Arrays.copyOfRange(address, address.length - 4, address.length));
+        assertNegative(address, awsName, 0, 900);
         for (String label : List.of("weighted", "alias", "leaf.delegated")) {
             assertHeader(query(DnsTestQuery.query(label + "." + name, 16, 0x1234)), 5, false, 0, 0);
         }
@@ -266,10 +325,12 @@ class Route53DnsPacketIntegrationTest {
     void malformedStoredValuesAndTtlsStayRefused() throws Exception {
         String name = uniqueName() + ".example";
         String id = createZone(name);
-        for (String type : List.of("TXT", "NS", "SOA")) {
+        for (String type : List.of("A", "AAAA", "TXT", "NS", "SOA")) {
             String owner = "bad-" + type.toLowerCase() + "." + name;
             change(id, "UPSERT", record(owner, type, 60, (String) null));
             int queryType = switch (type) {
+                case "A" -> 1;
+                case "AAAA" -> 28;
                 case "NS" -> 2;
                 case "SOA" -> 6;
                 default -> 16;

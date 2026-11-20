@@ -92,7 +92,7 @@ public class CertificatesTest {
                     new X500Name("CN=" + issuerName), issuerKey,
                     List.of(), false, null, notBefore, notAfter);
             byte[] der = certificate.getEncoded();
-            return new Certificates.Minted(der, Certificates.toPem(der));
+            return new Certificates.Minted(der, Certificates.toPem("CERTIFICATE", der));
         } catch (Exception e) {
             throw new IllegalStateException("cannot mint a certificate", e);
         }

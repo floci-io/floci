@@ -57,7 +57,7 @@ public class StepFunctionsEventPublisher {
             Map<String, Object> entry = EventBridgeService.serviceEventEntry(SOURCE, DETAIL_TYPE,
                     objectMapper.writeValueAsString(buildDetail(exec)), executionArn);
             EventBridgeService.PutEventsResult result = eventBridgeService.putEvents(List.of(entry),
-                    AwsArnUtils.regionOrDefault(executionArn, regionResolver.getDefaultRegion()));
+                    regionResolver.regionOf(executionArn));
             if (result != null && result.failedCount() > 0) {
                 LOG.warnv("EventBridge rejected Step Functions Execution Status Change for {0}: {1}",
                         executionArn, result.entries());

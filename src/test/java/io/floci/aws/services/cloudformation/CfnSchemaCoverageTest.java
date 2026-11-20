@@ -66,6 +66,8 @@ class CfnSchemaCoverageTest {
             Path.of("src/test/resources/cloudformation/getatt-attribute-gaps.tsv");
     private static final Path PROPERTY_GAPS =
             Path.of("src/test/resources/cloudformation/writable-property-gaps.tsv");
+    private static final Path CHANGE_EXEMPT =
+            Path.of("src/test/resources/cloudformation/change-exempt.tsv");
     private static final Path SCHEMA_SURFACE =
             Path.of("src/test/resources/cloudformation/schema-surface.tsv");
     private static final Path PROVISIONERS = MainSources.packageDir(CfnResourceProvisioner.class);
@@ -149,6 +151,8 @@ class CfnSchemaCoverageTest {
     private static final String ALL_PROPERTIES = "*";
     /** A call that makes an arm decide what a dropped property means, see {@code drop-policy.tsv}. */
     private static final String DROPPED_PROPERTIES_CALL = "droppedProperties(";
+    /** A call on the context, so {@code Ec2CfnMetadataOptions.changes(} does not count. */
+    private static final String ENGINE_CHANGES_CALL = "ctx.changes(";
 
     /** What the registry schemas declare for one resource type, see {@link #schemaSurface}. */
     private record SchemaSurface(Set<String> readOnly, Set<String> writable) { }
@@ -375,6 +379,78 @@ class CfnSchemaCoverageTest {
         }
     }
 
+    /**
+     * Every supported type reads the engine's property changes from its arm, or has a row in
+     * {@code change-exempt.tsv} (type, tab, reason), no more and no fewer. A type reads them when its
+     * arm calls {@code ctx.changes(}; {@code droppedProperties(} does not count, it derives drops from
+     * the context's own prior properties. The file only shrinks: moving a type onto the changes deletes
+     * its row. Like the other scans it matches the call in the arm's reachable source text (a class
+     * without a type switch is scanned whole). A call that names another type by constant or literal
+     * counts for that type, not for this one.
+     */
+    @Test
+    void changeExemptRowsMatchTheTypesThatDoNotReadTheEnginesChanges() {
+        assertSameLines(render(recordedChangeExempt()), render(actualChangeExempt()),
+                "The set of types that do not read the engine's property changes changed.",
+                "(a type whose arm does not call ctx.changes): add a row with a reason to "
+                        + CHANGE_EXEMPT,
+                "(this type now reads the engine's changes, or is not supported): delete its row from "
+                        + CHANGE_EXEMPT);
+    }
+
+    @Test
+    void everyChangeExemptRowExplainsItself() {
+        List<String> unexplained = recordedChangeExempt().entrySet().stream()
+                .filter(e -> e.getValue().isBlank() || e.getValue().startsWith("TODO"))
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+
+        if (!unexplained.isEmpty()) {
+            throw new AssertionError("A type that does not read the engine's changes must say why, so a "
+                    + "reviewer can tell 'not yet moved' from 'forgotten': " + unexplained);
+        }
+    }
+
+    /** "AWS::SQS::QueuePolicy" -> reason. */
+    private static Map<String, String> recordedChangeExempt() {
+        Map<String, String> rows = new TreeMap<>();
+        try {
+            for (String line : Files.readAllLines(CHANGE_EXEMPT, StandardCharsets.UTF_8)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                String[] parts = line.split("\t", 2);
+                if (parts.length < 2) {
+                    throw new AssertionError("Expected 'type<TAB>reason' but found: " + line);
+                }
+                if (rows.put(parts[0], parts[1]) != null) {
+                    throw new AssertionError("Duplicate row for " + parts[0] + " in " + CHANGE_EXEMPT);
+                }
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot read " + CHANGE_EXEMPT, e);
+        }
+        return rows;
+    }
+
+    /** The supported types whose arm does not reach {@code ctx.changes(}. */
+    private static Map<String, String> actualChangeExempt() {
+        Map<String, ProvisionerScan> scans = scanProvisioners();
+        Map<String, String> types = new TreeMap<>();
+        for (Map.Entry<String, String> entry : inventory().entrySet()) {
+            ProvisionerScan scan = scans.get(entry.getValue());
+            if (scan == null) {
+                throw new AssertionError("No provisioner source scanned for " + entry.getKey()
+                        + ": the inventory maps it to " + entry.getValue());
+            }
+            if (!scan.readsEngineChanges(entry.getKey())) {
+                types.put(entry.getKey(), "");
+            }
+        }
+        return types;
+    }
+
     /** "AWS::SNS::Topic\tTopicArn" -> reason. */
     private static Map<String, String> recordedGaps() {
         Map<String, String> gaps = new TreeMap<>();
@@ -503,7 +579,7 @@ class CfnSchemaCoverageTest {
      */
     private record ProvisionerScan(String className, Set<String> classWide,
                                    Map<String, Set<String>> byType, String classCode,
-                                   Map<String, String> codeByType) {
+                                   Map<String, String> codeByType, Map<String, String> typeConstants) {
 
         /**
          * The properties read by the code reachable from the type's arm, attributed like
@@ -552,6 +628,32 @@ class CfnSchemaCoverageTest {
         boolean reaches(String resourceType, String call) {
             String code = codeByType.isEmpty() ? classCode : codeByType.get(resourceType);
             return code != null && code.contains(call);
+        }
+
+        /**
+         * Whether the code reachable from the type's arm calls {@code ctx.changes(} for this type. A call
+         * whose first argument is a type constant of the class or an {@code "AWS::..."} literal counts
+         * for that type only, since an arm can reach a method that serves several types; any other
+         * first argument, such as {@code r.getResourceType()}, counts for the arm's type.
+         */
+        boolean readsEngineChanges(String resourceType) {
+            String code = codeByType.isEmpty() ? classCode : codeByType.get(resourceType);
+            if (code == null) {
+                return false;
+            }
+            int from = code.indexOf(ENGINE_CHANGES_CALL);
+            while (from >= 0) {
+                String arguments = argumentsOf(code, from + ENGINE_CHANGES_CALL.length() - 1);
+                String first = arguments.split(",", 2)[0].trim();
+                String named = first.startsWith("\"")
+                        ? first.substring(1, first.length() - 1)
+                        : typeConstants.get(first);
+                if (named == null || named.equals(resourceType)) {
+                    return true;
+                }
+                from = code.indexOf(ENGINE_CHANGES_CALL, from + 1);
+            }
+            return false;
         }
 
         Set<String> attributesFor(String resourceType) {
@@ -631,7 +733,7 @@ class CfnSchemaCoverageTest {
             }
         }
         return new ProvisionerScan(className, Set.copyOf(classWide), Map.copyOf(byType),
-                inlineConstants(withoutComments(source), source), Map.copyOf(codeByType));
+                inlineConstants(withoutComments(source), source), Map.copyOf(codeByType), Map.copyOf(constants));
     }
 
     /** The {@code getResourceType()} dispatch inside {@code provision}: its whole block, and its arms. */

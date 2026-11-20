@@ -10,6 +10,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -19,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyMembers.members;
 
 /**
  * The Payment Cryptography control plane.
@@ -65,6 +68,7 @@ public class PaymentCryptographyJsonHandler {
             case "GetKey" -> () -> getKey(request, region);
             case "ListKeys" -> () -> listKeys(request, region);
             case "DeleteKey" -> () -> deleteKey(request, region);
+            case "RestoreKey" -> () -> restoreKey(request, region);
             case "StartKeyUsage" -> () -> startKeyUsage(request, region);
             case "StopKeyUsage" -> () -> stopKeyUsage(request, region);
             case "CreateAlias" -> () -> createAlias(request, region);
@@ -82,12 +86,16 @@ public class PaymentCryptographyJsonHandler {
             case "GetDefaultKeyReplicationRegions" -> () -> getDefaultKeyReplicationRegions(request, region);
             case "EnableDefaultKeyReplicationRegions" -> () -> enableDefaultKeyReplicationRegions(request, region);
             case "DisableDefaultKeyReplicationRegions" -> () -> disableDefaultKeyReplicationRegions(request, region);
+            case "GetCertificateSigningRequest" -> () -> getCertificateSigningRequest(request, region);
             case "TagResource" -> () -> tagResource(request, region);
             case "UntagResource" -> () -> untagResource(request, region);
             case "ListTagsForResource" -> () -> listTagsForResource(request, region);
             case "PutResourcePolicy" -> () -> putResourcePolicy(request, region);
             case "GetResourcePolicy" -> () -> getResourcePolicy(request, region);
             case "DeleteResourcePolicy" -> () -> deleteResourcePolicy(request, region);
+            case "AssociateMpaTeam" -> () -> associateMpaTeam(request, region);
+            case "GetMpaTeamAssociation" -> () -> getMpaTeamAssociation(request, region);
+            case "DisassociateMpaTeam" -> () -> disassociateMpaTeam(request, region);
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -181,14 +189,24 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * Deletes a key and answers with the key, as the reference does.
+     * Schedules a key for deletion and answers with the key, as the reference does.
      *
-     * <p>The waiting period the reference offers is read, and the key is
-     * deleted at once all the same: the service deletes a key the moment it
-     * is asked to.
+     * <p>The waiting period is the one the request names, or the reference's default of
+     * seven days. The model settles the range, so a period outside it is refused before
+     * the key is touched.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        int days = request.hasNonNull("DeleteKeyInDays")
+                ? request.path("DeleteKeyInDays").asInt() : 7;
+        PaymentCryptographyKey key = service.deleteKey(
+                requiredKey(request, region, KEY_IDENTIFIER), days);
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Cancels the scheduled deletion of a key. */
+    private Map<String, Object> restoreKey(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.restoreKey(
+                requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
 
@@ -472,6 +490,47 @@ public class PaymentCryptographyJsonHandler {
         return true;
     }
 
+    // ---- multi-party approval ------------------------------------------------
+
+    /**
+     * Associates a Multi-Party Approval team with a protected operation.
+     *
+     * <p>An operation has one team, so a second association replaces the first, as the
+     * reference replaces one.
+     */
+    private Map<String, Object> associateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam(region,
+                request.path("Action").asText(), request.path("MpaTeamArn").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The Multi-Party Approval team associated with a protected operation. */
+    private Map<String, Object> getMpaTeamAssociation(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.mpaTeamAssociation(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /**
+     * Removes the Multi-Party Approval team associated with a protected operation.
+     *
+     * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING}.
+     */
+    private Map<String, Object> disassociateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.disassociateMpaTeam(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The association, as the model names its members. */
+    private static Map<String, Object> mpaAssociation(PaymentCryptographyMpaTeamAssociation association) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Action", association.getAction());
+        out.put("MpaTeamArn", association.getMpaTeamArn());
+        out.put("AssociationState", association.getAssociationState());
+        return out;
+    }
+
     /** The tags of a request, as the name and the value of each. */
     private static Map<String, String> tagsOf(JsonNode request) {
         Map<String, String> tags = new LinkedHashMap<>();
@@ -486,6 +545,35 @@ public class PaymentCryptographyJsonHandler {
             }
         }
         return tags;
+    }
+
+    // ---- certificate signing requests ----------------------------------------
+
+    /**
+     * The certificate signing request a key pair signs.
+     *
+     * <p>The subject is the metadata the request names, and the digest is the one the request
+     * names, so the request is the one the caller asked for. The answer carries the PEM of
+     * the request, base64 encoded, as the reference's own answer carries it.
+     */
+    private Map<String, Object> getCertificateSigningRequest(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
+        String signingRequest = service.certificateSigningRequest(key,
+                request.path("SigningAlgorithm").asText(),
+                subjectOf(request.path("CertificateSubject")));
+        return Map.of("CertificateSigningRequest", signingRequest);
+    }
+
+    /** The subject of a request, as the members the model names. */
+    private static Map<String, String> subjectOf(JsonNode subject) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String member : PaymentCryptographyCertificateRequest.subjectMembers()) {
+            JsonNode value = subject.get(member);
+            if (value != null && !value.isNull()) {
+                fields.put(member, value.asText());
+            }
+        }
+        return fields;
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -743,38 +831,6 @@ public class PaymentCryptographyJsonHandler {
                             + String.join(", ", served) + ")", 400);
         }
         return form;
-    }
-
-    /** The members of a form, as the service reads them. */
-    private static Map<String, Object> members(JsonNode node) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        if (node == null || !node.isObject()) {
-            return out;
-        }
-        node.properties().forEach(entry -> out.put(entry.getKey(), value(entry.getValue())));
-        return out;
-    }
-
-    /** One member of a form, as the service reads it. */
-    private static Object value(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null;
-        }
-        if (node.isObject()) {
-            return members(node);
-        }
-        if (node.isArray()) {
-            List<Object> values = new ArrayList<>();
-            node.forEach(child -> values.add(value(child)));
-            return values;
-        }
-        if (node.isBoolean()) {
-            return node.asBoolean();
-        }
-        if (node.isNumber()) {
-            return node.asText();
-        }
-        return node.asText();
     }
 
     /**

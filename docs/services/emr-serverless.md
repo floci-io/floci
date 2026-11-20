@@ -142,14 +142,47 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   `networkConfiguration` come from the application.
 * **Dashboard**: `GetDashboardForJobRun` gives "a URL that you can use to access the application UIs for a job run",
   for the latest attempt or the `attempt` asked for, checked as `GetJobRun` checks it, and, as AWS's, "The URL is
-  valid for one hour after you generate it". EMR Serverless opens the run's live Spark or Tez UI while it runs and its
-  Spark History Server or persistent Tez UI once it has ended; Floci keeps neither, so the URL opens a page Floci
-  serves at `/_aws/emr-serverless/dashboard` on its own address (`base-url`, or `hostname`), with the attempt's
-  state, its times and where its driver's logs go in S3 and in CloudWatch Logs, kept as the attempt was admitted, so
-  a later change to the application's monitoring configuration does not move them. The link names the run and is signed
-  with a key Floci makes as it starts: one changed, or past its hour, or given before Floci restarted, opens a `403`
-  page asking for a new one, and one whose run has gone a `404`. Like the rest of Floci, the page asks for no
-  credentials. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
+  valid for one hour after you generate it". "For jobs in a running state, the application UI is a live user
+  interface such as the Spark or Tez web UI. For completed jobs, the application UI is a persistent application user
+  interface such as the Spark History Server or persistent Tez UI." With `runner-mode` set to `docker`, a Spark run's
+  link opens both for real, through Floci, each on a host of its own, `http://<secret>-<port>.emr-serverless-ui.<Floci's
+  host and port>/`, the secret 26 random letters and digits that only this link holds, so the host itself is the
+  link's authority, as the UI takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and
+  `localhost.floci.io` do, and Floci's TLS certificate names `*.emr-serverless-ui.localhost` and
+  `*.emr-serverless-ui.localhost.floci.io`. A link's host answers with a `403` page once its hour has passed, or when
+  it was given before Floci restarted.
+  * **While the attempt runs**, the link, on port 4040, opens its driver's Spark UI: port 4040 of its container, which
+    Docker publishes on the host's loopback interface alone, or which Floci, in a container on the same network,
+    reaches there. The release's image turns the UI off; Floci turns it on before the run's own settings, so a run
+    that turns it off again has none. Until the driver runs, and then until its Spark has started the UI, or for good
+    where the run turned it off, the host answers with a `503` page asking to try again, and once the attempt has
+    ended, with a `404` one.
+  * **Once the attempt has ended**, the link, on port 18080, opens a Spark History Server over the run's event logs,
+    for the 30 days EMR Serverless keeps them: "By default, EMR Serverless stores application logs securely in Amazon
+    EMR managed storage for a maximum of 30 days". The run's driver writes its event logs where the release's image
+    says (`spark.eventLog.dir`, `file:///var/log/spark/apps`), on a Docker volume of the run's own, every attempt's
+    there, and the server runs in a container of the release's image that starts as its link is first opened, the host
+    answering with a `503` page until it answers, and stops once no link to it is valid. The server lists the run's
+    applications, one per attempt, rather than opening the attempt's. A history goes 30 days after its run ended, or
+    once its run has gone, which Floci checks as it starts and every hour; a restart keeps the histories, and a reset
+    removes them all. Each history and its server carry the owner label of the Floci that keeps them, so another
+    Floci sharing the Docker daemon leaves them alone. Where Docker cannot tell whether a history is kept, its host
+    answers with the `503` page too, rather than taking the history for gone.
+  * **Otherwise**, the link opens a page Floci serves at `/_aws/emr-serverless/dashboard` on its own address
+    (`base-url`, or `hostname`): for a run whose logs are not kept in managed storage, its
+    `managedPersistenceMonitoringConfiguration`, or else its application's, with `enabled` false, as with logs in S3
+    alone the application UI is "Not supported" ("Otherwise, you can't use the built-in application UIs"), so Floci
+    keeps none of its event logs; for a run that turns its event logs off (`spark.eventLog.enabled`) or sends them
+    elsewhere (`spark.eventLog.dir`), as nothing is kept for a history server to read; for a Hive run, as Floci runs
+    no Tez UI; once a history has gone; and in the `immediate` mode. The page shows the attempt's state, its times,
+    where its driver's logs go in S3 and in CloudWatch Logs, and whether they are kept in managed storage, kept as the
+    attempt was admitted, so a later change to the application's monitoring configuration does not move them. Its link
+    names the run and is signed with a key Floci makes as it starts: one changed, or past its hour, or given before
+    Floci restarted, opens a `403` page asking for a new one, and one whose run has gone a `404`.
+
+  Like the rest of Floci, no link asks for credentials. AWS's link, by a user's report, opens a limited number of times
+  ("This URL has already been used the maximum number of times. Please generate a new URL."); Floci's open as often as
+  asked within their hour. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
 
 ## Sessions
 
@@ -193,8 +226,13 @@ and its lifecycle but runs no driver for it.
 * **ListSessions** returns the newest sessions first, as `ListJobRuns` orders runs, filtered by `states`,
   `createdAtAfter` and `createdAtBefore`, at most 50 per page, grouped by state as `ListJobRuns` groups runs.
 * **GetResourceDashboard** takes a `resourceType` of `SESSION`, the only one, and gives a link like
-  `GetDashboardForJobRun`'s, valid for an hour, to a page about the session on Floci's address, which stands in for
-  the session's Spark UI or Spark History Server. `accessSystemProfileLogs` changes nothing.
+  `GetDashboardForJobRun`'s, valid for an hour: "While a session is active, the URL opens the live Apache Spark UI",
+  and "After a session ends, the Spark History Server remains available". With `runner-mode` set to `docker`, a link
+  given before the session has ended, or begun to, opens its Spark Connect server's Spark UI, and one given after,
+  for 30 days, a Spark History Server over its kept event logs, as a run's link opens its driver's (see [Running a
+  session's Spark Connect server](#running-a-sessions-spark-connect-server)); any other, one given while the session
+  is `TERMINATING` among them, opens a page about the session on Floci's address. `accessSystemProfileLogs` changes
+  nothing.
 
 A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).
@@ -236,7 +274,11 @@ The server's port is published on the Docker host's loopback interface only, and
   24 hours count from when the server answers.
 * **Logs**: no source gives where a session's driver logs go, so Floci sends the server's output to its own log only,
   not to the application's monitoring configuration.
-* **Spark UI**: `GetResourceDashboard` still links to Floci's page about the session, not to the server's Spark UI.
+* **Spark UI**: `GetResourceDashboard`'s link opens the server's Spark UI on a host of its own, as a run's link opens
+  its driver's (see **Dashboard** under job runs): port 4040 of the server's container, published on the host's
+  loopback interface alone. Its host answers with a `503` page until the server's container runs, and with a `404` one
+  once the session has ended. The server keeps its event logs on a volume of the session's own, so once the session has
+  ended a new link opens a Spark History Server over them, for 30 days, as a run's does.
 
 ## Running Spark job runs
 

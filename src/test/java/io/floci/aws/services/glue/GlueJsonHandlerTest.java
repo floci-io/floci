@@ -8,13 +8,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,7 +42,7 @@ class GlueJsonHandlerTest {
         mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         GlueSchemaRegistryService schemaRegistryService =
                 new GlueSchemaRegistryService(storageFactory, regionResolver);
         GlueService glueService = new GlueService(
@@ -700,18 +700,6 @@ class GlueJsonHandlerTest {
         assertEquals("beta", ((Table) tables.get(0)).getName());
     }
 
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory("000000000000");
-        }
-    }
 
     private ObjectNode connectionInput(String name) {
         ObjectNode input = mapper.createObjectNode();

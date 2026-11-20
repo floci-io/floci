@@ -6,9 +6,9 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -23,7 +23,6 @@ import software.amazon.awssdk.services.ecs.model.RunTaskResponse;
 import software.amazon.awssdk.services.ecs.model.Task;
 
 import java.time.Duration;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -35,17 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @QuarkusTest
-@TestProfile(EcsEssentialContainerExitDockerIntegrationTest.DockerEcsProfile.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class EcsEssentialContainerExitDockerIntegrationTest {
-
-    public static final class DockerEcsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.mock", "false",
-                    "floci.services.ecs.reconcile-containers-on-startup", "false",
-                    "floci.docker.resource-namespace", "ecs-essential-exit-it");
-        }
-    }
 
     @Inject
     DockerClient docker;

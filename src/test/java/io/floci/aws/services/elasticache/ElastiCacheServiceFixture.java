@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerHandle;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerManager;
@@ -56,7 +57,7 @@ final class ElastiCacheServiceFixture {
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
         service = new ElastiCacheService(containerManager, proxyManager, mock(ValkeyClusterFormation.class),
                 storageFactory, config, mock(Ec2Service.class), new RegionResolver("us-east-1", "000000000000"),
-                kmsService, new ElastiCacheProvisioningIds());
+                kmsService, mock(CloudWatchLogsService.class), new ElastiCacheProvisioningIds());
     }
 
     /** The container the group {@code groupId} gets. */

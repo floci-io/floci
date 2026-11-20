@@ -1,6 +1,6 @@
 package io.floci.aws.services.apigateway;
 
-import io.floci.aws.testing.ExtraCorsOriginProfile;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
@@ -30,11 +30,11 @@ import static org.hamcrest.Matchers.nullValue;
  * filter would answer the preflight itself and the integration would never run.</p>
  */
 @QuarkusTest
-@TestProfile(ExtraCorsOriginProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayPreflightRoutingIntegrationTest {
 
-    private static final String ORIGIN = ExtraCorsOriginProfile.ORIGIN;
+    private static final String ORIGIN = ContainerBackedEc2Profile.EXTRA_CORS_ORIGIN;
     private static final String STAGE = "cors";
 
     private static String apiId;

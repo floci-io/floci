@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 /**
  * Registry of all active RDS auth proxies. One proxy per DB instance or cluster.
@@ -30,6 +31,7 @@ public class RdsProxyManager {
     private final RdsContainerManager containerManager;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RdsAuthProxy> pendingFailedStarts = new ConcurrentHashMap<>();
+    private volatile Predicate<String> forceSsl = instanceId -> false;
 
     @Inject
     public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
@@ -107,7 +109,8 @@ public class RdsProxyManager {
                 engine, iamEnabled, masterUsername, masterPassword, dbName, sigV4Validator,
                 tlsCertificates, passwordValidator, rdsConfig.proxyHandshakeTimeoutMillis(),
                 rdsConfig.proxyBackendConnectTimeoutMillis(), rdsConfig.proxyMaxConnections(),
-                binding, username -> binding != null, backendGate, endpointKind);
+                binding, username -> binding != null, backendGate, endpointKind,
+                () -> forceSsl.test(instanceId));
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {
@@ -150,6 +153,10 @@ public class RdsProxyManager {
                 throw failure;
             }
         }
+    }
+
+    public void forceSslWhen(Predicate<String> forceSsl) {
+        this.forceSsl = forceSsl;
     }
 
     public synchronized void updateMasterPassword(String instanceId, String newPassword) {

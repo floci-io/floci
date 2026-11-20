@@ -1,13 +1,11 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -17,18 +15,11 @@ import static org.hamcrest.Matchers.nullValue;
  * Verifies the floci.protocols.strict-claiming enforcement: RPC-signaled
  * requests that no supported wire protocol claims are rejected per the Smithy
  * wire-protocol-selection guide, while REST and well-formed RPC traffic is
- * untouched.
+ * untouched. The setting comes from {@link IndependentServiceSettingsProfile}.
  */
 @QuarkusTest
-@TestProfile(StrictProtocolClaimingIntegrationTest.StrictClaimingProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class StrictProtocolClaimingIntegrationTest {
-
-    public static final class StrictClaimingProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.protocols.strict-claiming", "true");
-        }
-    }
 
     @BeforeAll
     static void configureContentTypes() {

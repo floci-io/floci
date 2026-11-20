@@ -1,5 +1,6 @@
 package io.floci.aws.services.cognito.verification;
 
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.ses.SesService;
@@ -41,7 +42,7 @@ class CognitoMessageDispatcherTest {
     void setUp() {
         ses = mock(SesService.class);
         sns = mock(SnsService.class);
-        dispatcher = new CognitoMessageDispatcher(ses, sns, "us-east-1");
+        dispatcher = new CognitoMessageDispatcher(ses, sns, new RegionResolver("us-east-1", "000000000000"));
     }
 
     @Test
@@ -486,7 +487,8 @@ class CognitoMessageDispatcherTest {
 
     @Test
     void dispatch_poolWithoutAnArnSendsFromTheDeploymentDefaultRegion() {
-        CognitoMessageDispatcher china = new CognitoMessageDispatcher(ses, sns, "cn-northwest-1");
+        CognitoMessageDispatcher china = new CognitoMessageDispatcher(ses, sns,
+            new RegionResolver("cn-northwest-1", "000000000000"));
 
         china.dispatch(pool(Map.of()), user("alice@example.com", null),
             VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));

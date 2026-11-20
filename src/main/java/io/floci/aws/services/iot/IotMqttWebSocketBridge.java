@@ -24,9 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * are piped byte for byte to the broker's plaintext listener, so every broker feature and every
  * authorization rule applies without a second code path. No client certificate is involved: on
  * AWS this path authenticates by SigV4 or a custom authorizer. The broker enforces a custom
- * authorizer named in the MQTT username, the URL query or an upgrade header, and stays permissive
- * otherwise; the upgrade's headers, query, server name and client address reach it through
- * {@link IotMqttBrokerService#webSocketUpgrades()}.
+ * authorizer named in the MQTT username, the URL query or an upgrade header, else the default
+ * authorizer unless the upgrade carries a SigV4 signature; the upgrade's headers, query, server
+ * name and client address reach it through {@link IotMqttBrokerService#webSocketUpgrades()}.
  *
  * <p>Everything for one session runs on the event loop of the WebSocket's connection, the
  * broker socket included, so the handlers below never race each other.

@@ -45,8 +45,8 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
 | `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
-| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
-| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
@@ -373,11 +373,39 @@ not Jupyter:
 
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
-or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
-`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
-Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
-Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+In the `immediate` mode, and for an interface the cluster does not run, a presigned URL opens a page Floci serves at
+`/_aws/emr/app-ui` on its own address (`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and
+the interface asked for. The link is signed with a key Floci makes as it starts and lasts an hour, as no source gives
+AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one whose cluster has gone a
+`404`.
+
+In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
+("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
+web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**), and on one with Spark
+its `SparkHistoryServer` ("Spark HistoryServer | http://master-public-dns-name:18080/"). A step's Spark on the
+cluster's YARN keeps its event logs where "By default, Amazon EMR stores event logs", "the /var/log/spark/apps directory
+of HDFS" (`spark.eventLog.dir`, unless the cluster's `spark-defaults` give another, which the server then does not
+read), and gives the server's address as `spark.yarn.historyServer.address`, so an ended application's tracking URL
+leads to its page there; the server reads that folder only, whatever the cluster's `spark.history.*` settings say. On a
+cluster with Hadoop, the `YarnTimelineService`, Hadoop's YARN timeline server on its own default port, 8188, with its
+store on the primary node's volume, which the ResourceManager publishes its applications to and which, as no source
+gives how EMR's Tez reaches it, a Hive step's Tez logs its DAGs to through its REST interface; and on one with Tez too,
+where its image has Tez (a cluster with Hive, or Floci's Pig), the `TezUI` ("Tez |
+http://master-public-dns-name:8080/tez-ui"), Tez's own page, whose configuration names the
+timeline server and the ResourceManager, both of which answer its requests from its own host. Each opens on a host of
+its own, as AWS's application UIs are on hosts of their own under "emrappui-prod.us-east-1.amazonaws.com", which "are
+registered in the Public Suffix List": `http://<secret>-<port>.emrappui.<Floci's host and port>/`, the secret 26
+random letters and digits that only this link holds, so the host itself is the link's authority, as the interface
+takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and `localhost.floci.io` do, and Floci's
+TLS certificate names `*.emrappui.localhost` and `*.emrappui.localhost.floci.io`. Requests to the host go on to that
+port of the primary node, which Floci reaches at a port Docker publishes on the host's loopback interface alone, or,
+Floci in a container, on the cluster's network, which its container joins; the node's daemons write their links to
+one another by the node's name, and Floci makes each such link, in the text it sends, a link to that interface's own
+host under the same secret, so the ResourceManager's links to a job's history and to its containers' logs on the
+NodeManager of a primary node that works open too. A NodeManager on a core or task node, which Floci does not reach,
+keeps its links as written. The link lasts an hour, as the page's does, after which its host answers with a `403`
+page; once its cluster has ended, its host answers with a `404` one. A request's body goes on to the interface as it
+arrives, and an interface that sends nothing for a minute has the request given up with a `502` page.
 
 * **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
   keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
@@ -395,8 +423,28 @@ Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
   any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
   for sessions, Studios and notebook executions.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
-  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
-  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+  refused. In the `docker` mode it opens the interface for real, `SHS` the Spark History Server, `YTS` the YARN
+  timeline server and `TEZ` the Tez UI, on a host of its own as an on-cluster UI does: while the cluster runs, its
+  primary node's; once it has ended, as "You can access application history and relevant log files for active and
+  terminated clusters", its kept history's, for the 30 days for which "The logs are available ... after the
+  application ends". Floci keeps it in a volume of the primary node's of its own, which holds the timeline server's
+  store (its entities kept 30 days rather than Hadoop's default 7) and, copied out of the cluster's HDFS as the cluster's
+  storage goes, its Spark applications' event logs, and as a reset or a shutdown removes a node still running; the
+  cluster's other storage goes as before, though a copy that fails keeps it, the event logs in it, for a later try or
+  a restart to remove. The URL is not `PresignedURLReady` while the cluster is ending or its storage
+  is going. Then a container of the image the cluster ran serves it, on a network of its own that no step's container
+  is on, started by the first link, the URL not `PresignedURLReady` until it answers, and stopped once no link to it is
+  valid, a later link starting it again. The kept history goes once its 30 days have passed, whether or not a link
+  asked for it. A restart keeps the histories of the clusters that ended within 30 days, and a reset removes every
+  one. Elsewhere the URL opens Floci's page, ready at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
+  the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
+  `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
+  through the web proxy, the JobHistory server's on the job of that id (`job_` in place of `application_`), the Spark
+  History Server's, the timeline server's and the Tez UI's on the application's; without one, on the cluster's
+  applications, its running ones, its jobs, its Spark applications, its application history and its DAGs. A link Floci opens for real is
+  `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
+  a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
+  Any other is ready at once.
 * **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
   IAM role and used by a cluster with fine-grained access control activated": a random username and password that
   expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later
@@ -517,7 +565,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
   reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
   run on them. Beside them runs the MapReduce JobHistory server EMR's primary node runs too (a release's `mapred-site`
   classification "Restarts Hadoop MapReduce-HistoryServer"), on Hadoop's own ports, 10020 and 19888 for its web
-  pages, from the jobs' history in the cluster's HDFS, and the node is ready once it answers. A
+  pages, from the jobs' history in the cluster's HDFS, and, on a cluster with Spark, a Spark History Server on 18080,
+  from the Spark applications' event logs in `/var/log/spark/apps` of the cluster's HDFS, on one with Hadoop the YARN
+  timeline server on 8188, and on one with Tez the Tez UI's page on 8080 (see [Application UIs](#application-uis)); the
+  node is ready once each answers. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's

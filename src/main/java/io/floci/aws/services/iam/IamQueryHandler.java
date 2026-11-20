@@ -88,8 +88,6 @@ public class IamQueryHandler {
     private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
             "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
             "LAST_AUTHENTICATED_TIME_DESCENDING");
-    /** {@code serviceNamespaceListType}: minimum 1 item, maximum 200. */
-    private static final int MAX_SERVICE_NAMESPACES = 200;
     private static final int MAX_TAG_LIST_MEMBERS = 50;
     private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final int MAX_TAG_VALUE_LENGTH = 256;
@@ -138,7 +136,9 @@ public class IamQueryHandler {
         LOG.debugv("IAM action: {0}", action);
 
         try {
+            IamArnShapes.checkPolicySourceArn(action, params);
             IamRequestShapes.check(action, params);
+            IamArnShapes.checkPolicyArn(action, params);
             return switch (action) {
             // Users
             case "CreateUser" -> handleCreateUser(params);
@@ -2834,6 +2834,47 @@ public class IamQueryHandler {
     }
 
     /**
+     * The namespaces a request names, held to the ones AWS publishes. The member's pattern admits
+     * anything word-shaped, so a value like {@code amazon-s3} satisfies the model and still names
+     * no service, and AWS refuses it rather than reporting that the identity reaches nothing.
+     *
+     * <p>Recorded on {@code ListPoliciesGrantingServiceAccess} on 2026-11-03: {@code InvalidInput}
+     * 400 with a sender fault and {@code Invalid service namespace: [<namespace>]}, the brackets
+     * being AWS's own. The recording covers one bad value; several are rendered inside the one
+     * pair of brackets, which is this emulator's reading of a sentence AWS writes for the plural.
+     */
+    private static void requirePublishedNamespaces(List<String> namespaces) {
+        List<String> unknown = namespaces.stream()
+                .filter(namespace -> !AwsServiceNamespaces.isPublished(namespace))
+                .toList();
+        if (!unknown.isEmpty()) {
+            throw new AwsException("InvalidInput",
+                    "Invalid service namespace: [" + String.join(", ", unknown) + "]", 400);
+        }
+    }
+
+    /**
+     * The same rule for the member that takes one namespace, which AWS words differently and
+     * spells {@code namepace}, recorded on {@code GetServiceLastAccessedDetailsWithEntities} on
+     * 2026-11-03. The misspelling is AWS's and is kept, a client matching the message having to
+     * match what the service sends.
+     *
+     * <p>A namespace the job itself reports is readable whether the catalog publishes it or not.
+     * The catalog is vendored, so it is as new as the last regeneration, where a policy may grant
+     * a service published after it: the report would list that namespace and a request for its
+     * entities would then be refused, which is this emulator disagreeing with itself. The job is
+     * what decides, which is why it is read first. Nothing else is exempt: a namespace the job
+     * does not report and the catalog does not publish is still refused.
+     */
+    private static void requireReadableNamespace(String namespace, ServiceLastAccessedJob job) {
+        if (AwsServiceNamespaces.isPublished(namespace) || job.getServiceNamespaces().contains(namespace)) {
+            return;
+        }
+        throw new AwsException("InvalidInput",
+                "Service namepace " + namespace + " is either invalid or unsupported.", 400);
+    }
+
+    /**
      * {@code SortKey} if the request carries one the enum permits, null if it carries none. A
      * request that carries the member is held to the enum whatever it carries: an empty value is
      * not one of the four, and reading it as an absent member would answer a default-ordered
@@ -2881,6 +2922,7 @@ public class IamQueryHandler {
         validatePagingInputs("GetServiceLastAccessedDetailsWithEntities", params);
         ServiceLastAccessedJob job = serviceLastAccessedService.get(
                 accountResolver.resolve(authorization), jobId);
+        requireReadableNamespace(namespace, job);
         // The report named the services it covers, so an entity is only reported for one of those.
         List<ServiceLastAccessedEntity> reported = job.getServiceNamespaces().contains(namespace)
                 ? job.getEntities() : List.of();
@@ -2915,12 +2957,12 @@ public class IamQueryHandler {
                                                              String authorization) {
         String accountId = accountResolver.resolve(authorization);
         String arn = requireParam(params, "Arn");
+        // The vendored request shape carries the member now, so the declared constraints are read
+        // ahead of this method: an absent list is the required member it declares, a list over 200
+        // is its own bound, and a value breaking the published pattern is that pattern. What is
+        // left here is the one rule the model cannot state, which services AWS publishes.
         List<String> namespaces = getMemberList(params, "ServiceNamespaces");
-        if (namespaces.isEmpty()) {
-            throw new AwsException("InvalidInput",
-                    "The request must include at least one service namespace.", 400);
-        }
-        checkListLength(namespaces.size(), "serviceNamespaces", MAX_SERVICE_NAMESPACES);
+        requirePublishedNamespaces(namespaces);
         List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
         // The response list carries one entry per requested namespace, so that is what a Marker
         // walks through. The request models no MaxItems, so the table gives it no limit and the

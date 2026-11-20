@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -9,6 +10,9 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
+import io.floci.aws.services.eks.model.LogSetup;
+import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -39,7 +43,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /** Every attribute {@code publish} writes for a cluster. */
     private static final List<String> CLUSTER_ATTRIBUTES =
-            List.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl");
+            List.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl",
+                    "ClusterSecurityGroupId");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** Every attribute {@code publishNodegroup} writes for a nodegroup. */
     private static final List<String> NODEGROUP_ATTRIBUTES = List.of("Id", "ClusterName", "NodegroupName", "Arn");
@@ -110,6 +115,18 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Unstripped: createCluster reads the reserved cluster-args tag, then drops it.
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
+        request.setEncryptionConfig(createSetting(props, "EncryptionConfig", ctx, new TypeReference<>() { }));
+        KubernetesNetworkConfig network =
+                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { });
+        if (network != null) {
+            // EKS Auto Mode stays out until ComputeConfig and StorageConfig go with it: CreateCluster refuses load
+            // balancing without the other two.
+            network.setElasticLoadBalancing(null);
+        }
+        request.setKubernetesNetworkConfig(network);
+        request.setResourcesVpcConfig(createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { }));
+        request.setAccessConfig(createSetting(props, "AccessConfig", ctx, new TypeReference<>() { }));
+        request.setLogging(logging(props, ctx));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
         // new one has, so its endpoint and certificate must not outlive it.
@@ -127,11 +144,66 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * A property in its API request shape, or null when the template leaves it out. The
+     * template value is read against the type the resource schema declares, so a value of another type
+     * fails the resource with CloudFormation's wording. The request model has no ServiceIpv6Cidr member
+     * of KubernetesNetworkConfig and no ControlPlaneEgressMode member of ResourcesVpcConfig, so those
+     * are not read, and a create leaves out KubernetesNetworkConfig's ElasticLoadBalancing, as it does
+     * EKS Auto Mode's other settings.
+     */
+    private static <T> T createSetting(JsonNode props, String name, ProvisionContext ctx, TypeReference<T> type) {
+        JsonNode resolved = readSetting(props, name, ctx);
+        if (resolved == null) {
+            return null;
+        }
+        try {
+            return MAPPER.convertValue(CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES),
+                    type);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationError", "AWS::EKS::Cluster " + name + " is not valid: "
+                    + e.getMessage(), 400);
+        }
+    }
+
+    private static JsonNode readSetting(JsonNode props, String name, ProvisionContext ctx) {
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode resolved = types.readProperty(CLUSTER, props, name);
+        types.finish();
+        return resolved;
+    }
+
+    /**
+     * Logging in the API shape. The template lists the enabled types as
+     * {@code ClusterLogging.EnabledTypes[].Type}; the service disables every type not listed.
+     */
+    private static Logging logging(JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = readSetting(props, "Logging", ctx);
+        if (resolved == null) {
+            return null;
+        }
+        List<String> enabled = new ArrayList<>();
+        JsonNode types = resolved.path("ClusterLogging").path("EnabledTypes");
+        types.forEach(entry -> {
+            String type = entry.path("Type").asText("");
+            if (type.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "AWS::EKS::Cluster Logging.ClusterLogging.EnabledTypes entry has no Type", 400);
+            }
+            enabled.add(type);
+        });
+        return new Logging(List.of(new LogSetup(enabled, true)));
+    }
+
     private void publish(StackResource r, Cluster cluster) {
         r.setPhysicalId(cluster.getName());
         r.getAttributes().put("Arn", cluster.getArn());
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint", cluster.getEndpoint());
+        }
+        if (cluster.getResourcesVpcConfig() != null
+                && cluster.getResourcesVpcConfig().getClusterSecurityGroupId() != null) {
+            r.getAttributes().put("ClusterSecurityGroupId", cluster.getResourcesVpcConfig().getClusterSecurityGroupId());
         }
         if (cluster.getCertificateAuthority() != null && cluster.getCertificateAuthority().getData() != null) {
             r.getAttributes().put("CertificateAuthorityData", cluster.getCertificateAuthority().getData());

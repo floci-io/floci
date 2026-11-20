@@ -34,7 +34,7 @@ public class Session implements SparkConnectSession {
     private Map<String, Object> configurationOverrides;
     private NetworkConfiguration networkConfiguration;
     private Long idleTimeoutMinutes;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private Long totalExecutionDurationSeconds;
 
     public String getApplicationId() { return applicationId; }

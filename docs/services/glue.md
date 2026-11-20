@@ -169,7 +169,7 @@ retroactively.
 | GetJobRuns | Lists a job's runs, newest first. |
 | BatchStopJobRun | Stops running runs of a job and reports the rest in `Errors`. |
 
-Job runs do not execute the job's script. A run follows Glue's state machine and response shape: it
+By default job runs do not execute the job's script (see [Running Spark job scripts](#running-spark-job-scripts)). A run follows Glue's state machine and response shape: it
 takes the job's worker type, worker count, timeout and Glue version unless the request overrides them,
 and `MaxConcurrentRuns` (1 when unset) rejects a start with `ConcurrentRunsExceededException` unless
 `JobRunQueuingEnabled` is set. With the default `job-run-duration-seconds` of 0 a run is `SUCCEEDED` as
@@ -177,6 +177,22 @@ soon as it starts. A positive value keeps each run `RUNNING` for that many secon
 `BatchStopJobRun` (the run ends `STOPPED`) and the concurrency limit; a run whose duration exceeds the job
 timeout ends `TIMEOUT` when the timeout is reached. Queued runs are admitted straight away rather than
 waiting in `WAITING`.
+
+#### Running Spark job scripts
+
+With `FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`, `StartJobRun` runs the script of a Spark job (`Command.Name` `glueetl`) whose
+`ScriptLocation` is in S3, with `spark-submit` in a container of AWS's Glue 5.0 image, which holds the Glue ETL library. The
+script gets the job's `DefaultArguments` with the run's `Arguments` over them, plus `--JOB_NAME` and `--JOB_RUN_ID`, so
+`awsglue.utils.getResolvedOptions` reads them. Its AWS calls reach Floci with the credentials of the job's `Role`.
+
+The run is `RUNNING` while the script runs (or `WAITING` while `JobRunQueuingEnabled` is set and `MaxConcurrentRuns` is in use,
+starting once a slot frees), then `SUCCEEDED` when it exits with 0 or `FAILED` with an `ErrorMessage` when it does not or cannot
+start; `TIMEOUT` when the job's `Timeout` passes; `STOPPED` after `BatchStopJobRun`. Python shell, streaming and Ray jobs, and
+jobs whose script is not in S3, keep the simulation above. The image is large (AWS asks for at least 7 GB of disk) and needs a
+Docker daemon (explicitly mount `/var/run/docker.sock` when running Floci in a container or Testcontainers wrapper with
+`FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`), which is why the mode is off by default. When the Docker daemon is unreachable at
+start, runs fall back to the simulation above; if Docker fails mid-run or Floci restarts while a run is executing or waiting,
+the run is `FAILED`.
 
 #### Crawlers
 
@@ -373,6 +389,9 @@ Each table bucket of the account is then a child catalog, `s3tablescatalog/<buck
 |---|---|---|
 | `FLOCI_SERVICES_GLUE_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_GLUE_JOB_RUN_DURATION_SECONDS` | `0` | Seconds a job run stays `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
+| `FLOCI_SERVICES_GLUE_RUNNER_MODE` | `immediate` | `docker` runs the script of a `glueetl` job in a container; `immediate` runs no script |
+| `FLOCI_SERVICES_GLUE_IMAGE` | `public.ecr.aws/glue/aws-glue-libs:5` | The image a `docker` job run uses |
+| `FLOCI_SERVICES_GLUE_DOCKER_NETWORK` | | Docker network for the job containers; unset uses the global default |
 | `FLOCI_SERVICES_GLUE_CRAWLER_RUN_DURATION_SECONDS` | `0` | Seconds a crawl keeps the crawler `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
 
 ## Integration with Athena
