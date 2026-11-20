@@ -4,6 +4,7 @@ import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodBuilder;
+import io.fabric8.kubernetes.api.model.PodConditionBuilder;
 import io.fabric8.kubernetes.api.model.PodStatusBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
@@ -41,6 +42,7 @@ import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -81,6 +83,7 @@ class KubernetesPodLauncherTest {
 
     private KubernetesApiClient apiClient;
     private EmulatorConfig config;
+    private EmulatorConfig.LambdaServiceConfig.KubernetesExecutor kubernetes;
     private final RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
     private RuntimeApiServerFactory runtimeApiServerFactory;
     private RuntimeApiServer runtimeApiServer;
@@ -98,7 +101,7 @@ class KubernetesPodLauncherTest {
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
-        EmulatorConfig.LambdaServiceConfig.KubernetesExecutor kubernetes = mock(EmulatorConfig.LambdaServiceConfig.KubernetesExecutor.class);
+        kubernetes = mock(EmulatorConfig.LambdaServiceConfig.KubernetesExecutor.class);
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         lenient().when(config.services()).thenReturn(services);
         lenient().when(services.lambda()).thenReturn(lambda);
@@ -400,6 +403,79 @@ class KubernetesPodLauncherTest {
                 .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining("failed to start");
         verify(runtimeApiServerFactory).release(runtimeApiServer);
+    }
+
+    @Test
+    void unschedulablePodFailsTheColdStartImmediately() {
+        markUnschedulableInBackground(Instant.now());
+
+        assertThatThrownBy(() -> launcher.launch(function()))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Unschedulable");
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+    }
+
+    @Test
+    void unschedulablePodIsGivenTheGracePeriodWhileTheAutoscalerAddsANode() {
+        // With the grace period on, the pod reported Unschedulable moments ago is not
+        // terminal yet: the autoscaler needs it in that state to add a node, and the pod
+        // reaches Running once the node joins.
+        lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(30);
+        markUnschedulableThenRunningInBackground(Instant.now());
+
+        ContainerHandle handle = launcher.launch(function());
+
+        assertThat(handle.getContainerId()).startsWith("floci-lambda-");
+    }
+
+    @Test
+    void unschedulablePodFailsOnceTheGracePeriodIsOut() {
+        lenient().when(kubernetes.unschedulableGraceSeconds()).thenReturn(5);
+        markUnschedulableInBackground(Instant.now().minusSeconds(60));
+
+        assertThatThrownBy(() -> launcher.launch(function()))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Unschedulable");
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+    }
+
+    /** Reports the pod Unschedulable since {@code since}, the shape Karpenter's cluster leaves. */
+    private void markUnschedulableInBackground(Instant since) {
+        CompletableFuture.runAsync(() -> {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).until(
+                    () -> client.pods().inNamespace("default").list().getItems().stream()
+                            .anyMatch(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-")));
+            Pod pod = client.pods().inNamespace("default").list().getItems().stream()
+                    .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                    .findFirst().orElseThrow();
+            pod.setStatus(new PodStatusBuilder()
+                    .withPhase("Pending")
+                    .withConditions(new PodConditionBuilder()
+                            .withType("PodScheduled")
+                            .withStatus("False")
+                            .withReason("Unschedulable")
+                            .withMessage("Insufficient memory")
+                            .withLastTransitionTime(since.toString())
+                            .build())
+                    .build());
+            client.pods().inNamespace("default").resource(pod).updateStatus();
+        });
+    }
+
+    private void markUnschedulableThenRunningInBackground(Instant since) {
+        CompletableFuture.runAsync(() -> {
+            markUnschedulableInBackground(since);
+            Awaitility.await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(
+                    () -> !client.pods().inNamespace("default").list().getItems().stream()
+                            .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                            .findFirst().orElseThrow()
+                            .getStatus().getConditions().isEmpty());
+            Pod pod = client.pods().inNamespace("default").list().getItems().stream()
+                    .filter(p -> p.getMetadata().getName().startsWith("floci-lambda-my-fn-"))
+                    .findFirst().orElseThrow();
+            pod.setStatus(new PodStatusBuilder().withPhase("Running").build());
+            client.pods().inNamespace("default").resource(pod).updateStatus();
+        });
     }
 
     @Test
