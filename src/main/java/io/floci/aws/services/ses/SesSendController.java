@@ -108,8 +108,10 @@ public class SesSendController {
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = request.path("TenantName").asText(null);
             JsonNode content = request.path("Content");
-            if (!content.has("Raw") && !content.has("Simple") && !namesStoredTemplate(content.path("Template"))) {
-                requireInlineTemplateFields(content.path("Template"));
+            JsonNode template = content.path("Template");
+            TemplateSelector selector = TemplateSelector.of(template);
+            if (!content.has("Raw") && !content.has("Simple")) {
+                requireSendEmailTemplateContent(selector, template);
             }
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
             ListManagementOptions listManagement =
@@ -161,40 +163,26 @@ public class SesSendController {
                         .build();
                 messageId = sesService.sendEmail(simpleRequest);
             } else if (content.has("Template")) {
-                if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
+                if (fromEmailAddress == null || fromEmailAddress.isEmpty()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
                 }
-                JsonNode template = content.path("Template");
-                String templateName = template.path("TemplateName").asText(null);
-                String templateArn = template.path("TemplateArn").asText(null);
-                boolean hasName = templateName != null && !templateName.isBlank();
-                boolean hasArn = templateArn != null && !templateArn.isBlank();
-                boolean hasInline = template.has("TemplateContent");
-                int selectorCount = (hasName ? 1 : 0) + (hasArn ? 1 : 0) + (hasInline ? 1 : 0);
-                if (hasInline && selectorCount > 1) {
+                if (fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException",
-                            "TemplateName and TemplateArn cannot be provided when TemplateContent is provided.",
-                            400);
+                            "Invalid email address " + fromEmailAddress + ".", 400);
                 }
-                if (selectorCount > 1) {
+                if (selector.isEmpty()) {
                     throw new AwsException("BadRequestException",
-                            "Content.Template must specify exactly one of TemplateName, TemplateArn, or TemplateContent.",
-                            400);
+                            "TemplateName and TemplateArn cannot be both empty", 400);
                 }
-                if (selectorCount == 0) {
-                    throw new AwsException("BadRequestException",
-                            "Content.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
-                }
+                selector.requireNameAlignsWithArn(region);
                 JsonNode templateData = parseTemplateData(template, "TemplateData");
                 List<MessageHeader> additionalHeaders =
                         parseHeadersArray(template.path("Headers"), "content.template.headers");
-                if (hasName || hasArn) {
-                    String resolvedName = hasName
-                            ? templateName
-                            : SesTemplateService.templateNameFromArn(templateArn);
+                if (selector.namesStoredTemplate()) {
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     SendEmailRequest templateRequest = sendRequest
-                            .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
+                            .content(new EmailContent.Template(selector.storedName(region), templateData,
+                                    additionalHeaders))
                             .build();
                     messageId = sesService.sendEmail(templateRequest);
                 } else {
@@ -247,8 +235,7 @@ public class SesSendController {
             requireInlineTemplateFields(request.path("DefaultContent").path("Template"));
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
-                throw new AwsException("BadRequestException",
-                        "FromEmailAddress is required.", 400);
+                throw new AwsException("BadRequestException", "Email address not specified.", 400);
             }
             SesAddressSyntax.requireBulkAddress(fromEmailAddress);
             List<String> replyToAddresses = addressList(request, "ReplyToAddresses");
@@ -263,44 +250,33 @@ public class SesSendController {
                 throw new AwsException("BadRequestException",
                         "DefaultContent.Template is required.", 400);
             }
-            String templateName = template.path("TemplateName").asText(null);
-            String templateArn = template.path("TemplateArn").asText(null);
-            boolean hasName = templateName != null && !templateName.isBlank();
-            boolean hasArn = templateArn != null && !templateArn.isBlank();
-            boolean hasInline = template.has("TemplateContent");
-            int selectorCount = (hasName ? 1 : 0) + (hasArn ? 1 : 0) + (hasInline ? 1 : 0);
-            if (hasInline && selectorCount > 1) {
-                throw new AwsException("BadRequestException",
-                        "TemplateName or TemplateArn cannot be provided with EmailTemplateContent", 400);
-            }
-            if (selectorCount > 1) {
-                throw new AwsException("BadRequestException",
-                        "DefaultContent.Template must specify exactly one of TemplateName, TemplateArn, or TemplateContent.",
-                        400);
-            }
-            if (selectorCount == 0) {
+            TemplateSelector selector = TemplateSelector.of(template);
+            if (selector.isEmpty()) {
                 throw new AwsException("BadRequestException",
                         "DefaultContent.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
             }
+            // AWS counts the entries after the inline content check and the sender checks, and
+            // before it rejects a stored template named beside the content or looks one up
+            // (probe-confirmed).
+            SesService.requireBulkDestinationCount(bulkEntries.size());
+            if (selector.inline() && selector.namesStoredTemplate()) {
+                throw new AwsException("BadRequestException",
+                        "TemplateName or TemplateArn cannot be provided with EmailTemplateContent", 400);
+            }
+            selector.requireNameAlignsWithArn(region);
 
             String subject = null;
             String text = null;
             String html = null;
             // The send looks the stored template up only after its sender checks (probe-confirmed).
             String storedTemplateName = null;
-            if (hasInline) {
+            if (selector.inline()) {
                 JsonNode inline = template.path("TemplateContent");
                 subject = inline.path("Subject").asText(null);
                 text = inline.path("Text").asText(null);
                 html = inline.path("Html").asText(null);
-            }
-            // AWS counts the entries after the inline content check and before it looks the stored
-            // template up (probe-confirmed).
-            SesService.requireBulkDestinationCount(bulkEntries.size());
-            if (!hasInline) {
-                storedTemplateName = hasName
-                        ? templateName
-                        : SesTemplateService.templateNameFromArn(templateArn);
+            } else {
+                storedTemplateName = selector.storedName(region);
             }
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
@@ -430,20 +406,68 @@ public class SesSendController {
     // AWS reports an incomplete inline template ahead of a missing or malformed sender, the
     // destinations, the entry count, the template data, the message tags, the list management
     // options, the feedback address and the configuration set and tenant lookups (probe-confirmed
-    // on SendEmail and SendBulkEmail). A template that also names a stored one differs by
-    // operation: SendBulkEmail still reports the incomplete content first, SendEmail reports the
-    // combination, so SendEmail skips this check for it.
+    // on SendEmail and SendBulkEmail). SendBulkEmail reports it even when the template also names
+    // a stored one.
     private static void requireInlineTemplateFields(JsonNode template) {
-        if (template.has("TemplateContent")) {
+        if (template.hasNonNull("TemplateContent")) {
             JsonNode inline = template.path("TemplateContent");
             SesService.requireInlineTemplateContent(inline.path("Subject").asText(null),
                     inline.path("Text").asText(null), inline.path("Html").asText(null));
         }
     }
 
-    private static boolean namesStoredTemplate(JsonNode template) {
-        return !template.path("TemplateName").asText("").isBlank()
-                || !template.path("TemplateArn").asText("").isBlank();
+    // SendEmail rejects a stored template named beside TemplateContent ahead of the sender, the
+    // destinations, the template data, the message tags, the list management options, the feedback
+    // address and the configuration set and tenant lookups, whatever the content holds
+    // (probe-confirmed).
+    private static void requireSendEmailTemplateContent(TemplateSelector selector, JsonNode template) {
+        if (selector.inline() && selector.namesStoredTemplate()) {
+            throw new AwsException("BadRequestException",
+                    "TemplateName and TemplateArn cannot be provided when TemplateContent is provided.", 400);
+        }
+        requireInlineTemplateFields(template);
+    }
+
+    /**
+     * Which of TemplateName, TemplateArn and TemplateContent a send's template carries. A member
+     * sent as an explicit null counts as absent (probe-confirmed).
+     */
+    private record TemplateSelector(String name, String arn, boolean inline) {
+
+        static TemplateSelector of(JsonNode template) {
+            return new TemplateSelector(template.path("TemplateName").asText(null),
+                    template.path("TemplateArn").asText(null), template.hasNonNull("TemplateContent"));
+        }
+
+        boolean hasName() {
+            return name != null && !name.isBlank();
+        }
+
+        boolean hasArn() {
+            return arn != null && !arn.isBlank();
+        }
+
+        boolean namesStoredTemplate() {
+            return hasName() || hasArn();
+        }
+
+        boolean isEmpty() {
+            return !inline && !namesStoredTemplate();
+        }
+
+        String storedName(String region) {
+            return hasName() ? name : SesTemplateService.sendTemplateNameFromArn(arn, region);
+        }
+
+        // AWS accepts a TemplateName beside a TemplateArn when both name the same template, and
+        // reports a malformed ARN first (probe-confirmed on SendEmail and SendBulkEmail).
+        void requireNameAlignsWithArn(String region) {
+            if (hasName() && hasArn()
+                    && !name.equals(SesTemplateService.sendTemplateNameFromArn(arn, region))) {
+                throw new AwsException("BadRequestException", "The SES resource '" + name
+                        + "' does not align with the given ARN '" + arn + "'.", 400);
+            }
+        }
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {
