@@ -18,8 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-import static io.restassured.RestAssured.given;
-import static io.restassured.http.ContentType.URLENC;
+import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
+import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -35,15 +35,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     private static final String ID = "vpc-sg-cluster-" + System.nanoTime();
-
-    private static RequestSpecification rds(String action) {
-        return given().header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
-                        + "SignedHeaders=content-type;host, Signature=test")
-                .contentType(URLENC)
-                .formParam("Action", action)
-                .formParam("Version", "2014-10-31");
-    }
 
     private static List<String> groupIds(String xml) {
         try {
@@ -65,14 +56,6 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .when().post("/").then().statusCode(200).extract().asString());
     }
 
-    private static RequestSpecification create() {
-        return rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password");
-    }
-
     @AfterEach
     void cleanUp() {
         // a protected cluster would survive the delete below and leak into the next test
@@ -87,7 +70,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void createStoresRequestedGroupsAndModifyReplacesThem() {
-        String created = create()
+        String created = createAuroraPostgresCluster(ID)
                 .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-abcdef01")
                 .when().post("/").then().statusCode(200).extract().asString();
         assertEquals(List.of("sg-abcdef01"), groupIds(created));
@@ -110,7 +93,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void omittedGroupsDefaultToTheVpcsDefaultSecurityGroup() {
-        String created = create().when().post("/").then().statusCode(200).extract().asString();
+        String created = createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200).extract().asString();
         List<String> groups = describedGroupIds();
         assertEquals(1, groups.size());
         assertNotEquals("sg-00000000", groups.get(0));
@@ -124,7 +107,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         String restored = ID + "-restored";
         String snapshot = ID + "-snap";
         try {
-            create().when().post("/").then().statusCode(200);
+            createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200);
             rds("CreateDBClusterSnapshot").formParam("DBClusterIdentifier", ID)
                     .formParam("DBClusterSnapshotIdentifier", snapshot).post("/").then().statusCode(200);
             for (String group : new String[] {null, "sg-abcdef01"}) {
@@ -161,7 +144,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void maintenanceWindowDayNamesReadBackLowerCase() {
-        String created = create()
+        String created = createAuroraPostgresCluster(ID)
                 .formParam("PreferredMaintenanceWindow", "Mon:00:00-Mon:03:00")
                 .when().post("/").then().statusCode(200).extract().asString();
         assertEquals(true, created.contains("<PreferredMaintenanceWindow>mon:00:00-mon:03:00<"));
@@ -195,14 +178,14 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void windowsAndDeletionProtectionAreStoredAndDefaulted() {
-        create().when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200);
         assertEquals("mon:00:00-mon:03:00", described("PreferredMaintenanceWindow"));
         assertEquals("04:00-06:00", described("PreferredBackupWindow"));
         assertEquals("false", described("DeletionProtection"));
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
 
-        String created = create()
+        String created = createAuroraPostgresCluster(ID)
                 .formParam("PreferredBackupWindow", "05:00-06:00")
                 .formParam("PreferredMaintenanceWindow", "tue:07:00-tue:08:00")
                 .formParam("DeletionProtection", "true")
@@ -228,7 +211,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void protectedClusterIsNotDeletedUntilProtectionIsLifted() {
-        create().formParam("DeletionProtection", "true").when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).formParam("DeletionProtection", "true").when().post("/").then().statusCode(200);
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterCombination</Code>"))
@@ -245,16 +228,16 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void invalidWindowsAreRefusedAndLeaveNoClusterBehind() {
-        create().formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400)
+        createAuroraPostgresCluster(ID).formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
-        create().formParam("PreferredBackupWindow", "05:00-06:00")
+        createAuroraPostgresCluster(ID).formParam("PreferredBackupWindow", "05:00-06:00")
                 .formParam("PreferredMaintenanceWindow", "mon:05:30-mon:06:30")
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
 
-        create().formParam("PreferredBackupWindow", "05:00-06:00").when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).formParam("PreferredBackupWindow", "05:00-06:00").when().post("/").then().statusCode(200);
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400);
         assertEquals("05:00-06:00", described("PreferredBackupWindow"));
@@ -267,7 +250,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     @Test
     void windowGivenAloneIsPairedWithAClearOneOnCreateAndRefusedOnModify() {
         // default maintenance mon:00:00-mon:03:00 overlaps 01:00-02:00, so a clear one is derived
-        create().formParam("PreferredBackupWindow", "01:00-02:00").when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).formParam("PreferredBackupWindow", "01:00-02:00").when().post("/").then().statusCode(200);
         assertEquals("01:00-02:00", described("PreferredBackupWindow"));
         String maint = described("PreferredMaintenanceWindow");
         assertEquals(false, BackupWindows.overlap("01:00-02:00", maint), maint);
@@ -275,7 +258,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
 
         // default backup 04:00-06:00 overlaps mon:04:30-mon:05:30
-        create().formParam("PreferredMaintenanceWindow", "mon:04:30-mon:05:30")
+        createAuroraPostgresCluster(ID).formParam("PreferredMaintenanceWindow", "mon:04:30-mon:05:30")
                 .when().post("/").then().statusCode(200);
         String backup = described("PreferredBackupWindow");
         assertEquals(false, BackupWindows.overlap(backup, "mon:04:30-mon:05:30"), backup);
@@ -283,7 +266,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
 
         // never-set windows count as the defaults on modify
-        create().when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200);
         assertOverlapRefused(rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("PreferredBackupWindow", "01:00-02:00").when().post("/").then());
         assertOverlapRefused(rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
@@ -293,7 +276,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void modifyWithABadWindowChangesNothing() {
-        create().when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200);
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("BackupRetentionPeriod", "9").formParam("PreferredBackupWindow", "garbage")
                 .when().post("/").then().statusCode(400);
@@ -302,7 +285,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void createWithMalformedDeletionProtectionLeavesNoClusterBehind() {
-        create().formParam("DeletionProtection", "garbage").when().post("/").then().statusCode(400)
+        createAuroraPostgresCluster(ID).formParam("DeletionProtection", "garbage").when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
     }
@@ -312,7 +295,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         rds("CreateDBClusterParameterGroup").formParam("DBClusterParameterGroupName", "pg-rejected")
                 .formParam("DBParameterGroupFamily", "aurora-postgresql15").formParam("Description", "d")
                 .when().post("/").then().statusCode(200);
-        create().formParam("MasterUserPassword", "original-password1")
+        createAuroraPostgresCluster(ID).formParam("MasterUserPassword", "original-password1")
                 .formParam("VpcSecurityGroupIds.member.1", "sg-old").when().post("/").then().statusCode(200);
         String groupBefore = described("DBClusterParameterGroup");
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
@@ -332,14 +315,14 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void createWithEmptySecurityGroupMemberLeavesNoClusterBehind() {
-        create().formParam("VpcSecurityGroupIds.member.1", "").when().post("/").then().statusCode(400)
+        createAuroraPostgresCluster(ID).formParam("VpcSecurityGroupIds.member.1", "").when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
     }
 
     @Test
     void modifyWithEmptySecurityGroupMemberChangesNothing() {
-        create().formParam("VpcSecurityGroupIds.member.1", "sg-old").when().post("/").then().statusCode(200);
+        createAuroraPostgresCluster(ID).formParam("VpcSecurityGroupIds.member.1", "sg-old").when().post("/").then().statusCode(200);
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("VpcSecurityGroupIds.member.1", "").formParam("BackupRetentionPeriod", "9")
                 .when().post("/").then().statusCode(400)
