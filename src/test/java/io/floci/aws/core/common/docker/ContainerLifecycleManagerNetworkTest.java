@@ -230,6 +230,32 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
+    void createJoinsTheContainerToItsFurtherNetworksBeforeItStarts() {
+        manager().create(specJoining("steps-network"));
+
+        InOrder order = inOrder(createCmd, connectCmd);
+        order.verify(createCmd).exec();
+        order.verify(connectCmd).withContainerId("container-id");
+        order.verify(connectCmd).withNetworkId("steps-network");
+        order.verify(connectCmd).exec();
+        verify(connectCmd, never()).withContainerNetwork(any());
+        verify(disconnectCmd, never()).exec();
+    }
+
+    @Test
+    void createRemovesTheContainerWhenItCannotJoinAFurtherNetwork() {
+        RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        lenient().when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
+        doThrow(new IllegalStateException("network gone")).when(connectCmd).exec();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager().create(specJoining("steps-network")));
+
+        assertTrue(failure.getMessage().contains("steps-network"), failure.getMessage());
+        verify(dockerClient).removeContainerCmd("container-id");
+    }
+
+    @Test
     void createLeavesNetworkAloneWithoutLinkLocalIps() {
         manager().create(new ContainerSpec("busybox:stable"));
 
@@ -579,7 +605,7 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
+        return new ContainerLifecycleManager(dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec spec(String networkMode, Map<Integer, Integer> portBindings,
@@ -597,5 +623,14 @@ class ContainerLifecycleManagerNetworkTest {
                 List.of(), "test-network", List.of(), List.of(), List.of(), List.of(), Map.of(), null,
                 false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
                 List.of(LINK_LOCAL_IP), Map.of(), false);
+    }
+
+    // A container on test-network that joins network too.
+    private static ContainerSpec specJoining(String network) {
+        return new ContainerSpec(
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(),
+                List.of(), "test-network", List.of(), List.of(), List.of(), List.of(), Map.of(), null,
+                false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
+                List.of(), Map.of(), false, LinuxOptions.NONE, false, null, List.of(network));
     }
 }

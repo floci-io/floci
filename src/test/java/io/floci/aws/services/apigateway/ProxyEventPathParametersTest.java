@@ -3,6 +3,7 @@ package io.floci.aws.services.apigateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
@@ -50,7 +51,7 @@ class ProxyEventPathParametersTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, MAPPER, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null, new HttpProxyInvoker());
     }
 
     private JsonNode pathParametersFor(String path, String resourcePath) throws Exception {

@@ -1,5 +1,6 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
@@ -26,7 +27,7 @@ class ElbV2RuleLookupIntegrationTest {
                 ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1)) {
             String balancer = client.createLoadBalancer(r -> r
                     .name("sdk-rule-" + UUID.randomUUID().toString().substring(0, 8))
-                    .type("application").subnets(List.of("subnet-default-us-east-1-a", "subnet-default-us-east-1-b")))
+                    .type("application").subnets(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"))))
                     .loadBalancers().get(0).loadBalancerArn();
             try {
                 String listener = client.createListener(r -> r.loadBalancerArn(balancer).port(8080).protocol("HTTP")

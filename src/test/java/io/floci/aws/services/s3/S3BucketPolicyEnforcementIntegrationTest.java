@@ -385,6 +385,47 @@ class S3BucketPolicyEnforcementIntegrationTest {
         assertReadAndCopy(reader, source, destination, 403);
     }
 
+    @Test
+    void aBucketPolicyReadsTheRequestTime() {
+        // aws:CurrentTime and aws:EpochTime are "always included in the request context", so the
+        // context S3 builds for its own bucket-policy check carries them too. A cross-account read
+        // needs that check's Allow, so a grant conditioned on the request time is refused when
+        // they are missing there.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "bp-time-" + suffix;
+        S3RequestSigner owner = sourceBucketInAccountA(source);
+        putObjectAs(source, "current/o.txt", "current", owner);
+        putObjectAs(source, "epoch/o.txt", "epoch", owner);
+        S3RequestSigner reader = createAccountAdmin("reader-" + suffix, ACCOUNT_B).signer();
+
+        putBucketPolicyAs(source, requestTimeGrant(source, "DateLessThan", "NumericLessThan"), owner);
+        given().filter(reader).when().get("/" + source + "/current/o.txt").then().statusCode(403);
+        given().filter(reader).when().get("/" + source + "/epoch/o.txt").then().statusCode(403);
+
+        putBucketPolicyAs(source, requestTimeGrant(source, "DateGreaterThan", "NumericGreaterThan"), owner);
+        given().filter(reader).when().get("/" + source + "/current/o.txt")
+                .then().statusCode(200).body(equalTo("current"));
+        given().filter(reader).when().get("/" + source + "/epoch/o.txt")
+                .then().statusCode(200).body(equalTo("epoch"));
+    }
+
+    /**
+     * Grants account B {@code current/*} on a {@code dateOperator} condition on
+     * {@code aws:CurrentTime}, and {@code epoch/*} on a {@code numericOperator} one on
+     * {@code aws:EpochTime}, both against January 1, 2020.
+     */
+    private static String requestTimeGrant(String bucket, String dateOperator, String numericOperator) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"s3:GetObject",
+                   "Resource":"arn:aws:s3:::%2$s/current/*",
+                   "Condition":{"%3$s":{"aws:CurrentTime":"2020-01-01T00:00:00Z"}}},
+                  {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"s3:GetObject",
+                   "Resource":"arn:aws:s3:::%2$s/epoch/*",
+                   "Condition":{"%4$s":{"aws:EpochTime":"1577836800"}}}]}"""
+                .formatted(ACCOUNT_B, bucket, dateOperator, numericOperator);
+    }
+
     /** Creates a bucket in account A holding {@code o.txt}, and returns its owner, an account-A administrator. */
     private static S3RequestSigner sourceBucketInAccountA(String bucket) {
         S3RequestSigner owner = createAccountAdmin("owner-" + bucket, ACCOUNT_A).signer();

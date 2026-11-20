@@ -18,6 +18,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.StreamingResponses;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
@@ -122,9 +123,6 @@ public class S3Controller {
     /** The errors S3Service answers a read of an object that is not there with. */
     private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchBucket", "NoSuchKey", "NoSuchVersion");
 
-    private static final Pattern MINTED_VERSION_ID =
-            Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
-
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -149,6 +147,7 @@ public class S3Controller {
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final EmulatorConfig config;
+    private final S3VirtualHostFilter virtualHostFilter;
     private final Clock clock;
 
     @Inject
@@ -163,6 +162,7 @@ public class S3Controller {
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
                         EmulatorConfig config,
+                        S3VirtualHostFilter virtualHostFilter,
                         Clock clock) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
@@ -176,6 +176,7 @@ public class S3Controller {
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.config = config;
+        this.virtualHostFilter = virtualHostFilter;
         this.clock = clock;
     }
 
@@ -3957,7 +3958,7 @@ public class S3Controller {
      * {@code versionId=}, which a {@code @QueryParam} reads as absent.
      */
     private void checkVersionId(String bucket, String versionId) {
-        if (versionId == null || "null".equals(versionId) || MINTED_VERSION_ID.matcher(versionId).matches()
+        if (versionId == null || "null".equals(versionId) || UuidShapes.matchesLowerCase(versionId)
                 || !s3Service.bucketExists(bucket)) {
             return;
         }
@@ -4995,7 +4996,7 @@ public class S3Controller {
                 httpHeaders.getHeaderString("Host"),
                 httpHeaders.getHeaderString("X-Forwarded-Host"),
                 uriInfo.getRequestUri());
-        if (host == null) {
+        if (host == null || virtualHostFilter.isEndpointRoot(host)) {
             return null;
         }
         String bucket = S3VirtualHostFilter.extractBucketFromExisting(host, s3Service);

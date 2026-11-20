@@ -19,6 +19,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -57,6 +58,9 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    private static final String DOCUMENT_PREFIX = "document/";
+    private static final String PARAMETER_PREFIX = "parameter/";
+    private static final String ASSOCIATION_PREFIX = "association/";
     private static final String ECS_AL2023_RECOMMENDED =
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
     private static final String ECS_AL2023_ARM64_RECOMMENDED =
@@ -1152,8 +1156,9 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     }
 
     /**
-     * Applies {@code change} to the tags of the document or association {@code resourceId} names and stores
-     * it; {@code false}, changing nothing, for any other {@code resourceType}.
+     * Applies {@code change} to a copy of the tags of the document or association {@code resourceId} names, puts the
+     * copy in place of the held map and stores it; {@code false}, changing nothing, for any other
+     * {@code resourceType}.
      */
     private boolean updateTags(String resourceType, String resourceId, String region,
                                Consumer<Map<String, String>> change) {
@@ -1161,12 +1166,16 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         switch (resourceType) {
             case "Document" -> {
                 SsmDocument document = taggableDocument(resourceId, region);
-                change.accept(document.getTags());
+                Map<String, String> updated = new LinkedHashMap<>(document.getTags());
+                change.accept(updated);
+                document.setTags(updated);
                 documentStore.put(storageKey, document);
             }
             case "Association" -> {
                 SsmAssociation association = taggableAssociation(resourceId, region);
-                change.accept(association.getTags());
+                Map<String, String> updated = new LinkedHashMap<>(association.getTags());
+                change.accept(updated);
+                association.setTags(updated);
                 associationStore.put(storageKey, association);
             }
             default -> {
@@ -1188,24 +1197,22 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return new AwsException("InvalidResourceId", "Resource " + resourceId + " not found.", 400);
     }
 
-    public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
+    public synchronized void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
         String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
 
-        if (param.getTags() == null) {
-            param.setTags(new HashMap<>());
-        }
-        param.getTags().putAll(tags);
+        Map<String, String> updated = copyOfTags(param);
+        updated.putAll(tags);
+        param.setTags(updated);
         parameterStore.put(storageKey, param);
         LOG.debugv("Added tags to parameter: {0}", resourceId);
     }
 
     /**
-     * The name without its leading and trailing spaces, as {@code PutParameter} stores it. Only the space character
-     * is removed; a tab, newline or other whitespace stays and fails name validation.
+     * Removes leading and trailing ASCII spaces. Other whitespace is preserved for the operation's validation.
      */
     public static String withoutSurroundingSpaces(String name) {
         if (name == null) {
@@ -1256,19 +1263,76 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return param.getTags() != null ? param.getTags() : Map.of();
     }
 
-    public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
+    public synchronized void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
         String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
 
         if (param.getTags() != null) {
-            for (String key : tagKeys) {
-                param.getTags().remove(key);
-            }
+            Map<String, String> updated = copyOfTags(param);
+            tagKeys.forEach(updated::remove);
+            param.setTags(updated);
             parameterStore.put(storageKey, param);
         }
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
+    }
+
+    /**
+     * A new map of the parameter's tags, to put in place of the held one: filled one entry at a time, as the held map
+     * was, so ListTagsForResource lists them in the same order.
+     */
+    private static Map<String, String> copyOfTags(Parameter parameter) {
+        Map<String, String> copy = new HashMap<>();
+        if (parameter.getTags() != null) {
+            parameter.getTags().forEach(copy::put);
+        }
+        return copy;
+    }
+
+    /**
+     * The tags held on the parameter, document or association stored under {@code arn}, in the account and Region it
+     * names, read in place and matched on the whole ARN; empty for an ARN naming nothing stored. A parameter ARN names
+     * {@code /<name>} before {@code <name>}, as the tagging operations read it.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ssm")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String region = parsed.region();
+        String resource = parsed.resource();
+        if (account.isEmpty() || !arn.equals(AwsArnUtils.Arn.of("ssm", region, account, resource).toString())) {
+            return Map.of();
+        }
+        Map<String, String> tags = null;
+        if (resource.startsWith(PARAMETER_PREFIX)) {
+            String name = resource.substring(PARAMETER_PREFIX.length());
+            tags = AccountAwareStorageBackend.readInAccount(parameterStore, account, regionKey(region, "/" + name))
+                    .or(() -> AccountAwareStorageBackend.readInAccount(parameterStore, account,
+                            regionKey(region, name)))
+                    .filter(parameter -> arn.equals(parameter.getArn()))
+                    .map(Parameter::getTags).orElse(null);
+        } else if (resource.startsWith(DOCUMENT_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(documentStore, account,
+                    regionKey(region, resource.substring(DOCUMENT_PREFIX.length()))).map(SsmDocument::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith(ASSOCIATION_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(associationStore, account,
+                    regionKey(region, resource.substring(ASSOCIATION_PREFIX.length()))).map(SsmAssociation::getTags)
+                    .orElse(null);
+        }
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
+        return held;
     }
 
     /**
@@ -1408,6 +1472,33 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return parameterName(nameOrArn, region, true);
     }
 
+    /** Whether a read names a stored parameter in the caller's scope, including a version or label selector. */
+    boolean hasStoredParameter(String nameOrArn, String region) {
+        if (nameOrArn.startsWith(SECRET_REFERENCE_PREFIX)) {
+            return false;
+        }
+        String name = parameterReadName(nameOrArn, region);
+        if (AwsArnUtils.looksLikeArn(name)) {
+            return false;
+        }
+        if (parameterStore.get(regionKey(region, name)).isPresent()) {
+            return true;
+        }
+        int separator = name.lastIndexOf(':');
+        if (separator <= 0 || separator == name.length() - 1
+                || name.substring(separator + 1).indexOf(' ') >= 0) {
+            return false;
+        }
+        return parameterStore.get(regionKey(region, name.substring(0, separator))).isPresent();
+    }
+
+    /** A legacy hierarchy is readable only while the caller's account and region contain a parameter below it. */
+    boolean hasStoredParametersUnderPath(String path, String region) {
+        String normalizedPath = path.endsWith("/") ? path : path + "/";
+        String prefix = regionKey(region, normalizedPath);
+        return parameterStore.keys().stream().anyMatch(key -> key.startsWith(prefix));
+    }
+
     /**
      * The stored name a tagging {@code ResourceId} addresses. A legacy {@code parameter<name>} ARN of the request's
      * partition, region and account is read as {@code parameter/<name>}; see {@link #withLegacyParameterSlash}.
@@ -1482,6 +1573,51 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     // Both permission operations resolve the document first, so an unknown document
     // raises InvalidDocument instead of silently minting or reporting share state for
     // a document that does not exist.
+
+    /**
+     * The accounts the document of that name in the owner's account and Region is shared with; empty when there is no
+     * such document.
+     */
+    List<String> documentSharedWith(String ownerAccountId, String name, String region) {
+        String key = regionKey(region, name);
+        if (AccountAwareStorageBackend.readInAccount(documentStore, ownerAccountId, key).isEmpty()) {
+            return List.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(documentPermissionStore, ownerAccountId, key)
+                .map(List::copyOf).orElse(List.of());
+    }
+
+    /**
+     * The document an association runs: the caller's by its name or ARN, or, by its ARN, one another account shared
+     * with the caller. A document of another account not shared with the caller does not exist for it.
+     */
+    private SsmDocument associatedDocument(String nameOrArn, String region) {
+        if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
+            return getDocument(nameOrArn, region);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(nameOrArn);
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Failed to parse document name as ARN: {0}", nameOrArn);
+            return getDocument(nameOrArn, region);
+        }
+        if (!"ssm".equals(arn.service()) || !arn.resource().startsWith(DOCUMENT_PREFIX)
+                || !arn.region().equals(region) || !arn.partition().equals(regionResolver.partitionForRegion(region))) {
+            return getDocument(nameOrArn, region);
+        }
+        String name = arn.resource().substring(DOCUMENT_PREFIX.length());
+        String caller = regionResolver.getAccountId();
+        if (arn.accountId().equals(caller)) {
+            return getDocument(name, region);
+        }
+        if (!documentSharedWith(arn.accountId(), name, region).contains(caller)) {
+            throw new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.", 400);
+        }
+        return AccountAwareStorageBackend.readInAccount(documentStore, arn.accountId(), regionKey(region, name))
+                .orElseThrow(() -> new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.",
+                        400));
+    }
 
     public SsmDocument getDocument(String name, String region) {
         SsmDocument document = documentStore.get(regionKey(region, name))
@@ -1702,7 +1838,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
             Map<String, String> tags,
             String region) {
         validateTagKeys(tags);
-        SsmDocument document = getDocument(name, region);
+        SsmDocument document = associatedDocument(name, region);
         validateDocumentVersion(document, documentVersion);
 
         if (instanceId != null && !instanceId.isBlank()) {
@@ -1769,7 +1905,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                         "The specified association does not exist.", 400));
 
         if (documentVersion != null) {
-            validateDocumentVersion(getDocument(association.getName(), region), documentVersion);
+            validateDocumentVersion(associatedDocument(association.getName(), region), documentVersion);
         }
 
         if (associationName != null) association.setAssociationName(associationName);
@@ -2028,6 +2164,20 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     @Override
     public String namespace() {
         return "ssm";
+    }
+
+    /** A document another account owns, which {@code CreateAssociation} runs from that account when it is shared. */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        if (!AwsArnUtils.isArnFor(arn, "ssm")) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return !parsed.accountId().isEmpty() && !parsed.accountId().equals(accountId)
+                && parsed.resource().startsWith(DOCUMENT_PREFIX)
+                && parsed.partition().equals(regionResolver.partitionForRegion(parsed.region()))
+                && AccountAwareStorageBackend.readInAccount(documentStore, parsed.accountId(),
+                        regionKey(parsed.region(), parsed.resource().substring(DOCUMENT_PREFIX.length()))).isPresent();
     }
 
     /**

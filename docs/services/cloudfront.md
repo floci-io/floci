@@ -75,9 +75,12 @@ OPTIONS, POST, PUT, PATCH and DELETE).
 | `CreateOriginAccessControl` | POST | `/2020-05-31/origin-access-control` |
 | `GetOriginAccessControl` | GET | `/2020-05-31/origin-access-control/{Id}` |
 | `GetOriginAccessControlConfig` | GET | `/2020-05-31/origin-access-control/{Id}/config` |
-| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}` |
+| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}/config` |
 | `DeleteOriginAccessControl` | DELETE | `/2020-05-31/origin-access-control/{Id}` |
 | `ListOriginAccessControls` | GET | `/2020-05-31/origin-access-control` |
+
+`UpdateOriginAccessControl` accepts the current `If-Match` ETag and a complete configuration.
+With IAM enforcement enabled, its permission can be scoped to the selected origin access control ARN.
 
 ### Origin Access Identity (OAI — legacy)
 
@@ -144,6 +147,64 @@ the path:
 | `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
 | `ListKeyGroups` | GET | `/2020-05-31/key-group` |
 
+### Stored configurations
+
+These operations store what they are given and return it, so code that manages these resources works, but Floci does not act on them: a continuous deployment policy never diverts a primary distribution's requests to its staging distribution, no real-time log or monitoring-subscription metric is delivered, no field is encrypted, and a streaming distribution serves no RTMP. A staging distribution made by `CopyDistribution` still answers on its own domain name, as any enabled distribution does.
+
+#### Staging distributions and continuous deployment
+
+| Operation | Method | Path |
+|---|---|---|
+| `CopyDistribution` | POST | `/2020-05-31/distribution/{PrimaryDistributionId}/copy` |
+| `CreateContinuousDeploymentPolicy` | POST | `/2020-05-31/continuous-deployment-policy` |
+| `GetContinuousDeploymentPolicy` | GET | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `UpdateContinuousDeploymentPolicy` | PUT | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `DeleteContinuousDeploymentPolicy` | DELETE | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `ListContinuousDeploymentPolicies` | GET | `/2020-05-31/continuous-deployment-policy` |
+
+#### Real-time log configs
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateRealtimeLogConfig` | POST | `/2020-05-31/realtime-log-config` |
+| `GetRealtimeLogConfig` | POST | `/2020-05-31/get-realtime-log-config` |
+| `UpdateRealtimeLogConfig` | PUT | `/2020-05-31/realtime-log-config` |
+| `DeleteRealtimeLogConfig` | POST | `/2020-05-31/delete-realtime-log-config` |
+| `ListRealtimeLogConfigs` | GET | `/2020-05-31/realtime-log-config` |
+
+#### Field-level encryption
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateFieldLevelEncryptionConfig` | POST | `/2020-05-31/field-level-encryption` |
+| `GetFieldLevelEncryptionConfig` | GET | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `UpdateFieldLevelEncryptionConfig` | PUT | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `DeleteFieldLevelEncryptionConfig` | DELETE | `/2020-05-31/field-level-encryption/{Id}` |
+| `ListFieldLevelEncryptionConfigs` | GET | `/2020-05-31/field-level-encryption` |
+| `CreateFieldLevelEncryptionProfile` | POST | `/2020-05-31/field-level-encryption-profile` |
+| `GetFieldLevelEncryptionProfile` | GET | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `UpdateFieldLevelEncryptionProfile` | PUT | `/2020-05-31/field-level-encryption-profile/{Id}/config` |
+| `DeleteFieldLevelEncryptionProfile` | DELETE | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `ListFieldLevelEncryptionProfiles` | GET | `/2020-05-31/field-level-encryption-profile` |
+
+#### Monitoring subscriptions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateMonitoringSubscription` | POST | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `GetMonitoringSubscription` | GET | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `DeleteMonitoringSubscription` | DELETE | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+
+#### Streaming distributions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateStreamingDistribution` | POST | `/2020-05-31/streaming-distribution` |
+| `GetStreamingDistribution` | GET | `/2020-05-31/streaming-distribution/{Id}` |
+| `GetStreamingDistributionConfig` | GET | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `UpdateStreamingDistribution` | PUT | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `DeleteStreamingDistribution` | DELETE | `/2020-05-31/streaming-distribution/{Id}` |
+
 ### Tagging
 
 | Operation | Method | Path |
@@ -166,8 +227,10 @@ the path:
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
   `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
-  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
-  resources currently return `InvalidIfMatchVersion` (400) for either case.
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Key-value-store
+  control-plane updates and deletes also return `PreconditionFailed` (412) for stale UUID versions
+  issued by Floci; missing or malformed versions return `InvalidIfMatchVersion` (400). Other
+  CloudFront resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - List operations emit the payload root declared by the CloudFront REST XML model (for example,
   `ListDistributions` returns `<DistributionList>`), with list contents represented by
@@ -394,6 +457,18 @@ the path:
   created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
   The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
   resolved from whatever region its ARN names, as long as it exists.
+- `AWS::CloudFront::Distribution` passes `ViewerCertificate` through, on create and on update, so the
+  certificate and protocol rules above apply to a stack the same way they do to the API.
+- `ConnectionMode` is stored and returned by `GetDistribution`, `GetDistributionConfig`,
+  `ListDistributions` and the create and update responses, and `AWS::CloudFront::Distribution`
+  passes it through. It is held to `direct` and `tenant-only`; anything else is `InvalidArgument`
+  400, the code this service answers a member outside its shape with. An omitted mode is reported
+  as omitted: no published sentence says which mode such a distribution reads back as. A
+  `tenant-only` distribution is otherwise treated like a standard one. The restrictions the
+  Developer Guide lists for multi-tenant distributions (only `sni-only`, no `SSLv3`, no IAM
+  certificate, no `Aliases` or `PriceClass`) are not enforced, because no error code is published
+  for them, and an omitted `ViewerCertificate` on a `tenant-only` distribution reads as the default
+  certificate, the same as on a standard one. AWS documents no default for that case.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with
@@ -423,8 +498,10 @@ and described through the CloudFront control plane, and its keys are managed thr
 - Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
   applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
   entry is invalid, including a put without a `Value`. A stale or missing ETag on the
-  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
-  control plane an `InvalidIfMatchVersion`.
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"). Control-plane
+  update and delete return `PreconditionFailed` (412) for stale UUID versions issued by Floci, and
+  `InvalidIfMatchVersion` (400) for missing or malformed versions. Rejected requests preserve the store.
+  ETags retain Floci's existing UUID representation; this does not define an AWS version format.
 - The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
   ETag, and a key write only the data plane ETag.
 - An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
@@ -617,20 +694,22 @@ signatures must still return 403. Verify those cases through the proxy after con
 
 ## Not Supported (Phase 2)
 
-- Continuous deployment policies (`CreateContinuousDeploymentPolicy`, etc.)
-- `CopyDistribution` (staging distributions)
-- Real-time log configs (`CreateRealtimeLogConfig`, etc.)
-- Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
+- Continuous deployment: a policy never diverts a primary distribution's requests to its staging
+  distribution (see [Stored configurations](#stored-configurations))
+- Delivering real-time logs, and encrypting fields with field-level encryption
 - `TestFunction` execution (function is stored, not executed)
-- Streaming distributions (RTMP — deprecated by AWS)
+- Serving RTMP for a streaming distribution (deprecated by AWS)
 - VPC origins, Anycast IP lists
+- Connection groups and distribution tenants (`CreateConnectionGroup`, `CreateDistributionTenant`,
+  etc.), their CloudFormation types, `ListDistributionsByConnectionMode`, and serving a
+  `tenant-only` distribution by a tenant's domain
 - Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
   `InvalidArgument`
 - Running CloudFront Functions, so the key value store can only be read and written through its API, not
   from a function with `cf.kvs()`
 - CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
   `AWS::CloudFront::Function`
-- Monitoring subscriptions
+- Publishing the additional metrics a monitoring subscription turns on
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)
 - Persistent edge caching and global CDN propagation

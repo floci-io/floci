@@ -2,8 +2,12 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.emr.EmrAppUiService;
 import io.floci.aws.services.emr.EmrHandler;
+import io.floci.aws.services.emr.EmrNotebookExecutionService;
 import io.floci.aws.services.emr.EmrService;
+import io.floci.aws.services.emr.EmrStudioService;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.stepfunctions.model.Execution;
@@ -70,7 +74,10 @@ class AslExecutorEmrSyncTest {
                 .objectMapper(objectMapper)
                 .sfnService(instance)
                 .customResourceLiveness(null)
-                .emrTaskInvoker(new EmrTaskInvoker(new EmrHandler(emrService, objectMapper), objectMapper))
+                .emrTaskInvoker(new EmrTaskInvoker(
+                        new EmrHandler(emrService, mock(EmrStudioService.class),
+                                mock(EmrNotebookExecutionService.class), mock(EmrAppUiService.class), objectMapper),
+                        objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();
@@ -88,6 +95,53 @@ class AslExecutorEmrSyncTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Timeout", execution.getError());
         verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+    }
+
+    @Test
+    void addStepSyncStillTimesOutWhenEmrNoLongerHasTheCluster() {
+        when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID))).thenThrow(new AwsException(
+                "InvalidRequestException", "Cluster id 'j-SYNCTEST00001' is not valid.", 400));
+
+        Execution execution = run("""
+                {"StartAt": "Add", "States": {"Add": {"Type": "Task",
+                  "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync", "TimeoutSeconds": 1, "End": true}}}
+                """, ADD_STEP);
+
+        // Best effort: nothing left to cancel leaves the Task ending as it was.
+        assertEquals("States.Timeout", execution.getError());
+        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+    }
+
+    @Test
+    void addStepSyncStillTimesOutWhenEmrWillNotCancelTheStep() {
+        when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID))).thenReturn(List.of(
+                new EmrService.CancelStepInfo(STEP_ID, "FAILED", "Step is not in a cancellable state: RUNNING")));
+
+        Execution execution = run("""
+                {"StartAt": "Add", "States": {"Add": {"Type": "Task",
+                  "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync", "TimeoutSeconds": 1, "End": true}}}
+                """, ADD_STEP);
+
+        // A step EMR will not cancel comes back FAILED in an answer that succeeds, which the cleanup passes over.
+        assertEquals("States.Timeout", execution.getError());
+        verify(emrService).cancelSteps(CLUSTER_ID, List.of(STEP_ID));
+    }
+
+    @Test
+    void anInternalErrorCancellingTheStepFailsTheTaskWithIt() {
+        when(emrService.describeStep(CLUSTER_ID, STEP_ID)).thenReturn(step("RUNNING"));
+        when(emrService.cancelSteps(CLUSTER_ID, List.of(STEP_ID)))
+                .thenThrow(new AwsException("InternalServerException", "Request processing failed", 500));
+
+        Execution execution = run("""
+                {"StartAt": "Add", "States": {"Add": {"Type": "Task",
+                  "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync", "TimeoutSeconds": 1, "End": true}}}
+                """, ADD_STEP);
+
+        assertEquals("EMR.InternalServerException", execution.getError());
+        assertEquals("Request processing failed", execution.getCause());
     }
 
     @Test

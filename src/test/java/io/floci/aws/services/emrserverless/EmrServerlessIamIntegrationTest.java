@@ -2,20 +2,19 @@ package io.floci.aws.services.emrserverless;
 
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
+import io.floci.aws.testing.SignedRestRequests;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.EmrServerlessRequests.tagsPath;
+import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -103,6 +102,32 @@ class EmrServerlessIamIntegrationTest {
         }
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR Serverless holds on the application a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's application and not
+     * another's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheApplication() throws Exception {
+        String tagged = createApplication();
+        String other = createApplication();
+        send(admin, "POST", tagsPath(applicationArn(tagged)), "{\"tags\":{\"team\":\"data\"}}").then()
+                .statusCode(200);
+        send(admin, "POST", tagsPath(applicationArn(other)), "{\"tags\":{\"team\":\"web\"}}").then()
+                .statusCode(200);
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "emrs-iam-", "access",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Action\":\"emr-serverless:GetApplication\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}")) {
+            send(user.signer("emr-serverless"), "GET", "/applications/" + tagged, null).then().statusCode(200);
+            denied(send(user.signer("emr-serverless"), "GET", "/applications/" + other, null),
+                    "emr-serverless:GetApplication");
+        } finally {
+            send(admin, "DELETE", "/applications/" + tagged, null).then().statusCode(200);
+            send(admin, "DELETE", "/applications/" + other, null).then().statusCode(200);
+        }
+    }
+
     private static String allow(String actions, String resource) {
         return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":" + actions
                 + ",\"Resource\":\"" + resource + "\"}]}";
@@ -124,17 +149,6 @@ class EmrServerlessIamIntegrationTest {
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) throws Exception {
-        URI uri = endpoint.resolve(path);
-        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        RequestSpecification request = given().urlEncodingEnabled(false)
-                .headers(signer.headersFor(method, uri, Map.of(), bytes));
-        if (body != null) {
-            request = request.contentType("application/json").body(bytes);
-        }
-        return request.request(method, uri);
-    }
-
-    private static void denied(Response response, String action) {
-        response.then().statusCode(403).body(containsString("not authorized to perform: " + action));
+        return SignedRestRequests.send(endpoint, signer, method, path, body, "application/json");
     }
 }

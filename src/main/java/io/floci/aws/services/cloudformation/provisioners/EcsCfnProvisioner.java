@@ -4,10 +4,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
@@ -57,12 +59,20 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final String SERVICE = "AWS::ECS::Service";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
+    private static final CfnApiShapeConverter.Rules API_SHAPE = new CfnApiShapeConverter.Rules(
+            Map.of("EFSVolumeConfiguration", "efsVolumeConfiguration",
+                    "FSxWindowsFileServerVolumeConfiguration", "fsxWindowsFileServerVolumeConfiguration",
+                    "S3FilesVolumeConfiguration", "s3filesVolumeConfiguration",
+                    "FilesystemId", "fileSystemId", "IAM", "iam"),
+            Set.of("DriverOpts", "Labels"), Set.of("TransitEncryptionPort"), false);
 
     private final EcsService ecsService;
+    private final EcsJsonHandler ecsJsonHandler;
 
     @Inject
-    public EcsCfnProvisioner(EcsService ecsService) {
+    public EcsCfnProvisioner(EcsService ecsService, EcsJsonHandler ecsJsonHandler) {
         this.ecsService = ecsService;
+        this.ecsJsonHandler = ecsJsonHandler;
     }
 
     @Override
@@ -262,6 +272,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
         request.setFamily(family);
         request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
+        JsonNode volumes = props.path("Volumes");
+        request.setVolumes(ecsJsonHandler.parseVolumes(normalizeCfnEcsArray(volumes)));
+        EcsJsonHandler.validateMountSources(request.getContainerDefinitions(), request.getVolumes());
         request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
         request.setCpu(ctx.resolveOptional(props, "Cpu"));
         request.setMemory(ctx.resolveOptional(props, "Memory"));
@@ -291,7 +304,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private void provisionService(StackResource r, JsonNode props, ProvisionContext ctx) {
         String clusterRef = ctx.resolveOptional(props, "Cluster");
         String taskDefinition = ctx.resolveOptional(props, "TaskDefinition");
-        int desiredCount = parseDesiredCount(ctx.resolveOptional(props, "DesiredCount"));
+        Integer desiredCount = parseDesiredCount(ctx.resolveOptional(props, "DesiredCount"));
         LaunchType launchType = parseEnum(LaunchType.class, ctx.resolveOptional(props, "LaunchType"));
         List<EcsLoadBalancer> loadBalancers =
                 parseLoadBalancers(props != null ? props.get("LoadBalancers") : null, ctx);
@@ -326,6 +339,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             update.setCluster(clusterRef);
             update.setService(serviceName);
             update.setTaskDefinition(taskDefinition);
+            // A missing count is left out of the update, as AWS omits it, so the stored count stays.
             update.setDesiredCount(desiredCount);
             update.setNetworkConfiguration(networkConfiguration);
             update.setDeploymentConfiguration(deploymentConfiguration);
@@ -346,7 +360,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             create.setCluster(clusterRef);
             create.setServiceName(serviceName);
             create.setTaskDefinition(taskDefinition);
-            create.setDesiredCount(desiredCount);
+            create.setDesiredCount(desiredCount != null ? desiredCount : 1);
             create.setLaunchType(launchType);
             create.setLoadBalancers(loadBalancers);
             create.setNetworkConfiguration(networkConfiguration);
@@ -389,13 +403,13 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * The update that puts {@code prior} back on what {@code update} changed: its task definition,
-     * desired count and network configuration, and each setting the update declared. A capacity
-     * provider strategy or service registries the service did not have are put back empty, so a
-     * registry the update added is deregistered; a setting the update left unchanged is left
-     * unchanged again, so the restore rolls no deployment for registries nobody touched. The
-     * deployment configuration is not here: updateService cannot put back none, so the caller
-     * restores it exactly through replaceServiceDeploymentConfiguration.
+     * The update that puts {@code prior} back on what {@code update} changed: its task definition
+     * and network configuration, and each setting the update declared, the desired count among
+     * them. A capacity provider strategy or service registries the service did not have are put
+     * back empty, so a registry the update added is deregistered; a setting the update left
+     * unchanged is left unchanged again, so the restore rolls no deployment for registries nobody
+     * touched. The deployment configuration is not here: updateService cannot put back none, so
+     * the caller restores it exactly through replaceServiceDeploymentConfiguration.
      */
     private static UpdateServiceRequest restoreRequest(UpdateServiceRequest update, EcsServiceModel prior) {
         UpdateServiceRequest restore = new UpdateServiceRequest();
@@ -405,7 +419,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             return restore;
         }
         restore.setTaskDefinition(prior.getTaskDefinition());
-        restore.setDesiredCount(prior.getDesiredCount());
+        if (update.getDesiredCount() != null) {
+            restore.setDesiredCount(prior.getDesiredCount());
+        }
         restore.setNetworkConfiguration(prior.getNetworkConfiguration());
         if (update.getCapacityProviderStrategy() != null) {
             restore.setCapacityProviderStrategy(Objects.requireNonNullElse(prior.getCapacityProviderStrategy(), List.of()));
@@ -513,7 +529,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 () -> ecsService.deleteService(cluster, name, true, region), "ServiceNotFoundException");
     }
 
-    private static List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
+    private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
         List<ContainerDefinition> result = new ArrayList<>();
         if (node == null || node.isNull()) {
             return result;
@@ -537,6 +553,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 def.setMemoryReservation(item.path("MemoryReservation").asInt());
             }
             def.setPortMappings(parsePortMappings(item.path("PortMappings")));
+            def.setMountPoints(ecsJsonHandler.parseMountPoints(normalizeCfnEcsArray(item.path("MountPoints"))));
             def.setEnvironment(parseEnvironment(item.path("Environment")));
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
@@ -568,6 +585,18 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
         return new HealthCheck(toStringList(node.path("Command")), optionalInt(node, "Interval"),
                 optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
+    }
+
+    private static ArrayNode normalizeCfnEcsArray(JsonNode node) {
+        ArrayNode result = MAPPER.createArrayNode();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> {
+                if (item.isObject()) {
+                    result.add(CfnApiShapeConverter.convert(item, API_SHAPE));
+                }
+            });
+        }
+        return result;
     }
 
     private static Integer optionalInt(JsonNode node, String member) {
@@ -868,10 +897,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** DesiredCount defaults to 1 when absent; anything present has to be an integer. */
-    private static int parseDesiredCount(String value) {
+    /** An absent DesiredCount is null (1 at create, left out at update); anything present has to be an integer. */
+    private static Integer parseDesiredCount(String value) {
         if (value == null || value.isBlank()) {
-            return 1;
+            return null;
         }
         try {
             return Integer.parseInt(value.trim());

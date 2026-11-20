@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -34,6 +35,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -48,7 +50,7 @@ import java.util.stream.Collectors;
  * account's credentials, while detector and member resources remain scoped to their owning account.
  */
 @ApplicationScoped
-public class GuardDutyService {
+public class GuardDutyService implements StoredResourceArns {
 
     /**
      * The Terraform AWS provider matches this exact message to translate a
@@ -82,6 +84,7 @@ public class GuardDutyService {
     private static final int PLAN_PAGE_SIZE = 100;
     private static final String PLAN_TOKEN_PREFIX = "guardduty:v1:plan:";
     private static final String PLAN_ARN_RESOURCE_PREFIX = "malware-protection-plan/";
+    private static final String DETECTOR_ARN_RESOURCE_PREFIX = "detector/";
     static final String PLAN_NOT_FOUND_MESSAGE =
             "The request is rejected because the input malwareProtectionPlanId is not owned by the current account.";
     private static final Set<String> ORG_AUTO_ENABLE_VALUES = Set.of("NEW", "NONE", "ALL");
@@ -812,6 +815,63 @@ public class GuardDutyService {
         detectorStore.put(ref.key(), detector);
     }
 
+    @Override
+    public String namespace() {
+        return "guardduty";
+    }
+
+    /** A request names a detector or a plan by the id GuardDuty minted, which its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the detector or the Malware Protection plan whose ARN is {@code arn}, in the request's account, where
+     * the tag handlers read: an ARN of another account names none. Read in place under the Region the ARN names and the
+     * id, a record stored before storage was account-aware included. A plan is matched on the ARN it records; a
+     * detector, which records none, on the ARN its Region, the account of its service role and its id give. Tags are
+     * only ever replaced by a new, unmodifiable map under this service's lock, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "guardduty")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        if (parsed.region().isEmpty() || !isRequestAccount(account)) {
+            return Map.of();
+        }
+        String resource = parsed.resource();
+        Map<String, String> tags;
+        if (resource.startsWith(PLAN_ARN_RESOURCE_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(malwareProtectionPlanStore, account,
+                            storageKey(parsed.region(), resource.substring(PLAN_ARN_RESOURCE_PREFIX.length())))
+                    .filter(plan -> arn.equals(plan.getArn()))
+                    .map(MalwareProtectionPlan::getTags)
+                    .orElse(Map.of());
+        } else if (resource.startsWith(DETECTOR_ARN_RESOURCE_PREFIX)) {
+            String detectorId = resource.substring(DETECTOR_ARN_RESOURCE_PREFIX.length());
+            tags = AccountAwareStorageBackend.readInAccount(detectorStore, account,
+                            storageKey(parsed.region(), detectorId))
+                    .filter(detector -> arn.equals(AwsArnUtils.Arn.of("guardduty", parsed.region(),
+                            accountIdFromServiceRole(detector.getServiceRole()),
+                            DETECTOR_ARN_RESOURCE_PREFIX + detectorId).toString()))
+                    .map(Detector::getTags)
+                    .orElse(Map.of());
+        } else {
+            return Map.of();
+        }
+        return new LinkedHashMap<>(tags);
+    }
+
+    /** Whether {@code account} is the request's, the one the stores answer for; a store not scoped by account, any. */
+    private boolean isRequestAccount(String account) {
+        return !(detectorStore instanceof AccountAwareStorageBackend<Detector> scoped)
+                || account.equals(scoped.accountId());
+    }
+
     private Detector detectorFromArn(String arn) {
         DetectorRef ref = parseDetectorArn(arn);
         return detectorStore.get(ref.key()).orElseThrow(GuardDutyService::detectorNotFound);
@@ -824,12 +884,12 @@ public class GuardDutyService {
         } catch (IllegalArgumentException e) {
             throw badRequest("The request is rejected because an invalid resource ARN is specified: " + arn);
         }
-        String prefix = "detector/";
         String resource = parsed.resource();
-        if (!resource.startsWith(prefix) || resource.length() == prefix.length()) {
+        if (!resource.startsWith(DETECTOR_ARN_RESOURCE_PREFIX)
+                || resource.length() == DETECTOR_ARN_RESOURCE_PREFIX.length()) {
             throw badRequest("The request is rejected because an invalid resource ARN is specified: " + arn);
         }
-        return new DetectorRef(parsed.region(), resource.substring(prefix.length()));
+        return new DetectorRef(parsed.region(), resource.substring(DETECTOR_ARN_RESOURCE_PREFIX.length()));
     }
 
     private static List<DetectorFeature> mergeDetectorFeatures(

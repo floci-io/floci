@@ -1,29 +1,40 @@
 package io.floci.aws.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.CertificatesTest;
+import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.PaymentCryptographyTr34RoundTripTest;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.crypto.Tr34;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import io.floci.aws.testing.ManualClock;
+import org.bouncycastle.crypto.engines.AESEngine;
+import org.bouncycastle.crypto.macs.CMac;
+import org.bouncycastle.crypto.params.KeyParameter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
+import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -47,6 +58,22 @@ class PaymentCryptographyKeyExchangeTest {
 
     /** The key a key block is wrapped under. */
     private PaymentCryptographyKey protection;
+
+    /** The variant the PIN encryption key is bound to. */
+    private static final String PIN_VARIANT = "PIN_ENCRYPTION_KEY_VARIANT_28";
+
+    /** The variant the data encryption key is bound to. */
+    private static final String DATA_VARIANT = "DATA_ENCRYPTION_KEY_VARIANT_22";
+
+    /** The variant the terminal major key is bound to. */
+    private static final String MAJOR_VARIANT = "TERMINAL_MAJOR_KEY_VARIANT_00";
+
+    /**
+     * The shared information the sample passes: 32 bytes, the same bytes as the KDF's
+     * other info.
+     */
+    private static final String SAMPLE_SHARED_INFORMATION =
+            "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF";
 
     @BeforeEach
     void setUp() {
@@ -207,17 +234,7 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void aKeyLeavesUnderAKeyTheTwoPartiesAgreed() {
         // The two parties agree a key with ECDH, and the key leaves in a block under it.
-        SecureRandom random = new SecureRandom();
-        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
-        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
-                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
-        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
-                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
-        // The counterparty's certificate is signed by the authority, which is what lets the
-        // service trust it.
-        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
-                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
-        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+        Exchange exchange = agreedExchange();
 
         Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
                 "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
@@ -234,19 +251,368 @@ class PaymentCryptographyKeyExchangeTest {
         assertEquals(exchange.key().getKeyUsage(), imported.getKeyUsage());
     }
 
+
+    @Test
+    void aKeyIsTranslatedFromAKeyTheTwoPartiesAgreedToAnotherKey() {
+        // The key comes under a key the two parties agreed with ECDH, and it goes out under
+        // the key the request names.
+        Exchange exchange = agreedExchange();
+
+        // The key that leaves under the agreed key.
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+
+        // The key it is translated under.
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1",
+                translateRequest(exchange.material(), (String) wrapped.get("KeyMaterial"), outgoing.getKeyId()))
+                .get("WrappedKey");
+
+        assertEquals("TR31_KEY_BLOCK", translated.get("WrappedKeyMaterialFormat"));
+        // The block that goes out opens under the key the request named, and it holds the key
+        // that came in.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", outgoing.getKeyId(),
+                        "WrappedKeyBlock", translated.get("WrappedKeyMaterial")),
+                "", true, Map.of());
+        assertEquals(exchange.key().getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(exchange.key().getKeyUsage(), imported.getKeyUsage());
+    }
+
+    @Test
+    void aTranslatedBlockCarriesTheVersionAndTheOptionalBlocksOfTheBlockThatCameIn() {
+        // The block that came in is authenticated with its header and its optional blocks,
+        // so the block that goes out carries the same ones.
+        Exchange exchange = agreedExchange();
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("KeyBlockHeaders", Map.of(
+                "KeyVersion", "01",
+                "KeyExportability", "EXPORTABLE",
+                "OptionalBlocks", Map.of("AB", "0011")));
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", material, "", "").get("WrappedKey");
+
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1",
+                translateRequest(exchange.material(), (String) wrapped.get("KeyMaterial"), outgoing.getKeyId()))
+                .get("WrappedKey");
+
+        String block = (String) translated.get("WrappedKeyMaterial");
+        assertEquals("01", block.substring(9, 11), "the version of the key");
+        assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
+        assertEquals("08", block.substring(18, 20), "the optional block's length");
+    }
+
+    @Test
+    void aKeyThatMayNotLeaveIsNotTranslatedOut() {
+        // The block that comes in says the key in it may not leave the service, and the
+        // block that goes out is handed to the caller, so the key may not be translated
+        // out of it.
+        Exchange exchange = agreedExchange();
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("KeyBlockHeaders", Map.of("KeyExportability", "NON_EXPORTABLE"));
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", material, "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1", translateRequest(
+                        exchange.material(), (String) wrapped.get("KeyMaterial"), outgoing.getKeyId())));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("may not leave the service"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyIsNotTranslatedUnderAKeyWeakerThanIt() {
+        // The wrapping key has to be at least as strong as the key it protects, the rule
+        // the export and the import enforce.
+        Exchange exchange = agreedExchange("ECC_NIST_P521");
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("DeriveKeyAlgorithm", "AES_256");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+                "DiffieHellmanTr31KeyBlock", material, "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1", translateRequest(
+                        material, (String) wrapped.get("KeyMaterial"), outgoing.getKeyId())));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("at least as strong"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyIsNotTranslatedUnderAnAgreementWeakerThanIt() throws Exception {
+        // The agreed key opens the block that comes in, so it has to be as strong as the
+        // key in it, the rule the import enforces.
+        Exchange exchange = agreedExchange();
+        Map<String, Object> material = sampleAgreement(exchange);
+        byte[] derived = sampleDerivedKey(exchange);
+        // The block carries an AES-256 key, and the agreement is on a curve that is
+        // weaker than it.
+        String incoming = PaymentCryptographyTr31.wrap(
+                HexFormat.of().parseHex(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+                derived, true, "A", "D0", "B", "E");
+        PaymentCryptographyKey outgoing = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1",
+                        translateRequest(material, incoming, outgoing.getKeyId())));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("at least as strong"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyWithAUsageItsAlgorithmDoesNotServeIsNotTranslated() throws Exception {
+        // The usage binds the key to its purpose: a signature key is an asymmetric one, so an
+        // AES key may not carry that usage. The block that came in says it does, and the
+        // translation refuses it rather than answering with a block the import would refuse.
+        Exchange exchange = agreedExchange("ECC_NIST_P521");
+        Map<String, Object> material = sampleAgreement(exchange);
+        byte[] derived = sampleDerivedKey(exchange);
+        String incoming = PaymentCryptographyTr31.wrap(
+                HexFormat.of().parseHex(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+                derived, true, "A", "S0", "B", "E");
+        PaymentCryptographyKey outgoing = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1",
+                        translateRequest(material, incoming, outgoing.getKeyId())));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("may not be made of"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyIsTranslatedWithTheCheckValueAlgorithmTheRequestNames() {
+        // The request may name the check value algorithm, and the one it names for an AES
+        // key is the CMAC.
+        Exchange exchange = agreedExchange();
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        Map<String, Object> request = translateRequest(exchange.material(),
+                (String) wrapped.get("KeyMaterial"), outgoing.getKeyId());
+        request.put("KeyCheckValueAlgorithm", "CMAC");
+
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1", request)
+                .get("WrappedKey");
+
+        assertEquals(cmacKeyCheckValue(exchange.key().getKeyMaterialHex()),
+                translated.get("KeyCheckValue"));
+    }
+
+    @Test
+    void aCheckValueAlgorithmTheKeyDoesNotHaveIsRefused() {
+        // The check value of an AES key is a CMAC, so a request that asks for the ANSI
+        // X9.24 one asks for a value this service does not compute.
+        Exchange exchange = agreedExchange();
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        Map<String, Object> request = translateRequest(exchange.material(),
+                (String) wrapped.get("KeyMaterial"), outgoing.getKeyId());
+        request.put("KeyCheckValueAlgorithm", "ANSI_X9_24");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1", request));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("check value algorithm"),
+                refused.getMessage());
+    }
+
+    @Test
+    void aCheckValueAlgorithmThatIsNullIsAMemberTheRequestDoesNotCarry() {
+        // The request carries the member as a null, which is the member it does not carry,
+        // so the key is translated and it is not refused for a check value algorithm named
+        // "null".
+        Exchange exchange = agreedExchange();
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        ObjectNode request = translateBody(exchange,
+                (String) wrapped.get("KeyMaterial"), outgoing);
+        request.putNull("KeyCheckValueAlgorithm");
+
+        Map<?, ?> translated = (Map<?, ?>) new PaymentCryptographyCryptoHandler(service)
+                .translateKeyMaterial(request, "us-east-1").get("WrappedKey");
+
+        assertEquals("TR31_KEY_BLOCK", translated.get("WrappedKeyMaterialFormat"));
+        assertEquals(cmacKeyCheckValue(exchange.key().getKeyMaterialHex()),
+                translated.get("KeyCheckValue"));
+    }
+
+    @Test
+    void aKeyIsTranslatedUnderTheKeyTheSampleDerives() throws Exception {
+        // The sample derives the one-time wrapping key with the Concat KDF of NIST SP
+        // 800-56A over the shared secret, with SHA-512 and a 32-byte shared information,
+        // and the emulator has to derive the same key from the request's parameters. The
+        // agreement is on a curve as strong as the key it opens, because the agreed key
+        // has to be at least as strong as the key in the block.
+        Exchange exchange = agreedExchange("ECC_NIST_P521");
+        Map<String, Object> material = sampleAgreement(exchange);
+        byte[] derived = sampleDerivedKey(exchange);
+
+        // The block that comes in is under the derived key, as the sample wraps it. The
+        // key in it may leave the service, because the translation hands it to the
+        // caller.
+        String incoming = PaymentCryptographyTr31.wrap(
+                HexFormat.of().parseHex(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+                derived, true, "A", "D0", "B", "E");
+
+        // The wrapping key has to be at least as strong as the key it carries.
+        PaymentCryptographyKey outgoing = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1",
+                translateRequest(material, incoming, outgoing.getKeyId())).get("WrappedKey");
+
+        // The block that goes out holds the key that came in, and the check value is the
+        // one the sample computes locally.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", outgoing.getKeyId(),
+                        "WrappedKeyBlock", translated.get("WrappedKeyMaterial")),
+                "", true, Map.of());
+        assertEquals("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                imported.getKeyMaterialHex());
+        assertEquals(cmacKeyCheckValue(imported.getKeyMaterialHex()), translated.get("KeyCheckValue"));
+    }
+
+    /**
+     * The request that translates a block that came in under the agreed key.
+     *
+     * @param material the material of the agreement
+     * @param block the block that comes in
+     * @param wrappingKeyIdentifier the identifier of the key the block goes out under
+     * @return the request
+     */
+    private static Map<String, Object> translateRequest(Map<String, Object> material, String block,
+                                                        String wrappingKeyIdentifier) {
+        Map<String, Object> incoming = new LinkedHashMap<>(material);
+        incoming.put("WrappedKeyBlock", block);
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("IncomingKeyMaterial", Map.of("DiffieHellmanTr31KeyBlock", incoming));
+        request.put("OutgoingKeyMaterial", Map.of(
+                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", wrappingKeyIdentifier)));
+        return request;
+    }
+
+    /**
+     * The body of a request that translates a block that came in under the agreed key.
+     *
+     * <p>The body is the request of {@link #translateRequest}, and the identifiers in it are
+     * the ARNs the model asks for, so the request is the one the data plane would read.
+     * The request names no check value algorithm.
+     *
+     * @param exchange the exchange the two parties made
+     * @param block the block that comes in
+     * @param wrappingKey the key the block goes out under
+     * @return the body of the request
+     */
+    private static ObjectNode translateBody(Exchange exchange, String block,
+                                            PaymentCryptographyKey wrappingKey) {
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("PrivateKeyIdentifier", exchange.agreement().getArn());
+        material.put("CertificateAuthorityPublicKeyIdentifier", exchange.authority().getArn());
+        ObjectMapper mapper = new ObjectMapper();
+        return mapper.valueToTree(translateRequest(material, block, wrappingKey.getArn()));
+    }
+
+    /**
+     * The material of the sample's agreement: a key derived with the Concat KDF of NIST
+     * SP 800-56A.
+     *
+     * @param exchange the exchange the two parties made
+     * @return the material of the agreement
+     */
+    private static Map<String, Object> sampleAgreement(Exchange exchange) {
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("DeriveKeyAlgorithm", "AES_256");
+        material.put("KeyDerivationFunction", "NIST_SP800");
+        material.put("KeyDerivationHashAlgorithm", "SHA_512");
+        material.put("DerivationData", Map.of("SharedInformation", SAMPLE_SHARED_INFORMATION));
+        return material;
+    }
+
+    /**
+     * The key the sample derives from the secret the two parties made.
+     *
+     * @param exchange the exchange the two parties made
+     * @return the derived key
+     */
+    private byte[] sampleDerivedKey(Exchange exchange) throws Exception {
+        return concatKdf("SHA-512", sharedSecret(exchange),
+                HexFormat.of().parseHex(SAMPLE_SHARED_INFORMATION), 32);
+    }
+
+    /**
+     * The Concat KDF of NIST SP 800-56A, as the standard writes it.
+     *
+     * <p>The key is the digest of the counter, the secret and the shared information, the
+     * counter over the blocks that are needed, so the derivation here does not use the
+     * service's own.
+     */
+    private static byte[] concatKdf(String hash, byte[] secret, byte[] otherInfo, int length)
+            throws Exception {
+        MessageDigest digest = MessageDigest.getInstance(hash);
+        byte[] out = new byte[length];
+        int at = 0;
+        for (int counter = 1; at < length; counter++) {
+            digest.reset();
+            // The standard's order: the counter, then the secret, then the shared
+            // information.
+            digest.update(new byte[] {
+                (byte) (counter >>> 24), (byte) (counter >>> 16), (byte) (counter >>> 8),
+                (byte) counter});
+            digest.update(secret);
+            digest.update(otherInfo);
+            byte[] block = digest.digest();
+            int take = Math.min(block.length, length - at);
+            System.arraycopy(block, 0, out, at, take);
+            at += take;
+        }
+        return out;
+    }
+
+    /**
+     * The check value of a key: the leftmost three bytes of the CMAC of sixteen zero bytes.
+     *
+     * <p>The sample computes it the same way, so the emulator's answer is held to the
+     * sample's.
+     */
+    private static String cmacKeyCheckValue(String keyHex) {
+        CMac mac = new CMac(new AESEngine());
+        mac.init(new KeyParameter(HexFormat.of().parseHex(keyHex)));
+        // The CMAC of sixteen zero bytes.
+        mac.update(new byte[16], 0, 16);
+        byte[] value = new byte[16];
+        mac.doFinal(value, 0);
+        return HexFormat.of().withUpperCase().formatHex(value).substring(0, 6);
+    }
+
+
+    /** The secret the two parties made, from the service's key and the counterparty's. */
+    private byte[] sharedSecret(Exchange exchange) throws Exception {
+        PaymentCryptographyKey agreement = service.findKey("us-east-1",
+                (String) exchange.material().get("PrivateKeyIdentifier"));
+        PrivateKey privateKey = PaymentCryptographyKeyExchange.privateKeyOf(agreement);
+        X509Certificate certificate = Certificates.parseCertificate(
+                (String) exchange.material().get("PublicKeyCertificate"));
+        return Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) certificate.getPublicKey());
+    }
+
     @Test
     void aKeyLeavesUnderAKeyTheTwoPartiesAgreedCarriesTheHeadersTheRequestNames() {
         // The block headers the request names travel with the block under the agreed key,
         // the same as they do under a key the service holds.
-        SecureRandom random = new SecureRandom();
-        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
-        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
-                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
-        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
-                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
-        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
-                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
-        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+        Exchange exchange = agreedExchange();
         Map<String, Object> material = new LinkedHashMap<>(exchange.material());
         material.put("KeyBlockHeaders", Map.of(
                 "KeyExportability", "NON_EXPORTABLE",
@@ -277,7 +643,8 @@ class PaymentCryptographyKeyExchangeTest {
         // Signed by somebody else, so the authority cannot vouch for it.
         Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
                 "floci counterparty", other.getPrivate(), "floci somebody else");
-        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate,
+                "ECC_NIST_P256");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.exportKey("us-east-1", exchange.key().getKeyId(),
@@ -406,6 +773,24 @@ class PaymentCryptographyKeyExchangeTest {
         String certificate = (String) answer.get("KeyCertificate");
         assertNotNull(certificate);
         assertNotNull(Certificates.parseCertificate(certificate));
+    }
+
+    @Test
+    void aReplicatedKeyPairKeepsItsHalves() {
+        // A replica is the same key in another region, so it has to hold the halves the
+        // primary holds. A replica without them is a record of a key that has none.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        PaymentCryptographyKey pair = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE), true, true, Map.of(), List.of("us-west-2"));
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", pair.getKeyId());
+
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals(pair.getKeyPublicKeyBase64(), replica.getKeyPublicKeyBase64());
+        assertEquals(pair.getKeyPrivateKeyBase64(), replica.getKeyPrivateKeyBase64());
     }
 
     @Test
@@ -768,6 +1153,146 @@ class PaymentCryptographyKeyExchangeTest {
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
         assertEquals("ValidationException", refused.getErrorCode());
     }
+
+    /**
+     * The wrapped key an AS2805 export answers with.
+     *
+     * @param key the key that leaves
+     * @param kek the key the cryptogram is wrapped under
+     * @param variant the variant the key is bound to
+     * @return the wrapped key
+     */
+    private Map<?, ?> as2805Export(PaymentCryptographyKey key, PaymentCryptographyKey kek,
+                                   String variant) {
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
+                "As2805KeyCryptogram", Map.of(
+                        "As2805KeyVariant", variant,
+                        "WrappingKeyIdentifier", kek.getKeyId()), "", "");
+        return (Map<?, ?>) answer.get("WrappedKey");
+    }
+
+    /**
+     * The material of an AS2805 import.
+     *
+     * @param variant the variant the cryptogram is bound to
+     * @param wrappingKeyId the key the cryptogram is wrapped under
+     * @param cryptogram the cryptogram that comes in
+     * @param algorithm the algorithm of the key that comes in
+     * @param usage the usage of the key that comes in
+     * @return the material
+     */
+    private static Map<String, Object> as2805Import(String variant, String wrappingKeyId,
+                                                    String cryptogram, String algorithm, String usage) {
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("As2805KeyVariant", variant);
+        incoming.put("WrappingKeyIdentifier", wrappingKeyId);
+        incoming.put("WrappedKeyCryptogram", cryptogram);
+        incoming.put("KeyAlgorithm", algorithm);
+        incoming.put("KeyAttributes", Map.of(
+                "KeyAlgorithm", algorithm,
+                "KeyClass", "SYMMETRIC_KEY",
+                "KeyUsage", usage,
+                "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)));
+        incoming.put("Exportable", true);
+        return incoming;
+    }
+
+    @Test
+    void aKeyThatLeavesUnderAnAs2805CryptogramComesBack() {
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        Map<?, ?> wrapped = as2805Export(key, kek, PIN_VARIANT);
+        assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "As2805KeyCryptogram",
+                as2805Import(PIN_VARIANT, kek.getKeyId(), (String) wrapped.get("KeyMaterial"),
+                        "TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals("TR31_P0_PIN_ENCRYPTION_KEY", imported.getKeyUsage());
+    }
+
+    @Test
+    void aCryptogramThatWasChangedDoesNotOpen() {
+        // The cryptogram carries a tag over the whole of it, so a cryptogram that was
+        // changed does not open at all, and not under a key that is wrong but plausible.
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        String cryptogram = (String) as2805Export(key, kek, PIN_VARIANT).get("KeyMaterial");
+        // The character is inside the ciphertext, which is where the key it carries is.
+        String changed = changed(cryptogram, 50);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram",
+                        as2805Import(PIN_VARIANT, kek.getKeyId(), changed, "TDES_3KEY",
+                                "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramUnderAKeyWhoseMaterialIsNotHeldIsRefused() {
+        // The material of a key is held while the emulator runs and is not written to the
+        // store, so a key read back after a restart has none, and the export says so
+        // rather than failing on the missing value.
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+        kek.setKeyMaterialHex(null);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", PIN_VARIANT,
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("material"), refused.getMessage());
+    }
+
+    /**
+     * The cryptogram with one of its characters changed.
+     *
+     * @param cryptogram the cryptogram, in hexadecimal
+     * @param at the character that is changed, counting from the front
+     * @return the changed cryptogram
+     */
+    private static String changed(String cryptogram, int at) {
+        char[] characters = cryptogram.toCharArray();
+        characters[at] = characters[at] == 'A' ? 'B' : 'A';
+        return new String(characters);
+    }
+
+    @Test
+    void aCryptogramUnderAVariantTheServiceDoesNotServeIsRefused() {
+        // The model's union names four variants, and the service serves every one of them,
+        // so a variant outside the four names no variant at all.
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", "TERMINAL_MINOR_KEY_VARIANT_01",
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramThatIsWrappedUnderTheWrongVariantDoesNotOpen() {
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        String cryptogram = (String) as2805Export(key, kek, PIN_VARIANT).get("KeyMaterial");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram",
+                        as2805Import(DATA_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
+                                "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"RSA_3072", "RSA_4096", "ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521"})
     void anExportSigningKeyThatIsNotRsa2048IsRefused(String algorithm) {
@@ -780,6 +1305,82 @@ class PaymentCryptographyKeyExchangeTest {
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("signed with RSA_2048"), refused.getMessage());
     }
+
+    @Test
+    void aCryptogramUnderAVariantThatIsNotTheKeysPurposeIsRefused() {
+        // The variant says what the key is for, so a key exported under another variant
+        // would come back with the other variant's usage, and the export would change what
+        // the key is for.
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", MAJOR_VARIANT,
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramUnderAWeakerWrappingKeyIsRefused() {
+        // The wrapping key has to be at least as strong as the key it protects, the same
+        // rule the export enforces, so a cryptogram the export would refuse to write does
+        // not open here either.
+        // TDES_2KEY is weaker than TDES_3KEY, so a TDES_2KEY wrapping key cannot protect
+        // a TDES_3KEY key.
+        PaymentCryptographyKey kek = createKey("TDES_2KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(
+                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F1011121314151617"),
+                0x00, PaymentCryptographyKeyAlgorithm.TDES_3KEY,
+                PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram",
+                        as2805Import(MAJOR_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
+                                "TR31_K0_KEY_ENCRYPTION_KEY"), "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anExportUnderAnAesWrappingKeyIsRefused() {
+        // AS2805's cryptography is all TDES, so a key encryption key that is AES cannot
+        // wrap a key cryptogram even though it is a key encryption key.
+        PaymentCryptographyKey kek = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", PIN_VARIANT,
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TDES"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("AES_128"), refused.getMessage());
+    }
+
+    @Test
+    void anImportUnderAnAesWrappingKeyIsRefused() {
+        // The export and the import refuse the same wrapping key, so a cryptogram the
+        // export would not write does not open here either.
+        PaymentCryptographyKey tdesKek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+        String cryptogram = (String) as2805Export(key, tdesKek, PIN_VARIANT).get("KeyMaterial");
+        PaymentCryptographyKey kek = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram",
+                        as2805Import(PIN_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
+                                "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TDES"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("AES_128"), refused.getMessage());
+    }
+
     @Test
     void aTr34BlockThatCarriesNoHeaderIsRefused() throws Exception {
         // A block that is signed correctly but whose key block names no key says nothing
@@ -898,6 +1499,39 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     /**
+     * A key exchange under a key the two parties agreed with ECDH, on the curve the
+     * cardholder-device flow uses.
+     *
+     * @return the material of the export, and the key that leaves under it
+     */
+    private Exchange agreedExchange() {
+        return agreedExchange("ECC_NIST_P256");
+    }
+
+    /**
+     * A key exchange under a key the two parties agreed with ECDH, on the given curve.
+     *
+     * <p>The authority vouches for the counterparty's certificate, so the helper mints the
+     * two certificates and builds the agreement.
+     *
+     * @param curve the curve the agreement is made on
+     * @return the material of the export, and the key that leaves under it
+     */
+    private Exchange agreedExchange(String curve) {
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.from(curve), random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        // The counterparty's certificate is signed by the authority, which is what lets the
+        // service trust it.
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+        return agreedExchange(authorityCertificate, counterpartyCertificate, curve);
+    }
+
+    /**
      * A key exchange under a key the two parties agreed with ECDH.
      *
      * <p>The service trusts the certificate the counterparty brings because the authority
@@ -907,12 +1541,13 @@ class PaymentCryptographyKeyExchangeTest {
      * @param authorityCertificate the certificate of the authority that vouches for the
      *                              counterparty
      * @param counterpartyCertificate the certificate the counterparty brings
+     * @param curve the curve the agreement is made on
      * @return the material of the export, and the key that leaves under it
      */
     private Exchange agreedExchange(Certificates.Minted authorityCertificate,
-                                    Certificates.Minted counterpartyCertificate) {
+                                    Certificates.Minted counterpartyCertificate, String curve) {
         PaymentCryptographyKey authority = createAuthority(authorityCertificate.pem());
-        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
+        PaymentCryptographyKey agreement = createKeyPair(curve,
                 "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
         Map<String, Object> material = new LinkedHashMap<>();
         material.put("PrivateKeyIdentifier", agreement.getKeyId());
@@ -924,11 +1559,20 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("DerivationData", Map.of(
                 "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
         return new Exchange(material,
-                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                agreement, authority);
     }
 
-    /** The material of a key exchange, and the key that leaves under it. */
-    private record Exchange(Map<String, Object> material, PaymentCryptographyKey key) {
+    /**
+     * The material of a key exchange, and the key that leaves under it.
+     *
+     * @param material the material of the agreement
+     * @param key the key that leaves under it
+     * @param agreement the key the two parties agreed with
+     * @param authority the key that vouches for the counterparty's certificate
+     */
+    private record Exchange(Map<String, Object> material, PaymentCryptographyKey key,
+                             PaymentCryptographyKey agreement, PaymentCryptographyKey authority) {
     }
 
 

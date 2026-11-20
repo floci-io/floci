@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -47,23 +48,29 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SecretsManagerService implements ResourceProvider {
+public class SecretsManagerService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SecretsManagerService.class);
 
     private static final String AWSCURRENT = "AWSCURRENT";
     private static final String AWSPREVIOUS = "AWSPREVIOUS";
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    /** The random characters Secrets Manager adds after a hyphen at the end of a secret's ARN. */
+    private static final int RANDOM_SUFFIX_LENGTH = 6;
     private static final String AWS_MANAGED_KEY = "aws/secretsmanager";
     private static final String PENDING_DELETION_STATE = "PendingDeletion";
     private static final Pattern SECRET_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9/_+=.@-]+");
+    private static final Pattern WORD_BOUNDARY = Pattern.compile(
+            "[^\\p{Alnum}]+|(?<=\\p{Lower})(?=\\p{Upper})|(?<=\\p{Alpha})(?=\\p{Digit})");
 
     public static final String SCHEDULED_DELETION_ERROR_MESSAGE =
         "You can't perform this operation on the secret because it was marked for deletion.";
@@ -494,6 +501,36 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    @Override
+    public String namespace() {
+        return "secretsmanager";
+    }
+
+    /**
+     * What IAM asks Secrets Manager of a request's resources: the ARN, random suffix included, of the caller's secret
+     * a name or an ARN names, a partial one included ({@link #findArn}). Reads only.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return "Secret".equals(type) && names.size() == 1
+                ? findArn(regionResolver.getAccountId(), names.getFirst(), region) : Optional.empty();
+    }
+
+    /**
+     * The secret an ARN names, a partial one included, as the operations read it ({@link #resolveSecret}): the
+     * caller's, in the Region the ARN names ({@link #findArn}), else the one the account the ARN names holds under
+     * that full ARN. Reads only.
+     */
+    @Override
+    public Optional<String> resolveStoredArn(String arn) {
+        AwsArnUtils.Arn parsed = parseOrNull(arn);
+        if (parsed == null || secretNameOrNull(parsed) == null) {
+            return Optional.empty();
+        }
+        return findArn(regionResolver.getAccountId(), arn, parsed.region())
+                .or(() -> Optional.ofNullable(findByArnInAccount(arn, parsed)).map(Secret::getArn));
+    }
+
     /**
      * The full ARN of the secret {@code secretId} names in the given account, or empty when there is
      * none, resolved in the order the operations resolve it: a name in {@code region}, or an ARN,
@@ -518,13 +555,42 @@ public class SecretsManagerService implements ResourceProvider {
         return findArnByName(accountId, nameFromArn, arn.region());
     }
 
+    /**
+     * The tags of the secret stored under the full ARN {@code arn}, in the account and Region it names; empty when
+     * there is none. The secret is stored by the ARN's name without the hyphen and random characters Secrets Manager
+     * adds, so this reads that one entry and matches it on the whole ARN, never scanning the store; it reads no value
+     * and leaves the secret's last-accessed date as it is.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        AwsArnUtils.Arn parsed = parseOrNull(arn);
+        String name = secretNameOrNull(parsed);
+        int named = name == null ? -1 : name.length() - RANDOM_SUFFIX_LENGTH - 1;
+        if (named < 1 || name.charAt(named) != '-') {
+            return Map.of();
+        }
+        Secret secret = stored(parsed.accountId(), regionKey(parsed.region(), name.substring(0, named)))
+                .filter(candidate -> arn.equals(candidate.getArn())).orElse(null);
+        if (secret == null || secret.getTags() == null) {
+            return Map.of();
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (Secret.Tag tag : secret.getTags()) {
+            tags.put(tag.key(), tag.value() == null ? "" : tag.value());
+        }
+        return tags;
+    }
+
     /** The full ARN of the secret with this name in the given account and region, or empty when there is none. */
     Optional<String> findArnByName(String accountId, String name, String region) {
-        String key = regionKey(region, name);
-        Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
+        return stored(accountId, regionKey(region, name)).map(Secret::getArn);
+    }
+
+    /** The secret the account holds under the storage key, a legacy entry included. */
+    private Optional<Secret> stored(String accountId, String key) {
+        return store instanceof AccountAwareStorageBackend<Secret> aware
                 ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
                 : store.get(key);
-        return secret.map(Secret::getArn);
     }
 
     /**
@@ -764,15 +830,43 @@ public class SecretsManagerService implements ResourceProvider {
             case "owning-service" -> secret.getOwningService() != null
                     && secret.getOwningService().startsWith(targetVal);
             case "all" -> {
-                String lowerVal = targetVal.toLowerCase();
-                boolean nameMatch = secret.getName() != null && secret.getName().toLowerCase().startsWith(lowerVal);
-                boolean descMatch = secret.getDescription() != null && secret.getDescription().toLowerCase().startsWith(lowerVal);
-                boolean tagKeyMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().toLowerCase().startsWith(lowerVal));
-                boolean tagValueMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().toLowerCase().startsWith(lowerVal));
-                yield nameMatch || descMatch || tagKeyMatch || tagValueMatch;
+                List<String> words = splitWords(targetVal);
+                if (words.isEmpty()) {
+                    // A value with no words is a prefix of every name, as it was before word splitting.
+                    yield secret.getName() != null;
+                }
+                yield matchesAnyWord(secret.getName(), words)
+                        || matchesAnyWord(secret.getDescription(), words)
+                        || (secret.getTags() != null && secret.getTags().stream()
+                                .anyMatch(t -> matchesAnyWord(t.key(), words) || matchesAnyWord(t.value(), words)));
             }
             default -> false;
         };
+    }
+
+    private static List<String> splitWords(String text) {
+        List<String> words = new ArrayList<>();
+        for (String word : WORD_BOUNDARY.split(text)) {
+            if (!word.isEmpty()) {
+                words.add(word.toLowerCase());
+            }
+        }
+        return words;
+    }
+
+    private static boolean matchesAnyWord(String attribute, List<String> filterWords) {
+        if (attribute == null) {
+            return false;
+        }
+        List<String> attributeWords = splitWords(attribute);
+        for (String filterWord : filterWords) {
+            for (String attributeWord : attributeWords) {
+                if (attributeWord.startsWith(filterWord)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public record Filter(String key, List<String> values) {}
@@ -1551,6 +1645,8 @@ public class SecretsManagerService implements ResourceProvider {
 
     private void executeManagedRotation(String secretArn, String token, String region,
                                         ManagedSecretRotator rotator) {
+        AtomicReference<String> pendingValue = new AtomicReference<>();
+        AtomicBoolean rollbackFailed = new AtomicBoolean();
         try {
             AtomicInteger committed = new AtomicInteger();
             rotator.rotate(secretArn, region, new ManagedSecretRotator.Rotation() {
@@ -1558,6 +1654,7 @@ public class SecretsManagerService implements ResourceProvider {
                 public void commit(Supplier<String> changeBackend, Runnable rollbackBackend) {
                     try {
                         String newValue = changeBackend.get();
+                        pendingValue.set(newValue);
                         synchronized (lockFor(secretArn)) {
                             Secret current = resolveSecret(secretArn, region);
                             putManagedRotationVersion(current, token, current.getCurrentVersionId(), newValue);
@@ -1567,7 +1664,13 @@ public class SecretsManagerService implements ResourceProvider {
                         }
                         committed.set(1);
                     } catch (RuntimeException e) {
-                        rollbackBackend.run();
+                        try {
+                            rollbackBackend.run();
+                        } catch (RuntimeException rollbackError) {
+                            rollbackError.addSuppressed(e);
+                            rollbackFailed.set(true);
+                            throw rollbackError;
+                        }
                         throw e;
                     }
                 }
@@ -1579,13 +1682,28 @@ public class SecretsManagerService implements ResourceProvider {
             LOG.errorv(e, "Managed rotation failed for secret {0}", secretArn);
             synchronized (lockFor(secretArn)) {
                 Secret current = resolveSecret(secretArn, region);
-                if (current.getVersions() != null) {
+                if (rollbackFailed.get() && pendingValue.get() != null) {
+                    // Backend rollback failed after the backend password changed: keep AWSPENDING with the
+                    // rotated value so the new credential is not lost while AWSCURRENT stays unchanged.
+                    if (current.getVersions() == null) {
+                        current.setVersions(new HashMap<>());
+                    }
+                    SecretVersion pending = current.getVersions().get(token);
+                    if (pending == null) {
+                        pending = new SecretVersion();
+                        pending.setVersionId(token);
+                        pending.setVersionStages(List.of("AWSPENDING"));
+                        pending.setCreatedDate(Instant.now());
+                        current.getVersions().put(token, pending);
+                    }
+                    pending.setSecretString(pendingValue.get());
+                    persist(current, region);
+                } else if (current.getVersions() != null) {
                     SecretVersion pending = current.getVersions().remove(token);
                     if (pending != null) {
                         persist(current, region);
                     }
                 }
-                persist(current, region);
             }
         } finally {
             clearManagedRotation(secretArn, token);
@@ -2244,8 +2362,8 @@ public class SecretsManagerService implements ResourceProvider {
 
     private static String randomSuffix() {
         ThreadLocalRandom rng = ThreadLocalRandom.current();
-        StringBuilder sb = new StringBuilder(6);
-        for (int i = 0; i < 6; i++) {
+        StringBuilder sb = new StringBuilder(RANDOM_SUFFIX_LENGTH);
+        for (int i = 0; i < RANDOM_SUFFIX_LENGTH; i++) {
             sb.append(ALPHABET.charAt(rng.nextInt(ALPHABET.length())));
         }
         return sb.toString();

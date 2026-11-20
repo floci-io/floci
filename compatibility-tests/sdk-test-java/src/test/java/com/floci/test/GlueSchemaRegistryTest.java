@@ -926,7 +926,7 @@ class GlueSchemaRegistryTest {
 
             Map<String, Object> configs = new HashMap<>();
             configs.put(AWSSchemaRegistryConstants.AWS_ENDPOINT, TestFixtures.endpoint().toString());
-            configs.put(AWSSchemaRegistryConstants.AWS_REGION, "us-east-1");
+            configs.put(AWSSchemaRegistryConstants.AWS_REGION, TestFixtures.region().id());
             configs.put(AWSSchemaRegistryConstants.DATA_FORMAT, DataFormat.AVRO.name());
             configs.put(AWSSchemaRegistryConstants.REGISTRY_NAME, registryName);
             configs.put(AWSSchemaRegistryConstants.SCHEMA_NAME, schemaName);

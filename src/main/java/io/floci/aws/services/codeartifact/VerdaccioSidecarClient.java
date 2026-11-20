@@ -480,6 +480,55 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Reads {@code dependencies}/{@code devDependencies}/{@code peerDependencies}/
+     * {@code optionalDependencies} straight off this version's own packument entry, exactly as
+     * stored on publish/retention (confirmed live: {@link #storeVersion} preserves them verbatim).
+     * A name appearing in more than one of the 4 maps emits a separate entry for each, rather than
+     * being deduplicated: a package can legitimately be both a runtime default and a dev-only
+     * override with different version ranges.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        Optional<JsonNode> document = fetchPackageDocument(baseUrl, namespace, packageName);
+        if (document.isEmpty()) {
+            return List.of();
+        }
+        JsonNode versionDoc = document.get().path("versions").path(version);
+        if (versionDoc.isMissingNode()) {
+            return List.of();
+        }
+        List<CodeArtifactService.PackageDependency> dependencies = new ArrayList<>();
+        addNpmDependencies(dependencies, versionDoc.path("dependencies"), "regular");
+        addNpmDependencies(dependencies, versionDoc.path("devDependencies"), "dev");
+        addNpmDependencies(dependencies, versionDoc.path("peerDependencies"), "peer");
+        addNpmDependencies(dependencies, versionDoc.path("optionalDependencies"), "optional");
+        return dependencies;
+    }
+
+    private static void addNpmDependencies(List<CodeArtifactService.PackageDependency> dependencies,
+            JsonNode dependencyMap, String dependencyType) {
+        Iterator<String> names = dependencyMap.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            String versionRequirement = dependencyMap.path(name).asText(null);
+            String dependencyNamespace = null;
+            String dependencyPackageName = name;
+            if (name.startsWith("@")) {
+                int slash = name.indexOf('/');
+                if (slash > 0) {
+                    dependencyNamespace = name.substring(1, slash);
+                    dependencyPackageName = name.substring(slash + 1);
+                }
+            }
+            dependencies.add(new CodeArtifactService.PackageDependency(dependencyNamespace, dependencyPackageName,
+                    dependencyType, versionRequirement));
+        }
+    }
+
+    /**
      * Publishes {@code version} straight to this sidecar's own packument, the real npm registry
      * wire shape confirmed against a live Verdaccio container: a {@code PUT} to the package path
      * carrying just the new version's metadata and its tarball as a base64 {@code _attachments}

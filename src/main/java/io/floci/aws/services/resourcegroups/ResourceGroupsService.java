@@ -326,6 +326,22 @@ public class ResourceGroupsService implements Resettable {
         return region + "::" + name;
     }
 
+    /**
+     * The tags of the group whose ARN is {@code arn} in {@code account}, read in place under the key the handlers read,
+     * its name in the ARN's Region, and matched on the whole ARN it records; none when there is no such group. A group
+     * is stored whole, so the read is of one whole set.
+     */
+    Map<String, String> groupTagsInAccount(String account, String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.resource().startsWith("group/")) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(groups, account,
+                        key(parsed.region(), parsed.resource().substring("group/".length())))
+                .filter(group -> arn.equals(group.arn()))
+                .map(ResourceGroup::tags).orElse(Map.of());
+    }
+
     private static String text(JsonNode object, String field, boolean required) {
         JsonNode value = object.get(field);
         if ((value == null || value.isNull()) && !required) {

@@ -5,6 +5,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class AvailabilityZoneIdsTest {
 
@@ -53,5 +54,15 @@ class AvailabilityZoneIdsTest {
         assertEquals(-1, AvailabilityZoneIds.indexOf("us-east-1", "us-east-1-az2"));
         assertEquals(-1, AvailabilityZoneIds.indexOf("us-east-1", "use1-azx"));
         assertEquals(-1, AvailabilityZoneIds.indexOf("us-east-1", null));
+    }
+
+    @Test
+    void aZonesRegionIsItsNameWithoutTheZoneLetter() {
+        assertEquals("us-east-1", AvailabilityZoneIds.regionOf("us-east-1a"));
+        assertEquals("cn-northwest-1", AvailabilityZoneIds.regionOf("cn-northwest-1c"));
+        assertNull(AvailabilityZoneIds.regionOf("use1-az1"));
+        assertNull(AvailabilityZoneIds.regionOf("a"));
+        assertNull(AvailabilityZoneIds.regionOf(""));
+        assertNull(AvailabilityZoneIds.regionOf(null));
     }
 }

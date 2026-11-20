@@ -17,17 +17,31 @@ import java.util.regex.Pattern;
  *   <li>{@code sourceValue} is a literal or expression resolved by {@link ContextValueResolver}</li>
  * </ul>
  *
- * <p>For {@code overwrite:path}, the source value may contain embedded
- * {@code $request.path.X} / {@code $context.X} substrings which are resolved in-place. They land in
+ * <p>For {@code overwrite:path}, the source value may contain embedded expressions such as
+ * {@code $request.path.X}, {@code $request.body.X}, {@code $stageVariables.X} or {@code $context.X},
+ * which are resolved in-place; one that resolves to nothing becomes the empty string. They land in
  * a URL, so a path parameter keeps the caller's encoding and any other value is percent-encoded.
+ * Each embedded expression is read whole before it is resolved: a body JSONPath runs through dotted
+ * names, {@code [n]} indexes and {@code ['key']} or {@code ["key"]} selectors, so
+ * {@code /orders/$request.body.items[0].id} selects one item's id; a stage variable name runs
+ * through letters, digits and underscores; a request path, header or query string name is a single
+ * segment, so {@code /files/$request.path.name.json} keeps its {@code .json} suffix.
  *
  * <p>When a source resolves to {@code null} (missing claim, missing header, etc.),
  * overwrite/append actions are silently skipped to match AWS behavior. {@code remove}
  * is unconditional.
  */
 public class RequestParameterMapper {
-    private static final Pattern EMBEDDED_VAR =
-            Pattern.compile("\\$[a-zA-Z]+(\\.[a-zA-Z][a-zA-Z0-9_-]*)+");
+    private static final String NAME = "[A-Za-z0-9_-]+";
+    private static final String JSON_PATH_SELECTOR = "\\[(?:-?[0-9]+|'[^'\\]]*'|\"[^\"\\]]*\")\\]";
+    private static final String JSON_PATH_STEP = "\\.(?:" + NAME + "|" + JSON_PATH_SELECTOR + ")";
+    private static final String JSON_PATH = JSON_PATH_STEP + "(?:" + JSON_PATH_STEP + "|" + JSON_PATH_SELECTOR + ")*";
+    private static final Pattern EMBEDDED_VAR = Pattern.compile(
+            "\\$request\\.body(?:" + JSON_PATH + "|(?![A-Za-z0-9_-]))"
+                    + "|\\$request\\.(?:path|header|querystring)\\." + NAME
+                    + "|\\$stageVariables\\.[A-Za-z0-9_]+"
+                    + "|\\$context(?:\\." + NAME + ")+"
+                    + "|\\$[A-Za-z]+(?:\\." + NAME + ")+");
     private static final String REQUEST_PATH_PREFIX = "$request.path.";
 
     private final ContextValueResolver resolver;

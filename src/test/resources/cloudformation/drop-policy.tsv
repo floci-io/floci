@@ -1,3 +1,14 @@
+AWS::ApiGateway::Authorizer	AuthorizerResultTtlInSeconds	default:300
+AWS::ApiGateway::Authorizer	AuthorizerUri	keep:the patch cannot remove it
+AWS::ApiGateway::Authorizer	IdentitySource	clear	the field reads back absent; a drop from a TOKEN or COGNITO_USER_POOLS authorizer fails, as AWS requires it there
+AWS::ApiGateway::Authorizer	Name	keep:required by AWS
+AWS::ApiGateway::Authorizer	ProviderARNs	clear	the field reads back empty
+AWS::ApiGateway::Authorizer	RestApiId	create-only	a drop fails: the rest api is not found
+AWS::ApiGateway::Authorizer	Type	keep:required by AWS
+AWS::ApiGateway::Stage	DeploymentId	keep:the patch cannot remove it
+AWS::ApiGateway::Stage	Description	clear	the field reads back absent
+AWS::ApiGateway::Stage	RestApiId	create-only	a drop fails: the rest api is not found
+AWS::ApiGateway::Stage	StageName	create-only	a drop fails: the stage name is required
 AWS::ApiGatewayV2::Authorizer	ApiId	create-only	a drop fails: the authorizer is not found
 AWS::ApiGatewayV2::Authorizer	AuthorizerPayloadFormatVersion	clear	a create without it accepts the authorizer
 AWS::ApiGatewayV2::Authorizer	AuthorizerResultTtlInSeconds	clear	the field reads back absent
@@ -136,13 +147,22 @@ AWS::EC2::Subnet	VpcId	create-only	a drop is refused
 AWS::ECS::Service	CapacityProviderStrategy	keep:AWS documents a removed strategy as no update; a declared empty list clears it
 AWS::ECS::Service	Cluster	create-only
 AWS::ECS::Service	DeploymentConfiguration	clear	it is stored as none, so it reads back as never set; a declared {} is stored as given
-AWS::ECS::Service	DesiredCount	default:1
+AWS::ECS::Service	DesiredCount	keep:AWS omits it from the update, so the stored count stays
 AWS::ECS::Service	LaunchType	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::ECS::Service	LoadBalancers	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::ECS::Service	NetworkConfiguration	keep:the update leaves a missing network configuration unchanged
 AWS::ECS::Service	ServiceName	keep:the prior name is reused
 AWS::ECS::Service	ServiceRegistries	keep:AWS removes registries only through a declared empty list
 AWS::ECS::Service	TaskDefinition	keep:required for the ECS controller
+AWS::KMS::Key	Description	clear	cleared to the empty description, KMS's own empty state; the CloudFormation page lists no default
+AWS::KMS::Key	EnableKeyRotation	default:false	the CloudFormation page: EnableKeyRotation defaults to false
+AWS::KMS::Key	Enabled	default:true	the CloudFormation page: Enabled defaults to true
+AWS::KMS::Key	KeyPolicy	keep:no AWS documentation says a dropped policy resets to the default, so the stored policy stays
+AWS::KMS::Key	KeySpec	keep:a drop names the create default, so a key holding another value fails the update, as a change does
+AWS::KMS::Key	KeyUsage	keep:a drop names the create default, so a key holding another value fails the update, as a change does
+AWS::KMS::Key	MultiRegion	keep:a drop names the create default, so a key holding another value fails the update, as a change does
+AWS::KMS::Key	Origin	keep:a drop names the create default, so a key holding another value fails the update, as a change does
+AWS::KMS::Key	Tags	clear	every update drives the stack's own tag keys to the template; tags added outside the stack stay
 AWS::Lambda::Alias	Description	clear
 AWS::Lambda::Alias	FunctionName	create-only	a drop fails: the provisioner requires it
 AWS::Lambda::Alias	FunctionVersion	keep:the update skips a null, so the stored version stays

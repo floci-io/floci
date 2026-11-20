@@ -3,7 +3,7 @@ package io.floci.aws.services.bedrockruntime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import io.floci.aws.testing.BedrockProxyBackendProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -16,7 +16,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.BedrockProxyBackendProfile.PORT;
+import static io.floci.aws.testing.SidecarContainersProfile.BEDROCK_PROXY_PORT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,12 +25,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Verifies that with {@code proxy.passthrough=true} the raw Bedrock model id is forwarded
  * as-is to the OpenAI-compatible backend, bypassing the mapping/default-model requirement.
  *
- * <p>Passthrough and the backend URL come from {@link BedrockProxyBackendProfile}, which this class
+ * <p>Passthrough and the backend URL come from {@link SidecarContainersProfile}, which this class
  * shares with the other proxy classes that talk to a stand-in. The raw model id is not in that
  * profile's mapping, so it reaches the backend through passthrough alone.
  */
 @QuarkusTest
-@TestProfile(BedrockProxyBackendProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class BedrockProxyPassthroughIntegrationTest {
 
     private static final String AUTH_HEADER =
@@ -45,7 +45,7 @@ class BedrockProxyPassthroughIntegrationTest {
 
     @BeforeEach
     void setUp() throws IOException {
-        backend = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
+        backend = HttpServer.create(new InetSocketAddress("127.0.0.1", BEDROCK_PROXY_PORT), 0);
         backend.createContext("/v1/chat/completions", exchange -> {
             receivedBody.set(exchange.getRequestBody().readAllBytes());
 

@@ -1,17 +1,12 @@
 package io.floci.aws.services.rds.proxy;
 
-import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.SSLSocket;
 import java.io.BufferedOutputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,16 +14,14 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
+import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
@@ -38,11 +31,12 @@ import java.util.function.BiConsumer;
  *
  * <p>Flow:
  * <ol>
- *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation)
+ *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation), refusing one sent
+ *       without TLS when {@code rds.force_ssl} requires it
  *   <li>Challenge client with AuthenticationCleartextPassword
  *   <li>Read client password
  *   <li>Validate (IAM SigV4 or plain password)
- *   <li>Connect to backend with MD5 or SCRAM-SHA-256 auth
+ *   <li>Connect to backend with cleartext, MD5 or SCRAM-SHA-256 auth, checking SCRAM's server signature
  *   <li>Buffer backend messages until ReadyForQuery
  *   <li>For IAM logins, hand the session over to the role named in the token, then apply the
  *       client's startup parameters as that role
@@ -70,6 +64,30 @@ public class PostgresProtocolHandler {
     @FunctionalInterface
     public interface StartupObserver {
         void onStartup(String username, String database, Map<String, String> parameters);
+    }
+
+    /**
+     * Optional callback used by Redshift proxies to provision/verify a database role and
+     * temporary group memberships before the backend session opens. The backend then
+     * authenticates as that role, so PostgreSQL itself keeps the session from becoming another user.
+     */
+    @FunctionalInterface
+    public interface SessionRoleHandover {
+        HandoverOutcome prepare(String clientUsername, String clientPassword, String database) throws SQLException;
+    }
+
+    /**
+     * {@code backendPassword} is the password the backend session logs in as {@code databaseRole}
+     * with; {@code null} means the cluster master password, for the master user itself.
+     * {@code onBackendLogin} runs once that login has finished, whether it succeeded or not, so the
+     * role's own password can be restored while the session stays open; {@code onClose} runs when the
+     * session ends or the login is refused.
+     */
+    public record HandoverOutcome(String databaseRole, String backendPassword,
+                                  Runnable onBackendLogin, Runnable onClose) {
+        public HandoverOutcome(String databaseRole, String backendPassword, Runnable onClose) {
+            this(databaseRole, backendPassword, null, onClose);
+        }
     }
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
@@ -123,6 +141,8 @@ public class PostgresProtocolHandler {
      * StartupMessage parameters ({@code options}, {@code application_name} and any run-time
      * parameter) apply as they would on the server itself: they open the backend session, or,
      * for an IAM login handed over to the token's role, are set once the role owns the session.
+     * {@code replication} opens the backend session in both cases, since it can only be chosen
+     * at connection start.
      */
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
@@ -176,12 +196,39 @@ public class PostgresProtocolHandler {
                                       PasswordValidator passwordValidator, int handshakeTimeoutMillis,
                                       boolean forwardStartupParameters, boolean databaseIamAuthentication,
                                       StartupObserver startupObserver) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, null);
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, roleHandover, false);
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover,
+                                      boolean requireSsl) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
         StartupMessage startup = readStartupMessage(client, backendConnector, databaseIamAuthentication,
-                tlsCertificates, handshakeTimeoutMillis);
+                tlsCertificates, handshakeTimeoutMillis, requireSsl);
         if (startup == null) {
             closeQuietly(client);
             return null;
@@ -236,6 +283,40 @@ public class PostgresProtocolHandler {
             }
         }
 
+        // Phase 4b: A client the proxy vouched for through a role handover runs as the role the
+        // handover names, which the backend authenticates directly. Prepared before any backend
+        // session opens so a refused role never costs a connection.
+        boolean iamHandover = isIam && !isMaster;
+        boolean customHandover = !iamHandover && roleHandover != null
+                && authResult == PasswordValidator.AuthResult.MASTER_EQUIVALENT && !isMaster;
+        String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
+        HandoverOutcome handoverOutcome = null;
+        if (customHandover) {
+            try {
+                handoverOutcome = roleHandover.prepare(clientUsername, clientPassword, effectiveDbName);
+            } catch (SQLException failure) {
+                String sqlState = failure.getSQLState() == null || failure.getSQLState().isBlank()
+                        ? "28000" : failure.getSQLState();
+                sendErrorResponse(clientOut, "FATAL", sqlState, failure.getMessage());
+                clientOut.flush();
+                closeQuietly(client);
+                return null;
+            }
+            if (handoverOutcome == null || handoverOutcome.databaseRole() == null
+                    || handoverOutcome.databaseRole().isBlank()) {
+                if (handoverOutcome != null && handoverOutcome.onClose() != null) {
+                    handoverOutcome.onClose().run();
+                }
+                sendErrorResponse(clientOut, "FATAL", "28000",
+                        "password authentication failed for user \"" + clientUsername + "\"");
+                clientOut.flush();
+                closeQuietly(client);
+                return null;
+            }
+        }
+        Runnable handoverClose = handoverOutcome == null || handoverOutcome.onClose() == null
+                ? () -> { } : handoverOutcome.onClose();
+
         // Phase 5: Connect to backend PostgreSQL, now that the client's startup message and
         // credentials have been validated. IAM and master: use master credentials. The backend
         // has the original container password and is never updated directly, so the proxy always
@@ -245,6 +326,7 @@ public class PostgresProtocolHandler {
         try {
             backend = backendConnector.connect();
         } catch (IOException e) {
+            handoverClose.run();
             sendErrorResponse(clientOut, "FATAL", "08006", "could not connect to backend database");
             clientOut.flush();
             closeQuietly(client);
@@ -260,29 +342,41 @@ public class PostgresProtocolHandler {
             InputStream backendIn = backend.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
 
-            String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
             BackendLogin backendLogin = resolveBackendLogin(isMaster, isIam, authResult,
                     masterUsername, masterPassword, clientUsername, clientPassword);
             String backendUser = backendLogin.user();
             String backendPass = backendLogin.password();
+            if (handoverOutcome != null) {
+                backendUser = handoverOutcome.databaseRole();
+                backendPass = handoverOutcome.backendPassword() != null
+                        ? handoverOutcome.backendPassword() : masterPassword;
+            }
             // An IAM login for any role but the master runs on a session opened as the master and
             // handed over below, so PostgreSQL would apply the client's parameters with the
             // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
-            // would regain the master. Those logins open without them, and their parameters are
-            // applied once the session belongs to the role (Phase 5c). The proxy reads that
-            // session's results and sends it SQL of its own, so it fixes the encoding to UTF-8.
-            boolean iamHandover = isIam && !isMaster;
+            // would regain the master. Those logins open with only "replication", which cannot be
+            // chosen later, and their other parameters are applied once the session belongs to the
+            // role (Phase 5c). The proxy reads that session's results and sends it SQL of its own,
+            // so it fixes the encoding to UTF-8.
             Map<String, String> backendParameters;
             if (!forwardStartupParameters) {
                 backendParameters = Map.of();
             } else if (iamHandover) {
-                backendParameters = Map.of("client_encoding", "UTF8");
+                backendParameters = handoverStartupParameters(startup.parameters(), Map.of());
             } else {
                 backendParameters = startup.parameters();
             }
-            byte[] backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                    effectiveDbName, backendParameters);
+            byte[] backendRejection;
+            try {
+                backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
+                        effectiveDbName, backendParameters);
+            } finally {
+                if (handoverOutcome != null && handoverOutcome.onBackendLogin() != null) {
+                    handoverOutcome.onBackendLogin().run();
+                }
+            }
             if (backendRejection != null) {
+                handoverClose.run();
                 clientOut.write(backendRejection);
                 clientOut.flush();
                 closeQuietly(client);
@@ -350,11 +444,9 @@ public class PostgresProtocolHandler {
                     backend.setSoTimeout(handshakeTimeoutMillis);
                     backendIn = backend.getInputStream();
                     backendOut = backend.getOutputStream();
-                    Map<String, String> withDefaults = new LinkedHashMap<>();
-                    withDefaults.put("options", startupOptions(defaults.atStartup()));
-                    withDefaults.put("client_encoding", "UTF8");
                     backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                            effectiveDbName, withDefaults);
+                            effectiveDbName, handoverStartupParameters(startup.parameters(),
+                                    Map.of("options", startupOptions(defaults.atStartup()))));
                     if (backendRejection != null) {
                         clientOut.write(backendRejection);
                         clientOut.flush();
@@ -484,10 +576,26 @@ public class PostgresProtocolHandler {
                                     : "role identity changed during handover");
                     return null;
                 }
+                // PostgreSQL checks the replication privilege only when the WAL sender starts,
+                // which it did as the master, and never again for replication commands.
+                if (requestsReplication(startup.parameters()) && !hasReplicationPrivilege(backendIn, backendOut)) {
+                    LOG.infov("RDS IAM replication connection refused for role {0}: replication privilege required",
+                            SigV4RequestValidator.sanitizeForLog(clientUsername));
+                    sendErrorResponse(clientOut, "FATAL", "42501", "permission denied to start WAL sender");
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
+                    return null;
+                }
+            }
+
+            if (handoverOutcome != null) {
+                iamRole = handoverOutcome.databaseRole();
             }
 
             // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
             if (endsWithErrorResponse(bufferedMessages)) {
+                handoverClose.run();
                 for (byte[] msg : bufferedMessages) {
                     clientOut.write(msg);
                 }
@@ -516,7 +624,7 @@ public class PostgresProtocolHandler {
 
     private static StartupMessage readStartupMessage(Socket socket, BackendConnector backendConnector,
             boolean forwardCancel, RdsProxyTlsCertificates tlsCertificates,
-            int handshakeTimeoutMillis) throws IOException {
+            int handshakeTimeoutMillis, boolean requireSsl) throws IOException {
         Socket currentSocket = socket;
         while (true) {
             InputStream in = currentSocket.getInputStream();
@@ -552,10 +660,15 @@ public class PostgresProtocolHandler {
             }
 
             Map<String, String> params = PostgresWire.startupParameters(startup.body());
-            return new StartupMessage(currentSocket,
-                    params.getOrDefault("user", "postgres"),
-                    params.get("database"),
-                    params);
+            String user = params.getOrDefault("user", "postgres");
+            if (requireSsl && !(currentSocket instanceof SSLSocket)) {
+                sendErrorResponse(out, "FATAL", "28000", "no pg_hba.conf entry for host \""
+                        + currentSocket.getInetAddress().getHostAddress() + "\", user \"" + user
+                        + "\", database \"" + params.getOrDefault("database", user) + "\", no encryption");
+                out.flush();
+                return null;
+            }
+            return new StartupMessage(currentSocket, user, params.get("database"), params);
         }
     }
 
@@ -631,7 +744,7 @@ public class PostgresProtocolHandler {
             return null;
         }
         if (type != 'p') {
-            LOG.warnv("Expected PasswordMessage ('p'), got {0}", (char) type);
+            LOG.warnv("Expected PasswordMessage (''p''), got {0}", (char) type);
             return null;
         }
         int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 5, MAX_HANDSHAKE_PACKET_LENGTH, "password message");
@@ -667,52 +780,44 @@ public class PostgresProtocolHandler {
         return responseMessage('E', "FATAL", "08006", "Backend database authentication failed");
     }
 
+    /**
+     * Answers the backend's authentication requests through {@link BackendAuthenticator}, in its
+     * general mode: trust, cleartext, MD5 or SCRAM-SHA-256, whose server signature must be proved
+     * before an AuthenticationOk is taken. False, with the cause logged but no secret, when the
+     * backend asks for something the proxy cannot or will not answer.
+     */
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
-        int type = readAuthenticationType(in);
-        if (type != 'R') {
-            LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
-            return false;
+        BackendAuthenticator authenticator = new BackendAuthenticator(username, password);
+        String packetName = "backend authentication message";
+        while (true) {
+            int type = readAuthenticationType(in);
+            if (type != 'R') {
+                LOG.warnv("Expected Authentication (''R'') from backend, got type={0}", type);
+                return false;
+            }
+            byte[] body = PostgresWire.readBody(in, 8, MAX_HANDSHAKE_PACKET_LENGTH, packetName);
+            Optional<PostgresWire.Message> answer;
+            try {
+                answer = authenticator.answer(new PostgresWire.Message((byte) 'R', body));
+            } catch (IOException e) {
+                LOG.warnv("Backend PostgreSQL authentication failed: {0}", e.getMessage());
+                return false;
+            }
+            int authType = PostgresWire.int32(body, 0);
+            if (authType == 0) {
+                return true;
+            }
+            if (answer.isPresent()) {
+                PostgresWire.write(out, answer.get());
+                out.flush();
+            }
+            packetName = switch (authType) {
+                case 10 -> "SASL continue message";
+                case 11 -> "SASL final message";
+                default -> "authentication response";
+            };
         }
-
-        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "backend authentication message");
-        int authType = PostgresWire.readInt32(in);
-
-        if (authType == 0) {
-            // Trust auth — no password needed
-            return true;
-        }
-
-        if (authType == 3) {
-            // CleartextPassword
-            sendPasswordMessage(out, password);
-            out.flush();
-            return readAuthOk(in);
-        }
-
-        if (authType == 5) {
-            // MD5Password — read 4-byte salt
-            byte[] salt = new byte[4];
-            PostgresWire.readFully(in, salt);
-            String md5pw = computeMd5Password(password, username, salt);
-            sendPasswordMessage(out, md5pw);
-            out.flush();
-            return readAuthOk(in);
-        }
-
-        if (authType == 10) {
-            // SCRAM-SHA-256 — drain the mechanisms list and perform SCRAM handshake
-            byte[] mechanismsBytes = new byte[length - 8];
-            PostgresWire.readFully(in, mechanismsBytes);
-            return performScramSha256(in, out, username, password);
-        }
-
-        LOG.warnv("Unsupported backend PostgreSQL auth type: {0}", authType);
-        if (length > 8) {
-            byte[] extra = new byte[length - 8];
-            PostgresWire.readFully(in, extra);
-        }
-        return false;
     }
 
     /**
@@ -740,168 +845,6 @@ public class PostgresProtocolHandler {
         byte[] errorResponse() {
             return errorResponse;
         }
-    }
-
-    // ── SCRAM-SHA-256 ─────────────────────────────────────────────────────────
-
-    private static boolean performScramSha256(InputStream in, OutputStream out,
-                                              String username, String password) throws IOException {
-        // Step 1: Send SASLInitialResponse with client-first-message
-        String clientNonce = generateNonce();
-        String clientFirstMessageBare = "n=" + username + ",r=" + clientNonce;
-        String clientFirstMessage = "n,," + clientFirstMessageBare;
-        byte[] firstMsgBytes = clientFirstMessage.getBytes(StandardCharsets.UTF_8);
-
-        // Body: mechanism-name '\0' Int32(msg-length) msg-bytes
-        ByteArrayOutputStream saslInit = new ByteArrayOutputStream();
-        saslInit.write("SCRAM-SHA-256".getBytes(StandardCharsets.UTF_8));
-        saslInit.write(0);
-        saslInit.write((firstMsgBytes.length >> 24) & 0xFF);
-        saslInit.write((firstMsgBytes.length >> 16) & 0xFF);
-        saslInit.write((firstMsgBytes.length >> 8) & 0xFF);
-        saslInit.write(firstMsgBytes.length & 0xFF);
-        saslInit.write(firstMsgBytes);
-        PostgresWire.write(out, 'p', saslInit.toByteArray());
-        out.flush();
-
-        // Step 2: Read AuthenticationSASLContinue (authType=11)
-        if (readAuthenticationType(in) != 'R') {
-            return false;
-        }
-        int len2 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL continue message");
-        if (PostgresWire.readInt32(in) != 11) {
-            return false;
-        }
-        byte[] serverFirstBytes = new byte[len2 - 8];
-        PostgresWire.readFully(in, serverFirstBytes);
-        String serverFirstMessage = new String(serverFirstBytes, StandardCharsets.UTF_8);
-
-        // Parse server-first-message: r=<nonce>,s=<base64-salt>,i=<iterations>
-        Map<String, String> sp = parseScramParams(serverFirstMessage);
-        String serverNonce = sp.get("r");
-        byte[] salt = Base64.getDecoder().decode(sp.get("s"));
-        int iterations = Integer.parseInt(sp.get("i"));
-
-        if (serverNonce == null || !serverNonce.startsWith(clientNonce)) {
-            LOG.warn("SCRAM: server nonce does not start with client nonce");
-            return false;
-        }
-
-        // Step 3: Compute client-final-message with proof
-        // c = base64("n,,") = "biws" (GS2 header, no channel binding)
-        String clientFinalWithoutProof = "c=biws,r=" + serverNonce;
-        String authMessage = clientFirstMessageBare + "," + serverFirstMessage + "," + clientFinalWithoutProof;
-
-        byte[] saltedPassword = pbkdf2HmacSha256(password, salt, iterations);
-        byte[] clientKey = hmacSha256(saltedPassword, "Client Key");
-        byte[] storedKey = Digests.sha256(clientKey);
-        byte[] clientSignature = hmacSha256(storedKey, authMessage.getBytes(StandardCharsets.UTF_8));
-        byte[] clientProof = xor(clientKey, clientSignature);
-
-        String clientFinalMessage = clientFinalWithoutProof
-                + ",p=" + Base64.getEncoder().encodeToString(clientProof);
-
-        // Send SASLResponse: just the final message bytes
-        PostgresWire.write(out, 'p', clientFinalMessage.getBytes(StandardCharsets.UTF_8));
-        out.flush();
-
-        // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
-        if (readAuthenticationType(in) != 'R') {
-            return false;
-        }
-        int len3 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL final message");
-        if (PostgresWire.readInt32(in) != 12) {
-            return false;
-        }
-        byte[] serverFinalBytes = new byte[len3 - 8];
-        PostgresWire.readFully(in, serverFinalBytes);
-
-        // Step 5: Read final AuthenticationOK
-        return readAuthOk(in);
-    }
-
-    private static String generateNonce() {
-        byte[] bytes = new byte[18];
-        new SecureRandom().nextBytes(bytes);
-        return Base64.getEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private static Map<String, String> parseScramParams(String msg) {
-        Map<String, String> params = new HashMap<>();
-        for (String part : msg.split(",")) {
-            int eq = part.indexOf('=');
-            if (eq > 0) {
-                params.put(part.substring(0, eq), part.substring(eq + 1));
-            }
-        }
-        return params;
-    }
-
-    private static byte[] pbkdf2HmacSha256(String password, byte[] salt, int iterations) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
-            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-            return skf.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new RuntimeException("PBKDF2-HMAC-SHA256 failed", e);
-        }
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) {
-        return hmacSha256(key, data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static byte[] hmacSha256(byte[] key, byte[] data) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(data);
-        } catch (Exception e) {
-            throw new RuntimeException("HMAC-SHA256 failed", e);
-        }
-    }
-
-    private static byte[] xor(byte[] a, byte[] b) {
-        byte[] result = new byte[a.length];
-        for (int i = 0; i < a.length; i++) {
-            result[i] = (byte) (a[i] ^ b[i]);
-        }
-        return result;
-    }
-
-    // ── MD5 password ──────────────────────────────────────────────────────────
-
-    private static boolean readAuthOk(InputStream in) throws IOException {
-        int type = readAuthenticationType(in);
-        if (type != 'R') {
-            LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
-            return false;
-        }
-        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "authentication response");
-        int authType = PostgresWire.readInt32(in);
-        if (length > 8) {
-            byte[] extra = new byte[length - 8];
-            PostgresWire.readFully(in, extra);
-        }
-        return authType == 0;
-    }
-
-    private static void sendPasswordMessage(OutputStream out, String password) throws IOException {
-        byte[] pwBytes = password.getBytes(StandardCharsets.UTF_8);
-        // 'p' + Int32(4 + pwLen + 1) + password + null
-        PostgresWire.write(out, 'p', pwBytes, new byte[]{0});
-    }
-
-    private static String computeMd5Password(String password, String username, byte[] salt) {
-        MessageDigest md5 = Digests.md5Digest();
-        md5.update(password.getBytes(StandardCharsets.UTF_8));
-        md5.update(username.getBytes(StandardCharsets.UTF_8));
-        String hex1 = HexFormat.of().formatHex(md5.digest());
-
-        md5.reset();
-        md5.update(hex1.getBytes(StandardCharsets.UTF_8));
-        md5.update(salt);
-        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     // ── Post-auth buffering ───────────────────────────────────────────────────
@@ -1261,7 +1204,8 @@ public class PostgresProtocolHandler {
     /**
      * The run-time parameters a StartupMessage asks for, in the order PostgreSQL applies them:
      * the {@code -c} switches in {@code options} first, then every other parameter as sent.
-     * {@code user}, {@code database} and {@code _pq_.} protocol extensions are not parameters.
+     * {@code user}, {@code database}, {@code replication} and {@code _pq_.} protocol extensions
+     * are not run-time parameters.
      */
     static List<SessionSetting> sessionSettings(Map<String, String> startupParameters)
             throws StartupParameterException {
@@ -1273,25 +1217,45 @@ public class PostgresProtocolHandler {
         for (Map.Entry<String, String> parameter : startupParameters.entrySet()) {
             String name = parameter.getKey();
             if ("user".equals(name) || "database".equals(name) || "options".equals(name)
-                    || name.startsWith("_pq_.")) {
-                continue;
-            }
-            if ("replication".equals(name)) {
-                String value = parameter.getValue();
-                Boolean replication = "database".equals(value) ? Boolean.TRUE : parseBool(value);
-                if (replication == null) {
-                    throw new StartupParameterException("22023",
-                            "invalid value for parameter \"replication\": \"" + value + "\"");
-                }
-                if (replication) {
-                    throw new StartupParameterException("0A000",
-                            "replication connections are not supported for IAM sessions through the proxy");
-                }
+                    || "replication".equals(name) || name.startsWith("_pq_.")) {
                 continue;
             }
             settings.add(new SessionSetting(name, parameter.getValue()));
         }
         return settings;
+    }
+
+    /**
+     * The StartupMessage parameters of a backend session opened as the master for a handover:
+     * {@code base}, UTF-8 for the proxy's own queries, and the client's {@code replication},
+     * which can only be chosen at connection start.
+     */
+    static Map<String, String> handoverStartupParameters(Map<String, String> clientParameters,
+                                                         Map<String, String> base) {
+        Map<String, String> parameters = new LinkedHashMap<>(base);
+        parameters.put("client_encoding", "UTF8");
+        String replication = clientParameters.get("replication");
+        if (replication != null) {
+            parameters.put("replication", replication);
+        }
+        return parameters;
+    }
+
+    static boolean requestsReplication(Map<String, String> startupParameters) {
+        String value = startupParameters.get("replication");
+        return value != null && ("database".equals(value) || Boolean.TRUE.equals(parseBool(value)));
+    }
+
+    static String replicationPrivilegeQuery() {
+        return "SELECT r.oid::pg_catalog.text, r.rolsuper OR r.rolreplication OR EXISTS ("
+                + "SELECT 1 FROM pg_catalog.pg_roles g WHERE g.rolname OPERATOR(pg_catalog.=) 'rds_replication' "
+                + "AND pg_catalog.pg_has_role(r.oid, g.oid, 'MEMBER')) "
+                + "FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) SESSION_USER";
+    }
+
+    private static boolean hasReplicationPrivilege(InputStream in, OutputStream out) throws IOException {
+        List<SessionSetting> rows = settingsFromDataRows(runQuery(in, out, replicationPrivilegeQuery()));
+        return rows.size() == 1 && "t".equals(rows.getFirst().value());
     }
 
     /**
@@ -1574,7 +1538,10 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
             }
         };
-        Thread t1 = RelayThreads.start("rds-pg-c2b", () -> relay(clientIn, backendOut, closeBoth));
+        boolean logicalReplication = session.iamRole() != null && requestsReplication(session.startupParameters());
+        Thread t1 = RelayThreads.start("rds-pg-c2b", logicalReplication
+                ? () -> relayRefusingPhysicalReplication(clientIn, backendOut, session.iamRole(), closeBoth)
+                : () -> relay(clientIn, backendOut, closeBoth));
         Thread t2 = RelayThreads.start("rds-pg-b2c",
                 () -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
         try {
@@ -1681,6 +1648,134 @@ public class PostgresProtocolHandler {
         } finally {
             onDone.run();
         }
+    }
+
+    static final String PHYSICAL_REPLICATION_REFUSAL = "DO $$BEGIN RAISE EXCEPTION "
+            + "'permission denied to use physical replication' USING ERRCODE = 'insufficient_privilege'; END$$";
+
+    private static final Set<String> REPLICATION_COMMANDS = Set.of("IDENTIFY_SYSTEM", "BASE_BACKUP",
+            "START_REPLICATION", "CREATE_REPLICATION_SLOT", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT",
+            "READ_REPLICATION_SLOT", "TIMELINE_HISTORY", "UPLOAD_MANIFEST", "SHOW");
+
+    /** A WAL sender refuses the extended query protocol, so only a Query can carry a replication command. */
+    private static void relayRefusingPhysicalReplication(InputStream clientIn, OutputStream backendOut,
+                                                         String iamRole, Runnable onDone) {
+        RelayInputStream from = new RelayInputStream(clientIn);
+        BufferedOutputStream to = new BufferedOutputStream(backendOut, 8192);
+        byte[] buf = new byte[8192];
+        try {
+            while (true) {
+                int type = from.read();
+                if (type < 0) {
+                    return;
+                }
+                byte[] header = new byte[4];
+                PostgresWire.readFully(from, header);
+                int length = PostgresWire.int32(header, 0);
+                if (length < 4) {
+                    return;
+                }
+                int remaining = length - 4;
+                if (type == 'Q') {
+                    byte[] payload = new byte[remaining];
+                    PostgresWire.readFully(from, payload);
+                    if (!permittedOnLogicalReplication(PostgresWire.cString(payload, 0).value())) {
+                        LOG.infov("RDS IAM replication session for role {0} sent a physical replication command; refused",
+                                SigV4RequestValidator.sanitizeForLog(iamRole));
+                        payload = PostgresWire.cStringBytes(PHYSICAL_REPLICATION_REFUSAL);
+                        header = PostgresWire.int32(payload.length + 4);
+                    }
+                    to.write(type);
+                    to.write(header);
+                    to.write(payload);
+                } else {
+                    to.write(type);
+                    to.write(header);
+                    while (remaining > 0) {
+                        int n = from.read(buf, 0, Math.min(buf.length, remaining));
+                        if (n < 0) {
+                            return;
+                        }
+                        to.write(buf, 0, n);
+                        remaining -= n;
+                    }
+                }
+                if (from.isDrained()) {
+                    to.flush();
+                }
+            }
+        } catch (IOException e) {
+            LOG.debugv("RDS IAM replication relay for role {0} ended: {1}", iamRole, e.getMessage());
+        } finally {
+            try {
+                to.flush();
+            } catch (IOException e) {
+                LOG.debugv("Backend for RDS IAM role {0} gone before the last flush: {1}", iamRole, e.getMessage());
+            }
+            onDone.run();
+        }
+    }
+
+    /**
+     * Keywords are matched ignoring ASCII case, which PostgreSQL does not, so a lowercase command
+     * PostgreSQL would run as SQL and refuse as a syntax error is refused here instead.
+     */
+    static boolean permittedOnLogicalReplication(String query) {
+        List<String> words = leadingReplicationWords(query, 4);
+        if (words.isEmpty() || !REPLICATION_COMMANDS.contains(words.getFirst())) {
+            return true;
+        }
+        return switch (words.getFirst()) {
+            case "IDENTIFY_SYSTEM", "SHOW", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT" -> true;
+            case "CREATE_REPLICATION_SLOT" -> words.size() > 2 && (words.get(2).equals("LOGICAL")
+                    || (words.get(2).equals("TEMPORARY") && words.size() > 3 && words.get(3).equals("LOGICAL")));
+            case "START_REPLICATION" -> words.size() > 3 && words.get(1).equals("SLOT")
+                    && words.get(3).equals("LOGICAL");
+            default -> false;
+        };
+    }
+
+    /** A double-quoted identifier keeps its quotes, so it never reads as a keyword. */
+    private static List<String> leadingReplicationWords(String query, int limit) {
+        List<String> words = new ArrayList<>();
+        int i = 0;
+        int n = query.length();
+        while (words.size() < limit) {
+            while (i < n && " \t\n\r\f\u000b".indexOf(query.charAt(i)) >= 0) {
+                i++;
+            }
+            if (i == n) {
+                break;
+            }
+            StringBuilder word = new StringBuilder();
+            if (query.charAt(i) == '"') {
+                word.append(query.charAt(i++));
+                while (i < n) {
+                    char c = query.charAt(i++);
+                    word.append(c);
+                    if (c == '"' && (i == n || query.charAt(i) != '"')) {
+                        break;
+                    }
+                    if (c == '"') {
+                        word.append(query.charAt(i++));
+                    }
+                }
+            } else if (isIdentifierStart(query.charAt(i))) {
+                while (i < n && (isIdentifierStart(query.charAt(i))
+                        || (query.charAt(i) >= '0' && query.charAt(i) <= '9') || query.charAt(i) == '$')) {
+                    char c = query.charAt(i++);
+                    word.append(c >= 'a' && c <= 'z' ? (char) (c - 'a' + 'A') : c);
+                }
+            } else {
+                break;
+            }
+            words.add(word.toString());
+        }
+        return words;
+    }
+
+    private static boolean isIdentifierStart(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c >= 0x80;
     }
 
     // ── Error response ────────────────────────────────────────────────────────

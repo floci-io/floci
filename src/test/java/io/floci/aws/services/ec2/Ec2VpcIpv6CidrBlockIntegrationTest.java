@@ -1,5 +1,6 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.core.common.AwsException;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -7,6 +8,10 @@ import org.junit.jupiter.api.Test;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -15,6 +20,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * CreateVpc ignored AmazonProvidedIpv6CidrBlock and no response carried an
@@ -194,5 +200,37 @@ class Ec2VpcIpv6CidrBlockIntegrationTest {
             kept--;
         }
         return String.join(":", Arrays.copyOf(groups, kept)) + "::/56";
+    }
+
+    /** AWS gives each VPC its own Amazon-provided IPv6 block; no two VPCs here share one either. */
+    @Test
+    void amazonProvidedBlocksAreDistinctAcrossVpcs() {
+        Set<String> blocks = new HashSet<>();
+        for (int i = 0; i < 40; i++) {
+            String block = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.120." + i + ".0/24")
+                .formParam("AmazonProvidedIpv6CidrBlock", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().path("CreateVpcResponse.vpc.ipv6CidrBlockAssociationSet.item.ipv6CidrBlock");
+            assertEquals(true, blocks.add(block), "block handed out twice: " + block);
+        }
+    }
+
+    /** A drawn block another VPC holds is drawn again; a run of held draws is refused, never handed out twice. */
+    @Test
+    void aHeldBlockIsDrawnAgainAndExhaustionIsRefused() {
+        Set<String> held = Set.of("2600:1f18:1:100::/56", "2600:1f18:2:200::/56");
+        Iterator<String> draws = List.of("2600:1f18:1:100::/56", "2600:1f18:2:200::/56",
+                "2600:1f18:3:300::/56").iterator();
+        assertEquals("2600:1f18:3:300::/56", Ec2Service.unusedAmazonProvidedIpv6Block(held, draws::next));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> Ec2Service.unusedAmazonProvidedIpv6Block(held, () -> "2600:1f18:1:100::/56"));
+        assertEquals("InsufficientCidrBlocks", refused.getErrorCode());
     }
 }

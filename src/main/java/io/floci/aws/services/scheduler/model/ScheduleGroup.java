@@ -14,7 +14,7 @@ public class ScheduleGroup {
     private String state;
     private Instant creationDate;
     private Instant lastModificationDate;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public ScheduleGroup() {}
 

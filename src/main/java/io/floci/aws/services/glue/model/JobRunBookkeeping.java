@@ -17,6 +17,7 @@ public class JobRunBookkeeping {
     private long completionOrder;
     private String originRunId;
     private String workflowRunId;
+    private boolean scriptRun;
 
     @JsonProperty(value = "triggeredRuns", access = JsonProperty.Access.WRITE_ONLY)
     private int legacyTriggeredRuns;
@@ -31,6 +32,10 @@ public class JobRunBookkeeping {
 
     public String getOriginRunId() { return originRunId; }
     public void setOriginRunId(String originRunId) { this.originRunId = originRunId; }
+
+    /** Whether a container runs the run's script, so that no clock settles it. */
+    public boolean isScriptRun() { return scriptRun; }
+    public void setScriptRun(boolean scriptRun) { this.scriptRun = scriptRun; }
 
     public String getWorkflowRunId() { return workflowRunId; }
     public void setWorkflowRunId(String workflowRunId) { this.workflowRunId = workflowRunId; }

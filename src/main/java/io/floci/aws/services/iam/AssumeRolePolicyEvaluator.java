@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.ServicePrincipals;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -52,6 +53,14 @@ public class AssumeRolePolicyEvaluator {
     private final ObjectMapper objectMapper;
     private final IamPolicyEvaluator policyEvaluator;
 
+    /**
+     * The organization an account belongs to, when Organizations is deployed. A field rather than
+     * a constructor parameter so a caller that builds this evaluator itself needs nothing of it,
+     * and narrow for the same reason the rest of IAM reads organizations through a port.
+     */
+    @Inject
+    Instance<PrincipalOrganization> principalOrganizations;
+
     @Inject
     public AssumeRolePolicyEvaluator(ObjectMapper objectMapper, IamPolicyEvaluator policyEvaluator) {
         this.objectMapper = objectMapper;
@@ -95,16 +104,32 @@ public class AssumeRolePolicyEvaluator {
      */
     public boolean allowsAnyPrincipalOf(String trustPolicyDocument, String account, String partition) {
         String root = AwsArnUtils.Arn.global(partition, "iam", account, "root").toString();
-        if (allows(trustPolicyDocument, IamService.CallerArns.accountRoot(root, account), account, Map.of())) {
+        if (allows(trustPolicyDocument, inOrganizationOf(IamService.CallerArns.accountRoot(root, account), account),
+                account, Map.of())) {
             return true;
         }
         for (String principal : allowedAwsPrincipals(trustPolicyDocument)) {
             if (AwsArnUtils.isArn(principal) && account.equals(AwsArnUtils.parse(principal).accountId())
-                    && allows(trustPolicyDocument, callerNamed(principal), account, Map.of())) {
+                    && allows(trustPolicyDocument, inOrganizationOf(callerNamed(principal), account),
+                            account, Map.of())) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * The principal in the organization its account belongs to, so a trust policy written on
+     * {@code aws:PrincipalOrgID} and its two companions reads the same keys here as it does for a
+     * caller resolved from a credential. Left as it is when Organizations answers nothing.
+     */
+    private IamService.CallerArns inOrganizationOf(IamService.CallerArns caller, String account) {
+        if (principalOrganizations == null || !principalOrganizations.isResolvable()) {
+            return caller;
+        }
+        return principalOrganizations.get().organizationContextOf(account)
+                .map(caller::withOrganization)
+                .orElse(caller);
     }
 
     /** The {@code Principal.AWS} entries of the Allow statements that apply to {@code sts:AssumeRole}. */
@@ -120,7 +145,7 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return principals;
         }
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return principals;
         }
         Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
@@ -181,7 +206,7 @@ public class AssumeRolePolicyEvaluator {
             return TrustDecision.NEUTRAL;
         }
         JsonNode statements = root.path("Statement");
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return TrustDecision.NEUTRAL;
         }
         String version = root.path("Version").asText(null);
@@ -220,7 +245,7 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return false;
         }
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return false;
         }
         boolean allow = false;
@@ -257,7 +282,7 @@ public class AssumeRolePolicyEvaluator {
             return false;
         }
         JsonNode statements = root.path("Statement");
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return false;
         }
         String version = root.path("Version").asText(null);
@@ -279,50 +304,6 @@ public class AssumeRolePolicyEvaluator {
     }
 
     private enum Match { ALLOW, DENY, NO_MATCH }
-
-    /**
-     * A statement without a valid {@code Effect}, or with a {@code Condition} that is not an object
-     * of non-empty operator objects, invalidates the whole document. IAM refuses such a document
-     * when it is written; Floci stores it as given, so it is refused here instead of being read as
-     * a statement with no condition.
-     */
-    private boolean isWellFormed(JsonNode statements) {
-        if (statements.isArray()) {
-            if (statements.isEmpty()) {
-                return false;
-            }
-            for (JsonNode statement : statements) {
-                if (!validStatement(statement)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return validStatement(statements);
-    }
-
-    private boolean validStatement(JsonNode statement) {
-        if (!statement.isObject()) {
-            return false;
-        }
-        String effect = statement.path("Effect").asText("");
-        if (!"Allow".equals(effect) && !"Deny".equals(effect)) {
-            return false;
-        }
-        JsonNode condition = statement.get("Condition");
-        if (condition == null) {
-            return true;
-        }
-        if (!condition.isObject() || condition.isEmpty()) {
-            return false;
-        }
-        for (JsonNode operator : condition) {
-            if (!operator.isObject() || operator.isEmpty()) {
-                return false;
-            }
-        }
-        return true;
-    }
 
     private TrustDecision evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
                                             String callerAccount, Map<String, List<String>> context,

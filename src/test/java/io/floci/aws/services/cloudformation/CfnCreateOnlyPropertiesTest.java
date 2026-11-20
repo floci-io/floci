@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -172,6 +173,37 @@ class CfnCreateOnlyPropertiesTest {
 
         Set<String> unknownProps = CfnCreateOnlyProperties.getCreateOnlyProperties("Unknown::Type");
         assertTrue(unknownProps.isEmpty());
+    }
+
+    @Test
+    void sesEventDestinationNameUsesConditionalReplacementMetadata() throws IOException {
+        String type = "AWS::SES::ConfigurationSetEventDestination";
+        assertEquals(Set.of("ConfigurationSetName"), CfnCreateOnlyProperties.getCreateOnlyProperties(type));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "EventDestination"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Name"));
+        assertEquals(Set.of("ConfigurationSetName", "EventDestination/Name"),
+                CfnCreateOnlyProperties.replacementPointers(type));
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode previous = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"old","Enabled":true}}
+                """);
+        JsonNode renamed = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"new","Enabled":true}}
+                """);
+        JsonNode updated = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"old","Enabled":false}}
+                """);
+        assertTrue(CfnCreateOnlyProperties.createOnlyValueChanged(type, previous, renamed));
+        assertFalse(CfnCreateOnlyProperties.createOnlyValueChanged(type, previous, updated));
+        assertEquals(Set.of(previous.path("ConfigurationSetName"), previous.path("EventDestination").path("Name")),
+                Set.copyOf(CfnCreateOnlyProperties.createOnlySubtrees(type, previous)));
+
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("cloudformation/conditional-create-only-properties.json")) {
+            assertEquals(Map.of(type, Set.of("EventDestination/Name")),
+                    mapper.readValue(in, new TypeReference<Map<String, Set<String>>>() {}));
+        }
     }
 
     /**

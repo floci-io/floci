@@ -3,6 +3,7 @@ package io.floci.aws.services.elasticache.proxy;
 import io.floci.aws.core.common.ListenBacklog;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -10,24 +11,37 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
 
 /**
  * Shared TCP auth-proxy skeleton for the Redis (RESP) wire protocol. Intercepts the
  * {@code AUTH} command or the {@code AUTH} option in {@code HELLO}, validates credentials
- * through the subclass, then becomes a transparent byte relay to the backend container.
+ * through the subclass, then relays the connection to the backend container.
  * Used by both the ElastiCache and MemoryDB proxies, since MemoryDB's real AWS design is
  * explicitly modeled on ElastiCache: same Redis-compatible wire protocol, same IAM-auth
  * mechanism.
+ *
+ * <p>Where the proxy checks credentials, it keeps reading the client's commands after sign-in, so a
+ * later {@code AUTH} or {@code HELLO} is checked the same way, and a connection signed in with an IAM
+ * token is closed 12 hours after its last sign-in, as on AWS. Everything else is relayed byte for
+ * byte.
  *
  * <p>Uses Java virtual threads to accept connections and run the AUTH handshake.
  */
 public abstract class AbstractRedisAuthProxy {
     private static final int HANDSHAKE_TIMEOUT_MILLIS = 10_000;
     private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
+    /** How long a connection signed in with an IAM token lasts, unless it signs in again. */
+    private static final long IAM_CONNECTION_LIFETIME_NANOS = TimeUnit.HOURS.toNanos(12);
 
     private static final byte[] OK_RESPONSE = "+OK\r\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NOAUTH_RESPONSE =
@@ -62,8 +76,10 @@ public abstract class AbstractRedisAuthProxy {
     private final String backendHost;
     private final int backendPort;
     private final int handshakeTimeoutMillis;
+    private final LongSupplier nanoTime;
     private final Set<Socket> handshakingClients = ConcurrentHashMap.newKeySet();
     private final Set<Socket> unencryptedClients = ConcurrentHashMap.newKeySet();
+    private final Set<Connection> connections = ConcurrentHashMap.newKeySet();
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -77,6 +93,14 @@ public abstract class AbstractRedisAuthProxy {
     protected AbstractRedisAuthProxy(Logger log, String serviceName, String threadPrefix,
                                       String resourceId, String backendHost, int backendPort,
                                       int handshakeTimeoutMillis) {
+        this(log, serviceName, threadPrefix, resourceId, backendHost, backendPort, handshakeTimeoutMillis,
+                System::nanoTime);
+    }
+
+    /** @param nanoTime the time IAM connection lifetimes are measured on, a seam for tests */
+    AbstractRedisAuthProxy(Logger log, String serviceName, String threadPrefix, String resourceId,
+                           String backendHost, int backendPort, int handshakeTimeoutMillis,
+                           LongSupplier nanoTime) {
         this.log = log;
         this.serviceName = serviceName;
         this.threadPrefix = threadPrefix;
@@ -84,6 +108,7 @@ public abstract class AbstractRedisAuthProxy {
         this.backendHost = backendHost;
         this.backendPort = backendPort;
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
+        this.nanoTime = nanoTime;
     }
 
     protected final String backendHost() {
@@ -103,8 +128,38 @@ public abstract class AbstractRedisAuthProxy {
     /** Closes a socket, tolerating errors. Implementations may add their own logging. */
     protected abstract void closeQuietly(Socket socket);
 
+    /** The user a username names: a blank one, as {@code AUTH <password>} sends, names {@code default}. */
+    protected static String userOrDefault(String username) {
+        return username == null || username.isEmpty() ? "default" : username;
+    }
+
     /** Applies the validated frontend identity to a newly connected backend. */
     protected void initializeBackend(Socket backend, String username) throws IOException {
+    }
+
+    /**
+     * Whether {@code username} signs in with an IAM token. Such a connection is closed 12 hours after
+     * its last sign-in, and cannot sign in again inside a transaction.
+     */
+    protected boolean signsInWithIam(String username) {
+        return false;
+    }
+
+    /**
+     * Whether the proxy checks the credentials of an {@code AUTH} or {@code HELLO} sent after sign-in,
+     * as it does at sign-in. When it does not, they reach the backend as sent.
+     */
+    protected boolean checksCredentials() {
+        return authRequired();
+    }
+
+    /**
+     * The username and password a relayed connection sends its backend to run as {@code username} from
+     * then on, once the proxy has accepted that user's own credentials. The default suits a backend
+     * without access control, whose default user takes any password.
+     */
+    protected List<String> backendCredentials(String username) throws IOException {
+        return List.of("default", UUID.randomUUID().toString());
     }
 
     /** Establishes the client transport before reading credentials. */
@@ -226,7 +281,7 @@ public abstract class AbstractRedisAuthProxy {
                         }
                         continue;
                     }
-                    bridgeCommand(client, input, cmd, null);
+                    bridgeCommand(client, input, cmd, null, false);
                     return;
                 }
                 if (authRequired()) {
@@ -235,7 +290,7 @@ public abstract class AbstractRedisAuthProxy {
                     return;
                 }
 
-                bridgeCommand(client, input, cmd, null);
+                bridgeCommand(client, input, cmd, null, false);
                 return;
             }
         } catch (Exception e) {
@@ -273,7 +328,7 @@ public abstract class AbstractRedisAuthProxy {
             return;
         }
 
-        bridgeCommand(client, input, null, username);
+        bridgeCommand(client, input, null, username, true);
     }
 
     private boolean handleHello(Socket client, InputStream input, String[] cmd) throws IOException {
@@ -338,7 +393,7 @@ public abstract class AbstractRedisAuthProxy {
             return false;
         }
 
-        bridgeCommand(client, input, forwarded.toArray(String[]::new), username);
+        bridgeCommand(client, input, forwarded.toArray(String[]::new), username, authProvided);
         return true;
     }
 
@@ -359,7 +414,8 @@ public abstract class AbstractRedisAuthProxy {
         return true;
     }
 
-    private void bridgeCommand(Socket client, InputStream input, String[] command, String username) throws IOException {
+    private void bridgeCommand(Socket client, InputStream input, String[] command, String username,
+                               boolean signedIn) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
         try {
             backend.setTcpNoDelay(true);
@@ -371,7 +427,7 @@ public abstract class AbstractRedisAuthProxy {
             }
             client.setSoTimeout(0);
             handshakingClients.remove(client);
-            bridge(client, input, backend);
+            bridge(new Connection(client, backend, signedIn && signsInWithIam(username)), input);
         } catch (IOException e) {
             closeQuietly(backend);
             throw e;
@@ -388,15 +444,22 @@ public abstract class AbstractRedisAuthProxy {
      * from {@code handleConnection} blocks in {@code join} here; scheduling nested virtual-thread
      * relays under load can stall delivery of backend responses (e.g. PING/PONG) to the client.
      */
-    private void bridge(Socket client, InputStream clientInput, Socket backend) throws IOException {
+    private void bridge(Connection connection, InputStream clientInput) throws IOException {
+        Socket client = connection.client;
+        Socket backend = connection.backend;
         InputStream backendInput = backend.getInputStream();
-        CountDownLatch firstRelayDone = new CountDownLatch(1);
+        boolean checkCredentials = checksCredentials();
+        connections.add(connection);
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
                 .start(() -> {
                     try {
-                        relay(clientInput, backend);
+                        if (checkCredentials) {
+                            relayCommands(clientInput, connection);
+                        } else {
+                            relay(clientInput, backend);
+                        }
                     } finally {
-                        firstRelayDone.countDown();
+                        connection.relayFinished();
                     }
                 });
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
@@ -404,18 +467,52 @@ public abstract class AbstractRedisAuthProxy {
                     try {
                         relay(backendInput, client);
                     } finally {
-                        firstRelayDone.countDown();
+                        connection.relayFinished();
                     }
                 });
         try {
-            firstRelayDone.await();
+            if (connection.awaitEnd()) {
+                closeExpired(connection);
+            }
             t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
             t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
+            connections.remove(connection);
             closeQuietly(client);
             closeQuietly(backend);
+        }
+    }
+
+    /**
+     * Closes every connection whose IAM sign-in is 12 hours old by {@code nanoTime}, as each
+     * connection's own wait does once that time has passed. A seam for tests that move the time on.
+     */
+    void closeExpiredConnections() {
+        for (Connection connection : connections) {
+            if (connection.expire()) {
+                closeExpired(connection);
+            }
+        }
+    }
+
+    private void closeExpired(Connection connection) {
+        log.infov("Closing a connection to {0} 12 hours after it signed in with an IAM token", resourceId);
+        closeQuietly(connection.client);
+        closeQuietly(connection.backend);
+    }
+
+    private void relayCommands(InputStream clientInput, Connection connection) {
+        try {
+            OutputStream backendOutput = new BufferedOutputStream(connection.backend.getOutputStream());
+            new ClientCommandRelay(clientInput, backendOutput, new SignedInCommands(connection)).run();
+        } catch (IOException ignored) {
+            // Normal when either side closes the connection
+        } catch (RuntimeException e) {
+            log.warnv(e, "Closing a connection to {0} after a failure checking its commands", resourceId);
+        } finally {
+            shutdownOutput(connection.backend);
         }
     }
 
@@ -467,5 +564,267 @@ public abstract class AbstractRedisAuthProxy {
             }
         }
         return false;
+    }
+
+    /**
+     * A relayed connection. It ends when either side closes it, or, while the client is signed in with
+     * an IAM token, 12 hours after that sign-in.
+     */
+    private final class Connection {
+        private final Socket client;
+        private final Socket backend;
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition changed = lock.newCondition();
+        private boolean relayFinished;
+        private boolean expired;
+        private boolean iam;
+        private long signedInAt;
+
+        private Connection(Socket client, Socket backend, boolean iam) {
+            this.client = client;
+            this.backend = backend;
+            this.iam = iam;
+            this.signedInAt = nanoTime.getAsLong();
+        }
+
+        /**
+         * Restarts the lifetime of a connection that signs in again, which lasts only after an IAM sign-in.
+         * Once the connection has expired, it is being closed, and signing in no longer renews it.
+         */
+        void signedIn(boolean iamUser) {
+            lock.lock();
+            try {
+                if (expired) {
+                    return;
+                }
+                iam = iamUser;
+                signedInAt = nanoTime.getAsLong();
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        void relayFinished() {
+            lock.lock();
+            try {
+                relayFinished = true;
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * Marks the connection expired once its IAM sign-in has run out, which the caller then closes. True
+         * only for the call that marks it, and decided under the same lock as a renewing sign-in.
+         */
+        boolean expire() {
+            lock.lock();
+            try {
+                if (expired || !iam || remainingNanos() > 0) {
+                    return false;
+                }
+                expired = true;
+                return true;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /** Waits until a relay direction finishes, or until this wait expires the connection, which returns true. */
+        boolean awaitEnd() throws InterruptedException {
+            lock.lock();
+            try {
+                while (!relayFinished) {
+                    if (expire()) {
+                        return true;
+                    }
+                    if (iam && !expired) {
+                        changed.awaitNanos(remainingNanos());
+                    } else {
+                        changed.await();
+                    }
+                }
+                return false;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private long remainingNanos() {
+            return IAM_CONNECTION_LIFETIME_NANOS - (nanoTime.getAsLong() - signedInAt);
+        }
+    }
+
+    /**
+     * Follows a signed-in client's commands: it checks the credentials of each {@code AUTH} and
+     * {@code HELLO}, and tracks transactions, since IAM re-authentication is not supported inside one.
+     * A sign-in queued in a transaction leaves the connection's lifetime as it was: the proxy cannot see
+     * whether {@code EXEC} runs it, and an aborted transaction never does.
+     *
+     * <p>The backend answers every command, so its replies keep their order: accepted credentials are
+     * relayed as the backend credentials of their user, and refused ones as credentials the backend
+     * refuses with {@code WRONGPASS}, which leaves the connection signed in as before. The client's own
+     * password or token never reaches the backend.
+     */
+    private final class SignedInCommands implements ClientCommandRelay.Commands {
+        /** The commands that begin or end a transaction, none of which takes an argument. */
+        private static final List<String> TRANSACTION_COMMANDS = List.of("MULTI", "EXEC", "DISCARD", "RESET");
+
+        private final Connection connection;
+        private boolean transaction;
+
+        private SignedInCommands(Connection connection) {
+            this.connection = connection;
+        }
+
+        @Override
+        public boolean wants(String name) {
+            return isSignIn(name) || TRANSACTION_COMMANDS.stream().anyMatch(name::equalsIgnoreCase);
+        }
+
+        private static boolean isSignIn(String name) {
+            return name.equalsIgnoreCase("AUTH") || name.equalsIgnoreCase("HELLO");
+        }
+
+        @Override
+        public List<String> rewrite(List<String> command) {
+            String name = command.get(0);
+            if (!isSignIn(name)) {
+                // With an argument the backend refuses it for its arity, leaving the transaction as it was.
+                if (command.size() == 1) {
+                    transaction = name.equalsIgnoreCase("MULTI");
+                }
+                return command;
+            }
+            SignIn signIn = name.equalsIgnoreCase("AUTH") ? SignIn.auth(command) : SignIn.hello(command);
+            if (signIn == null) {
+                return command;
+            }
+            if (!signIn.reachesSignIn()) {
+                return signIn.relayed(refusedCredentials());
+            }
+            String username = signIn.username();
+            boolean iam = signsInWithIam(username);
+            if (transaction && iam) {
+                // Sends MULTI in its place: inside a transaction the backend refuses it as a command that
+                // cannot be queued, which also aborts the transaction, and the refusal keeps its place.
+                return List.of("MULTI");
+            }
+            List<String> credentials = authenticate(username, signIn.password()) ? switchTo(username) : null;
+            if (credentials == null) {
+                return signIn.relayed(refusedCredentials());
+            }
+            if (!transaction) {
+                connection.signedIn(iam);
+            }
+            return signIn.relayed(credentials);
+        }
+
+        @Override
+        public List<String> inPlaceOfTooLarge(String name) {
+            if (isSignIn(name)) {
+                List<String> refused = refusedCredentials();
+                return List.of("AUTH", refused.get(0), refused.get(1));
+            }
+            // A transaction command too large to hold has arguments, so the backend refuses this one too.
+            return List.of(name, "");
+        }
+
+        private List<String> switchTo(String username) {
+            try {
+                return backendCredentials(username);
+            } catch (IOException e) {
+                log.warnv("Could not switch a connection to {0} over to another user: {1}", resourceId,
+                        e.getMessage());
+                return null;
+            }
+        }
+
+        private static List<String> refusedCredentials() {
+            return List.of("floci-refused-" + UUID.randomUUID(), UUID.randomUUID().toString());
+        }
+    }
+
+    /**
+     * The credentials in an {@code AUTH} or {@code HELLO} sent after sign-in.
+     *
+     * @param arguments    what the backend reads of the command: all of it, or for a {@code HELLO} the
+     *                     backend refuses, the arguments up to the one it refuses
+     * @param credentials  the index among them of each username and password pair
+     * @param reachesSignIn whether the backend gets as far as checking the credentials
+     */
+    private record SignIn(List<String> arguments, List<Integer> credentials, boolean reachesSignIn) {
+
+        /** Null for an {@code AUTH} without arguments, which carries no credentials. */
+        static SignIn auth(List<String> command) {
+            return switch (command.size()) {
+                case 1 -> null;
+                // AUTH <password> signs in as the default user, which the proxy names null, as at sign-in.
+                case 2 -> new SignIn(Arrays.asList("AUTH", null, command.get(1)), List.of(1), true);
+                case 3 -> new SignIn(command, List.of(1), true);
+                // The backend refuses more arguments as a syntax error, before reading any of them.
+                default -> {
+                    List<String> blanks = new ArrayList<>(Collections.nCopies(command.size(), ""));
+                    blanks.set(0, command.get(0));
+                    yield new SignIn(blanks, List.of(), false);
+                }
+            };
+        }
+
+        /**
+         * Reads the options as the backend does, which stops at the first it refuses. Null for a
+         * well-formed {@code HELLO} without an {@code AUTH} option.
+         */
+        static SignIn hello(List<String> command) {
+            List<Integer> credentials = new ArrayList<>();
+            if (command.size() > 1 && !supportedProtocol(command.get(1))) {
+                return new SignIn(command.subList(0, 2), credentials, false);
+            }
+            int index = 2;
+            while (index < command.size()) {
+                String option = command.get(index);
+                int remaining = command.size() - 1 - index;
+                if (option.equalsIgnoreCase("AUTH") && remaining >= 2) {
+                    credentials.add(index + 1);
+                    index += 3;
+                } else if (option.equalsIgnoreCase("SETNAME") && remaining >= 1
+                        && isValidClientName(command.get(index + 1))) {
+                    index += 2;
+                } else {
+                    int refused = option.equalsIgnoreCase("SETNAME") && remaining >= 1 ? index + 1 : index;
+                    return new SignIn(command.subList(0, refused + 1), credentials, false);
+                }
+            }
+            return credentials.isEmpty() ? null : new SignIn(command, credentials, true);
+        }
+
+        private static boolean supportedProtocol(String version) {
+            try {
+                long protocol = Long.parseLong(version);
+                return protocol >= 2 && protocol <= 3;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+
+        /** The last pair is the one the backend signs in with. */
+        String username() {
+            return arguments.get(credentials.getLast());
+        }
+
+        String password() {
+            return arguments.get(credentials.getLast() + 1);
+        }
+
+        List<String> relayed(List<String> replacement) {
+            List<String> relayed = new ArrayList<>(arguments);
+            for (int index : credentials) {
+                relayed.set(index, replacement.get(0));
+                relayed.set(index + 1, replacement.get(1));
+            }
+            return relayed;
+        }
     }
 }

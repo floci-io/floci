@@ -54,7 +54,7 @@ public class Schema {
     private Instant updatedTime;
 
     @JsonProperty("Tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     public Schema() {}
 

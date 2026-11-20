@@ -1,20 +1,22 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.DynamoDbPartitionedWalStorageProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
+/**
+ * {@code EXTRA_CORS_ALLOWED_ORIGINS}, the environment-style alias of the extra CORS origins setting,
+ * set to {@code http://localhost:4000} by {@link DynamoDbPartitionedWalStorageProfile}.
+ */
 @QuarkusTest
-@TestProfile(GlobalCorsFilterAliasIntegrationTest.AliasProfile.class)
+@TestProfile(DynamoDbPartitionedWalStorageProfile.class)
 public class GlobalCorsFilterAliasIntegrationTest {
 
     @BeforeAll
@@ -44,12 +46,5 @@ public class GlobalCorsFilterAliasIntegrationTest {
         .then()
             .statusCode(403)
             .header("Access-Control-Allow-Origin", nullValue());
-    }
-
-    public static final class AliasProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("EXTRA_CORS_ALLOWED_ORIGINS", "http://localhost:4000");
-        }
     }
 }

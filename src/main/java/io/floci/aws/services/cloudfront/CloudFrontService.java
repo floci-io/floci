@@ -65,6 +65,8 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class CloudFrontService implements ServerCertificateReferenceProvider {
 
+    /** The file CloudFront's tags are stored in, by resource ARN, which IAM's tag lookup also reads. */
+    static final String TAGS_FILE = "cloudfront-tags.json";
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
     private static final int MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY = 100;
@@ -88,6 +90,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             "TLSv1.2_2025", "TLSv1.3_2025");
     /** The values {@code SSLSupportMethod} admits, the enumeration its shape declares. */
     private static final Set<String> SSL_SUPPORT_METHODS = Set.of("sni-only", "vip", "static-ip");
+    /** The values {@code ConnectionMode} admits, the enumeration its shape declares. */
+    private static final Set<String> CONNECTION_MODES = Set.of("direct", "tenant-only");
     /**
      * The forms a member declared {@code boolean} can carry, XML giving such a value as
      * {@code true}, {@code false}, {@code 1} or {@code 0}.
@@ -209,7 +213,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 new TypeReference<Map<String, CloudFrontOriginAccessIdentity>>() {});
         this.functionStore = factory.create("cloudfront", "cloudfront-functions.json",
                 new TypeReference<Map<String, CloudFrontFunction>>() {});
-        this.tagStore = factory.create("cloudfront", "cloudfront-tags.json",
+        this.tagStore = factory.create("cloudfront", TAGS_FILE,
                 new TypeReference<Map<String, Map<String, String>>>() {});
         this.cdpStore = factory.create("cloudfront", "cloudfront-continuous-deployment-policies.json",
                 new TypeReference<Map<String, ContinuousDeploymentPolicy>>() {});
@@ -243,6 +247,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
         validateOriginAccessControls(dist.getConfig());
+        validateConnectionMode(dist.getConfig());
         validateViewerCertificateSettings(dist.getConfig(), DistributionWrite.CREATE);
         applyDefaultCertificateProtocolVersion(dist.getConfig());
         return whileCertificatesHeld(dist.getConfig(), () -> {
@@ -280,6 +285,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
         validateOriginAccessControls(updated.getConfig());
+        validateConnectionMode(updated.getConfig());
         validateViewerCertificateSettings(updated.getConfig(), DistributionWrite.UPDATE);
         applyDefaultCertificateProtocolVersion(updated.getConfig());
         return whileCertificatesHeld(updated.getConfig(), () -> {
@@ -373,6 +379,23 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The CloudFrontDefaultCertificate specified is not valid.", 400);
         }
         return parsed;
+    }
+
+    /**
+     * {@code ConnectionMode} is held to the enumeration its shape declares, {@code direct} or
+     * {@code tenant-only}. The member has no code of its own, so a value outside the set reads as
+     * the {@code InvalidArgument} this service already answers a member outside its shape with, as
+     * {@code SSLSupportMethod} does. An omitted mode is kept omitted: no published sentence says
+     * which mode such a distribution reads back as, nor what a {@code tenant-only} distribution
+     * does with a viewer certificate it leaves out, so neither is filled in here.
+     */
+    private static void validateConnectionMode(DistributionConfig config) {
+        if (config == null || config.getConnectionMode() == null) {
+            return;
+        }
+        if (!CONNECTION_MODES.contains(config.getConnectionMode())) {
+            throw new AwsException("InvalidArgument", "The ConnectionMode specified is not valid.", 400);
+        }
     }
 
     /**
@@ -1877,8 +1900,15 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         fn.setEtag(UUID.randomUUID().toString());
         fn.setCreatedTime(Instant.now());
         fn.setLastModifiedTime(Instant.now());
+        // A function's ARN is its name: a new one starts with no tags, whatever was left under that ARN before.
+        tagStore.delete(functionArn(fn.getName()));
         functionStore.put(fn.getName(), fn);
         return fn;
+    }
+
+    /** The ARN of the function {@code name}, which is the one its tags are kept under. */
+    public String functionArn(String name) {
+        return arn("function/" + name);
     }
 
     public CloudFrontFunction describeFunction(String name, String stage) {
@@ -1940,6 +1970,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
         functionStore.delete(name);
         functionStore.delete(functionKey(name, "LIVE"));
+        tagStore.delete(functionArn(name));
     }
 
     public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {

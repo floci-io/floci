@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -290,7 +291,7 @@ class SesMessageInsightsV2IntegrationTest {
         String raw = "From: " + SENDER + "\r\nTo: raw@example.com\r\n"
                 + "Subject: rejected-mime-subject\r\n"
                 + SmtpRelay.HEADER_MESSAGE_TAGS + ": campaign=fromheader\r\n\r\n"
-                + SesContentScan.signature() + "\r\n";
+                + SesTestSignature.value() + "\r\n";
         String messageId = given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",

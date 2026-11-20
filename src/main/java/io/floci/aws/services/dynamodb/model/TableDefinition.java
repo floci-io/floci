@@ -31,7 +31,7 @@ public class TableDefinition {
     private long warmReadUnitsPerSecond;
     private long warmWriteUnitsPerSecond;
     private String tableArn;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
     private List<LocalSecondaryIndex> localSecondaryIndexes;
     private List<VectorIndex> vectorIndexes;
@@ -124,6 +124,22 @@ public class TableDefinition {
         }
         long wcu = pt != null ? pt.getWriteCapacityUnits() : 0;
         return wcu > 0 ? wcu : 5;
+    }
+
+    /** The warm read units an index reports: its baseline, or a higher value the index was given. */
+    public long gsiWarmReadUnits(GlobalSecondaryIndex gsi) {
+        long baseline = "PAY_PER_REQUEST".equals(billingMode)
+                ? defaultWarmReadUnits(billingMode, null) : gsi.getProvisionedThroughput().getReadCapacityUnits();
+        Long stored = gsi.getWarmReadUnitsPerSecond();
+        return stored != null && stored > baseline ? stored : baseline;
+    }
+
+    /** The warm write units an index reports: its baseline, or a higher value the index was given. */
+    public long gsiWarmWriteUnits(GlobalSecondaryIndex gsi) {
+        long baseline = "PAY_PER_REQUEST".equals(billingMode)
+                ? defaultWarmWriteUnits(billingMode, null) : gsi.getProvisionedThroughput().getWriteCapacityUnits();
+        Long stored = gsi.getWarmWriteUnitsPerSecond();
+        return stored != null && stored > baseline ? stored : baseline;
     }
 
     public String getTableName() { return tableName; }
@@ -343,6 +359,12 @@ public class TableDefinition {
         return localSecondaryIndexes.stream()
                 .filter(l -> indexName.equals(l.getIndexName()))
                 .findFirst();
+    }
+
+    /** Whether the table has a global secondary, local secondary or vector index of this name. */
+    public boolean holdsIndex(String indexName) {
+        return findGsi(indexName).isPresent() || findLsi(indexName).isPresent()
+                || findVectorIndex(indexName).isPresent();
     }
 
     @JsonIgnore

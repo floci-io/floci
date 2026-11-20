@@ -14,6 +14,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
@@ -225,29 +226,42 @@ public class GlueService {
                        RegionResolver regionResolver,
                        ResourceGroupsTaggingService resourceGroupsTaggingService,
                        KmsService kmsService) {
-        this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
-        this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
-        this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
-        this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
-        this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
-        this.partitionIndexStore = storageFactory.create(
+        this.databaseStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "databases.json", new TypeReference<>() {});
+        this.tableStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "tables.json", new TypeReference<>() {});
+        this.tableVersionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "table_versions.json", new TypeReference<>() {});
+        this.columnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "column_statistics.json", new TypeReference<>() {});
+        this.partitionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "partitions.json", new TypeReference<>() {});
+        this.partitionIndexStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_indexes.json", new TypeReference<>() {});
-        this.partitionColumnStatisticsStore = storageFactory.create(
+        this.partitionColumnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
-        this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
-        this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
-        this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
-        this.classifierStore = storageFactory.create("glue", "classifiers.json", new TypeReference<>() {});
-        this.connectionStore = storageFactory.create("glue", "connections.json", new TypeReference<>() {});
-        this.resourcePolicyStore = storageFactory.create("glue", "resource_policy.json", new TypeReference<>() {});
-        this.encryptionSettingsStore = storageFactory.create(
+        this.functionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "functions.json", new TypeReference<>() {});
+        this.jobStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "jobs.json", new TypeReference<>() {});
+        this.crawlerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "crawlers.json", new TypeReference<>() {});
+        this.classifierStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "classifiers.json", new TypeReference<>() {});
+        this.connectionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "connections.json", new TypeReference<>() {});
+        this.resourcePolicyStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "resource_policy.json", new TypeReference<>() {});
+        this.encryptionSettingsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
         this.dataQualityRulesetStore = storageFactory.create(
                 "glue", "data_quality_rulesets.json", new TypeReference<>() {});
-        this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
-        this.workflowStore = storageFactory.create("glue", "workflows.json", new TypeReference<>() {});
+        this.triggerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "triggers.json", new TypeReference<>() {});
+        this.workflowStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "workflows.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -364,7 +378,7 @@ public class GlueService {
     }
 
     public void createDatabase(Database database) {
-        createDatabase(database, null, regionResolver.getDefaultRegion());
+        createDatabase(database, null, regionResolver.getRegion());
     }
 
     public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
@@ -429,7 +443,7 @@ public class GlueService {
     }
 
     public void deleteDatabase(String name) {
-        deleteDatabase(name, regionResolver.getDefaultRegion());
+        deleteDatabase(name, regionResolver.getRegion());
     }
 
     public synchronized void deleteDatabase(String name, String region) {
@@ -439,8 +453,13 @@ public class GlueService {
                 .map(Table::getName)
                 .toList();
         tableNames.forEach(tableName -> deleteTable(name, tableName));
+        List<String> functionArns = functionStore.scan(k -> true).stream()
+                .filter(function -> databaseName.equals(function.getDatabaseName()))
+                .map(function -> userDefinedFunctionArn(region, databaseName, function.getFunctionName()))
+                .toList();
         StorageOperations.deleteMatchingAtomically(functionStore,
                 function -> databaseName.equals(function.getDatabaseName()));
+        resourceGroupsTaggingService.deleteResources(functionArns, region);
         databaseStore.delete(databaseName);
         resourceGroupsTaggingService.deleteResources(List.of(databaseArn(region, databaseName)), region);
         LOG.infov("Deleted Glue Database: {0}", name);
@@ -792,9 +811,12 @@ public class GlueService {
     }
 
     public synchronized void deleteTable(String databaseName, String tableName) {
-        getTable(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
+        String region = regionResolver.getRegion();
+        resourceGroupsTaggingService.deleteResources(
+                List.of(tableArn(region, table.getDatabaseName(), table.getName())), region);
         tableVersionStore.keys().stream()
                 .filter(versionKey -> versionKey.startsWith(key + ":"))
                 .forEach(tableVersionStore::delete);
@@ -1356,8 +1378,11 @@ public class GlueService {
     }
 
     public synchronized void deleteUserDefinedFunction(String databaseName, String functionName) {
-        getUserDefinedFunction(databaseName, functionName);
+        UserDefinedFunction function = getUserDefinedFunction(databaseName, functionName);
         functionStore.delete(functionKey(databaseName, functionName));
+        String region = regionResolver.getRegion();
+        resourceGroupsTaggingService.deleteResources(List.of(
+                userDefinedFunctionArn(region, function.getDatabaseName(), function.getFunctionName())), region);
     }
 
     private void validateSchemaReference(Table table) {
@@ -1394,7 +1419,7 @@ public class GlueService {
         boolean latest = ref.getSchemaVersionId() == null && ref.getSchemaVersionNumber() == null;
         return schemaRegistryService.getSchemaVersion(
                 ref.getSchemaId(), ref.getSchemaVersionId(),
-                ref.getSchemaVersionNumber(), latest, regionResolver.getDefaultRegion());
+                ref.getSchemaVersionNumber(), latest, regionResolver.getRegion());
     }
 
     private static SchemaReference schemaReferenceOf(Table table) {
@@ -1495,7 +1520,8 @@ public class GlueService {
         return value;
     }
 
-    private static String normalizeName(String name) {
+    /** A database, table or function name as Glue stores it and names it in an ARN: lowercase. */
+    public static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
     }
 
@@ -1695,6 +1721,14 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "database/" + databaseName);
     }
 
+    private String tableArn(String region, String databaseName, String tableName) {
+        return regionResolver.buildArn("glue", region, "table/" + databaseName + "/" + tableName);
+    }
+
+    private String userDefinedFunctionArn(String region, String databaseName, String functionName) {
+        return regionResolver.buildArn("glue", region, "userDefinedFunction/" + databaseName + "/" + functionName);
+    }
+
     private String jobArn(String region, String jobName) {
         return regionResolver.buildArn("glue", region, "job/" + jobName);
     }
@@ -1791,6 +1825,7 @@ public class GlueService {
         Table copy = new Table();
         copy.setName(source.getName());
         copy.setDatabaseName(source.getDatabaseName());
+        copy.setCatalogId(source.getCatalogId());
         copy.setDescription(source.getDescription());
         copy.setOwner(source.getOwner());
         copy.setCreateTime(source.getCreateTime());
@@ -2025,7 +2060,7 @@ public class GlueService {
     }
 
     public void createJob(Job job) {
-        createJob(job, null, regionResolver.getDefaultRegion());
+        createJob(job, null, regionResolver.getRegion());
     }
 
     public void createJob(Job job, Map<String, String> tags, String region) {
@@ -2331,7 +2366,7 @@ public class GlueService {
     }
 
     public void createCrawler(Crawler crawler) {
-        createCrawler(crawler, null, regionResolver.getDefaultRegion());
+        createCrawler(crawler, null, regionResolver.getRegion());
     }
 
     public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {
@@ -3196,7 +3231,7 @@ public class GlueService {
     public void tagResource(String arn, Map<String, String> tags, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.tagResource(arn, tags);
+            schemaRegistryService.tagResource(arn, tags, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
@@ -3206,7 +3241,7 @@ public class GlueService {
     public void untagResource(String arn, List<String> tagKeys, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.untagResource(arn, tagKeys);
+            schemaRegistryService.untagResource(arn, tagKeys, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
@@ -3216,11 +3251,35 @@ public class GlueService {
     public Map<String, String> getTags(String arn, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            return schemaRegistryService.getTags(arn);
+            return schemaRegistryService.getTags(arn, region);
         } else {
             validateResourceExists(arn);
             return resourceGroupsTaggingService.getTagsForResource(region, arn);
         }
+    }
+
+    /**
+     * The tags of the resource stored under {@code arn}, in the account and Region it names: a registry's or a schema's
+     * from the schema registry, any other resource's from the tags applied to its ARN, which Glue drops when it deletes
+     * the resource; read in place and empty for an ARN naming nothing tagged. Only string values are tags: TagResource
+     * keeps the request's map as given.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "glue")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        Map<String, ?> applied = resource.startsWith("registry/") || resource.startsWith("schema/")
+                ? schemaRegistryService.storedTags(arn)
+                : resourceGroupsTaggingService.storedTags(parsed.accountId(), parsed.region(), arn);
+        Map<String, String> tags = new LinkedHashMap<>();
+        applied.forEach((key, value) -> {
+            if (value instanceof String text) {
+                tags.put(key, text);
+            }
+        });
+        return tags;
     }
 
     private void validateArn(String arn) {

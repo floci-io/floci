@@ -1,6 +1,6 @@
 package io.floci.aws.services.lambda;
 
-import io.floci.aws.testing.LambdaCodeSourcesProfile;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
@@ -15,7 +15,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code ..}, or that merely shares its prefix, must be refused over the wire.
  */
 @QuarkusTest
-@TestProfile(LambdaCodeSourcesProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class LambdaHotReloadAllowListIntegrationTest {
 
     private static int counter;

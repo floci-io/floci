@@ -43,6 +43,8 @@ class MemoryDbIntegrationTest {
     private static final String AUTH_USER = "it-mdb-user";
     private static final String AUTH_ACL = "it-mdb-acl";
     private static final String AUTH_PASSWORD = "it-mdb-password";
+    private static final String READER_USER = "it-mdb-reader";
+    private static final String READER_PASSWORD = "it-mdb-reader-password";
 
     private static final int SOCKET_TIMEOUT_MS = 10_000;
     private static final int READ_LINE_MAX_ATTEMPTS = 3;
@@ -71,10 +73,12 @@ class MemoryDbIntegrationTest {
         } catch (Exception ignored) {
             // best-effort
         }
-        try {
-            memorydb("DeleteUser", "{\"UserName\":\"" + AUTH_USER + "\"}");
-        } catch (Exception ignored) {
-            // best-effort
+        for (String user : List.of(AUTH_USER, READER_USER)) {
+            try {
+                memorydb("DeleteUser", "{\"UserName\":\"" + user + "\"}");
+            } catch (Exception ignored) {
+                // best-effort
+            }
         }
     }
 
@@ -148,15 +152,21 @@ class MemoryDbIntegrationTest {
                 .statusCode(200)
                 .body("User.Name", equalTo(AUTH_USER))
                 .body("User.Authentication.Type", equalTo("password"));
+        memorydb("CreateUser", "{"
+                + "\"UserName\":\"" + READER_USER + "\","
+                + "\"AccessString\":\"on ~app:* -@all +get\","
+                + "\"AuthenticationMode\":{\"Type\":\"password\",\"Passwords\":[\"" + READER_PASSWORD + "\"]}}")
+            .then()
+                .statusCode(200);
 
         // An ACL must include the built-in "default" user (DefaultUserRequired otherwise).
         memorydb("CreateACL", "{"
                 + "\"ACLName\":\"" + AUTH_ACL + "\","
-                + "\"UserNames\":[\"default\",\"" + AUTH_USER + "\"]}")
+                + "\"UserNames\":[\"default\",\"" + AUTH_USER + "\",\"" + READER_USER + "\"]}")
             .then()
                 .statusCode(200)
                 .body("ACL.Name", equalTo(AUTH_ACL))
-                .body("ACL.UserNames", hasItems("default", AUTH_USER));
+                .body("ACL.UserNames", hasItems("default", AUTH_USER, READER_USER));
     }
 
     @Test
@@ -203,6 +213,28 @@ class MemoryDbIntegrationTest {
 
             write(socket, respArray("PING"));
             assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(12)
+    void aclUserRunsUnderItsAccessString() throws Exception {
+        try (Socket socket = openSocket(authPort)) {
+            write(socket, respArray("AUTH", READER_USER, READER_PASSWORD));
+            assertEquals("+OK\r\n", readLine(socket));
+
+            write(socket, respArray("GET", "app:key"));
+            assertEquals("$-1\r\n", readLine(socket));
+            write(socket, respArray("SET", "app:key", "value"));
+            assertTrue(readLine(socket).startsWith("-NOPERM"), "the reader may not write");
+            write(socket, respArray("GET", "other:key"));
+            assertTrue(readLine(socket).startsWith("-NOPERM"), "the reader may not read outside app:*");
+
+            write(socket, respArray("AUTH", "default", "anything"));
+            assertTrue(readLine(socket).startsWith("-WRONGPASS"),
+                    "AUTH sent past the proxy must not reach an unrestricted backend user");
+            write(socket, respArray("SET", "app:key", "value"));
+            assertTrue(readLine(socket).startsWith("-NOPERM"));
         }
     }
 

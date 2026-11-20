@@ -1,6 +1,7 @@
 package io.floci.aws.services.secretsmanager;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.services.iam.PolicyDocument;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,8 +25,6 @@ public final class ResourcePolicyValidator {
     /** The name AWS reports a broad-principal finding under. */
     public static final String REFLEXIVE_PRINCIPAL_CHECK = "REFLEXIVE_PRINCIPAL_CHECK";
 
-    private static final String WILDCARD = "*";
-
     /** A single finding: the check that failed and what it found. */
     public record ValidationError(String checkName, String errorMessage) {
     }
@@ -40,15 +39,8 @@ public final class ResourcePolicyValidator {
      */
     public static List<ValidationError> validate(JsonNode policy) {
         List<ValidationError> errors = new ArrayList<>();
-        JsonNode statements = policy.path("Statement");
-
-        // A lone statement object is as valid as an array of them.
-        if (statements.isObject()) {
-            checkStatement(statements, errors);
-        } else if (statements.isArray()) {
-            for (JsonNode statement : statements) {
-                checkStatement(statement, errors);
-            }
+        for (JsonNode statement : PolicyDocument.statementsOf(policy)) {
+            checkStatement(statement, errors);
         }
         return errors;
     }
@@ -59,45 +51,10 @@ public final class ResourcePolicyValidator {
         if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText())) {
             return;
         }
-        if (isWildcardPrincipal(statement.path("Principal"))) {
+        if (PolicyDocument.namesEveryone(statement.path("Principal"))) {
             errors.add(new ValidationError(REFLEXIVE_PRINCIPAL_CHECK,
                     "The resource policy grants broad access to your secret. "
                             + "Amend the policy so that it does not use a wildcard principal."));
         }
-    }
-
-    /**
-     * A principal is wildcard either as the bare string {@code "*"} or as a keyed form whose value
-     * is {@code "*"} - {@code {"AWS": "*"}} and {@code {"AWS": ["*"]}} both grant everyone.
-     */
-    private static boolean isWildcardPrincipal(JsonNode principal) {
-        if (principal.isMissingNode() || principal.isNull()) {
-            return false;
-        }
-        if (principal.isTextual()) {
-            return WILDCARD.equals(principal.asText());
-        }
-        if (principal.isObject()) {
-            for (JsonNode value : principal) {
-                if (containsWildcard(value)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean containsWildcard(JsonNode value) {
-        if (value.isTextual()) {
-            return WILDCARD.equals(value.asText());
-        }
-        if (value.isArray()) {
-            for (JsonNode entry : value) {
-                if (entry.isTextual() && WILDCARD.equals(entry.asText())) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 }

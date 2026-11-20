@@ -73,7 +73,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
             snapshotTags(resource, bucket.getTags());
             service.replaceBucketTags(name, tags, ctx.region());
         } else {
-            String name = physicalName(props, "VectorBucketName", resource, ctx, false);
+            String name = physicalName(props, "VectorBucketName", resource, ctx);
             rejectSameNameReplacement(ctx, updatesEntity, "bucket/" + name);
             bucket = service.createVectorBucket(name, encryption(props, ctx, "AES256"), tags, ctx.region());
         }
@@ -100,7 +100,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
             snapshotTags(resource, index.getTags());
             service.replaceIndexTags(bucketName, name, tags, ctx.region());
         } else {
-            String name = physicalName(props, "IndexName", resource, ctx, true);
+            String name = physicalName(props, "IndexName", resource, ctx);
             rejectSameNameReplacement(ctx, updatesEntity, "bucket/" + bucketName + "/index/" + name);
             JsonNode metadataKeys = props.path("MetadataConfiguration").path("NonFilterableMetadataKeys");
             List<String> keys = new ArrayList<>();
@@ -121,16 +121,16 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static String physicalName(JsonNode props, String property, StackResource resource,
-                                       ProvisionContext ctx, boolean index) {
+                                       ProvisionContext ctx) {
         String name = ctx.resolveOptional(props, property);
         if (name == null) {
             return ctx.generatePhysicalName(resource.getLogicalId(), 63, true);
         }
-        return validateName(name, property, index);
+        return validateName(name, property);
     }
 
-    private static String validateName(String name, String property, boolean index) {
-        return S3VectorsService.validateName(name, property, index, "ValidationError");
+    private static String validateName(String name, String property) {
+        return S3VectorsService.validateName(name, property, "ValidationError");
     }
 
     private static void rejectSameNameReplacement(ProvisionContext ctx, boolean updatesEntity, String resourcePath) {

@@ -10,12 +10,14 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.services.ec2.model.Vpc;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -26,6 +28,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -67,6 +70,15 @@ public class Route53ResolverService {
     /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
     private static final String VALIDATION = "ValidationException";
 
+    /** The ListResolverRules filter names, lower-cased without underscores, and the rule field each one reads. */
+    private static final Map<String, String> RULE_FILTER_FIELDS = Map.of(
+            "creatorrequestid", "CreatorRequestId",
+            "domainname", "DomainName",
+            "name", "Name",
+            "resolverendpointid", "ResolverEndpointId",
+            "status", "Status",
+            "type", "RuleType");
+
     /** The AWS-managed domain lists available in commercial regions. */
     static final List<String> AWS_MANAGED_DOMAIN_LIST_NAMES = List.of(
             "AWSManagedDomainsAggregateThreatList",
@@ -87,6 +99,7 @@ public class Route53ResolverService {
     private final StorageBackend<String, ObjectNode> endpointStore;
     private final StorageBackend<String, ObjectNode> ruleStore;
     private final StorageBackend<String, ObjectNode> ruleAssociationStore;
+    private final StorageBackend<String, ObjectNode> dnssecConfigStore;
     /**
      * The {@code IpAddressRequests} each endpoint was created with, keyed by endpoint id.
      * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
@@ -117,6 +130,8 @@ public class Route53ResolverService {
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleAssociationStore = storageFactory.create("route53resolver",
                 "route53resolver-rule-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.dnssecConfigStore = storageFactory.create("route53resolver",
+                "route53resolver-dnssec-configs.json", new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
@@ -133,10 +148,12 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointStore,
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> dnssecConfigStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
-        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, endpointIpRequestStore, tagStore,
+        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, dnssecConfigStore,
+                endpointIpRequestStore, tagStore,
                 objectMapper, null);
     }
 
@@ -144,6 +161,7 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointStore,
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> dnssecConfigStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper, Ec2Service ec2Service) {
@@ -151,6 +169,7 @@ public class Route53ResolverService {
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
         this.ruleAssociationStore = ruleAssociationStore;
+        this.dnssecConfigStore = dnssecConfigStore;
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
         this.objectMapper = objectMapper;
@@ -197,8 +216,8 @@ public class Route53ResolverService {
         return list.deepCopy();
     }
 
-    public ObjectNode deleteFirewallDomainList(String id) {
-        ObjectNode list = require(domainListStore, id, "firewall domain list");
+    public ObjectNode deleteFirewallDomainList(String id, String region) {
+        ObjectNode list = require(domainListStore, id, "firewall domain list", region);
         domainListStore.delete(id);
         tagStore.delete(text(list, "Arn"));
         ObjectNode result = list.deepCopy();
@@ -206,12 +225,12 @@ public class Route53ResolverService {
         return result;
     }
 
-    public List<ObjectNode> listCustomFirewallDomainLists() {
-        return domainListStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listCustomFirewallDomainLists(String region) {
+        return recordsIn(domainListStore, region);
     }
 
-    public Optional<ObjectNode> getCustomFirewallDomainList(String id) {
-        return domainListStore.get(id).map(ObjectNode::deepCopy);
+    public Optional<ObjectNode> getCustomFirewallDomainList(String id, String region) {
+        return domainListStore.get(id).filter(list -> inRegion(list, region)).map(ObjectNode::deepCopy);
     }
 
     // ---------- Resolver endpoints ----------
@@ -387,8 +406,8 @@ public class Route53ResolverService {
 
     // Synchronized with createResolverEndpoint, which stores the endpoint before its record: a delete
     // between the two would find no interfaces to delete, and the create would then store the record.
-    public synchronized ObjectNode deleteResolverEndpoint(String id) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public synchronized ObjectNode deleteResolverEndpoint(String id, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         // A record written before endpoints had interfaces has no NetworkInterfaces, so none to delete.
         endpointIpRequestStore.get(id).ifPresent(record -> {
             List<String> interfaceIds = new ArrayList<>();
@@ -409,12 +428,12 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverEndpoint(String id) {
-        return require(endpointStore, id, "resolver endpoint").deepCopy();
+    public ObjectNode getResolverEndpoint(String id, String region) {
+        return require(endpointStore, id, "resolver endpoint", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverEndpoints() {
-        return endpointStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listResolverEndpoints(String region) {
+        return recordsIn(endpointStore, region);
     }
 
     /**
@@ -424,8 +443,8 @@ public class Route53ResolverService {
      * is the address of the EC2 interface behind the entry; an entry with no interface (see
      * {@link #createEndpointInterfaces}) has the request's {@code Ip}, or none.
      */
-    public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public List<ObjectNode> listResolverEndpointIpAddresses(String id, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         // Read once, so the requests and their interfaces come from the same record.
         JsonNode record = endpointIpRequestStore.get(id).orElse(null);
         JsonNode recorded = record == null ? null : record.get("IpAddressRequests");
@@ -462,8 +481,8 @@ public class Route53ResolverService {
         }
     }
 
-    public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public ObjectNode updateResolverEndpoint(String id, JsonNode request, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         String endpointType = text(request, "ResolverEndpointType");
         if (endpointType != null) {
             requireEnum(endpointType, "ResolverEndpointType", ENDPOINT_TYPES, INVALID_PARAMETER);
@@ -514,8 +533,20 @@ public class Route53ResolverService {
         return rule.deepCopy();
     }
 
-    public ObjectNode deleteResolverRule(String id) {
-        ObjectNode rule = require(ruleStore, id, "resolver rule");
+    /**
+     * Deletes a rule no VPC is associated with. AWS refuses one that still is, with {@code ResourceInUseException}:
+     * a rule is disassociated from every VPC it was associated with before it is deleted. Deleting it would leave
+     * associations whose rule, and so whose Region, is gone. {@code synchronized} with
+     * {@link #associateResolverRule}, so an association can't be stored between the check and the deletion.
+     */
+    public synchronized ObjectNode deleteResolverRule(String id, String region) {
+        ObjectNode rule = require(ruleStore, id, "resolver rule", region);
+        boolean associated = ruleAssociationStore.scan(key -> true).stream()
+                .anyMatch(association -> id.equals(text(association, "ResolverRuleId")));
+        if (associated) {
+            throw new AwsException("ResourceInUseException",
+                    "Resolver rule " + id + " is associated with one or more VPCs.", 400);
+        }
         ruleStore.delete(id);
         tagStore.delete(text(rule, "Arn"));
         ObjectNode result = rule.deepCopy();
@@ -523,16 +554,62 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverRule(String id) {
-        return require(ruleStore, id, "resolver rule").deepCopy();
+    public ObjectNode getResolverRule(String id, String region) {
+        return require(ruleStore, id, "resolver rule", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRules() {
-        return ruleStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    /**
+     * The rules of {@code region} matching every filter of {@code filters}, a rule matching a filter when its field
+     * equals any of the filter's values. A filter name may also be given in the legacy upper-case form
+     * ({@code CREATOR_REQUEST_ID}); a name the operation does not list filters nothing.
+     */
+    public List<ObjectNode> listResolverRules(JsonNode filters, String region) {
+        List<ObjectNode> rules = recordsIn(ruleStore, region);
+        if (filters == null || filters.isNull()) {
+            return rules;
+        }
+        if (!filters.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+        }
+        for (JsonNode filter : filters) {
+            if (!filter.isObject()) {
+                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+            }
+            String name = filter.path("Name").asText("");
+            if (name.isEmpty() || name.length() > 64) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
+            }
+            JsonNode filterValues = filter.path("Values");
+            if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+            }
+            List<String> values = new ArrayList<>();
+            for (JsonNode value : filterValues) {
+                if (!value.isTextual()) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+                }
+                if (value.asText().isEmpty() || value.asText().length() > 600) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
+                }
+                values.add(value.asText());
+            }
+            String field = RULE_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
+            if (field == null) {
+                continue;
+            }
+            boolean domain = "DomainName".equals(field);
+            rules = rules.stream()
+                    .filter(rule -> values.stream().anyMatch(value -> domain
+                            ? DnsLookupHelper.normalizeTarget(value)
+                                    .equalsIgnoreCase(DnsLookupHelper.normalizeTarget(text(rule, field)))
+                            : value.equals(text(rule, field))))
+                    .toList();
+        }
+        return rules;
     }
 
-    public ObjectNode updateResolverRule(String id, JsonNode config) {
-        ObjectNode rule = require(ruleStore, id, "resolver rule");
+    public ObjectNode updateResolverRule(String id, JsonNode config, String region) {
+        ObjectNode rule = require(ruleStore, id, "resolver rule", region);
         copyIfPresent(config, rule, "Name", "TargetIps", "ResolverEndpointId");
         rule.put("ModificationTime", Instant.now().toString());
         ruleStore.put(id, rule);
@@ -541,10 +618,10 @@ public class Route53ResolverService {
 
     // ---------- Resolver rule associations ----------
 
-    public ObjectNode associateResolverRule(JsonNode request) {
+    public synchronized ObjectNode associateResolverRule(JsonNode request, String region) {
         String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
         String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
-        require(ruleStore, ruleId, "resolver rule");
+        require(ruleStore, ruleId, "resolver rule", region);
         String id = id("rslvr-rrassoc");
         ObjectNode association = objectMapper.createObjectNode();
         association.put("Id", id);
@@ -556,11 +633,12 @@ public class Route53ResolverService {
         return association.deepCopy();
     }
 
-    public ObjectNode disassociateResolverRule(JsonNode request) {
+    public ObjectNode disassociateResolverRule(JsonNode request, String region) {
         String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
         String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
         ObjectNode association = ruleAssociationStore.scan(key -> true).stream()
                 .filter(a -> ruleId.equals(text(a, "ResolverRuleId")) && vpcId.equals(text(a, "VPCId")))
+                .filter(a -> inRegion(a, region))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No association between resolver rule " + ruleId + " and VPC " + vpcId, 400));
@@ -570,12 +648,69 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverRuleAssociation(String id) {
-        return require(ruleAssociationStore, id, "resolver rule association").deepCopy();
+    public ObjectNode getResolverRuleAssociation(String id, String region) {
+        return require(ruleAssociationStore, id, "resolver rule association", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRuleAssociations() {
-        return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listResolverRuleAssociations(String region) {
+        return recordsIn(ruleAssociationStore, region);
+    }
+
+    // ---------- VPC DNSSEC validation ----------
+
+    public synchronized ObjectNode updateResolverDnssecConfig(JsonNode request, String region, String accountId) {
+        String resourceId = requireText(request, "ResourceId", INVALID_PARAMETER);
+        String validation = requireText(request, "Validation", INVALID_PARAMETER);
+        requireEnum(validation, "Validation", List.of("ENABLE", "DISABLE", "USE_LOCAL_RESOURCE_SETTING"),
+                INVALID_PARAMETER);
+        requireDnssecVpc(resourceId, region);
+        String key = region + "::" + resourceId;
+        ObjectNode config = dnssecConfigStore.get(key).map(ObjectNode::deepCopy)
+                .orElseGet(() -> newDnssecConfig(resourceId, accountId));
+        String validationStatus = switch (validation) {
+            case "ENABLE" -> "ENABLED";
+            case "DISABLE" -> "DISABLED";
+            case "USE_LOCAL_RESOURCE_SETTING" -> "USE_LOCAL_RESOURCE_SETTING";
+            default -> throw new IllegalStateException("Unexpected DNSSEC validation: " + validation);
+        };
+        config.put("ValidationStatus", validationStatus);
+        dnssecConfigStore.put(key, config);
+        return config.deepCopy();
+    }
+
+    public synchronized ObjectNode getResolverDnssecConfig(String resourceId, String region) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException(INVALID_PARAMETER, "ResourceId is required", 400);
+        }
+        Vpc vpc = requireDnssecVpc(resourceId, region);
+        return dnssecConfigStore.get(region + "::" + resourceId)
+                .orElseGet(() -> {
+                    if (vpc == null) {
+                        throw new AwsException("ResourceNotFoundException",
+                                "DNSSEC configuration not found for VPC: " + resourceId, 400);
+                    }
+                    ObjectNode config = newDnssecConfig(resourceId, vpc.getOwnerId());
+                    config.put("ValidationStatus", "DISABLED");
+                    dnssecConfigStore.put(region + "::" + resourceId, config);
+                    return config;
+                }).deepCopy();
+    }
+
+    private Vpc requireDnssecVpc(String resourceId, String region) {
+        if (ec2Service == null) {
+            return null;
+        }
+        return ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).stream()
+                .findFirst().orElseThrow(() -> new AwsException("AccessDeniedException",
+                        "Unable to access VPC: " + resourceId, 400));
+    }
+
+    private ObjectNode newDnssecConfig(String resourceId, String accountId) {
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("Id", "rdsc-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        config.put("OwnerId", accountId);
+        config.put("ResourceId", resourceId);
+        return config;
     }
 
     /**
@@ -986,9 +1121,30 @@ public class Route53ResolverService {
                         + text(existing, "Id") + " with a different " + field + ".", 400);
     }
 
-    private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {
-        return store.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                "Unknown " + type + ": " + id, 400));
+    /** The record {@code id} names in {@code region}; one of another Region is not found, as Resolver is Regional. */
+    private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type, String region) {
+        return store.get(id).filter(record -> inRegion(record, region))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Unknown " + type + ": " + id, 400));
+    }
+
+    /** {@code store}'s records of {@code region}, copied. */
+    private List<ObjectNode> recordsIn(StorageBackend<String, ObjectNode> store, String region) {
+        return store.scan(key -> true).stream().filter(record -> inRegion(record, region))
+                .map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * Whether a stored record belongs to {@code region}. The stores carry no Region in their keys, so it comes from the
+     * ARN this service minted for the record, read as {@link #resolverRuleIn} reads a rule's on the DNS path, and for a
+     * rule association, which has no ARN, from its rule. An association whose rule is gone, which only a rule deleted
+     * before such deletes were refused leaves, has no Region to claim and belongs to none, rather than to every Region.
+     */
+    private boolean inRegion(ObjectNode record, String region) {
+        String ruleId = text(record, "ResolverRuleId");
+        if (!record.has("Arn") && ruleId != null) {
+            return ruleStore.get(ruleId).map(rule -> inRegion(rule, region)).orElse(false);
+        }
+        return region.equals(AwsArnUtils.regionOrDefault(text(record, "Arn"), region));
     }
 
     /**

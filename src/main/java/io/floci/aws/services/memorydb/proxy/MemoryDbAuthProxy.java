@@ -1,10 +1,12 @@
 package io.floci.aws.services.memorydb.proxy;
 
 import io.floci.aws.services.elasticache.proxy.AbstractRedisAuthProxy;
+import io.floci.aws.services.elasticache.proxy.ElastiCacheBackendAcl;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.util.List;
 
 /**
  * TCP auth proxy for a single MemoryDB cluster.
@@ -15,8 +17,12 @@ import java.net.Socket;
  *
  * <p>Whether authentication is required at all is decided up front from the cluster's
  * ACL: a cluster bound to {@code open-access} (or any ACL whose users require no
- * password) is created with {@code requireAuth = false}, in which case the proxy is a
- * straight relay.
+ * password) is created with {@code requireAuth = false}, in which case a client need not
+ * sign in, and an {@code open-access} cluster is a straight relay.
+ *
+ * <p>A cluster bound to an ACL of its own runs each connection as a private backend ACL user
+ * that carries the signed-in user's access string, as an ElastiCache cache with user groups does,
+ * so the backend answers a command the user may not run with {@code NOPERM}.
  */
 public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
 
@@ -24,6 +30,7 @@ public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
 
     private final boolean requireAuth;
     private final AuthValidator authValidator;
+    private final ElastiCacheBackendAcl backendAcl = new ElastiCacheBackendAcl();
 
     public MemoryDbAuthProxy(String clusterName, boolean authRequired,
                              String backendHost, int backendPort,
@@ -44,6 +51,34 @@ public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
     }
 
     @Override
+    protected void initializeBackend(Socket backend, String username) throws IOException {
+        if (!authValidator.enforcesAccessStrings()) {
+            return;
+        }
+        String name = userOrDefault(username);
+        backendAcl.authenticate(backend, name, () -> authValidator.accessString(name));
+    }
+
+    @Override
+    protected boolean checksCredentials() {
+        return requireAuth || authValidator.enforcesAccessStrings();
+    }
+
+    @Override
+    protected boolean signsInWithIam(String username) {
+        return authValidator.signsInWithIam(username);
+    }
+
+    @Override
+    protected List<String> backendCredentials(String username) throws IOException {
+        if (!authValidator.enforcesAccessStrings()) {
+            return super.backendCredentials(username);
+        }
+        String name = userOrDefault(username);
+        return backendAcl.credentials(backendHost(), backendPort(), name, () -> authValidator.accessString(name));
+    }
+
+    @Override
     protected void closeQuietly(Socket s) {
         try {
             s.close();
@@ -61,5 +96,20 @@ public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
     @FunctionalInterface
     public interface AuthValidator {
         boolean authenticate(String username, String secret);
+
+        /** Whether sessions run with their user's access string, false for the open-access ACL. */
+        default boolean enforcesAccessStrings() {
+            return false;
+        }
+
+        /** The access string of {@code username} in the cluster's ACL, or null when the ACL does not hold it. */
+        default String accessString(String username) {
+            return null;
+        }
+
+        /** Whether {@code username}, null for the {@code default} user, is an IAM user of the cluster's ACL. */
+        default boolean signsInWithIam(String username) {
+            return false;
+        }
     }
 }

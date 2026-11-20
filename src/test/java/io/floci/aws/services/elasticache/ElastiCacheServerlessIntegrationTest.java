@@ -1,14 +1,13 @@
 package io.floci.aws.services.elasticache;
 
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.ServerlessCache;
@@ -46,9 +45,7 @@ class ElastiCacheServerlessIntegrationTest {
     Ec2Service ec2;
 
     private ElastiCacheClient client() {
-        return ElastiCacheClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        return AwsTestClients.create(ElastiCacheClient.builder(), "000000000000", Region.US_EAST_1, endpoint);
     }
 
     @Test

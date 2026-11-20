@@ -52,9 +52,9 @@ The entrypoint needs to start as root to read the socket's group and to honour t
 
 ## Connection Pool
 
-Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
+Floci's short Docker calls (create, start, stop, remove and the like) go through one client with a bounded connection pool. When it is full, every other Docker call waits for a connection to free up, and Floci stops making progress. Streams that stay open while they run use the separate streaming pool below, so this pool only fills under a burst of short calls.
 
-The default of 1024 connections covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows. Raise it if you widen that range or run many other containers at the same time:
+The default is 1024 connections:
 
 ```yaml
 floci:
@@ -64,12 +64,12 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Container log-follow streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1). Exec-output and container-wait streams (CodeBuild phases, Lambda extensions and exit watchers, EKS audit followers) still use the main pool and count against `max-connections`:
+Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; other containers' log streams use it too, and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
   docker:
-    streaming-max-connections: 512
+    streaming-max-connections: 3072
 ```
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
@@ -84,7 +84,7 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS`
 
-A Docker call that gets no response within `api-timeout-seconds` fails, on Unix-socket and TCP hosts alike, so a hung daemon cannot block a request indefinitely. The limit applies to each attempt: a control-plane request that is safe to repeat is tried up to six times, so against a silent daemon it can take about six times the limit, plus backoff, to fail. It defaults to 300 seconds (5 minutes) for both pools and must be at least 1, since httpclient5 reads 0 as no limit. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy:
+A Docker call that gets no response within `api-timeout-seconds` fails, on Unix-socket and TCP hosts alike, so a hung daemon cannot block a request indefinitely. A request that is safe to repeat is retried after a transient connection error, but only within the same limit, counted from its first attempt: no retry starts once the limit would pass, so a silent daemon fails the call after about the limit. An attempt already running is not cut short, so a fast failure followed by a silent retry can take up to twice the limit. It defaults to 300 seconds (5 minutes) for both pools and must be at least 1, since httpclient5 reads 0 as no limit. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy:
 
 ```yaml
 floci:
@@ -103,6 +103,37 @@ floci:
 ```
 
 Environment variable: `FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS`
+
+To see how close Floci is to those limits, it logs a line every `pool-gauge-interval-seconds` (60 by default) while a pool is in use, and nothing while both are idle. Each pool reports its leased, available and pending connections against its limit and its open streams by kind and by the service whose container each one follows, followed by the number of docker-java stream threads:
+
+```
+Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0 pending=0 max=3072 streams[logs=20 wait=20] services[lambda=36 unattributed=4]; stream threads=40
+```
+
+A stream is `unattributed` when it follows no container (an exec, an image pull or build, daemon events), or a container this Floci process did not start with a service label: one started before a restart, by a tool other than Floci, or by a Floci helper that labels no service.
+
+A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. To turn the lines off, set the interval to 0:
+
+```yaml
+floci:
+  docker:
+    pool-gauge-interval-seconds: 0
+```
+
+Environment variable: `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS`
+
+### Unreachable daemon
+
+When the Docker daemon stops answering, Floci stops waiting on it. After `breaker-failure-threshold` attempts in a row (3 by default) fail before the daemon answers (a broken connection, a refused or missing socket, a call that times out), Floci pings the daemon. Each retry of a call is an attempt, so a single call that Floci retries can reach the threshold on its own; the ping is what keeps that from turning Docker off. If the ping fails too, every Docker call fails at once instead of waiting out its own connect, response and retry timeouts, so a container-backed request reports a missing daemon in about a second. Floci logs one warning when this starts, pings the daemon every `breaker-probe-interval-seconds` (5 by default), and logs one line when it answers again. An error status from the daemon (a 404, a 500) is an answer and never counts, for a call or for the ping, and a ping that never reaches the daemon (Floci shutting down) neither turns Docker off nor back on. The ping uses a connection of its own and gives up after 5 seconds. Set the threshold to 0 to turn this off:
+
+```yaml
+floci:
+  docker:
+    breaker-failure-threshold: 3
+    breaker-probe-interval-seconds: 5
+```
+
+Environment variables: `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD`, `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS`
 
 ## Private Registry Authentication
 
@@ -349,7 +380,10 @@ caller keeps its existing failure handling after retries are exhausted.
 |---|---|---|
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
-| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds two connections, so about half this many can run at once |
+| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
+| `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
+| `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |

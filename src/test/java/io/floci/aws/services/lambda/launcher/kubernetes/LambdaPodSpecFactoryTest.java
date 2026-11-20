@@ -6,6 +6,8 @@ import io.floci.aws.config.EmulatorConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -18,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -46,6 +49,8 @@ class LambdaPodSpecFactoryTest {
         when(tls.enabled()).thenReturn(false);
         when(kubernetes.initImage()).thenReturn("busybox:1.36");
         when(kubernetes.labels()).thenReturn(Optional.empty());
+        when(kubernetes.nodeSelector()).thenReturn(Optional.empty());
+        when(kubernetes.tolerations()).thenReturn(Optional.empty());
         factory = new LambdaPodSpecFactory(config);
     }
 
@@ -142,6 +147,91 @@ class LambdaPodSpecFactoryTest {
         assertThat(labels)
                 .containsEntry("team", "platform")
                 .doesNotContainKeys("malformed", "a", "bad key");
+    }
+
+    @Test
+    void podHasNoNodeSelectorOrTolerationsByDefault() {
+        JsonNode spec = spec(buildZipPod());
+        assertThat(spec.has("nodeSelector")).isFalse();
+        assertThat(spec.has("tolerations")).isFalse();
+    }
+
+    @Test
+    void nodeSelectorIsParsed() {
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(
+                List.of("workload-type=backend", " kubernetes.io/arch = amd64 ")));
+        assertThat(stringMap(spec(buildZipPod()).path("nodeSelector")))
+                .containsExactly(Map.entry("workload-type", "backend"),
+                        Map.entry("kubernetes.io/arch", "amd64"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad key=x", "a=b=c", "Kubernetes.io/arch=amd64", "=x", "no-equals"})
+    void invalidNodeSelectorEntryFailsTheColdStart(String invalid) {
+        // Dropping a selector term would widen where the pod may run, so it fails instead.
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(List.of("workload-type=backend", invalid)));
+        assertThatThrownBy(this::buildZipPod)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("'" + invalid + "'")
+                .hasMessageContaining("FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR");
+    }
+
+    @Test
+    void repeatedNodeSelectorKeyKeepsTheLastValue() {
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(
+                List.of("workload-type=backend", "workload-type=gpu")));
+        assertThat(stringMap(spec(buildZipPod()).path("nodeSelector")))
+                .containsExactly(Map.entry("workload-type", "gpu"));
+    }
+
+    @Test
+    void labelKeyPrefixIsLimitedTo253Characters() {
+        String longestPrefix = "a".repeat(253);
+        String overlongPrefix = "a".repeat(254);
+        when(kubernetes.labels()).thenReturn(Optional.of(
+                List.of(longestPrefix + "/ok=x", overlongPrefix + "/too-long=x")));
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of(longestPrefix + "/ok:NoSchedule", overlongPrefix + "/too-long:NoSchedule")));
+        JsonNode pod = buildZipPod();
+        assertThat(stringMap(pod.path("metadata").path("labels")))
+                .containsKey(longestPrefix + "/ok")
+                .doesNotContainKey(overlongPrefix + "/too-long");
+        assertThat(elements(spec(pod).path("tolerations")))
+                .extracting(n -> n.path("key").asText())
+                .containsExactly(longestPrefix + "/ok");
+    }
+
+    @Test
+    void nodeSelectorKeyWithOverlongPrefixFailsTheColdStart() {
+        String entry = "a".repeat(254) + "/too-long=x";
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(List.of(entry)));
+        assertThatThrownBy(this::buildZipPod)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("'" + entry + "'");
+    }
+
+    @Test
+    void tolerationsAreWrittenAsTheToleratedTaint() {
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of("workload-type=backend:NoSchedule", "dedicated:NoExecute", "example.com/spot")));
+        assertThat(elements(spec(buildZipPod()).path("tolerations")))
+                .extracting(n -> n.path("key").asText(), n -> n.path("operator").asText(),
+                        n -> n.path("value").asText(null), n -> n.path("effect").asText(null))
+                .containsExactly(
+                        tuple("workload-type", "Equal", "backend", "NoSchedule"),
+                        tuple("dedicated", "Exists", null, "NoExecute"),
+                        tuple("example.com/spot", "Exists", null, null));
+    }
+
+    @Test
+    void invalidTolerationsAreDropped() {
+        // The API server rejects an unknown effect or a key with spaces, so such
+        // entries must never reach the pod spec.
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of("a=b:Sometimes", "bad key:NoSchedule", "=x:NoSchedule", "team=a=b", "spot:NoSchedule")));
+        assertThat(elements(spec(buildZipPod()).path("tolerations")))
+                .extracting(n -> n.path("key").asText())
+                .containsExactly("spot");
     }
 
     @Test

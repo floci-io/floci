@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class ApiGatewayUpdateAuthorizerIntegrationTest {
@@ -209,5 +210,27 @@ class ApiGatewayUpdateAuthorizerIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("name", equalTo("original-name"));
+
+        String path = "/restapis/" + apiId + "/authorizers/" + authorizerId;
+        for (String ops : new String[]{
+                "{\"op\":\"replace\",\"path\":\"/type\",\"value\":\"BOGUS\"}",
+                "{\"op\":\"replace\",\"path\":\"/name\",\"value\":\"x\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/type\",\"value\":\"BOGUS\"}",
+                "{\"op\":\"remove\",\"path\":\"/identitySource\"}"}) {
+            given().contentType("application/json").body("{\"patchOperations\":[" + ops + "]}")
+                    .when().patch(path).then().statusCode(400);
+            given().when().get(path).then().statusCode(200).body("name", equalTo("original-name"))
+                    .body("type", equalTo("TOKEN")).body("identitySource", equalTo("method.request.header.Authorization"))
+                    .body("authorizerUri", equalTo("arn:aws:lambda:us-east-1:123456789012:function:my-authorizer"));
+        }
+
+        String requestId = given().contentType("application/json").body(
+                "{\"name\":\"req\",\"type\":\"REQUEST\",\"authorizerUri\":\"arn:aws:lambda:us-east-1:123456789012:function:a\","
+                + "\"identitySource\":\"method.request.header.X\",\"authorizerResultTtlInSeconds\":0}")
+                .when().post("/restapis/" + apiId + "/authorizers").then().statusCode(201).extract().path("id");
+        given().contentType("application/json")
+                .body("{\"patchOperations\":[{\"op\":\"remove\",\"path\":\"/identitySource\"}]}")
+                .when().patch("/restapis/" + apiId + "/authorizers/" + requestId).then().statusCode(200)
+                .body("identitySource", nullValue());
     }
 }

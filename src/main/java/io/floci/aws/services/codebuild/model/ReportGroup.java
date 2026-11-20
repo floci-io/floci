@@ -17,7 +17,7 @@ public class ReportGroup {
     private Map<String, Object> exportConfig;
     private Double created;
     private Double lastModified;
-    private List<Map<String, String>> tags;
+    private volatile List<Map<String, String>> tags;
     private String status;
 
     public String getArn() { return arn; }

@@ -225,10 +225,45 @@ class RedshiftServerlessRuntimeIntegrationTest {
         assertNotNull(dbUser);
         assertNotNull(dbPassword);
 
-        try (Connection connection = connect(dbUser, dbPassword)) {
+        try (Connection connection = connect(dbUser, dbPassword);
+             Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT current_user")) {
             assertTrue(connection.isValid(5));
+            assertTrue(rs.next());
+            assertEquals(dbUser, rs.getString(1));
         }
         assertThrows(SQLException.class, () -> DriverManager.getConnection(jdbcUrl(), dbUser, "stale-password"));
+    }
+
+    @Test
+    void dataApiWithoutSecretArnRunsAsIamIdentityAcrossRetainedSession() {
+        ExtractableResponse<Response> first = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
+                {"Sql": "SELECT current_user", "WorkgroupName": "%s", "Database": "dev", "SessionKeepAliveSeconds": 60}
+                """.formatted(WORKGROUP)).then().statusCode(200).extract();
+        String firstId = first.path("Id");
+        String sessionId = first.path("SessionId");
+        assertNotNull(sessionId);
+
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(250)).until(() -> "FINISHED".equals(
+                        RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                                "{\"Id\":\"" + firstId + "\"}").then().statusCode(200).extract().path("Status")));
+
+        String user1 = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+                "{\"Id\":\"" + firstId + "\"}").then().statusCode(200).extract().path("Records[0][0].stringValue");
+        assertEquals("IAMR:floci", user1);
+
+        String secondId = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
+                {"Sql": "SELECT current_user", "SessionId": "%s"}
+                """.formatted(sessionId)).then().statusCode(200).extract().path("Id");
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(250)).until(() -> "FINISHED".equals(
+                        RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                                "{\"Id\":\"" + secondId + "\"}").then().statusCode(200).extract().path("Status")));
+
+        String user2 = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+                "{\"Id\":\"" + secondId + "\"}").then().statusCode(200).extract().path("Records[0][0].stringValue");
+        assertEquals("IAMR:floci", user2);
     }
 
     @Test

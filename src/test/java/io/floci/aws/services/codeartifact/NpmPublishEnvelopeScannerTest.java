@@ -10,11 +10,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Random;
 
+import static io.floci.aws.testing.CodeArtifactRequests.npmIntegrity;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -54,8 +54,7 @@ class NpmPublishEnvelopeScannerTest {
 
         NpmPublishEnvelopeScanner.Envelope envelope = scan(json);
 
-        assertEquals("sha512-" + Base64.getEncoder().encodeToString(sha512(tarball)),
-                envelope.attachments().get("a.tgz").integrity());
+        assertEquals(npmIntegrity(tarball), envelope.attachments().get("a.tgz").integrity());
         assertEquals(tarball.length, envelope.attachments().get("a.tgz").size());
     }
 
@@ -68,8 +67,7 @@ class NpmPublishEnvelopeScannerTest {
 
         NpmPublishEnvelopeScanner.Envelope envelope = scan(json);
 
-        assertEquals("sha512-" + Base64.getEncoder().encodeToString(sha512(tarball)),
-                envelope.attachments().get("big.tgz").integrity());
+        assertEquals(npmIntegrity(tarball), envelope.attachments().get("big.tgz").integrity());
         assertEquals(tarball.length, envelope.attachments().get("big.tgz").size());
     }
 
@@ -134,8 +132,7 @@ class NpmPublishEnvelopeScannerTest {
 
         NpmPublishEnvelopeScanner.Envelope envelope = scan(json);
 
-        assertEquals("sha512-" + Base64.getEncoder().encodeToString(sha512(tarball)),
-                envelope.attachments().get("a.tgz").integrity());
+        assertEquals(npmIntegrity(tarball), envelope.attachments().get("a.tgz").integrity());
         assertEquals(tarball.length, envelope.attachments().get("a.tgz").size());
     }
 
@@ -236,9 +233,5 @@ class NpmPublishEnvelopeScannerTest {
 
     private static void assertInvalid(String json) {
         assertThrows(IOException.class, () -> scan(json));
-    }
-
-    private static byte[] sha512(byte[] bytes) throws Exception {
-        return MessageDigest.getInstance("SHA-512").digest(bytes);
     }
 }

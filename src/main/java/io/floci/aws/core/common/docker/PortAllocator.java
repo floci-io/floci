@@ -10,9 +10,11 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.IntFunction;
@@ -27,6 +29,7 @@ import java.util.function.IntFunction;
 public class PortAllocator {
 
     private static final Logger LOG = Logger.getLogger(PortAllocator.class);
+    private static final int SHORT_ID_LENGTH = 12;
 
     // Ports reserved by this process but not yet bound by Docker.
     // Prevents TOCTOU races when multiple containers are launched concurrently.
@@ -38,14 +41,21 @@ public class PortAllocator {
     // toward every existing caller byte-identical. Only the CDI-managed
     // instance - built via the @Inject constructor - ever has one.
     private final DockerClient dockerClient;
+    // Nullable for the same reason: without it, allocateForInProcessListener is allocate.
+    private final CurrentContainerNetworkResolver currentContainer;
 
     public PortAllocator() {
-        this(null);
+        this(null, null);
+    }
+
+    public PortAllocator(DockerClient dockerClient) {
+        this(dockerClient, null);
     }
 
     @Inject
-    public PortAllocator(DockerClient dockerClient) {
+    public PortAllocator(DockerClient dockerClient, CurrentContainerNetworkResolver currentContainer) {
         this.dockerClient = dockerClient;
+        this.currentContainer = currentContainer;
     }
 
     /**
@@ -63,15 +73,51 @@ public class PortAllocator {
         // snapshot is only as fresh as the moment allocate() started either way,
         // and this loop runs inside a lock every consumer of the shared
         // allocator blocks on.
-        Set<Integer> published = publishedHostPorts();
+        return allocateFrom(basePort, maxPort, publishedHostPorts(null));
+    }
+
+    /**
+     * Allocates a port for a listener Floci binds in its own process, such as an MWAA environment's
+     * web proxy. Inside a container, a host port Docker publishes for Floci's own container is that
+     * listener's way in, not a port someone else holds, so publishing the range on Floci's container
+     * must not use it up; a port another container publishes still is, since the host would route it
+     * there. Floci's container is the one its hostname names, which Docker sets to the container's
+     * short id unless told otherwise; one it cannot find there has its ports counted as taken.
+     * Outside a container this is {@link #allocate}, since a port Docker publishes there is held in
+     * the same namespace the listener binds in.
+     */
+    public synchronized int allocateForInProcessListener(int basePort, int maxPort) {
+        String ownContainer = currentContainer != null ? currentContainer.resolveContainerId().orElse(null) : null;
+        return allocateFrom(basePort, maxPort, publishedHostPorts(ownContainer));
+    }
+
+    private int allocateFrom(int basePort, int maxPort, Set<Integer> published) {
         for (int port = basePort; port <= maxPort; port++) {
-            if (!reserved.contains(port) && !published.contains(port) && isPortFree(port)) {
+            if (available(port, published)) {
                 reserved.add(port);
                 LOG.debugv("Allocated port {0} from range {1}-{2}", String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
                 return port;
             }
         }
         throw new RuntimeException("No free port available in range " + basePort + "-" + maxPort);
+    }
+
+    /**
+     * Allocates {@code port} itself when {@link #allocate} would hand it out, or answers empty when it is reserved,
+     * published by a container or bound. A failure reading Docker's published ports propagates rather than reading
+     * as a taken port.
+     */
+    public synchronized OptionalInt allocateIfFree(int port) {
+        if (!available(port, publishedHostPorts(null))) {
+            return OptionalInt.empty();
+        }
+        reserved.add(port);
+        LOG.debugv("Allocated port {0}", String.valueOf(port));
+        return OptionalInt.of(port);
+    }
+
+    private boolean available(int port, Set<Integer> published) {
+        return !reserved.contains(port) && !published.contains(port) && isPortFree(port);
     }
 
     /**
@@ -189,8 +235,11 @@ public class PortAllocator {
      * contract, unchanged for every caller that predates this method - or when
      * the Docker API call itself fails, matching {@link #isPortFree}'s own
      * fail-permissive posture for a probe that could not be completed.
+     *
+     * <p>{@code ownContainer}, when not null, is Floci's own container's id or name, whose ports are
+     * left out.
      */
-    Set<Integer> publishedHostPorts() {
+    Set<Integer> publishedHostPorts(String ownContainer) {
         if (dockerClient == null) {
             return Set.of();
         }
@@ -198,6 +247,9 @@ public class PortAllocator {
             List<Container> containers = dockerClient.listContainersCmd().withShowAll(true).exec();
             Set<Integer> published = new HashSet<>();
             for (Container c : containers) {
+                if (ownContainer != null && isContainer(c, ownContainer)) {
+                    continue;
+                }
                 ContainerPort[] ports = c.getPorts();
                 if (ports == null) {
                     continue;
@@ -214,5 +266,16 @@ public class PortAllocator {
             LOG.debugv("Error checking Docker port bindings: {0}", e.getMessage());
             return Set.of();
         }
+    }
+
+    // A container's id starts with the short id Docker gives it as its hostname, twelve characters; a name is listed
+    // with a leading slash.
+    private static boolean isContainer(Container container, String idOrName) {
+        String id = container.getId();
+        if (id != null && idOrName.length() >= SHORT_ID_LENGTH && id.startsWith(idOrName)) {
+            return true;
+        }
+        String[] names = container.getNames();
+        return names != null && Arrays.asList(names).contains("/" + idOrName);
     }
 }

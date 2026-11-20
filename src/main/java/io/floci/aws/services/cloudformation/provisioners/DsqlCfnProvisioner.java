@@ -53,11 +53,11 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
         CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
-        JsonNode protection = read(types, props, "DeletionProtectionEnabled");
-        JsonNode kmsKey = read(types, props, "KmsEncryptionKey");
-        JsonNode multiRegion = read(types, props, "MultiRegionProperties");
-        JsonNode tagList = read(types, props, "Tags");
-        JsonNode policyDocument = read(types, props, "PolicyDocument");
+        JsonNode protection = types.readProperty(TYPE, props, "DeletionProtectionEnabled");
+        JsonNode kmsKey = types.readProperty(TYPE, props, "KmsEncryptionKey");
+        JsonNode multiRegion = types.readProperty(TYPE, props, "MultiRegionProperties");
+        JsonNode tagList = types.readProperty(TYPE, props, "Tags");
+        JsonNode policyDocument = types.readProperty(TYPE, props, "PolicyDocument");
         types.finish();
         Boolean deletionProtection = protection == null ? null : protection.booleanValue();
         String kms = kmsKey == null ? null : kmsKey.asText();
@@ -102,11 +102,6 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         CfnDeletes.safeDelete("DSQL cluster", physicalId,
                 () -> dsqlService.deleteCluster(region, physicalId), "ResourceNotFoundException");
-    }
-
-    private static JsonNode read(CfnPropertyTypes.Reader types, JsonNode props, String property) {
-        return props == null ? null
-                : types.read(property, props.get(property), CfnPropertyTypes.propertyShape(TYPE, property));
     }
 
     private DsqlCluster awaitSettled(String region, String identifier) {

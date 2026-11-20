@@ -4,7 +4,7 @@ description: Floci, the local AWS emulator, as a single in-cluster endpoint for 
 type: application
 # Chart version. Bump it on every change under charts/floci: `ct lint` fails a pull
 # request that changes the chart without a new version.
-version: 0.1.0
+version: 0.2.0
 # Floci release the chart deploys by default (image.tag falls back to it).
 appVersion: "2.4.0"
 kubeVersion: ">=1.25.0-0"

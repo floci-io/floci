@@ -172,6 +172,18 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresLogicalReplicationParameterStartsTheServerWithLogicalWal() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("rds.logical_replication", "1");
+        overrides.put("max_connections", "500");
+
+        assertEquals(List.of("-c", "wal_level=logical"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.POSTGRES, "postgres:16-alpine", overrides));
+        assertTrue(RdsContainerManager.engineParameterOptions(
+                DatabaseEngine.POSTGRES, Map.of("rds.logical_replication", "0")).isEmpty());
+    }
+
+    @Test
     void parameterGroupOverridesAreNotPassedToOtherEngines() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());
@@ -309,6 +321,14 @@ class RdsContainerManagerTest {
         assertTrue(sql.contains("pg_roles"));
         assertTrue(sql.contains("rolname = 'rds_iam'"));
         assertTrue(sql.contains("CREATE ROLE rds_iam"));
+    }
+
+    @Test
+    void postgresInitSqlCreatesRdsReplicationRoleWhenMissing() {
+        String sql = RdsContainerManager.postgresIamRoleInitSql();
+
+        assertTrue(sql.contains("rolname = 'rds_replication'"));
+        assertTrue(sql.contains("CREATE ROLE rds_replication"));
     }
 
     @Test
@@ -795,8 +815,7 @@ class RdsContainerManagerTest {
                 .when(lifecycleManager).removeIfExistsStrict(any());
         doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -817,8 +836,7 @@ class RdsContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.create(any()))
                 .thenThrow(new IllegalStateException("no such image: mysql:8.0"));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
@@ -836,8 +854,7 @@ class RdsContainerManagerTest {
                 .when(lifecycleManager).removeIfExistsStrict(any());
         doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -848,8 +865,7 @@ class RdsContainerManagerTest {
         Mockito.reset(lifecycleManager);
         stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
                 "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
@@ -869,8 +885,7 @@ class RdsContainerManagerTest {
                 .thenThrow(new IllegalStateException("java.net.SocketException: Connection reset"));
         doThrow(new IllegalStateException("Failed to remove container created-container"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -905,8 +920,7 @@ class RdsContainerManagerTest {
                 .thenThrow(new IllegalStateException("connection reset after Docker create"));
         doThrow(new IllegalStateException("fixed-name cleanup unavailable"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -1536,6 +1550,15 @@ class RdsContainerManagerTest {
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
                 "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptCreatesThePredefinedRolesAfterReplayingTheDump() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        int roles = script.indexOf(RdsContainerManager.postgresIamRoleInitSql());
+        assertTrue(replay >= 0 && roles > replay, "Roles a dump lacks must be created after it is replayed");
     }
 
     @Test

@@ -27,8 +27,7 @@ import java.io.IOException;
  * {@code *}. A condition key read from the body, such as {@code cloudwatch:namespace}, would need
  * the body decompressed before IAM.
  *
- * <p>The decompressed body is bounded as the CBOR protocol bounds it
- * ({@link AwsJsonCborController#decodeBody}), and a body that is too large or cannot be
+ * <p>The decompressed metric publication is bounded at 5 MiB, and a body that is too large or cannot be
  * decompressed is refused in the controller's JSON error format. Every other request reads its
  * body as sent.
  */
@@ -36,6 +35,8 @@ import java.io.IOException;
 @CloudWatchGzipBody
 @Priority(Priorities.ENTITY_CODER)
 public class CloudWatchGzipReaderInterceptor implements ReaderInterceptor {
+
+    private static final int DECOMPRESSED_LIMIT = 5 * 1024 * 1024;
 
     private static final MediaType AWS_JSON_1_0 =
             MediaType.valueOf(AwsJsonController.CONTENT_TYPE_AWS_JSON_1_0);
@@ -59,7 +60,7 @@ public class CloudWatchGzipReaderInterceptor implements ReaderInterceptor {
         // No payload is an operation without input, as on the CBOR protocol, not a malformed gzip stream.
         if (body.length > 0) {
             try {
-                body = AwsJsonCborController.decodeBody(body);
+                body = AwsJsonCborController.decodeBody(body, DECOMPRESSED_LIMIT, "RequestEntityTooLargeException");
             } catch (AwsException e) {
                 throw new WebApplicationException(JsonErrorResponseUtils.createErrorResponse(e));
             }

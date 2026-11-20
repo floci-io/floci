@@ -7,9 +7,11 @@ import com.github.dockerjava.api.model.ContainerPort;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -63,6 +65,85 @@ class PortAllocatorDockerAwareTest {
 
         assertNotEquals(19900, allocated, "must not allocate a port a container already publishes, even though this process's own socket check sees it as free");
         allocator.release(allocated);
+    }
+
+    private static final String FLOCI_ID = "0123456789ab" + "c".repeat(52);
+
+    private static Container container(String id, String name, int... publicPorts) {
+        ContainerPort[] ports = new ContainerPort[publicPorts.length];
+        for (int i = 0; i < publicPorts.length; i++) {
+            ports[i] = new ContainerPort().withPublicPort(publicPorts[i]);
+        }
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getNames()).thenReturn(new String[] {"/" + name});
+        when(container.getPorts()).thenReturn(ports);
+        return container;
+    }
+
+    private static DockerClient dockerListing(Container... containers) {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ListContainersCmd listCmd = mock(ListContainersCmd.class);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.withShowAll(anyBoolean())).thenReturn(listCmd);
+        when(listCmd.exec()).thenReturn(List.of(containers));
+        return dockerClient;
+    }
+
+    private static CurrentContainerNetworkResolver flociIn(String hostname) {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(resolver.resolveContainerId()).thenReturn(Optional.ofNullable(hostname));
+        return resolver;
+    }
+
+    @Test
+    void anInProcessListenerInAContainerCanUseARangeFlocisOwnContainerPublishes() {
+        // Floci's compose file publishes 19900-19902 for its own MWAA web proxies. allocate() reads
+        // those as taken and runs out; the listener binds inside Floci's container, where they are free.
+        DockerClient dockerClient = dockerListing(container(FLOCI_ID, "floci", 19900, 19901, 19902));
+        PortAllocator allocator = new PortAllocator(dockerClient, flociIn("0123456789ab"));
+
+        assertThrows(RuntimeException.class, () -> allocator.allocate(19900, 19902));
+        int port = allocator.allocateForInProcessListener(19900, 19902);
+
+        assertEquals(19900, port);
+        allocator.release(port);
+    }
+
+    @Test
+    void anInProcessListenerInAContainerSkipsAPortAnotherContainerPublishes() {
+        // Floci publishes only part of the range and another container a port in it: the host routes
+        // that port to the other container, so a proxy listening on it in Floci's container is unreachable.
+        DockerClient dockerClient = dockerListing(container(FLOCI_ID, "floci", 19901),
+                container("fedcba987654" + "d".repeat(52), "other", 19900));
+        PortAllocator allocator = new PortAllocator(dockerClient, flociIn("0123456789ab"));
+
+        int port = allocator.allocateForInProcessListener(19900, 19901);
+
+        assertEquals(19901, port);
+        allocator.release(port);
+    }
+
+    @Test
+    void flocisOwnContainerIsAlsoFoundByTheNameItsHostnameGives() {
+        DockerClient dockerClient = dockerListing(container(FLOCI_ID, "floci", 19900));
+        PortAllocator allocator = new PortAllocator(dockerClient, flociIn("floci"));
+
+        int port = allocator.allocateForInProcessListener(19900, 19900);
+
+        assertEquals(19900, port);
+        allocator.release(port);
+    }
+
+    @Test
+    void anInProcessListenerOutsideAContainerStillSkipsPublishedPorts() {
+        DockerClient dockerClient = dockerListing(container(FLOCI_ID, "some-container", 19900));
+        PortAllocator allocator = new PortAllocator(dockerClient, flociIn(null));
+
+        int port = allocator.allocateForInProcessListener(19900, 19999);
+
+        assertNotEquals(19900, port);
+        allocator.release(port);
     }
 
     @Test

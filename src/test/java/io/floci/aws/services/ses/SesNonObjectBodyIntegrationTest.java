@@ -36,8 +36,7 @@ class SesNonObjectBodyIntegrationTest {
         return Stream.of(
                 Arguments.of("POST", "/v2/email/identities", "EmailIdentity is required."),
                 Arguments.of("POST", "/v2/email/templates", "TemplateName is required."),
-                Arguments.of("PUT", "/v2/email/templates/non-object-ghost",
-                        "Template must have at least a subject, text, or html part."),
+                Arguments.of("PUT", "/v2/email/templates/non-object-ghost", "The subject must be specified."),
                 Arguments.of("POST", "/v2/email/custom-verification-email-templates", "TemplateName is required."),
                 Arguments.of("PUT", "/v2/email/custom-verification-email-templates/non-object-ghost",
                         "FromEmailAddress is required."),

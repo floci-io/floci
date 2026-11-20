@@ -53,7 +53,7 @@ class ResourceGroupsIamEnforcementIntegrationTest {
     }
 
     @Test
-    void createAuthorizesNameInsteadOfIgnoredGroupSelectors() {
+    void createIsCheckedOnEveryResourceNotOnTheGroupSelectorsItIgnores() {
         String user = "rg-create-scope-" + UUID.randomUUID();
         String key = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), user)
                 .accessKeyId();
@@ -69,7 +69,9 @@ class ResourceGroupsIamEnforcementIntegrationTest {
     }
 
     @Test
-    void groupScopedDenyAppliesToEveryManagementOperation() {
+    void groupScopedDenyAppliesToEveryOperationOnThatGroup() {
+        // CreateGroup acts on no resource type in the Service Reference, so a Deny naming the group does not stop
+        // creating it, as in AWS; every operation on the group the Deny names, by its name or its ARN, is refused.
         String user = "rg-scoped-deny-" + UUID.randomUUID();
         String key = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), user)
                 .accessKeyId();
@@ -80,21 +82,76 @@ class ResourceGroupsIamEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"*","Resource":"*"},
                   {"Effect":"Deny","Action":"resource-groups:*","Resource":"%s"}]}
                 """.formatted(arn));
-        for (String path : OPERATIONS.keySet()) {
-            Object body = path.equals("/groups")
-                    ? "{\"Name\":\"" + name + "\",\"Configuration\":" + ResourceGroupsServiceTest.CONFIGURATION + "}"
-                    : Map.of("Group", name);
-            call(key, path, body).statusCode(403).body("__type", equalTo("AccessDeniedException"));
-            if (!path.equals("/groups")) {
-                call(key, path, Map.of("Group", arn)).statusCode(403)
-                        .body("__type", equalTo("AccessDeniedException"));
+        call(key, "/groups", "{\"Name\":\"" + name + "\",\"Configuration\":" + ResourceGroupsServiceTest.CONFIGURATION
+                + "}").statusCode(200);
+        try {
+            for (String path : OPERATIONS.keySet()) {
+                if (path.equals("/groups")) {
+                    continue;
+                }
+                call(key, path, Map.of("Group", name)).statusCode(403).body("__type", equalTo("AccessDeniedException"));
+                call(key, path, Map.of("Group", arn)).statusCode(403).body("__type", equalTo("AccessDeniedException"));
             }
+        } finally {
+            call(ACCOUNT, "/delete-group", Map.of("Group", name)).statusCode(200);
         }
-        call(ACCOUNT, "/get-group", Map.of("Group", name)).statusCode(404);
+    }
+
+    @Test
+    void aRequestNamingItsGroupByTheDeprecatedGroupNameIsCheckedOnEveryResource() {
+        // botocore marks GroupName deprecated, and the generated table reads the group from Group alone, so a request
+        // naming its group only by GroupName is checked on every resource: a grant on the group's ARN does not cover
+        // it, and one on every resource does.
+        String name = "rg-deprecated-" + UUID.randomUUID();
+        String arn = "arn:aws:resource-groups:us-east-1:" + ACCOUNT + ":group/" + name;
+        String user = "rg-deprecated-" + UUID.randomUUID();
+        String key = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), user)
+                .accessKeyId();
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth(ACCOUNT, "iam"), user, "allow", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"resource-groups:GetGroup","Resource":"%s"}]}
+                """.formatted(arn));
+        call(ACCOUNT, "/groups", "{\"Name\":\"" + name + "\",\"Configuration\":"
+                + ResourceGroupsServiceTest.CONFIGURATION + "}").statusCode(200);
+        try {
+            call(key, "/get-group", Map.of("GroupName", name)).statusCode(403);
+            EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth(ACCOUNT, "iam"), user, "allow", """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"resource-groups:GetGroup","Resource":"*"}]}
+                    """);
+            call(key, "/get-group", Map.of("GroupName", name)).statusCode(200);
+        } finally {
+            call(ACCOUNT, "/delete-group", Map.of("Group", name)).statusCode(200);
+        }
+    }
+
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheGroup() {
+        String tagged = "rg-data-" + UUID.randomUUID();
+        String other = "rg-web-" + UUID.randomUUID();
+        for (String[] group : new String[][] {{tagged, "data"}, {other, "web"}}) {
+            call(ACCOUNT, "/groups", "{\"Name\":\"" + group[0] + "\",\"Tags\":{\"team\":\"" + group[1] + "\"},"
+                    + "\"Configuration\":" + ResourceGroupsServiceTest.CONFIGURATION + "}").statusCode(200);
+        }
+        String user = "rg-tags-" + UUID.randomUUID();
+        String key = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), user)
+                .accessKeyId();
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth(ACCOUNT, "iam"), user, "allow", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"resource-groups:GetGroup","Resource":"*",
+                    "Condition":{"StringEquals":{"aws:ResourceTag/team":"data"}}}]}
+                """);
+        try {
+            call(key, "/get-group", Map.of("Group", tagged)).statusCode(200);
+            call(key, "/get-group", Map.of("Group", other)).statusCode(403);
+        } finally {
+            call(ACCOUNT, "/delete-group", Map.of("Group", tagged)).statusCode(200);
+            call(ACCOUNT, "/delete-group", Map.of("Group", other)).statusCode(200);
+        }
     }
 
     @ParameterizedTest
-    @CsvSource({"Group,false", "Group,true", "GroupName,false"})
+    @CsvSource({"Group,false", "Group,true"})
     void aGroupScopedGrantAllowsOnlyThatGroup(String selector, boolean useArn) {
         String name = "rg-scoped-allow-" + UUID.randomUUID();
         String arn = "arn:aws:resource-groups:us-east-1:" + ACCOUNT + ":group/" + name;

@@ -108,9 +108,7 @@ class ControlTowerIamIntegrationTest {
     @Test
     void enabledControlResourceAllowAndDenyUseEnabledArnRatherThanCatalogArn() throws Exception {
         try (ControlTowerClient admin = client("test", "test")) {
-            String target = "arn:aws:organizations::000000000000:ou/o-test/ou-" + UUID.randomUUID();
-            String arn = admin.enableControl(r -> r.controlIdentifier("arn:aws:controlcatalog:::control/fixture")
-                    .targetIdentifier(target)).arn();
+            String arn = enabledControl(admin, null);
             String before = admin.getEnabledControl(r -> r.enabledControlIdentifier(arn))
                     .enabledControlDetails().statusSummary().lastOperationIdentifier();
             try (SignedIamUsers.User user = user("Allow", "controltower:GetEnabledControl", arn);
@@ -123,6 +121,29 @@ class ControlTowerIamIntegrationTest {
                 denied(() -> caller.resetEnabledControl(r -> r.enabledControlIdentifier(arn)));
                 assertEquals(before, admin.getEnabledControl(r -> r.enabledControlIdentifier(arn))
                         .enabledControlDetails().statusSummary().lastOperationIdentifier());
+            }
+        }
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Control Tower holds on the enabled control a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's control and not
+     * another's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheEnabledControl() throws Exception {
+        try (ControlTowerClient admin = client("test", "test")) {
+            String tagged = enabledControl(admin, "web");
+            String other = enabledControl(admin, "web");
+            admin.tagResource(r -> r.resourceArn(tagged).tags(Map.of("team", "data")));
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "ct-generated-", "access",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                            + "\"Action\":\"controltower:GetEnabledControl\",\"Resource\":\"*\","
+                            + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}");
+                 ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
+                assertEquals(tagged, caller.getEnabledControl(r -> r.enabledControlIdentifier(tagged))
+                        .enabledControlDetails().arn());
+                denied(() -> caller.getEnabledControl(r -> r.enabledControlIdentifier(other)));
             }
         }
     }
@@ -225,6 +246,17 @@ class ControlTowerIamIntegrationTest {
         return SignedIamUsers.createUser(endpoint, "ct-generated-", "access",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow + "{\"Effect\":\"" + effect
                         + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}]}");
+    }
+
+    /** The ARN of a control the administrator enables on a target of its own, tagged with the team if one is given. */
+    private static String enabledControl(ControlTowerClient admin, String team) {
+        String target = "arn:aws:organizations::000000000000:ou/o-test/ou-" + UUID.randomUUID();
+        return admin.enableControl(r -> {
+            r.controlIdentifier("arn:aws:controlcatalog:::control/fixture").targetIdentifier(target);
+            if (team != null) {
+                r.tags(Map.of("team", team));
+            }
+        }).arn();
     }
 
     private ControlTowerClient client(String key, String secret) {

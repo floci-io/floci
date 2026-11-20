@@ -71,10 +71,13 @@ class EcsExecChannelHandlerTest {
             }
             return attach;
         });
-        when(docker.execStartCmd("exec-1")).thenReturn(startCmd);
+        // The session's stream holds its connection for as long as the session, so it uses the streaming client.
+        DockerClient streamingDocker = mock(DockerClient.class);
+        when(streamingDocker.execStartCmd("exec-1")).thenReturn(startCmd);
 
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.getDockerClient()).thenReturn(docker);
+        when(lifecycleManager.getStreamingDockerClient()).thenReturn(streamingDocker);
 
         Router router = Router.router(vertx);
         new EcsExecChannelHandler(sessions, lifecycleManager, new ObjectMapper(), vertx).init(router);

@@ -112,7 +112,7 @@ public class BackupService {
             if (!List.of("CREATED", "RUNNING", "ABORTING").contains(job.getState())) {
                 continue;
             }
-            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(job.getBackupVaultArn());
             if ("ABORTING".equals(job.getState())) {
                 scheduler.execute(() -> RequestScopes.runAs(entry.accountId(), region, () -> abortJob(entry.key())));
             } else {
@@ -705,8 +705,7 @@ public class BackupService {
     public PaginatedResult<BackupPlan> listBackupPlans(String region, boolean includeDeleted,
                                                        Integer maxResults, String nextToken) {
         List<BackupPlan> plans = planStore.scan(k -> true).stream()
-                .filter(plan -> region.equals(AwsArnUtils.regionOrDefault(plan.getBackupPlanArn(),
-                        regionResolver.getDefaultRegion())))
+                .filter(plan -> region.equals(regionResolver.regionOf(plan.getBackupPlanArn())))
                 .filter(plan -> includeDeleted || plan.getDeletionDate() == null)
                 .toList();
         String namespace = "backup:ListBackupPlans:" + regionResolver.getAccountId() + ":" + region + ":" + includeDeleted;
@@ -803,7 +802,7 @@ public class BackupService {
             job.setStatusMessage("Job stop requested");
             jobStore.put(jobId, job);
             String accountId = regionResolver.getAccountId();
-            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(job.getBackupVaultArn());
             scheduler.schedule(() -> RequestScopes.runAs(accountId, region, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
         }
     }

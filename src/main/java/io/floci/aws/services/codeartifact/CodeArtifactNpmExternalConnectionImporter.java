@@ -130,7 +130,8 @@ public class CodeArtifactNpmExternalConnectionImporter {
         if (externalConnectionName == null) {
             return Optional.empty();
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName,
+                "EXTERNAL_UPSTREAM")) {
             return Optional.empty();
         }
         Optional<NpmExternalConnectionClient.FetchedAsset> fetched;
@@ -265,7 +266,8 @@ public class CodeArtifactNpmExternalConnectionImporter {
         if (externalConnectionName == null) {
             return false;
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName,
+                "EXTERNAL_UPSTREAM")) {
             return false;
         }
 
@@ -275,7 +277,7 @@ public class CodeArtifactNpmExternalConnectionImporter {
                 "npm", namespace, packageName, version);
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "npm", namespace, packageName, version, externalConnectionName,
-                packageFenceSnapshot);
+                RetentionOriginKind.EXTERNAL_CONNECTION, packageFenceSnapshot);
         if (!claim.claimed()) {
             return false;
         }
@@ -412,6 +414,18 @@ public class CodeArtifactNpmExternalConnectionImporter {
 
     private static String tarballFilename(String packageName, String version) {
         return packageName + "-" + version + ".tgz";
+    }
+
+    /**
+     * Whether {@code repository} has an npm external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return npmExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private String npmExternalConnectionName(String region, String domain, String owner, String repository) {

@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -51,6 +52,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class AutoScalingReconcilerTest {
@@ -83,7 +85,7 @@ class AutoScalingReconcilerTest {
         reconciler.reconcile(asg);
         assertEquals(List.of(), asg.getInstances());
         verify(elbV2Service, times(2)).deregisterTargets(eq("us-east-1"), eq("owned-target-group"),
-                argThat(targets -> targets.size() == 1 && "i-cleanup".equals(targets.getFirst().getId())));
+                onlyTarget("i-cleanup"));
     }
 
     static Stream<Arguments> targetCleanupFailures() {
@@ -846,6 +848,35 @@ class AutoScalingReconcilerTest {
         assertEquals(0, asg.getInstances().size());
         verify(elbClassicService).deregisterInstances(
                 eq(asg.getRegion()), eq("classic-lb"), eq(List.of("i-dead")));
+    }
+
+    @Test
+    void reconcileLeavesTheCapacityOfAnEksManagedGroupToEks() {
+        AutoScalingService asgService = scalingService();
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("eks-workers-1a2b3c4d");
+        asg.setEksManaged(true);
+        asg.setMinSize(1);
+        asg.setMaxSize(3);
+        asg.setDesiredCapacity(2);
+        asg.setTargetGroupARNs(List.of("node-target-group"));
+        AsgInstance node = instance("i-0123456789abcdef0", "InService");
+        asg.getInstances().add(node);
+        // EC2 does not run the node's container, so the stale check of an ordinary group would drop it.
+        when(ec2Service.isInstanceContainerRunning("i-0123456789abcdef0")).thenReturn(false);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(List.of(node), asg.getInstances());
+        assertEquals("InService", node.getLifecycleState());
+        assertEquals("Healthy", node.getHealthStatus());
+        assertEquals(2, asg.getDesiredCapacity());
+        verifyNoInteractions(ec2Service, elbV2Service);
+        verify(asgService, never()).reconcileIfPresent(any(), any());
     }
 
     @Test

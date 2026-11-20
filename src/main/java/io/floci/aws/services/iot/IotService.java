@@ -79,6 +79,8 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+
 @ApplicationScoped
 public class IotService {
 
@@ -539,7 +541,7 @@ public class IotService {
         }
         CertificateLocation known = certificateLocations.get(certificateId);
         if (known != null) {
-            Optional<IotCertificate> current = getForAccount(certificateStore, known.accountId(), known.key());
+            Optional<IotCertificate> current = getInAccount(certificateStore, known.accountId(), known.key());
             if (current.isPresent()) {
                 return Optional.of(new RegisteredDevice(known.accountId(), regionOfCertificateKey(known.key()), current.get()));
             }
@@ -551,7 +553,7 @@ public class IotService {
         if (location == null) {
             return Optional.empty();
         }
-        return getForAccount(certificateStore, location.accountId(), location.key())
+        return getInAccount(certificateStore, location.accountId(), location.key())
                 .map(certificate -> new RegisteredDevice(location.accountId(), regionOfCertificateKey(location.key()), certificate));
     }
 
@@ -631,10 +633,10 @@ public class IotService {
         String prefix = "policy-attachment:" + region + ":";
         return keysForAccount(policyAttachmentStore, accountId).stream()
                 .filter(key -> key.startsWith(prefix))
-                .filter(key -> getForAccount(policyAttachmentStore, accountId, key).orElse(Set.of()).contains(certificateArn))
+                .filter(key -> getInAccount(policyAttachmentStore, accountId, key).orElse(Set.of()).contains(certificateArn))
                 .map(key -> key.substring(prefix.length()))
                 .sorted()
-                .map(policyName -> getForAccount(policyStore, accountId, policyKey(region, policyName)))
+                .map(policyName -> getInAccount(policyStore, accountId, policyKey(region, policyName)))
                 .flatMap(Optional::stream)
                 .map(IotPolicy::getPolicyDocument)
                 .filter(Objects::nonNull)
@@ -648,9 +650,9 @@ public class IotService {
      */
     private Map<String, String> connectionVariables(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
         Map<String, String> variables = basicConnectionVariables(clientId, sourceIp, domainName);
-        Optional<Thing> thing = getForAccount(thingStore, device.accountId(), thingKey(device.region(), clientId));
+        Optional<Thing> thing = getInAccount(thingStore, device.accountId(), thingKey(device.region(), clientId));
         boolean attached = thing.isPresent()
-                && getForAccount(thingPrincipalStore, device.accountId(), thingPrincipalKey(device.region(), clientId))
+                && getInAccount(thingPrincipalStore, device.accountId(), thingPrincipalKey(device.region(), clientId))
                         .orElse(Set.of()).contains(device.certificate().getCertificateArn());
         variables.put("iot:Connection.Thing.IsAttached", Boolean.toString(attached));
         if (attached) {
@@ -684,10 +686,6 @@ public class IotService {
                 .flatMap(key -> certificateStore.get(key).stream()
                         .map(value -> new AccountAwareStorageBackend.AccountEntry<>(regionResolver.getDefaultAccountId(), key, value)))
                 .toList();
-    }
-
-    private static <V> Optional<V> getForAccount(StorageBackend<String, V> store, String accountId, String key) {
-        return store instanceof AccountAwareStorageBackend<V> aware ? aware.getForAccount(accountId, key) : store.get(key);
     }
 
     private static <V> Set<String> keysForAccount(StorageBackend<String, V> store, String accountId) {
@@ -1224,9 +1222,13 @@ public class IotService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404));
     }
 
-    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
-        getConnection(clientId);
-        return paginate(mqttBrokerService.listSubscriptions(clientId), maxResults, nextToken);
+    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken, String region) {
+        validateMqttClientId(clientId);
+        String accountId = regionResolver.getAccountId();
+        if (!mqttBrokerService.hasSession(accountId, region, clientId)) {
+            throw new AwsException("ResourceNotFoundException", "MQTT client has no session: " + clientId, 404);
+        }
+        return paginate(mqttBrokerService.listSubscriptions(accountId, region, clientId), maxResults, nextToken);
     }
 
     public void sendDirectMessage(String clientId, String topic, byte[] payload) {
@@ -1801,7 +1803,7 @@ public class IotService {
      * action that failed, with the original payload as published.
      */
     private void executeTopicRule(IotTopicRule rule, String topic, byte[] originalPayload, byte[] document) {
-        String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
+        String ruleRegion = regionResolver.regionOf(rule.getRuleArn());
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
             String type = actionType(action);

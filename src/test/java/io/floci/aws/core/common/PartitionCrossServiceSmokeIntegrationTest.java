@@ -51,7 +51,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "aps", "autoscaling", "backup", "batch", "bcmdataexports", "bedrock", "bedrockagentcorecontrol", "ce",
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
-            "ec2instanceconnect", "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
+            "ec2instanceconnect", "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrcontainers", "emrserverless",
             "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
@@ -1334,6 +1334,22 @@ class PartitionCrossServiceSmokeIntegrationTest {
         .when().post("/applications").then().statusCode(200).extract().response();
         String applicationId = created.jsonPath().getString("applicationId");
         cleanup.register(() -> signed(region, "emr-serverless").when().delete("/applications/" + applicationId));
+        PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void emrContainersVirtualClusterArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "emr-containers");
+        String body = """
+                {"name": "%s", "clientToken": "%s", "containerProvider": {"type": "EKS", "id": "smoke-eks"}}
+                """.formatted(unique("smoke-vc", partitionCase), unique("token", partitionCase));
+        Response created = signed(region, "emr-containers")
+            .contentType(JSON)
+            .body(body)
+        .when().post("/virtualclusters").then().statusCode(200).extract().response();
+        String virtualClusterId = created.jsonPath().getString("id");
+        cleanup.register(() -> signed(region, "emr-containers").when().delete("/virtualclusters/" + virtualClusterId));
         PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
     }
 

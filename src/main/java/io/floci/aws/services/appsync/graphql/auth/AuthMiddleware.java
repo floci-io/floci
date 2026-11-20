@@ -45,8 +45,30 @@ public class AuthMiddleware {
             case API_KEY -> authenticateApiKey(headers, api, configured, info);
             case AWS_IAM -> authenticateIam(headers, api, configured, info);
             case BEARER_JWT -> authenticateBearer(headers, api, configured, info);
-            case AWS_LAMBDA -> authenticateLambda(headers, api, configured, info);
+            case AWS_LAMBDA -> authenticateBareJwtOrLambda(headers, api, configured, info);
         };
+    }
+
+    /**
+     * AppSync takes the JWT itself as the {@code Authorization} value for Cognito and OIDC APIs, the
+     * {@code Bearer } scheme being optional. A bare JWT on such an API is handled like {@code Bearer <jwt>},
+     * since AppSync does not accept an OIDC token as the Lambda authorization token.
+     */
+    private AppSyncAuthContext authenticateBareJwtOrLambda(
+            Map<String, String> headers, GraphqlApi api, Set<AuthenticationType> configured, AuthRequestInfo info) {
+        boolean bearerModes = configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
+                || configured.contains(AuthenticationType.OPENID_CONNECT);
+        String authorization = CredentialClassifier.header(headers, "authorization");
+        if (bearerModes && isDecodableBareJwt(authorization)) {
+            return authenticateBearer(headers, api, configured, info);
+        }
+        return authenticateLambda(headers, api, configured, info);
+    }
+
+    private boolean isDecodableBareJwt(String authorization) {
+        return CredentialClassifier.isBareJwt(authorization)
+                && jwtClaimsDecoder.decodeHeader(authorization).isPresent()
+                && jwtClaimsDecoder.decode(authorization).isPresent();
     }
 
     private AppSyncAuthContext authenticateApiKey(

@@ -6,6 +6,8 @@ import io.floci.aws.services.rds.proxy.PasswordValidator;
 import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftCredentialBroker;
+import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
 import io.floci.aws.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
@@ -37,6 +39,8 @@ public class RedshiftProxyManager {
     private final EmulatorConfig config;
     private final RedshiftParquetWriter parquetWriter;
     private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final RedshiftDbIdentityProvisioner identityProvisioner;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
     /**
      * Proxies whose listener could not be closed during a failed start or replace. The
@@ -57,11 +61,21 @@ public class RedshiftProxyManager {
         this(sigV4Validator, tlsCertificates, s3Service, iamService, config, spectrumInterceptor, null, null);
     }
 
-    @Inject
     public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
                                 S3Service s3Service, IamService iamService, EmulatorConfig config,
                                 SpectrumInterceptor spectrumInterceptor,
                                 RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter) {
+        this(sigV4Validator, tlsCertificates, s3Service, iamService, config, spectrumInterceptor,
+                auditLogPublisher, parquetWriter, null, null);
+    }
+
+    @Inject
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service, IamService iamService, EmulatorConfig config,
+                                SpectrumInterceptor spectrumInterceptor,
+                                RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter,
+                                RedshiftCredentialBroker credentialBroker,
+                                RedshiftDbIdentityProvisioner identityProvisioner) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
         this.s3Service = s3Service;
@@ -70,6 +84,8 @@ public class RedshiftProxyManager {
         this.config = config;
         this.parquetWriter = parquetWriter;
         this.auditLogPublisher = auditLogPublisher;
+        this.credentialBroker = credentialBroker;
+        this.identityProvisioner = identityProvisioner;
     }
 
     public synchronized void startProxy(String relayKey, int proxyPort,
@@ -107,7 +123,8 @@ public class RedshiftProxyManager {
                 clusterAccountId,
                 iamRoleArns,
                 redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
-                redshiftConfig.proxyMaxConnections(), spectrumInterceptor, auditLogPublisher, parquetWriter);
+                redshiftConfig.proxyMaxConnections(), spectrumInterceptor, auditLogPublisher, parquetWriter,
+                credentialBroker, identityProvisioner);
         proxy.updateIamRoles(iamRoleArns, defaultIamRoleArn);
         try {
             proxy.start(proxyPort);

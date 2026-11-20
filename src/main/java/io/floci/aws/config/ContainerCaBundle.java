@@ -12,6 +12,7 @@ import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.StringReader;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -264,9 +265,23 @@ public final class ContainerCaBundle {
         try {
             return Optional.of(sslContext(bundle.get()));
         } catch (IOException | GeneralSecurityException e) {
-            LOG.warnv(e, "Cannot read {0}; Floci's own HTTPS clients trust the JVM's roots only", bundle.get());
+            LOG.warnv(e, "Cannot read {0}; Floci''s own HTTPS clients trust the JVM''s roots only", bundle.get());
             return Optional.empty();
         }
+    }
+
+    /**
+     * An {@link HttpClient} builder for Floci's own outbound HTTPS that trusts {@code sslContext}, the
+     * context {@link #sslContext(EmulatorConfig)} gives: the extra CAs in {@code floci.tls.extra-ca-path},
+     * and Floci's CA when TLS is on, added to the JVM's roots. A null {@code sslContext} keeps the JVM's
+     * default trust. Only the context is set, so hostname verification stays on.
+     */
+    public static HttpClient.Builder httpClientBuilder(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder();
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder;
     }
 
     /** The {@code floci.tls.extra-ca-path} file, when one is set; a blank value counts as unset. */

@@ -38,7 +38,7 @@ public class EcsServiceModel {
     private String deploymentController;
     private String schedulingStrategy;
     private String availabilityZoneRebalancing;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
     /**
@@ -47,6 +47,13 @@ public class EcsServiceModel {
      * it; the Service shape itself has no member for it.
      */
     private Map<String, Object> serviceConnectConfiguration;
+    /**
+     * The ARN of the Cloud Map namespace the Service Connect configuration joined, its own or its cluster's default,
+     * resolved when the configuration was set so a later change to the cluster default does not move the service.
+     */
+    private String serviceConnectNamespaceArn;
+    /** The Cloud Map services ECS created for the configuration's endpoints in that namespace, in its order. */
+    private List<ServiceConnectServiceResource> serviceConnectResources = new ArrayList<>();
     private String platformVersion;
     private String platformFamily;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
@@ -118,6 +125,9 @@ public class EcsServiceModel {
     public String getFailedDeploymentId() { return failedDeploymentId; }
     public void setFailedDeploymentId(String failedDeploymentId) { this.failedDeploymentId = failedDeploymentId; }
 
+    public String getServiceConnectNamespaceArn() { return serviceConnectNamespaceArn; }
+    public void setServiceConnectNamespaceArn(String arn) { this.serviceConnectNamespaceArn = arn; }
+
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }
 
@@ -148,6 +158,11 @@ public class EcsServiceModel {
     public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
+
+    public List<ServiceConnectServiceResource> getServiceConnectResources() { return serviceConnectResources; }
+    public void setServiceConnectResources(List<ServiceConnectServiceResource> serviceConnectResources) {
+        this.serviceConnectResources = serviceConnectResources;
     }
 
     public String getPlatformVersion() { return platformVersion; }

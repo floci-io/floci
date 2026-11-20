@@ -31,6 +31,7 @@ class RequestResourcesTest {
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
     private static final RegionResolver US_EAST_1 = new RegionResolver("us-east-1", "000000000000");
+
     /** EventBridge as it answers the reader: the Region's default bus, {@code event-bus/default}. */
     private static final StoredResourceArns EVENTS = new StoredResourceArns() {
         @Override
@@ -49,6 +50,83 @@ class RequestResourcesTest {
                     : Optional.empty();
         }
     };
+
+    @Test
+    void detachFindsBothAttachmentEndpointsAndKeepsTypedMissingFallbacks() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.findByMembers("instance", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "instance/i-one"));
+        when(stored.findByMembers("network-interface", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "network-interface/eni-one"));
+        assertEquals(List.of(prefix + "instance/i-one", prefix + "network-interface/eni-one"),
+                of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one"), stored));
+        List<String> missing = List.of(prefix + "instance/*", prefix + "network-interface/*");
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-missing"), stored));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one")));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", json("{\"AttachmentId\":\"eni-attach-missing\"}"), stored));
+    }
+
+    @Test
+    void ec2ListsUseSdkWireNamesAndIgnoreForgedQuerySpellings() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "network-interface/*", prefix + "security-group/sg-one",
+                prefix + "security-group/sg-two", prefix + "subnet/subnet-one");
+        assertEquals(expected, of("ec2:CreateNetworkInterface", form("Action=CreateNetworkInterface"
+                + "&SubnetId=subnet-one&SecurityGroupId.1=sg-one&SecurityGroupId.2=sg-two"
+                + "&Groups.member.1=sg-forged&Groups.2=sg-forged&Groups=sg-forged")));
+        assertEquals(expected, of("ec2:CreateNetworkInterface", json("""
+                {"SubnetId":"subnet-one","Groups":["sg-one","sg-two"]}
+                """)));
+    }
+
+    @Test
+    void vpcEndpointModificationChecksAddedAndRemovedResources() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "route-table/rtb-add", prefix + "security-group/sg-add",
+                prefix + "subnet/subnet-add", prefix + "vpc-endpoint/vpce-one",
+                prefix + "route-table/rtb-remove", prefix + "security-group/sg-remove",
+                prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", form("VpcEndpointId=vpce-one"
+                + "&AddRouteTableId.1=rtb-add&RemoveRouteTableId.1=rtb-remove"
+                + "&AddSecurityGroupId.1=sg-add&RemoveSecurityGroupId.1=sg-remove"
+                + "&AddSubnetId.1=subnet-add&RemoveSubnetId.1=subnet-remove")));
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", json("""
+                {"VpcEndpointId":"vpce-one","AddRouteTableIds":["rtb-add"],
+                 "RemoveRouteTableIds":["rtb-remove"],"AddSecurityGroupIds":["sg-add"],
+                 "RemoveSecurityGroupIds":["sg-remove"],"AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
+                """)));
+    }
+
+    @Test
+    void transitGatewayModificationChecksRemovedSubnetsWithItsDistinctWireSpelling() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "subnet/subnet-add",
+                prefix + "transit-gateway-attachment/tgw-attach-one", prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", form(
+                "TransitGatewayAttachmentId=tgw-attach-one&AddSubnetIds.1=subnet-add"
+                        + "&RemoveSubnetIds.1=subnet-remove&RemoveSubnetId.1=subnet-forged")));
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", json("""
+                {"TransitGatewayAttachmentId":"tgw-attach-one","AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
+                """)));
+    }
+
+    @Test
+    void createVpcChecksItsNewArnAndOnlyThePoolsPresentInTheRequest() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        assertEquals(List.of(prefix + "vpc/*"), of("ec2:CreateVpc", json("{\"CidrBlock\":\"10.0.0.0/16\"}")));
+        assertEquals(List.of("arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v4",
+                        prefix + "ipv6pool-ec2/ipv6pool-one", prefix + "vpc/*",
+                        "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("""
+                        {"Ipv4IpamPoolId":"ipam-pool-v4","Ipv6IpamPoolId":"ipam-pool-v6",
+                         "Ipv6Pool":"ipv6pool-one"}
+                        """)));
+        assertEquals(List.of(prefix + "vpc/*", "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("{\"Ipv6IpamPoolId\":\"ipam-pool-v6\"}")));
+    }
 
     @Test
     void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
@@ -134,6 +212,35 @@ class RequestResourcesTest {
     }
 
     @Test
+    void endpointTagTargetsRetainTheCallerPartitionAndEachResource() throws Exception {
+        for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
+            List<String> expected = List.of(
+                    "arn:aws-us-gov:ec2:us-gov-west-1:111111111111:network-interface/eni-11111111",
+                    "*");
+            assertEquals(expected, RequestResources.ofBody(operation,
+                    new ObjectMapper().readTree("{\"Resources\":[\"eni-11111111\",\"vpce-22222222\"]}"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(expected, RequestResources.of(operation,
+                    form("ResourceId.1=eni-11111111&ResourceId.2=vpce-22222222"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(List.of("*", "*"), of(operation,
+                    form("ResourceId.1=vpce-svc-22222222&ResourceId.2=eni-attach-11111111")));
+        }
+    }
+
+    @Test
+    void endpointDeletionReadsDistinctEndpointsUsingItsActualQueryListName() throws Exception {
+        List<String> expected = List.of(
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-11111111",
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-22222222");
+        assertEquals(expected, of("ec2:DeleteVpcEndpoints", form("VpcEndpointId.1=vpce-11111111"
+                + "&VpcEndpointId.2=vpce-22222222&VpcEndpointId.3=vpce-11111111&ResourceId.1=vpce-33333333")));
+        assertEquals(expected, RequestResources.ofBody("ec2:DeleteVpcEndpoints", new ObjectMapper().readTree(
+                "{\"VpcEndpointIds\":[\"vpce-11111111\",\"vpce-22222222\",\"vpce-11111111\"]}"),
+                "aws", "us-east-1", "000000000000", null));
+    }
+
+    @Test
     void generatedIdTargetsReadModelListsAndSerializedQueryNamesInOrder() throws Exception {
         String instance = "arn:aws:ec2:us-east-1:000000000000:instance/i-one";
         for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
@@ -153,6 +260,16 @@ class RequestResourcesTest {
         assertEquals(List.of(), RequestResources.ofBody("ec2:DescribeInstances",
                 new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
                 "000000000000", null));
+    }
+
+    @Test
+    void anAssociationOnASharedDocumentGivenByItsArnIsCheckedOnThatArn() throws Exception {
+        String shared = "arn:aws:ssm:us-east-1:100000008230:document/shared";
+        List<String> arns = RequestResources.ofBody("ssm:CreateAssociation",
+                new ObjectMapper().readTree("{\"Name\":\"" + shared + "\"}"), "aws", "us-east-1", "000000000000",
+                null);
+        assertTrue(arns.contains(shared), arns.toString());
+        assertFalse(arns.stream().anyMatch(arn -> arn.contains("document/arn:")), arns.toString());
     }
 
     /**
@@ -1111,6 +1228,194 @@ class RequestResourcesTest {
     }
 
     /**
+     * A restore whose service asks KMS, as the caller, to decrypt with the key its snapshot records is also checked
+     * as {@code kms:Decrypt} on that key, found in the snapshot's own account and Region, the caller's or another's;
+     * one KMS no longer holds is forwarded as the value the snapshot records, not held, which refuses it; a snapshot
+     * recording no key, or one under a key AWS manages, whose policy lets the account use it through the service,
+     * forwards nothing.
+     */
+    @Test
+    void aRestoreForwardsDecryptOnTheKeyItsSnapshotRecords() {
+        String caller = "000000000000";
+        String owner = "111122223333";
+        String own = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/mine";
+        String shared = "arn:aws:redshift-serverless:eu-west-1:" + owner + ":snapshot/theirs";
+        String plain = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/plain";
+        String lost = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/lost";
+        String managed = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/managed";
+        String awsKey = "arn:aws:kms:us-east-1:" + caller + ":key/aws-redshift";
+        Map<String, String> keys = Map.of(own, "k-own", shared, "alias/theirs", lost, "deleted",
+                managed, "alias/aws/redshift");
+        StoredResourceArns serverless = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-serverless";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> recorded(String arn, String member) {
+                return "kmsKeyId".equals(member) ? Optional.ofNullable(keys.get(arn)) : Optional.empty();
+            }
+        };
+        StoredResourceArns kms = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "kms";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"key".equals(type)) {
+                    return Optional.empty();
+                }
+                return names.equals(List.of("k-own")) ? Optional.of("arn:aws:kms:" + region + ":" + caller + ":key/k-own")
+                        : names.equals(List.of("alias/aws/redshift")) ? Optional.of(awsKey) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+                return "key".equals(type) && names.equals(List.of("alias/theirs"))
+                        ? Optional.of("arn:aws:kms:" + region + ":" + account + ":key/k-theirs") : Optional.empty();
+            }
+
+            @Override
+            public boolean grantsItsAccountThroughServices(String arn) {
+                return awsKey.equals(arn);
+            }
+        };
+        String operation = "redshift-serverless:RestoreFromSnapshot";
+        assertEquals(List.of(
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:us-east-1:" + caller + ":key/k-own",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:eu-west-1:" + owner + ":key/k-theirs",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "deleted", "kms:ViaService", "redshift-serverless",
+                        false)),
+                RequestResources.forwarded(operation, List.of("*", own, shared, plain, lost, managed), caller,
+                        serverless, namespace -> "kms".equals(namespace) ? kms : null));
+        // Without the snapshot's or the key's service, or for an operation forwarding nothing, nothing is forwarded.
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, null, namespace -> kms));
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, serverless,
+                namespace -> null));
+        assertEquals(List.of(), RequestResources.forwarded("redshift-serverless:GetSnapshot", List.of(own), caller,
+                serverless, namespace -> kms));
+    }
+
+    /**
+     * A DDL statement Athena runs against the Glue Data Catalog makes, as the caller, the Glue requests the table gives
+     * it from the permissions Athena's user guide gives each statement: each action on the catalog, the database and
+     * the table the statement names, in the request's partition, Region and account, partition actions only for a
+     * partitioned table, and none for a statement the guide gives no permissions.
+     */
+    @Test
+    void aStatementMakesTheRequestsTheVendoredPermissionsGiveItOnWhatItNames() {
+        String operation = "athena:StartQueryExecution";
+        String glue = "arn:aws-cn:glue:cn-north-1:111122223333:";
+        Map<String, String> names = Map.of("database", "sales", "table", "orders");
+        List<RequestResources.StatementRequest> drop = RequestResources.statementRequests(operation, "DROP TABLE",
+                names, false, "aws-cn", "cn-north-1", "111122223333");
+        assertEquals(List.of(
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "table/sales/orders"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "table/sales/orders")), drop);
+        List<String> partitioned = RequestResources.statementRequests(operation, "DROP TABLE", names, true, "aws-cn",
+                "cn-north-1", "111122223333").stream().map(RequestResources.StatementRequest::action).distinct().toList();
+        assertEquals(List.of("glue:GetDatabase", "glue:GetTable", "glue:DeleteTable", "glue:GetPartitions",
+                "glue:GetPartition", "glue:DeletePartition"), partitioned);
+
+        // A wildcard of the guide's policy stays open; the database a statement creates is named by its name.
+        assertTrue(RequestResources.statementRequests(operation, "SHOW TABLES", names, false, "aws", "us-east-1",
+                "000000000000").contains(new RequestResources.StatementRequest("glue:GetTables",
+                "arn:aws:glue:us-east-1:000000000000:table/sales/*")));
+        assertEquals(List.of("arn:aws:glue:us-east-1:000000000000:catalog",
+                        "arn:aws:glue:us-east-1:000000000000:database/sales"),
+                RequestResources.statementRequests(operation, "CREATE DATABASE", Map.of("database", "sales"), false,
+                        "aws", "us-east-1", "000000000000").stream()
+                        .filter(request -> request.action().equals("glue:CreateDatabase"))
+                        .map(RequestResources.StatementRequest::resource).toList());
+        assertEquals(List.of(), RequestResources.statementRequests(operation, "VACUUM", names, false, "aws",
+                "us-east-1", "000000000000"));
+        assertEquals(List.of(), RequestResources.statementRequests("athena:GetWorkGroup", "DROP TABLE", names, false,
+                "aws", "us-east-1", "000000000000"));
+    }
+
+    /**
+     * An ECS request names its cluster by name or ARN, and the default cluster, which ECS gives, when it names none; a
+     * service or a task given by its own ARN is that resource, and by its name in the cluster the request names too
+     * when that is another, as a handler may read the one or the other; and a task definition is the revision ECS
+     * resolves a reference to, a family alone being its latest, each of a list's found on its own, or its revision
+     * open when ECS has none.
+     */
+    @Test
+    void anEcsRequestNamesItsClusterOrTheDefaultAndTheRevisionEcsResolves() {
+        String prefix = "arn:aws:ecs:us-east-1:000000000000:";
+        StoredResourceArns ecs = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "ecs";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"task-definition".equals(type) || names.size() != 1) {
+                    return Optional.empty();
+                }
+                return switch (names.getFirst()) {
+                    case "web", "web:3", "arn:aws:ecs:us-east-1:000000000000:task-definition/web:3" ->
+                            Optional.of(prefix + "task-definition/web:3");
+                    default -> Optional.empty();
+                };
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "cluster".equals(type) ? Optional.of(prefix + "cluster/default") : Optional.empty();
+            }
+        };
+        assertEquals(List.of(prefix + "service/default/api"),
+                of("ecs:DescribeServices", json("{\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"),
+                of("ecs:DescribeServices", json("{\"cluster\":\"blue\",\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"" + prefix + "cluster/blue\",\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"blue\",\"services\":[\"" + prefix + "service/blue/api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/green/api", prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"blue\",\"services\":[\"" + prefix + "service/green/api\"]}"), ecs));
+        assertEquals(List.of(prefix + "task/blue/t-2", prefix + "task/default/t-1", prefix + "task/default/t-2"),
+                of("ecs:DescribeTasks", json("{\"tasks\":[\"t-1\",\"" + prefix + "task/blue/t-2\"]}"), ecs));
+        assertEquals(List.of(prefix + "cluster/default"), of("ecs:DescribeClusters", json("{}"), ecs));
+        assertEquals(List.of(prefix + "cluster/blue"), of("ecs:DeleteCluster", json("{\"cluster\":\"blue\"}"), ecs));
+        // A cluster given by ARN however the documentation words it ("The ARN or short name of the cluster").
+        assertEquals(List.of(prefix + "cluster/blue", prefix + "task/blue/t-1"), of("ecs:ExecuteCommand",
+                json("{\"cluster\":\"" + prefix + "cluster/blue\",\"task\":\"t-1\",\"command\":\"ls\"}"), ecs));
+        // Each attribute is on the container instance its targetId names.
+        assertEquals(List.of(prefix + "container-instance/blue/i-1", prefix + "container-instance/blue/i-2"),
+                of("ecs:PutAttributes", json("{\"cluster\":\"blue\",\"attributes\":[{\"name\":\"a\",\"targetId\":\"i-1\"},"
+                        + "{\"name\":\"b\",\"targetType\":\"container-instance\",\"targetId\":\"i-2\"}]}"), ecs));
+        // Without ECS to give its default, a service of no cluster is in any.
+        assertEquals(List.of(prefix + "service/*/api"), of("ecs:DescribeServices", json("{\"services\":[\"api\"]}")));
+        for (String reference : List.of("web", "web:3", prefix + "task-definition/web:3")) {
+            assertEquals(List.of(prefix + "task-definition/web:3"),
+                    of("ecs:RunTask", json("{\"taskDefinition\":\"" + reference + "\"}"), ecs), reference);
+        }
+        assertEquals(List.of(prefix + "task-definition/*:*"),
+                of("ecs:RunTask", json("{\"taskDefinition\":\"gone\"}"), ecs));
+        assertEquals(List.of(prefix + "task-definition/web:3", prefix + "task-definition/*:*"),
+                of("ecs:DeleteTaskDefinitions", json("{\"taskDefinitions\":[\"web:3\",\"gone:1\"]}"), ecs));
+    }
+
+    /**
      * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, without the
      * whitespace around it, a name of two leading slashes keeping the second and one beginning {@code /parameter/}
      * keeping that; a version or a label after its name, or after its ARN, is checked on the parameter; a path is
@@ -1245,6 +1550,27 @@ class RequestResourcesTest {
 
     private static List<String> created(String operation, ContainerRequestContext request) {
         return RequestResources.created(operation, request, "aws", "us-east-1", "000000000000");
+    }
+
+    @Test
+    void layerArnLookupsUseTheStoredCoordinatesAndNumericVersion() {
+        String layer = "arn:aws:lambda:us-west-2:000000000000:layer:shared";
+        String version = layer + ":1";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.resolveStoredArn(version)).thenReturn(Optional.of(version));
+        ContainerRequestContext request = rest("GET", null, Map.of());
+        Map<String, String> labels = Map.of("LayerName", layer, "VersionNumber", "01");
+
+        assertEquals(List.of(version), RequestResources.of("lambda:GetLayerVersion", request,
+                "aws", "us-east-1", "000000000000", stored, labels));
+        assertEquals(List.of(version), RequestResources.of("lambda:GetLayerVersionByArn",
+                rest("GET", null, Map.of("Arn", layer + ":01")), "aws", "us-east-1",
+                "000000000000", stored, Map.of()));
+
+        when(stored.resolveStoredArn(version)).thenReturn(Optional.empty());
+        assertEquals(List.of(version, "arn:aws:lambda:us-east-1:000000000000:layer:shared:1"),
+                RequestResources.of("lambda:GetLayerVersion", request, "aws", "us-east-1",
+                        "000000000000", stored, labels));
     }
 
     private static List<String> of(String operation, ContainerRequestContext request) {

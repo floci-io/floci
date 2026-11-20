@@ -2,38 +2,51 @@ package io.floci.aws.services.elbv2;
 
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.SsrfProtection;
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
-import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.util.Optional;
 
 final class ElbV2TargetResolver {
 
     private ElbV2TargetResolver() {}
 
-    static String resolveHost(Ec2Service ec2Service, TargetGroup targetGroup, TargetDescription target) {
-        return resolveHost(ec2Service, targetGroup, target != null ? target.getId() : null);
+    /**
+     * Where a target is reached: an {@code ip} target at its own address, an {@code instance} target at
+     * whatever serves that instance port. A port an ECS task on the instance publishes is reached at the
+     * task's container; any other port at the instance's own container, as AWS forwards to the instance's
+     * primary address. An instance Floci cannot place keeps its id, which the caller then fails to reach.
+     */
+    static Ec2InstancePorts.Endpoint resolve(Ec2Service ec2Service, Ec2InstancePorts instancePorts,
+                                             TargetGroup targetGroup, String targetId, int port) {
+        if (targetId == null || targetId.isBlank() || targetGroup == null
+                || !"instance".equals(targetGroup.getTargetType())) {
+            return new Ec2InstancePorts.Endpoint(targetId, port);
+        }
+        String accountId = extractAccountId(targetGroup.getTargetGroupArn());
+        if (instancePorts != null) {
+            Optional<Ec2InstancePorts.Endpoint> published = instancePorts.find(accountId, targetId, port);
+            if (published.isPresent()) {
+                return published.get();
+            }
+        }
+        return new Ec2InstancePorts.Endpoint(resolveHost(ec2Service, targetId, accountId), port);
     }
 
-    static String resolveHost(Ec2Service ec2Service, TargetGroup targetGroup, String targetId) {
-        if (targetId == null || targetId.isBlank()) {
+    private static String resolveHost(Ec2Service ec2Service, String targetId, String accountId) {
+        if (ec2Service == null) {
             return targetId;
         }
-        if (targetGroup == null || !"instance".equals(targetGroup.getTargetType()) || ec2Service == null) {
-            return targetId;
-        }
-
-        String accountId = extractAccountId(targetGroup.getTargetGroupArn());
         Instance instance = accountId != null
                 ? ec2Service.findInstanceById(accountId, targetId)
                 : ec2Service.findInstanceById(targetId);
         if (instance == null) {
             return targetId;
         }
-
         String containerBridgeIp = instance.getContainerBridgeIp();
         if (containerBridgeIp != null && !containerBridgeIp.isBlank()) {
             return containerBridgeIp;

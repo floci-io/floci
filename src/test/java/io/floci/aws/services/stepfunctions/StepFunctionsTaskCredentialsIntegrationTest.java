@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
@@ -189,6 +190,30 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                 .statusCode(200).body("executions.size()", Matchers.equalTo(0));
     }
 
+    /** With enforcement off a Map's role is not looked at, so one that does not exist still reads and exports. */
+    @Test
+    void mapS3CallsRetainDefaultIamDisabledBehavior() throws Exception {
+        String bucket = sfn().bucket(SOURCE, "us-east-1", "credentials-map-");
+        String s3 = auth(SOURCE, "s3");
+        given().port(baseUri.getPort()).header("Authorization", s3).body("[1,2]")
+                .put("/" + bucket + "/items.json").then().statusCode(200);
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Run", "States", Map.of("Run", Map.of(
+                "Type", "Map", "End", true,
+                "ItemReader", Map.of("Resource", "arn:aws:states:::s3:getObject",
+                        "ReaderConfig", Map.of("InputType", "JSON"),
+                        "Parameters", Map.of("Bucket", bucket, "Key", "items.json")),
+                "ResultWriter", Map.of("Resource", "arn:aws:states:::s3:putObject",
+                        "Parameters", Map.of("Bucket", bucket, "Prefix", "out")),
+                "ItemProcessor", Map.of("ProcessorConfig", Map.of("Mode", "DISTRIBUTED", "ExecutionType", "STANDARD"),
+                        "StartAt", "Item", "States", Map.of("Item", Map.of("Type", "Pass", "End", true)))))));
+
+        Response done = terminal(SOURCE, start(machine(SOURCE, definition, "STANDARD"), "{}"));
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        String manifest = MAPPER.readTree(done.jsonPath().getString("output")).path("ResultWriterDetails").path("Key").asText();
+        given().port(baseUri.getPort()).header("Authorization", s3).get("/" + bucket + "/" + manifest).then().statusCode(200);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"direct", "optimized"})
     void lambdaCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
@@ -261,19 +286,17 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     @ParameterizedTest
     @ValueSource(strings = {"dynamodb:putItem", "aws-sdk:dynamodb:putItem", "s3:putObject", "aws-sdk:s3:putObject"})
     void dataCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
-        String name = "credentials-" + UUID.randomUUID();
         Map<String, Object> arguments;
         if (integration.contains("dynamodb")) {
+            String name = "credentials-" + UUID.randomUUID();
             dynamoDb("CreateTable", Map.of("TableName", name, "BillingMode", "PAY_PER_REQUEST",
                     "AttributeDefinitions", List.of(Map.of("AttributeName", "pk", "AttributeType", "S")),
                     "KeySchema", List.of(Map.of("AttributeName", "pk", "KeyType", "HASH"))));
             cleanup.register(() -> dynamoDb("DeleteTable", Map.of("TableName", name)));
             arguments = Map.of("TableName", name, "Item", Map.of("pk", Map.of("S", "a")));
         } else {
-            given().port(baseUri.getPort()).header("Authorization", auth(SOURCE, "s3")).put("/" + name)
-                    .then().statusCode(200);
-            cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), auth(SOURCE, "s3"), name));
-            arguments = Map.of("Bucket", name, "Key", "a", "Body", "hello");
+            String bucket = sfn().bucket(SOURCE, "us-east-1", "credentials-");
+            arguments = Map.of("Bucket", bucket, "Key", "a", "Body", "hello");
         }
         assertDataTaskIsNotEvaluated(integration, arguments, "SUCCEEDED");
     }
@@ -288,6 +311,50 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                         "Sql", "select 1")
                 : Map.of("ClusterIdentifier", "no-such-cluster", "Database", "dev", "Sql", "select 1");
         assertDataTaskIsNotEvaluated(integration, arguments, "FAILED");
+    }
+
+    /** Past authorization, ECS answers: nothing here reaches anything, and no role is evaluated. */
+    @ParameterizedTest
+    @ValueSource(strings = {"ecs:runTask", "ecs:runTask.sync", "aws-sdk:ecs:updateService", "aws-sdk:ecs:describeServices"})
+    void ecsCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        Map<String, Object> arguments = integration.startsWith("ecs:")
+                ? Map.of("TaskDefinition", "no-such-family-" + UUID.randomUUID())
+                : Map.of("Cluster", "no-such-cluster", "Service", "any", "Services", List.of("any"));
+        assertDataTaskIsNotEvaluated(integration, arguments, "FAILED");
+    }
+
+    @Test
+    void ecsListServicesCredentialsRetainDefaultIamDisabledBehavior() throws Exception {
+        assertDataTaskIsNotEvaluated("aws-sdk:ecs:listServices", Map.of(), "SUCCEEDED");
+    }
+
+    /** Past authorization, the service answers: these name what it does not have. */
+    @ParameterizedTest
+    @CsvSource({"elasticmapreduce:addStep,ClusterId,j-NOSUCHCLUSTER,FAILED",
+            "emr-serverless:startApplication,ApplicationId,00nosuchapp00000,FAILED"})
+    void emrCredentialsRetainDefaultIamDisabledBehavior(String integration, String member, String value, String status)
+            throws Exception {
+        Map<String, Object> arguments = integration.contains("addStep")
+                ? Map.of(member, value, "Step", Map.of("Name", "job", "ActionOnFailure", "CONTINUE",
+                        "HadoopJarStep", Map.of("Jar", "command-runner.jar")))
+                : Map.of(member, value);
+        assertDataTaskIsNotEvaluated(integration, arguments, status);
+    }
+
+    /** Past authorization, the service answers: these name what it does not have, or nothing it needs. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"aws-sdk:scheduler:deleteSchedule|{\"Name\":\"no-such-schedule\"}|FAILED",
+            "aws-sdk:cloudformation:listStacks|{}|SUCCEEDED",
+            "aws-sdk:cloudformation:describeStacks|{\"StackName\":\"no-such-stack\"}|FAILED",
+            "http:invoke|{\"Method\":\"GET\"}|FAILED",
+            "aws-sdk:ec2:describeRegions|{}|SUCCEEDED",
+            "aws-sdk:lambda:listEventSourceMappings|{}|SUCCEEDED",
+            "aws-sdk:secretsmanager:describeSecret|{\"SecretId\":\"no-such-secret\"}|FAILED",
+            "aws-sdk:sfn:describeMapRun|{\"MapRunArn\":\"arn:aws:states:us-east-1:000000000001:mapRun:m/l:i\"}|FAILED",
+            "aws-sdk:sfn:sendTaskSuccess|{\"TaskToken\":\"no-such-token\"}|FAILED"})
+    void controlCredentialsRetainDefaultIamDisabledBehavior(String integration, String arguments, String status)
+            throws Exception {
+        assertDataTaskIsNotEvaluated(integration, MAPPER.readValue(arguments, Map.class), status);
     }
 
     private void assertDataTaskIsNotEvaluated(String integration, Map<String, Object> arguments, String status)

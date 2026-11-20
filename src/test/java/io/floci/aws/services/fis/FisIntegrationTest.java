@@ -458,6 +458,98 @@ class FisIntegrationTest {
     }
 
     @Test
+    void aRunningInjectApiActionFailsTheTargetRolesCallsUntilTheExperimentStops() {
+        String account = "000000000312";
+        String roleName = "fis-inject-target-" + UUID.randomUUID().toString().substring(0, 8);
+        String roleArn = "arn:aws:iam::" + account + ":role/" + roleName;
+        given().header("Authorization", authorization(account, REGION, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateRole")
+                .formParam("Version", "2010-05-08")
+                .formParam("RoleName", roleName)
+                .formParam("AssumeRolePolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}"""
+                        .formatted(account))
+                .post("/")
+                .then()
+                .statusCode(200);
+        String sessionKey = given().header("Authorization", authorization(account, REGION, "sts"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "AssumeRole")
+                .formParam("Version", "2011-06-15")
+                .formParam("RoleArn", roleArn)
+                .formParam("RoleSessionName", "fis-inject")
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+
+        String templateId = awsRequest(account, REGION).contentType("application/json").body("""
+                {
+                  "clientToken":"%s",
+                  "description":"throttle the checkout role's EC2 calls",
+                  "roleArn":"arn:aws:iam::%s:role/fis-role",
+                  "stopConditions":[{"source":"none"}],
+                  "targets":{"roles":{"resourceType":"aws:iam:role","resourceArns":["%s"],"selectionMode":"ALL"}},
+                  "actions":{"throttle":{
+                    "actionId":"aws:fis:inject-api-throttle-error",
+                    "targets":{"Roles":"roles"},
+                    "parameters":{"service":"ec2","operations":"DescribeInstances","percentage":"100",
+                                  "duration":"PT10M"}}}
+                }
+                """.formatted(UUID.randomUUID(), account, roleArn))
+                .post("/experimentTemplates")
+                .then()
+                .statusCode(200)
+                .extract().path("experimentTemplate.id");
+        String experimentId = awsRequest(account, REGION).contentType("application/json").body("""
+                {"clientToken":"%s","experimentTemplateId":"%s"}
+                """.formatted(UUID.randomUUID(), templateId))
+                .post("/experiments")
+                .then()
+                .statusCode(200)
+                .body("experiment.actions.throttle.state.status", equalTo("running"))
+                .extract().path("experiment.id");
+
+        given().header("Authorization", authorization(sessionKey, REGION, "ec2"))
+                .formParam("Action", "DescribeInstances")
+                .formParam("Version", "2016-11-15")
+                .post("/")
+                .then()
+                .statusCode(503)
+                .body(containsString("<Code>RequestLimitExceeded</Code>"));
+        // The action impairs the target role's calls only, and only the operations it names.
+        given().header("Authorization", authorization(account, REGION, "ec2"))
+                .formParam("Action", "DescribeInstances")
+                .formParam("Version", "2016-11-15")
+                .post("/")
+                .then()
+                .statusCode(200);
+        given().header("Authorization", authorization(sessionKey, REGION, "ec2"))
+                .formParam("Action", "DescribeVpcs")
+                .formParam("Version", "2016-11-15")
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        awsRequest(account, REGION)
+                .delete("/experiments/" + experimentId)
+                .then()
+                .statusCode(200);
+        given().header("Authorization", authorization(sessionKey, REGION, "ec2"))
+                .formParam("Action", "DescribeInstances")
+                .formParam("Version", "2016-11-15")
+                .post("/")
+                .then()
+                .statusCode(200);
+        awsRequest(account, REGION)
+                .delete("/experimentTemplates/" + templateId)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
     void experimentsDoNotMutateEmulatedTargetServices() {
         String instanceId = null;
         String templateId = null;

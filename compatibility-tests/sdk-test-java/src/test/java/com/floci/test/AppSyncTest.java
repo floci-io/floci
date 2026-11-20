@@ -1360,7 +1360,8 @@ class AppSyncTest {
         String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/schemacreation";
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/" + TestFixtures.region().id()
+                        + "/appsync/aws4_request")
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();

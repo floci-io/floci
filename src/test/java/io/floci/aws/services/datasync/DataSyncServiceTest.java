@@ -5,17 +5,20 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.datasync.model.DataSyncAgent;
 import io.floci.aws.services.datasync.model.DataSyncLocation;
 import io.floci.aws.services.datasync.model.DataSyncLocationType;
 import io.floci.aws.services.datasync.model.DataSyncTask;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -55,6 +58,50 @@ class DataSyncServiceTest {
 
     private DataSyncLocation createLocation(DataSyncLocationType type, String body) {
         return service.createLocation(type, json(body), REGION);
+    }
+
+    /**
+     * IAM's lookup reads the tags of the agent or the location the ARN names, as the tag calls leave them, a map a
+     * reader already holds staying as it was, and nothing for another account's, another Region's or an unknown ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheArnNamesAndTaggingPutsANewMap() {
+        DataSyncAgent agent = service.createAgent(json("""
+                {"ActivationKey": "AAAAA-1AAAA-BB1CC-DDDDD-EEEEE", "Tags": [{"Key": "team", "Value": "web"}]}
+                """), REGION);
+        String arn = agent.getAgentArn();
+        service.tagResource(arn, Map.of("team", "data", "env", "dev"));
+        Map<String, String> held = agent.getTags();
+        service.untagResource(arn, List.of("env"));
+        DataSyncLocation location = createLocation(DataSyncLocationType.S3, """
+                {"S3BucketArn": "arn:aws:s3:::floci-bucket", "Tags": [{"Key": "team", "Value": "ops"}],
+                 "S3Config": {"BucketAccessRoleArn": "arn:aws:iam::000000000000:role/datasync"}}
+                """);
+
+        assertEquals("datasync", service.namespace());
+        assertEquals(Map.of("team", "data", "env", "dev"), held);
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(location.getLocationArn()));
+        assertTrue(service.storedTags(arn.replace("000000000000", "111122223333")).isEmpty());
+        assertTrue(service.storedTags(arn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(arn + "0").isEmpty());
+        assertTrue(service.storedTags("arn:aws:s3:::floci-bucket").isEmpty());
+    }
+
+    /** An agent stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareAgentInPlace() {
+        InMemoryStorage<String, DataSyncAgent> raw = new InMemoryStorage<>();
+        DataSyncService legacyState = new DataSyncService(
+                new InMemoryStorageFactory("000000000000").withStore("datasync-agents.json", raw),
+                new RegionResolver(REGION, "000000000000"), mapper);
+        DataSyncAgent legacy = new DataSyncAgent();
+        legacy.setAgentArn("arn:aws:datasync:us-east-1:000000000000:agent/agent-0123456789abcdef0");
+        legacy.setTags(Map.of("team", "data"));
+        raw.put(legacy.getAgentArn(), legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getAgentArn()));
+        assertEquals(Set.of(legacy.getAgentArn()), raw.keys());
     }
 
     @Test

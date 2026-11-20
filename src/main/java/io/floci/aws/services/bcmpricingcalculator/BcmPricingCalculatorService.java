@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.bcmpricingcalculator.model.WorkloadEstimate;
@@ -216,7 +217,7 @@ public class BcmPricingCalculatorService {
     }
 
     private static void validateId(String id) {
-        if (id == null || !id.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(id)) {
             throw validation("identifier is invalid.");
         }
     }

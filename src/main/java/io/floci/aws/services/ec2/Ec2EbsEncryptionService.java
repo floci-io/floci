@@ -68,7 +68,10 @@ public class Ec2EbsEncryptionService {
         return modifyEbsDefaultKmsKeyId(region, kmsKeyId, false);
     }
 
-    /** As above; with {@code dryRun} the key is checked and then answered with DryRunOperation, unchanged. */
+    /**
+     * As above; with {@code dryRun} the request must name a key, and is then answered with
+     * DryRunOperation, the default key unchanged.
+     */
     public String modifyEbsDefaultKmsKeyId(String region, String kmsKeyId, boolean dryRun) {
         if (kmsKeyId == null || kmsKeyId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter KmsKeyId", 400);

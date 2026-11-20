@@ -1,8 +1,8 @@
 """Shared generator for the vendored request shapes a service's request check reads.
 
 `regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py`, `regen_apigateway_shapes.py`,
-`regen_ecs_shapes.py` and `regen_organizations_shapes.py` each name a botocore model and an output
-file and hand the rest to `main()`. `regen_resource_groups_shapes.py`, `regen_logs_delivery_shapes.py` and
+`regen_ecs_shapes.py`, `regen_eks_shapes.py` and `regen_organizations_shapes.py` each name a botocore model
+and an output file and hand the rest to `main()`. `regen_resource_groups_shapes.py`, `regen_logs_delivery_shapes.py` and
 `regen_ecr_shapes.py` vendor constraints as well, through `build_constraints()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
@@ -138,6 +138,21 @@ def widen_partition_and_region(model: dict) -> dict:
         pattern = shape.get("pattern")
         if pattern:
             shape["pattern"] = pattern.replace(COMMERCIAL, EVERY_PARTITION).replace(COMMERCIAL_REGION, EVERY_REGION)
+    return model
+
+
+def drop_blob_and_timestamp_members(model: dict) -> dict:
+    """The model, with every structure member whose shape is a blob or a timestamp dropped.
+
+    `RequestConstraintCheck` parses neither wire type, so a present value is left to the service's
+    handler. The structure still lists a dropped member as required, so a request without it is refused.
+    """
+    for shape in model["shapes"].values():
+        if shape["type"] != "structure":
+            continue
+        for member, spec in list(shape.get("members", {}).items()):
+            if model["shapes"][spec["shape"]]["type"] in {"blob", "timestamp"}:
+                del shape["members"][member]
     return model
 
 
