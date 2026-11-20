@@ -521,6 +521,21 @@ public class DynamoDbService {
                                         List<VectorIndexCreate> vectorIndexes,
                                         String billingMode,
                                         String region) {
+        return createTable(tableName, keySchema, attributeDefinitions, readCapacity, writeCapacity,
+                           gsis, lsis, vectorIndexes, billingMode, region, () -> { });
+    }
+
+    /** @param lastCheck runs after every other check, just before the table is stored */
+    TableDefinition createTable(String tableName,
+                                List<KeySchemaElement> keySchema,
+                                List<AttributeDefinition> attributeDefinitions,
+                                Long readCapacity, Long writeCapacity,
+                                List<GlobalSecondaryIndex> gsis,
+                                List<LocalSecondaryIndex> lsis,
+                                List<VectorIndexCreate> vectorIndexes,
+                                String billingMode,
+                                String region,
+                                Runnable lastCheck) {
         // Enforce at the service boundary: CreateTable persists its input as the
         // canonical table name and derives TableArn from it. An ARN-form input
         // would produce ARN-on-ARN TableArn values. Handler-layer rejection alone
@@ -702,6 +717,8 @@ public class DynamoDbService {
             }
             table.setVectorIndexes(created);
         }
+
+        lastCheck.run();
 
         synchronized (capacityLock) {
             if (!"PAY_PER_REQUEST".equals(billingMode)) {
