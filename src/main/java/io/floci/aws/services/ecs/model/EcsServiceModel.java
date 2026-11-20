@@ -52,6 +52,8 @@ public class EcsServiceModel {
      * resolved when the configuration was set so a later change to the cluster default does not move the service.
      */
     private String serviceConnectNamespaceArn;
+    /** The Cloud Map services ECS created for the configuration's endpoints in that namespace, in its order. */
+    private List<ServiceConnectServiceResource> serviceConnectResources = new ArrayList<>();
     private String platformVersion;
     private String platformFamily;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
@@ -156,6 +158,11 @@ public class EcsServiceModel {
     public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
+
+    public List<ServiceConnectServiceResource> getServiceConnectResources() { return serviceConnectResources; }
+    public void setServiceConnectResources(List<ServiceConnectServiceResource> serviceConnectResources) {
+        this.serviceConnectResources = serviceConnectResources;
     }
 
     public String getPlatformVersion() { return platformVersion; }

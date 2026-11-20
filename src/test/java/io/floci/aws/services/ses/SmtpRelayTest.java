@@ -19,6 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,6 +27,9 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class SmtpRelayTest {
+
+    /** Far more than mime4j needs to parse {@link NestedMime#OVERFLOWS_THE_WRITER} layers. */
+    private static final long PARSE_STACK_BYTES = 256L << 20;
 
     @Mock MailClient mailClient;
 
@@ -40,6 +44,21 @@ class SmtpRelayTest {
 
     private static SmtpRelay.RawRelayMessage raw(String from, List<String> destinations, String rawMessage) {
         return new SmtpRelay.RawRelayMessage(from, null, destinations, rawMessage, null);
+    }
+
+    /**
+     * Parses on a thread with a stack of its own, so the parse of a message the writer cannot serialize
+     * succeeds however small the test JVM's stack is: whether mime4j's recursive parser gets through
+     * {@link NestedMime#OVERFLOWS_THE_WRITER} layers depends on the stack it runs on, and a CI runner's
+     * default thread stack is not enough.
+     */
+    private static SmtpRelay.RawRelayMessage parsedOnALargeStack(String rawMime) throws InterruptedException {
+        AtomicReference<SmtpRelay.RawRelayMessage> parsed = new AtomicReference<>();
+        Runnable parse = () -> parsed.set(raw("from@example.com", List.of("to@example.com"), rawMime));
+        Thread parser = new Thread(null, parse, "nested-mime-parse", PARSE_STACK_BYTES);
+        parser.start();
+        parser.join();
+        return parsed.get();
     }
 
     private SmtpRelay enabledRelay() {
@@ -337,9 +356,9 @@ class SmtpRelayTest {
     }
 
     @Test
-    void relayRaw_nestingThatParsesButOverflowsTheWriter_isSkippedNotThrown() {
+    void relayRaw_nestingThatParsesButOverflowsTheWriter_isSkippedNotThrown() throws InterruptedException {
         SmtpRelay relay = new SmtpRelay(mailClient, true);
-        SmtpRelay.RawRelayMessage nested = raw("from@example.com", List.of("to@example.com"),
+        SmtpRelay.RawRelayMessage nested = parsedOnALargeStack(
                 NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_WRITER));
         assertNotNull(nested.message());
 
