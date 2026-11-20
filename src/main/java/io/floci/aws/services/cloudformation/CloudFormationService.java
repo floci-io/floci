@@ -2949,7 +2949,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn(), previousEngine);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

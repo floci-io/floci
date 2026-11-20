@@ -78,6 +78,7 @@ class RdsCfnProvisionerTest {
     private CfnResourceDispatcher provisioner;
     private Function<String, String> importResolver;
     private Map<String, Boolean> conditions;
+    private Map<String, String> parameters;
 
     @BeforeEach
     void setUp() {
@@ -88,6 +89,7 @@ class RdsCfnProvisionerTest {
         ssmService = mock(SsmService.class);
         importResolver = name -> null;
         conditions = Map.of();
+        parameters = Map.of();
         provisioner = CfnProvisionerFixture.builder()
                 .ssm(ssmService)
                 .secretsManager(secretsManagerService)
@@ -97,8 +99,12 @@ class RdsCfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine() {
+        return engine(parameters);
+    }
+
+    private CloudFormationTemplateEngine engine(Map<String, String> parameterValues) {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
-                "stack/id", Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                "stack/id", parameterValues, Map.of(), Map.of(), conditions, Map.of(), mapper,
                 importResolver);
     }
 
@@ -2076,6 +2082,9 @@ class RdsCfnProvisionerTest {
             "{\"Engine\":\"postgres\",\"DBSubnetGroupName\":\"app-subnets\",\"VPCSecurityGroups\":[\"sg-second\"]}";
     private static final String ENCRYPTED = "{\"Engine\":\"postgres\",\"StorageEncrypted\":true}";
     private static final String MEMBER = "{\"DBClusterIdentifier\":\"cluster\"";
+    private static final String MEMBER_ON_PARAMETER = MEMBER + ",\"VPCSecurityGroups\":[{\"Ref\":\"Value\"}]}";
+    private static final String ENCRYPTED_BY_PARAMETER =
+            "{\"Engine\":\"postgres\",\"StorageEncrypted\":{\"Ref\":\"Value\"}}";
 
     /** What one {@code createDbInstance} call asked for, of what these tests read. */
     private record CreateRequest(String id, List<String> groups, DbInstanceSettings settings) { }
@@ -2085,7 +2094,13 @@ class RdsCfnProvisionerTest {
      * {@code createDbInstance} call made since, that one first.
      */
     private record Created(StackResource resource, String id, String template, DbInstance onFile,
-                           List<CreateRequest> requests) { }
+                           List<CreateRequest> requests) {
+
+        /** This instance as an UpdateStack to {@code json} left it, {@code updated}, still under the created id. */
+        Created updatedBy(StackResource updated, String json) {
+            return new Created(updated, id, json, onFile, requests);
+        }
+    }
 
     /**
      * A CreateStack of the unnamed instance {@code json}. RdsService then has it on file with
@@ -2107,9 +2122,36 @@ class RdsCfnProvisionerTest {
 
     /** An UpdateStack from the template the instance was created with to {@code json}. */
     private StackResource updateInstance(Created created, String json) {
-        return provisioner.provision("Db", "AWS::RDS::DBInstance", props(json), engine(), "us-east-1",
+        return updateInstance(created, json, engine());
+    }
+
+    /**
+     * As {@link #updateInstance(Created, String)}, with {@code json} resolved by {@code current}; the
+     * previous template still resolves with {@link #engine()}, as the stack was deployed.
+     */
+    private StackResource updateInstance(Created created, String json, CloudFormationTemplateEngine current) {
+        return provisioner.provision("Db", "AWS::RDS::DBInstance", props(json), current, "us-east-1",
                 "000000000000", "my-stack", created.id(), created.resource().getAttributes(), event -> { },
-                props(created.template()));
+                props(created.template()), null, null, engine());
+    }
+
+    /**
+     * An instance created from {@code template} with the stack parameter {@code Value} at
+     * {@code before}, then updated to {@code updated} with it at {@code after}; the previous template
+     * still resolves with {@code before}. The result is the updated resource under the created id.
+     */
+    private Created updateThroughParameter(String template, String updated, String before, String after,
+                                           String... groupsOnFile) {
+        return updateThroughParameter(template, updated, before, after, created -> { }, groupsOnFile);
+    }
+
+    /** As above, with {@code beforeUpdate} given the created instance first. */
+    private Created updateThroughParameter(String template, String updated, String before, String after,
+                                           Consumer<Created> beforeUpdate, String... groupsOnFile) {
+        parameters = Map.of("Value", before);
+        Created created = createInstance(template, groupsOnFile);
+        beforeUpdate.accept(created);
+        return created.updatedBy(updateInstance(created, updated, engine(Map.of("Value", after))), updated);
     }
 
     /** An instance created on {@code sg-first}, then updated to {@code json}; it is kept, under the same id. */
@@ -2129,7 +2171,7 @@ class RdsCfnProvisionerTest {
         Created created = createInstance(ENCRYPTED);
         StackResource replaced = updateInstance(created, PLAIN);
         assertNotEquals(created.id(), replaced.getPhysicalId());
-        return new Created(replaced, created.id(), PLAIN, created.onFile(), created.requests());
+        return created.updatedBy(replaced, PLAIN);
     }
 
     /** Makes {@code groupIds} the default groups of whatever VPC an update leaves the instance in. */
@@ -2263,13 +2305,15 @@ class RdsCfnProvisionerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
-        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]}",
-        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]}"
+        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]} | sg-first",
+        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]} | sg-first",
+        MEMBER_ON_PARAMETER + " | " + MEMBER_ON_PARAMETER + " | sg-second"
     })
-    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated) {
+    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated,
+                                                                              String groupNow) {
         // AWS's handler sends the change to ModifyDBInstance, and RDS refuses it for a member, even one
-        // that names the groups the member already has.
-        StackResource r = updateInstance(createInstance(template, "sg-cluster"), updated);
+        // that names the groups the member already has, or changes them only through a parameter.
+        StackResource r = updateThroughParameter(template, updated, "sg-first", groupNow, "sg-cluster").resource();
 
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("Modify vpc security group for the DB Cluster"), r.getStatusReason());
@@ -2403,18 +2447,21 @@ class RdsCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', value = {ENCRYPTED + " | false", PLAIN + " | true"})
+    @CsvSource(delimiter = '|', value = {
+        ENCRYPTED + " | " + ENCRYPTED + " | true | false",
+        ENCRYPTED + " | " + PLAIN + " | true | true",
+        ENCRYPTED_BY_PARAMETER + " | " + ENCRYPTED_BY_PARAMETER + " | false | true"
+    })
     void anInstanceFromBeforeStorageEncryptedWasRecordedIsComparedWithThePreviousTemplate(
-            String updated, boolean replaced) {
-        // Its template said true, but nothing records that, so the update reads the previous template:
-        // keeping true keeps the instance, dropping it replaces the instance.
-        Created created = createInstance(ENCRYPTED);
-        created.resource().getAttributes().remove(ENCRYPTION_ATTR);
+            String template, String updated, String encryptedNow, boolean replaced) {
+        // Its template said true, but nothing records that, so the update reads the previous template,
+        // resolved with the parameters it was deployed with: keeping true keeps the instance, dropping
+        // it, or turning the parameter it reads to false, replaces the instance.
+        Created result = updateThroughParameter(template, updated, "true", encryptedNow,
+                created -> created.resource().getAttributes().remove(ENCRYPTION_ATTR));
 
-        StackResource r = updateInstance(created, updated);
-
-        assertEquals(replaced, !created.id().equals(r.getPhysicalId()));
-        assertEquals(String.valueOf(!replaced), r.getAttributes().get(ENCRYPTION_ATTR));
+        assertEquals(replaced, !result.id().equals(result.resource().getPhysicalId()));
+        assertEquals(String.valueOf(!replaced), result.resource().getAttributes().get(ENCRYPTION_ATTR));
     }
 
     @Test

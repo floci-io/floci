@@ -85,6 +85,19 @@ public final class RdsRequests {
                 .vpcSecurityGroups().stream().map(VpcSecurityGroupMembership::vpcSecurityGroupId).toList();
     }
 
+    /**
+     * Two CloudFormation resources, to put inside a template's {@code Resources}: an Aurora PostgreSQL
+     * cluster {@code Cluster}, and its {@code Member} instance, which also has
+     * {@code memberProperties}, written as members of a JSON object.
+     */
+    public static String auroraClusterWithMember(String memberProperties) {
+        return """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {"Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"}},
+                "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {"DBClusterIdentifier": {"Ref": "Cluster"},
+                  "Engine": "aurora-postgresql", "DBInstanceClass": "db.r6g.large", %s}}""".formatted(memberProperties);
+    }
+
     private static RdsClientBuilder rdsClientBuilder(String region, String account) {
         return RdsClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))

@@ -72,7 +72,8 @@ class ProvisionContextTest {
         PropertyChanges changes = PropertyChanges.between("AWS::SQS::Queue", true,
                 props("{\"A\":1}"), props("{\"A\":2}"));
         ProvisionContext original = new ProvisionContext(engine, "eu-west-1", "123456789012", "stack",
-                "old-id", event -> {}, props("{\"A\":1}"), changes);
+                "old-id", event -> {}, props("{\"A\":1}"), changes, "boundary-arn",
+                mock(CloudFormationTemplateEngine.class));
 
         for (String replacement : new String[] {"new-id", null}) {
             ProvisionContext copy = original.withPriorPhysicalId(replacement);
@@ -84,6 +85,11 @@ class ProvisionContextTest {
             }
         }
         assertEquals("old-id", original.priorPhysicalId());
+    }
+
+    @Test
+    void aContextWithoutThePreviousDeploymentsEngineResolvesThePreviousPropertiesWithItsOwn() {
+        assertSame(engine, contextWithPriorProperties("{}").priorEngine());
     }
 
     @Test
