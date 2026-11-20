@@ -2242,10 +2242,10 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     public Connection findConnectionByArn(String connectionArn, String region) {
-        return connectionByArn(connectionArn, region, "describe");
+        return connectionByArn(connectionArn, region, null);
     }
 
-    /** {@code verb} names the failing call in the not-found message, as AWS words it. */
+    /** {@code verb} names the failing api-destination call in the not-found message, as AWS words it; null keeps the plain wording for internal callers. */
     private Connection connectionByArn(String connectionArn, String region, String verb) {
         if (connectionArn == null || connectionArn.isBlank()) {
             throw new AwsException("ResourceNotFoundException", "Connection ARN is required.", 400);
@@ -2268,8 +2268,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return connectionStore.scan(k -> {
             Connection c = connectionStore.get(k).orElse(null);
             return c != null && connectionArn.equals(c.getConnectionArn());
-        }).stream().findFirst().orElseThrow(
-                () -> EventBridgeErrors.apiDestinationConnectionNotFound(verb, connectionArn));
+        }).stream().findFirst().orElseThrow(() -> verb == null
+                ? new AwsException("ResourceNotFoundException", "Connection " + connectionArn + " does not exist.", 400)
+                : EventBridgeErrors.apiDestinationConnectionNotFound(verb, connectionArn));
     }
 
     public ApiDestination findApiDestinationByArn(String arn, String region) {
