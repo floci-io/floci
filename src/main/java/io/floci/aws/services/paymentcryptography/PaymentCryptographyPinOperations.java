@@ -17,10 +17,10 @@ import java.util.Map;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.materialHex;
-import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireEnabled;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireFamily;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireMode;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireUsage;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requiredKey;
 
 /**
  * The PIN operations, over the Visa PVV path.
@@ -131,7 +131,7 @@ public class PaymentCryptographyPinOperations {
         requireNoDukptForAes(format, request.get("DukptAttributes"));
         requireKeyMatchesFormat(pek, format, "EncryptionKeyIdentifier");
 
-        PaymentCryptographyKey pvk = requiredKey(verificationKeyIdentifier, region);
+        PaymentCryptographyKey pvk = requiredKey(service, verificationKeyIdentifier, region);
         requireMode(pvk, "Verify", "verifying a PIN");
         requireUsage(pvk, VISA_VERIFICATION_USAGES, "verifying a PIN");
         // The Visa PVV is defined over Triple DES, so the key is one.
@@ -202,7 +202,7 @@ public class PaymentCryptographyPinOperations {
 
         PinLeg pek = resolvePinLeg(encryptionKeyIdentifier, null, region,
                 "Encrypt", "encrypting a PIN block");
-        PaymentCryptographyKey pvk = requiredKey(generationKeyIdentifier, region);
+        PaymentCryptographyKey pvk = requiredKey(service, generationKeyIdentifier, region);
         requireMode(pvk, "Generate", "generating a PIN verification value");
         requireUsage(pvk, VISA_VERIFICATION_USAGES, "generating a PIN verification value");
         // The Visa PVV is defined over Triple DES, so the key is one.
@@ -376,11 +376,7 @@ public class PaymentCryptographyPinOperations {
      */
     private PinLeg resolvePinLeg(String identifier, JsonNode dukptAttributes, String region,
                                   String mode, String what) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw notFound(identifier);
-        }
-        requireEnabled(key);
+        PaymentCryptographyKey key = requiredKey(service, identifier, region);
         if (dukptAttributes == null) {
             requireMode(key, mode, what);
             requireUsage(key, PIN_ENCRYPTION_USAGES, what);
@@ -451,15 +447,6 @@ public class PaymentCryptographyPinOperations {
     }
 
     // ---- the helpers ---------------------------------------------------------
-
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw notFound(identifier);
-        }
-        requireEnabled(key);
-        return key;
-    }
 
     private static PaymentCryptographyKeyAlgorithm algorithmOf(PaymentCryptographyKey key) {
         PaymentCryptographyKeyAlgorithm algorithm =
@@ -613,10 +600,6 @@ public class PaymentCryptographyPinOperations {
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
-    }
-
-    private static AwsException notFound(String identifier) {
-        return new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
     }
 
     /**
