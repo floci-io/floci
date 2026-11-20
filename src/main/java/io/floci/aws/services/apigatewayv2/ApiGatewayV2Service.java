@@ -1026,7 +1026,7 @@ public class ApiGatewayV2Service {
             String statusCode = String.valueOf(key);
             if (!RESPONSE_STATUS_CODE.matcher(statusCode).matches()) {
                 throw new AwsException("BadRequestException",
-                        "ResponseParameters key " + statusCode + " must be a status code from 200 to 599.", 400);
+                        "The selection key must be a valid HTTP status code within the range of 200-599.", 400);
             }
             if (!(value instanceof Map<?, ?>)) {
                 throw new AwsException("BadRequestException",

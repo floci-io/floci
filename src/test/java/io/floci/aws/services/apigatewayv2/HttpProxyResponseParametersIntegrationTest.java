@@ -141,7 +141,7 @@ class HttpProxyResponseParametersIntegrationTest {
                 .patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
                 .then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", containsString("ResponseParameters key 600"));
+                .body("message", equalTo("The selection key must be a valid HTTP status code within the range of 200-599."));
     }
 
     @Test

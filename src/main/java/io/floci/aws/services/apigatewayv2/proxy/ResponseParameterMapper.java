@@ -55,7 +55,9 @@ public class ResponseParameterMapper {
             String key = mapping.getKey();
             if (key.equals("overwrite:statuscode")) {
                 Integer status = statusCode(resolve(mapping.getValue(), result, ctx));
-                if (status != null) statusCode = status;
+                if (status != null) {
+                    statusCode = status;
+                }
                 continue;
             }
             int colonIdx = key.indexOf(':');
@@ -66,7 +68,9 @@ public class ResponseParameterMapper {
                 continue;
             }
             String value = resolve(mapping.getValue(), result, ctx);
-            if (value == null) continue;
+            if (value == null) {
+                continue;
+            }
             try {
                 PinnedHttpClient.requireValidHeader(headerName, value);
             } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
@@ -82,7 +86,9 @@ public class ResponseParameterMapper {
     }
 
     private String resolve(String source, ProxyResult result, RequestContext ctx) {
-        if (source == null) return null;
+        if (source == null) {
+            return null;
+        }
         if (source.startsWith(RESPONSE_HEADER)) {
             String name = source.substring(RESPONSE_HEADER.length());
             List<String> values = result.headers() == null ? null
@@ -105,7 +111,9 @@ public class ResponseParameterMapper {
 
     /** The status code {@code value} spells, from 100 to 599, or null when it spells none. */
     public static Integer statusCode(String value) {
-        if (value == null || !value.matches("[0-9]{3}")) return null;
+        if (value == null || !value.matches("[0-9]{3}")) {
+            return null;
+        }
         int status = Integer.parseInt(value);
         return status >= 100 && status <= 599 ? status : null;
     }
@@ -113,7 +121,9 @@ public class ResponseParameterMapper {
     /** The name the header is stored under, matched case-insensitively, or {@code name} when absent. */
     private static String existingName(Map<String, List<String>> headers, String name) {
         for (String existing : headers.keySet()) {
-            if (existing.equalsIgnoreCase(name)) return existing;
+            if (existing.equalsIgnoreCase(name)) {
+                return existing;
+            }
         }
         return name;
     }
