@@ -574,6 +574,12 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudtrail</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>

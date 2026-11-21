@@ -34,6 +34,18 @@ class CloudTrailServiceTest {
 
     private CloudTrailService service;
 
+    @Test
+    void resetEmptiesTheEventHistory() {
+        ObjectMapper mapper = new ObjectMapper();
+        service.emitManagementEvent(new CloudTrailService.ManagementEventInput("secretsmanager.amazonaws.com",
+                "PutSecretValue", REGION, null, mapper.createObjectNode(), mapper.createObjectNode()));
+        assertEquals(1, service.lookupEvents(REGION, null, null, null).size());
+
+        service.clear();
+
+        assertEquals(0, service.lookupEvents(REGION, null, null, null).size());
+    }
+
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);

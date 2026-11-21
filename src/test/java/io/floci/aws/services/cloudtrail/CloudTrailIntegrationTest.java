@@ -18,6 +18,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -195,6 +196,21 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
+    void lookupEventsRefusesMalformedTimeBoundsAndLookupAttributes() {
+        invokeCloudTrail("LookupEvents", "{\"StartTime\":\"2026-01-01\"}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"EndTime\":true}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":{}}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":[\"EventName\"]}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents",
+                "{\"LookupAttributes\":[{\"AttributeKey\":\"EventName\",\"AttributeValue\":\"\"}]}")
+            .then().statusCode(400).body(containsString("InvalidLookupAttributesException"));
+    }
+
+    @Test
     void lookupEventsReturnsEmptyEventPage() {
         invokeCloudTrail("LookupEvents", """
                 {
@@ -212,19 +228,19 @@ class CloudTrailIntegrationTest {
     @Test
     void lookupEventsAcceptsOmittedAndPositiveMaxResults() {
         invokeCloudTrail("LookupEvents", "{}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":null}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":50}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":51}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1000}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1001}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
     }
 
     @Test
@@ -238,19 +254,19 @@ class CloudTrailIntegrationTest {
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of 0 is invalid."));
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1.5}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":50.9}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1000.5}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":2147483648}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":-2147483649}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of -2147483648 is invalid."));
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":1e309}")
-            .then().statusCode(200).body("Events", hasSize(0));
+            .then().statusCode(200).body("Events", notNullValue());
         invokeCloudTrail("LookupEvents", "{\"MaxResults\":-1e309}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))

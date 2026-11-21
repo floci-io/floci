@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.JsonNumberCoercion;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.cloudtrail.model.AdvancedEventSelector;
 import io.floci.aws.services.cloudtrail.model.DataResource;
 import io.floci.aws.services.cloudtrail.model.EventSelector;
@@ -15,13 +17,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @ApplicationScoped
 public class CloudTrailJsonHandler {
+
+    /** {@code LookupEvents} returns at most 50 events a page, whatever {@code MaxResults} asks for. */
+    private static final int MAX_LOOKUP_EVENTS = 50;
 
     private final CloudTrailService service;
     private final ObjectMapper mapper;
@@ -243,16 +250,108 @@ public class CloudTrailJsonHandler {
     }
 
     private Response lookupEvents(JsonNode req, String region) {
-        validateMaxResults(req.path("MaxResults"));
+        Integer maxResults = validateMaxResults(req.path("MaxResults"));
+        CloudTrailEventHistory.LookupAttribute attribute = lookupAttribute(req.path("LookupAttributes"));
+        Instant startTime = timestamp(req.path("StartTime"));
+        Instant endTime = timestamp(req.path("EndTime"));
+        if (startTime != null && endTime != null && startTime.isAfter(endTime)) {
+            throw new AwsException("InvalidTimeRangeException",
+                    "Start time must be earlier than or equal to the end time.", 400);
+        }
+        PaginatedResult<CloudTrailEventHistory.HistoryEvent> page = Pagination.paginate(
+                service.lookupEvents(region, attribute, startTime, endTime),
+                event -> String.format("%019d", Long.MAX_VALUE - event.sequence()),
+                maxResults == null ? MAX_LOOKUP_EVENTS : Math.min(maxResults, MAX_LOOKUP_EVENTS),
+                textOrNull(req, "NextToken"), lookupNamespace(region, attribute, startTime, endTime),
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400));
         ObjectNode resp = mapper.createObjectNode();
-        resp.putArray("Events");
+        ArrayNode events = resp.putArray("Events");
+        for (CloudTrailEventHistory.HistoryEvent event : page.items()) {
+            ObjectNode record = event.record();
+            ObjectNode out = events.addObject();
+            out.put("EventId", record.path("eventID").asText());
+            out.put("EventName", record.path("eventName").asText());
+            out.put("ReadOnly", record.path("readOnly").asText());
+            out.put("AccessKeyId", record.path("userIdentity").path("accessKeyId").asText());
+            out.put("EventTime", EpochSeconds.fromMillis(event.eventTime().toEpochMilli()));
+            out.put("EventSource", record.path("eventSource").asText());
+            out.put("Username", record.path("userIdentity").path("userName").asText());
+            out.putArray("Resources");
+            out.put("CloudTrailEvent", record.toString());
+        }
+        if (page.nextToken() != null) {
+            resp.put("NextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
+    /**
+     * A token pages only the lookup that issued it: AWS requires the same parameters with it, and
+     * a token reused for another filter, time range or region is refused rather than read as a
+     * position in a different list.
+     */
+    private static String lookupNamespace(String region, CloudTrailEventHistory.LookupAttribute attribute,
+                                          Instant startTime, Instant endTime) {
+        return "lookup-events:" + Integer.toHexString(Objects.hash(region, attribute, startTime, endTime));
+    }
+
+    /** AWS takes at most one lookup attribute, keyed by one of the documented names. */
+    private static CloudTrailEventHistory.LookupAttribute lookupAttribute(JsonNode attributes) {
+        if (attributes.isMissingNode() || attributes.isNull()) {
+            return null;
+        }
+        if (!attributes.isArray()) {
+            throw notConvertible(attributes, "a list");
+        }
+        if (attributes.isEmpty()) {
+            return null;
+        }
+        if (attributes.size() > 1) {
+            throw new AwsException("InvalidLookupAttributesException",
+                    "You cannot specify more than one lookup attribute.", 400);
+        }
+        JsonNode attribute = attributes.get(0);
+        if (!attribute.isObject()) {
+            throw notConvertible(attribute, "a structure");
+        }
+        JsonNode key = attribute.path("AttributeKey");
+        JsonNode value = attribute.path("AttributeValue");
+        if (!key.isTextual() || !CloudTrailEventHistory.LOOKUP_ATTRIBUTE_KEYS.contains(key.asText())
+                || !value.isTextual() || value.asText().isEmpty()) {
+            throw new AwsException("InvalidLookupAttributesException",
+                    "Specify a valid lookup attribute key and a non-empty value.", 400);
+        }
+        return new CloudTrailEventHistory.LookupAttribute(key.asText(), value.asText());
+    }
+
+    /** An omitted or null bound does not filter; any other value must be epoch seconds. */
+    private static Instant timestamp(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isNumber()) {
+            throw notConvertible(node, "a Timestamp");
+        }
+        return Instant.ofEpochMilli(Math.round(node.doubleValue() * 1000));
+    }
+
+    /** The {@code SerializationException} AWS answers for a member of the wrong JSON type. */
+    private static AwsException notConvertible(JsonNode node, String target) {
+        if (node.isObject()) {
+            return serialization("Start of structure or map found where not expected.");
+        }
+        if (node.isArray()) {
+            return serialization("Start of list found where not expected");
+        }
+        String kind = node.isTextual() ? "STRING_VALUE" : node.isBoolean()
+                ? (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE") : "NUMBER_VALUE";
+        return serialization(kind + " can not be converted to " + target);
+    }
+
     /** An omitted or null {@code MaxResults} is optional and takes the service default. */
-    private static void validateMaxResults(JsonNode maxResults) {
+    private static Integer validateMaxResults(JsonNode maxResults) {
         if (maxResults.isMissingNode() || maxResults.isNull()) {
-            return;
+            return null;
         }
         int value;
         if (maxResults.isNumber()) {
@@ -270,6 +369,7 @@ public class CloudTrailJsonHandler {
         if (value < 1) {
             throw invalidMaxResults(value);
         }
+        return value;
     }
 
     private static AwsException invalidMaxResults(int value) {
