@@ -59,12 +59,10 @@ public class IamActionRegistry {
     /**
      * A route and the action it is checked as. A rule naming a query parameter matches only a request
      * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
-     * where {@code GET /layers} is ListLayers. A rule flagged to match before the S3 query
-     * overrides is one of the S3 Control routes, which the control plane answers whatever its
-     * query string carries.
+     * where {@code GET /layers} is ListLayers.
      */
     private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
-                              String queryValue, String action, boolean beforeS3QueryOverrides) {
+                              String queryValue, String action) {
 
         boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
             return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
@@ -73,47 +71,8 @@ public class IamActionRegistry {
         }
     }
 
-    /**
-     * The routes of the S3 Control model, checked as the actions the Service Reference gives
-     * them by {@code IamRestRouteCoverageTest}. S3 Control clients sign with the s3 scope
-     * (botocore's s3control model declares signingName "s3"), so its operations are
-     * {@code s3:} actions, and its routes must be matched before the S3 data-plane query
-     * overrides: the control plane answers a tagging route whatever its query string carries,
-     * so a parameter such as {@code ?tagging} must not re-point the authorization at the
-     * data-plane object tagging it suggests, and the data-plane rules below would otherwise
-     * read {@code /v20180820/...} as a bucket named v20180820.
-     *
-     * <p>The account-level Block Public Access is the one route the Service Reference cannot
-     * settle, because it files S3's and S3 Control's GetPublicAccessBlock, PutPublicAccessBlock
-     * and DeletePublicAccessBlock under the bucket actions; the S3 User Guide's Block Public
-     * Access page gives the account level its own actions, and the exception is written down
-     * where the data is checked. ListAccessPoints and the account actions have no resource
-     * type, so IAM checks them against the wildcard rather than a bucket.
-     */
+    /** The routes the registry checks as an action of its own, each a rule of the scope it serves. */
     private static final List<ActionRule> RULES = List.of(
-        // ── S3 Control ───────────────────────────────────────────────────────────
-        s3ControlRule("GET",    "^/v20180820/tags/.+",        "s3:ListTagsForResource"),
-        s3ControlRule("POST",   "^/v20180820/tags/.+",        "s3:TagResource"),
-        s3ControlRule("DELETE", "^/v20180820/tags/.+",        "s3:UntagResource"),
-        s3ControlRule("GET",    "^/v20180820/accesspoint/?$", "s3:ListAccessPoints"),
-        s3ControlRule("PUT",    "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:PutAccountPublicAccessBlock"),
-        s3ControlRule("GET",    "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:GetAccountPublicAccessBlock"),
-        s3ControlRule("DELETE", "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:PutAccountPublicAccessBlock"),
-
-        // ── S3 ─────────────────────────────────────────────────────────────────
-        rule("s3", "GET",    "^/?$",                              "s3:ListAllMyBuckets"),
-        rule("s3", "PUT",    "^/[^/]+/?$",                       "s3:CreateBucket"),
-        rule("s3", "DELETE", "^/[^/]+/?$",                       "s3:DeleteBucket"),
-        rule("s3", "HEAD",   "^/[^/]+/?$",                       "s3:ListBucket"),
-        rule("s3", "GET",    "^/[^/]+/?$",                       "s3:ListBucket"),
-        rule("s3", "GET",    "^/[^/]+/.+",                       "s3:GetObject"),
-        rule("s3", "PUT",    "^/[^/]+/.+",                       "s3:PutObject"),
-        rule("s3", "DELETE", "^/[^/]+/.+",                       "s3:DeleteObject"),
-        rule("s3", "HEAD",   "^/[^/]+/.+",                       "s3:GetObject"),
-
         // ── Lambda ──────────────────────────────────────────────────────────────
         // Code signing configs first: a config's function list ends in /functions, as ListFunctions does.
         rule("lambda", "GET",    "^/2020-04-22/code-signing-configs/[^/]+/functions$",
@@ -565,35 +524,22 @@ public class IamActionRegistry {
     private static ActionRule rule(String service, String method, String path, String queryParameter,
                                    String queryValue, String action) {
         return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
-                queryValue, action, false);
-    }
-
-    private static ActionRule s3ControlRule(String method, String path, String action) {
-        return new ActionRule("s3", method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), null, null,
-                action, true);
+                queryValue, action);
     }
 
     /**
-     * Whether the request is one of the S3 Control routes, as the rules flag them. A denial then
-     * answers in S3 Control's own REST-XML envelope, the only one the s3control SDK
-     * deserializers read (issue #557), so the route decides the shape and not the action: the
-     * data plane resolves actions a control route never shares, and an action-name list would
-     * have to track every route to stay right. A request whose route cannot be read, which only
-     * a synthetic context is, is not a control one.
+     * Whether the request is an S3 Control one: the route it matches is the {@code s3control} model's. A denial then
+     * answers in S3 Control's own REST-XML envelope, the only one the s3control SDK deserializers read (issue #557),
+     * so the route decides the shape and not the action. A request whose route cannot be read, which only a synthetic
+     * context is, is not a control one.
      */
     public static boolean isS3ControlRequest(String credentialScope, ContainerRequestContext ctx) {
         if (!"s3".equals(credentialScope) || ctx.getMethod() == null || ctx.getUriInfo() == null
                 || ctx.getUriInfo().getRequestUri() == null) {
             return false;
         }
-        String method = ctx.getMethod().toUpperCase();
-        String path = sentPath(ctx.getUriInfo());
-        for (ActionRule rule : RULES) {
-            if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
-                return true;
-            }
-        }
-        return false;
+        return matchedRoute(IamRestRoutes.vendored(), credentialScope, ctx)
+                .map(match -> "s3control".equals(match.model())).orElse(false);
     }
 
     /**
@@ -675,35 +621,14 @@ public class IamActionRegistry {
      * {@code apigateway:PUT} for a PUT. That is when Floci can check it as AWS does ({@code checkedAsAws}). One
      * it cannot is left unmapped rather than checked on {@code *}, which would refuse a grant scoped to the
      * resource AWS checks it on. A request a route filter moved under an internal prefix is matched on its
-     * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. S3, the scope the
-     * vendored routes list as hand-routed, has its rules alone. Returns {@code null} when nothing maps the
-     * request (caller treats this as ALLOW).
+     * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. Returns {@code null}
+     * when nothing maps the request (caller treats this as ALLOW).
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
-        // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
-        // bucket's one trailing slash, so an S3 path is matched as sent.
+        // An S3 key may end in a slash, and one of slashes alone arrives escaped as S3SlashOnlyKeyFilter rewrites
+        // it (PUT /bucket// writes the key "/"), so an S3 path is matched as sent, not decoded.
         String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
-
-        if ("s3".equals(credentialScope)) {
-            // An S3 Control route is matched before the query overrides below, which would read the
-            // query string of a route the control plane answers whatever it carries: ?tagging on a
-            // tagging route is caller-supplied noise, not the object sub-resource it names.
-            for (ActionRule rule : RULES) {
-                if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
-                    return rule.action();
-                }
-            }
-            // S3 sub-resource override: the URL path alone doesn't distinguish
-            // s3:GetObjectAcl / s3:PutObjectAcl from s3:GetObject / s3:PutObject:
-            // only the {@code ?acl} query parameter does. Without this hook,
-            // an actor with s3:GetObject permission could read ACLs that their
-            // policy intends to forbid.
-            String s3SubAction = resolveS3SubResourceAction(method, ctx);
-            if (s3SubAction != null) {
-                return s3SubAction;
-            }
-        }
 
         for (ActionRule rule : RULES) {
             if (rule.matches(credentialScope, method, path, ctx)) {
@@ -799,6 +724,22 @@ public class IamActionRegistry {
      */
     public record RouteMembers(Map<String, String> located, String model) {
         static final RouteMembers NONE = new RouteMembers(Map.of(), null);
+    }
+
+    /**
+     * Whether a REST request of the credential scope is taken alike by the routes of two operations, none outranking
+     * the other, as one naming two of S3's sub-resources is ({@code PUT /bucket?cors&policy}): no botocore client
+     * sends one, and it runs as whichever its handler picks, so no one action covers it.
+     */
+    public static boolean ambiguousRoute(String credentialScope, ContainerRequestContext ctx) {
+        if (credentialScope == null || ctx.getMethod() == null || ctx.getUriInfo() == null
+                || ctx.getUriInfo().getRequestUri() == null) {
+            return false;
+        }
+        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        return IamRestRoutes.vendored().ambiguous(credentialScope, ctx.getMethod().toUpperCase(),
+                withoutInternalPrefix(ctx, path), ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
+                ctx.getHeaders());
     }
 
     /** The route a request of the operation matches, {@link RouteMembers#NONE} for one it matches none of. */
@@ -946,225 +887,4 @@ public class IamActionRegistry {
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
     }
-
-    private static boolean isFormUpload(MediaType mediaType) {
-        return mediaType != null
-                && "multipart".equalsIgnoreCase(mediaType.getType())
-                && "form-data".equalsIgnoreCase(mediaType.getSubtype());
-    }
-
-    /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
-    private record SubResourceAction(String queryParameter, String action) {}
-
-    private static SubResourceAction sub(String queryParameter, String action) {
-        return new SubResourceAction(queryParameter, action);
-    }
-
-    private static final List<SubResourceAction> GET_BUCKET_SUBRESOURCES = List.of(
-            sub("uploads",           "s3:ListBucketMultipartUploads"),
-            sub("notification",      "s3:GetBucketNotification"),
-            sub("versioning",        "s3:GetBucketVersioning"),
-            sub("versions",          "s3:ListBucketVersions"),
-            sub("location",          "s3:GetBucketLocation"),
-            sub("tagging",           "s3:GetBucketTagging"),
-            sub("object-lock",       "s3:GetBucketObjectLockConfiguration"),
-            sub("website",           "s3:GetBucketWebsite"),
-            sub("logging",           "s3:GetBucketLogging"),
-            sub("policy",            "s3:GetBucketPolicy"),
-            sub("policyStatus",      "s3:GetBucketPolicyStatus"),
-            sub("cors",              "s3:GetBucketCORS"),
-            sub("lifecycle",         "s3:GetLifecycleConfiguration"),
-            sub("acl",               "s3:GetBucketAcl"),
-            sub("encryption",        "s3:GetEncryptionConfiguration"),
-            sub("publicAccessBlock", "s3:GetBucketPublicAccessBlock"),
-            sub("ownershipControls", "s3:GetBucketOwnershipControls"),
-            sub("requestPayment",    "s3:GetBucketRequestPayment"),
-            sub("accelerate",        "s3:GetAccelerateConfiguration"),
-            sub("replication",       "s3:GetReplicationConfiguration"),
-            sub("metrics",           "s3:GetMetricsConfiguration"),
-            sub("intelligent-tiering", "s3:GetIntelligentTieringConfiguration"),
-            sub("analytics",         "s3:GetAnalyticsConfiguration"),
-            sub("inventory",         "s3:GetInventoryConfiguration"));
-
-    private static final List<SubResourceAction> PUT_BUCKET_SUBRESOURCES = List.of(
-            sub("notification",      "s3:PutBucketNotification"),
-            sub("versioning",        "s3:PutBucketVersioning"),
-            sub("tagging",           "s3:PutBucketTagging"),
-            sub("object-lock",       "s3:PutBucketObjectLockConfiguration"),
-            sub("website",           "s3:PutBucketWebsite"),
-            sub("logging",           "s3:PutBucketLogging"),
-            sub("policy",            "s3:PutBucketPolicy"),
-            sub("cors",              "s3:PutBucketCORS"),
-            sub("lifecycle",         "s3:PutLifecycleConfiguration"),
-            sub("acl",               "s3:PutBucketAcl"),
-            sub("encryption",        "s3:PutEncryptionConfiguration"),
-            sub("publicAccessBlock", "s3:PutBucketPublicAccessBlock"),
-            sub("ownershipControls", "s3:PutBucketOwnershipControls"),
-            sub("requestPayment",    "s3:PutBucketRequestPayment"),
-            sub("accelerate",        "s3:PutAccelerateConfiguration"),
-            sub("replication",       "s3:PutReplicationConfiguration"),
-            sub("metrics",           "s3:PutMetricsConfiguration"),
-            sub("intelligent-tiering", "s3:PutIntelligentTieringConfiguration"),
-            sub("analytics",         "s3:PutAnalyticsConfiguration"),
-            sub("inventory",         "s3:PutInventoryConfiguration"));
-
-    // AWS gives only DeleteBucketPolicy and DeleteBucketWebsite their own action; removing any other
-    // sub-resource is authorised by the same Put* action that sets it. ?accelerate is absent because
-    // S3Controller rejects DELETE on it with 405, so no mapping should claim the request.
-    private static final List<SubResourceAction> DELETE_BUCKET_SUBRESOURCES = List.of(
-            sub("tagging",           "s3:PutBucketTagging"),
-            sub("website",           "s3:DeleteBucketWebsite"),
-            sub("policy",            "s3:DeleteBucketPolicy"),
-            sub("cors",              "s3:PutBucketCORS"),
-            sub("lifecycle",         "s3:PutLifecycleConfiguration"),
-            sub("encryption",        "s3:PutEncryptionConfiguration"),
-            sub("publicAccessBlock", "s3:PutBucketPublicAccessBlock"),
-            sub("ownershipControls", "s3:PutBucketOwnershipControls"),
-            sub("replication",       "s3:PutReplicationConfiguration"),
-            sub("metrics",           "s3:PutMetricsConfiguration"),
-            sub("intelligent-tiering", "s3:PutIntelligentTieringConfiguration"),
-            sub("analytics",         "s3:PutAnalyticsConfiguration"),
-            sub("inventory",         "s3:PutInventoryConfiguration"));
-
-    private static String resolveS3SubResourceAction(String method, ContainerRequestContext ctx) {
-        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
-        // /{bucket}?acl -> bucket-level; /{bucket}/{key}?acl -> object-level.
-        // A trailing slash is a valid key character, so /bucket/folder/?acl is an object request -
-        // we cannot use endsWith("/") to infer bucket-level.
-        String path = ctx.getUriInfo().getPath();
-        String stripped = path.startsWith("/") ? path.substring(1) : path;
-        int firstSlash = stripped.indexOf('/');
-        boolean isBucketLevel = firstSlash < 0 || firstSlash == stripped.length() - 1;
-        if (!isBucketLevel) {
-            return objectSubResourceAction(method, params);
-        }
-        if ("POST".equals(method)) {
-            // S3Controller runs DeleteObjects and a browser-form PostObject ahead of any other sub-resource and
-            // checks them per key; another sub-resource S3 defines for POST, such as ?metadataTable, it answers
-            // NotImplemented, so that request is checked as the operation it names.
-            return params.containsKey("delete") || isFormUpload(ctx.getMediaType())
-                    ? null : unservedSubresourceAction(method, params);
-        }
-        List<SubResourceAction> chain = switch (method) {
-            case "GET" -> GET_BUCKET_SUBRESOURCES;
-            case "PUT" -> PUT_BUCKET_SUBRESOURCES;
-            case "DELETE" -> DELETE_BUCKET_SUBRESOURCES;
-            default -> List.of();
-        };
-        for (SubResourceAction entry : chain) {
-            if (params.containsKey(entry.queryParameter())) {
-                return entry.action();
-            }
-        }
-        return chain.isEmpty() ? null : unservedSubresourceAction(method, params);
-    }
-
-    /**
-     * A sub-resource S3 defines for the method that the lists above, or POST's DeleteObjects, do not hold is one
-     * S3Controller does not serve: it answers the request NotImplemented rather than run the bucket's operation, so
-     * the request is checked as the operation it names, as AWS checks it. Null when it names none, or one S3 defines
-     * for other methods only, which S3Controller refuses as not allowed.
-     */
-    private static String unservedSubresourceAction(String method, MultivaluedMap<String, String> params) {
-        S3BucketSubresources subresources = S3BucketSubresources.vendored();
-        for (String name : subresources.names()) {
-            List<String> operations = subresources.operations(method, name);
-            if (params.containsKey(name) && operations.size() == 1) {
-                return IamAuthorizedActions.actionFor("s3", operations.get(0));
-            }
-        }
-        return null;
-    }
-
-    /**
-     * The operation an object sub-resource selects, checked in the order S3Controller dispatches
-     * them: a request naming several runs the first, so it is checked as that one. A
-     * {@code versionId} selects the version action AWS checks in place of an action that has one
-     * (see {@link S3ObjectActions#forVersion}). Null where the controller falls through to the plain
-     * object operation on the current version, which the rules check.
-     */
-    private static String objectSubResourceAction(String method, MultivaluedMap<String, String> params) {
-        String versionId = params.getFirst("versionId");
-        return switch (method) {
-            case "GET" -> {
-                if (params.containsKey("uploadId")) {
-                    yield "s3:ListMultipartUploadParts";
-                }
-                if (params.containsKey("tagging")) {
-                    yield S3ObjectActions.forVersion("s3:GetObjectTagging", versionId);
-                }
-                if (params.containsKey("annotation")) {
-                    yield S3ObjectActions.forVersion(annotationReadAction(params), versionId);
-                }
-                if (params.containsKey("retention")) {
-                    yield "s3:GetObjectRetention";
-                }
-                if (params.containsKey("legal-hold")) {
-                    yield "s3:GetObjectLegalHold";
-                }
-                if (params.containsKey("acl")) {
-                    yield S3ObjectActions.forVersion("s3:GetObjectAcl", versionId);
-                }
-                yield versionId != null ? "s3:GetObjectVersion" : null;
-            }
-            case "HEAD" -> {
-                if (params.containsKey("annotation")) {
-                    yield S3ObjectActions.forVersion(annotationReadAction(params), versionId);
-                }
-                yield versionId != null ? "s3:GetObjectVersion" : null;
-            }
-            case "PUT" -> {
-                if (params.containsKey("tagging")) {
-                    yield S3ObjectActions.forVersion("s3:PutObjectTagging", versionId);
-                }
-                if (params.containsKey("retention")) {
-                    yield "s3:PutObjectRetention";
-                }
-                if (params.containsKey("legal-hold")) {
-                    yield "s3:PutObjectLegalHold";
-                }
-                if (params.containsKey("acl")) {
-                    yield S3ObjectActions.forVersion("s3:PutObjectAcl", versionId);
-                }
-                // A PUT naming an uploadId and a partNumber is UploadPart, which the rules check as
-                // s3:PutObject, as they do PutObject and CopyObject.
-                yield params.containsKey("annotation")
-                        ? S3ObjectActions.forVersion("s3:PutObjectAnnotation", versionId)
-                        : null;
-            }
-            case "DELETE" -> {
-                if (params.containsKey("tagging")) {
-                    yield S3ObjectActions.forVersion("s3:DeleteObjectTagging", versionId);
-                }
-                if (params.containsKey("annotation")) {
-                    yield S3ObjectActions.forVersion("s3:DeleteObjectAnnotation", versionId);
-                }
-                if (params.containsKey("uploadId")) {
-                    yield "s3:AbortMultipartUpload";
-                }
-                yield versionId != null ? "s3:DeleteObjectVersion" : null;
-            }
-            case "POST" -> {
-                if (params.containsKey("uploads")) {
-                    yield "s3:PutObject";
-                }
-                if (params.containsKey("restore")) {
-                    yield "s3:RestoreObject";
-                }
-                if (params.containsKey("select")) {
-                    // S3Controller selects from the version a versionId names.
-                    yield S3ObjectActions.forVersion("s3:GetObject", versionId);
-                }
-                yield params.containsKey("uploadId") ? "s3:PutObject" : null;
-            }
-            default -> null;
-        };
-    }
-
-    /** A named annotation is GetObjectAnnotation; an empty or absent name lists them, as S3Controller does. */
-    private static String annotationReadAction(MultivaluedMap<String, String> params) {
-        String name = params.getFirst("annotationName");
-        return name != null && !name.isEmpty() ? "s3:GetObjectAnnotation" : "s3:ListObjectAnnotations";
-    }
-
 }

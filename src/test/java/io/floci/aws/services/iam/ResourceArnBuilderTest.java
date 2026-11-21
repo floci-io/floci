@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestPathLabels;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -25,6 +26,7 @@ import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.lambda.LambdaStoredResourceArns;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
+import io.floci.aws.services.s3.S3RequestPathLabels;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.SqsStoredResourceArns;
@@ -1947,97 +1949,28 @@ class ResourceArnBuilderTest {
                 builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
-    // ── S3 ──────────────────────────────────────────────────────────────────────
+    // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
-    @Test
-    void s3BuildsBucketArn() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket", arn);
+    /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
+    private List<String> s3(ResourceArnBuilder from, String method, String sent, String operation, String region,
+                            String partition) {
+        when(ctx.getMethod()).thenReturn(method);
+        request(sent);
+        return from.buildResources("s3", "s3:" + operation, ctx, region, ACCOUNT, partition);
     }
 
-    @Test
-    void s3BuildsArnsInTheRequestRegionsPartition() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/key.txt");
-        assertEquals("arn:aws-cn:s3:::my-bucket/key.txt",
-                builder.build("s3", ctx, "cn-north-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/");
-        assertEquals("arn:aws-us-gov:s3:::*", builder.build("s3", ctx, "us-gov-west-1", "000000000000"));
+    private List<String> s3(String method, String sent, String operation) {
+        return s3(builder, method, sent, operation, "us-east-1", "aws");
     }
 
-    @Test
-    void s3BuildsObjectArn() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/file.json");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket/folder/file.json", arn);
-    }
-
-    /**
-     * S3VirtualHostFilter rewrites a virtual-hosted bucket-level request (GET /) to
-     * /bucket/. The resource is still the bucket, so the ARN must carry no trailing
-     * slash or a policy naming arn:aws:s3:::bucket stops matching and an allowed
-     * ListBucket is denied for every SDK that defaults to virtual-hosted addressing.
-     */
-    @Test
-    void s3BuildsBucketArnForVirtualHostedRewrittenPath() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket", arn);
-    }
-
-    @Test
-    void s3KeepsTrailingSlashOfAFolderMarkerKey() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/");
-        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
-    }
-
-    /**
-     * A key keeps the slashes it is sent with, and so does the ARN the request is checked against.
-     * {@code PUT /bucket//email.txt} stores the key {@code /email.txt}; read from the collapsed
-     * path it was checked on {@code bucket/email.txt}, so a grant on that object covered this one
-     * and a statement naming {@code bucket//*} reached nothing.
-     */
-    @Test
-    void s3ReadsAKeysOwnLeadingSlashFromThePathAsSent() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket//email.txt"));
-
-        assertEquals("arn:aws:s3:::my-bucket//email.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
-    }
-
-    /** The same inside a key, where the collapsed path named a key one separator short. */
-    @Test
-    void s3KeepsADoubleSlashInsideAKey() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/a/b.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/a//b.txt"));
-
-        assertEquals("arn:aws:s3:::my-bucket/a//b.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
-    }
-
-    /**
-     * Virtual-hosted, where the bucket came from the Host header and S3VirtualHostFilter rewrote the
-     * path: the key's leading slash is then only in the request the server received.
-     */
-    @Test
-    void s3ReadsAVirtualHostedKeysOwnSlashFromTheRequestAsReceived() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://my-bucket.localhost/my-bucket/email.txt"));
-        ResourceArnBuilder withRequest = new ResourceArnBuilder(new ObjectMapper(), vertxRequestOn("//email.txt"));
-
-        assertEquals("arn:aws:s3:::my-bucket//email.txt", withRequest.build("s3", ctx, "us-east-1", ACCOUNT));
-    }
-
-    /**
-     * A key of slashes alone reaches the object route through the escaped path S3SlashOnlyKeyFilter
-     * rewrites it to, and still reads as that object rather than as the bucket.
-     */
-    @Test
-    void s3KeepsAKeyOfOnlySlashes() {
-        when(uriInfo.getPath()).thenReturn("/my-bucket//");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/%2F"));
-
-        assertEquals("arn:aws:s3:::my-bucket//", builder.build("s3", ctx, "us-east-1", ACCOUNT));
+    /** A builder reading S3's keys as S3 does, from {@code received}, the path the server received. */
+    private static ResourceArnBuilder readingS3Keys(String received) {
+        RequestPathLabels s3Keys = new S3RequestPathLabels(vertxRequestOn(received));
+        @SuppressWarnings("unchecked")
+        Instance<RequestPathLabels> labels = mock(Instance.class);
+        when(labels.isUnsatisfied()).thenReturn(false);
+        when(labels.iterator()).thenAnswer(invocation -> List.of(s3Keys).iterator());
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, labels);
     }
 
     /** A current request whose path is {@code sentPath}, the path the server received. */
@@ -2051,90 +1984,72 @@ class ResourceArnBuilderTest {
         return current;
     }
 
-    // ── S3 Control ─────────────────────────────────────────────────────────────
+    /** A bucket and an object are named by their route's labels, in the partition of the request's Region. */
+    @Test
+    void anS3RequestIsCheckedOnTheBucketOrObjectItsRouteNames() {
+        assertEquals(List.of("arn:aws:s3:::my-bucket"), s3("PUT", "/my-bucket", "CreateBucket"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket"), s3("GET", "/my-bucket?list-type=2", "ListObjectsV2"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/folder/file.json"),
+                s3("GET", "/my-bucket/folder/file.json", "GetObject"));
+        assertEquals(List.of("arn:aws-cn:s3:::my-bucket/key.txt"),
+                s3(builder, "GET", "/my-bucket/key.txt", "GetObject", "cn-north-1", "aws-cn"));
+        // ListBuckets acts on no resource type.
+        assertEquals(List.of("*"), s3("GET", "/", "ListBuckets"));
+    }
 
     /**
-     * An S3 Control tagging route names the resource it acts on by its ARN, and that ARN as
-     * written is what the request is checked against. The data-plane reading of the path, which
-     * issue #6537 reports, checked s3:GetObject on a bucket named v20180820, so a policy
-     * allowing the tagging action on the real bucket never matched. The ARN is the caller's own
-     * naming of the resource, kept as the ARN-carrying requests of other services are: the plain
-     * general-purpose form and the directory-bucket form the Go SDK and Terraform send alike.
+     * A key keeps the slashes it is sent with, and so does the ARN the request is checked against, read as S3 reads
+     * it: {@code PUT /bucket//email.txt} stores the key {@code /email.txt}; read from the router's collapsed path it
+     * would be checked on {@code bucket/email.txt}, so a grant on that object would cover this one.
      */
     @Test
-    void s3ControlTaggingIsCheckedAgainstTheArnTheRouteNames() {
-        for (String action : List.of("s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource")) {
-            when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
+    void anS3KeyKeepsTheSlashesItWasSentWith() {
+        assertEquals(List.of("arn:aws:s3:::my-bucket//email.txt"),
+                s3(readingS3Keys("/my-bucket//email.txt"), "PUT", "/my-bucket//email.txt", "PutObject", "us-east-1",
+                        "aws"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/a//b.txt"),
+                s3(readingS3Keys("/my-bucket/a//b.txt"), "GET", "/my-bucket/a//b.txt", "GetObject", "us-east-1",
+                        "aws"));
+        assertEquals(List.of("arn:aws:s3:::my-bucket/folder/"),
+                s3(readingS3Keys("/my-bucket/folder/"), "PUT", "/my-bucket/folder/", "PutObject", "us-east-1", "aws"));
+        // Virtual-hosted: S3VirtualHostFilter put the bucket into the path, and the server received the key alone.
+        assertEquals(List.of("arn:aws:s3:::my-bucket//email.txt"),
+                s3(readingS3Keys("//email.txt"), "GET", "/my-bucket//email.txt", "GetObject", "us-east-1", "aws"));
+    }
+
+    /**
+     * An S3 Control tagging route names the resource it acts on by its ARN, and that ARN as written, percent-encoded as
+     * the Go SDK sends it or not, is what the request is checked against, never a bucket named v20180820 (issue
+     * #6537). One naming no ARN stays on the wildcard, under which the handler refuses it.
+     */
+    @Test
+    void anS3ControlTaggingRouteIsCheckedOnTheArnItNames() {
+        for (String[] call : List.of(new String[] {"GET", "ListTagsForResource"}, new String[] {"POST", "TagResource"},
+                new String[] {"DELETE", "UntagResource"})) {
             assertEquals(List.of("arn:aws:s3:::repro-bucket"),
-                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
-            when(uriInfo.getPath())
-                    .thenReturn("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket");
-            assertEquals(List.of("arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket"),
-                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+                    s3(call[0], "/v20180820/tags/arn:aws:s3:::repro-bucket", call[1]), call[1]);
+            assertEquals(List.of("arn:aws:s3:::repro-bucket"),
+                    s3(call[0], "/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Arepro-bucket", call[1]), call[1]);
         }
+        assertEquals(List.of("*"), s3("GET", "/v20180820/tags/not-an-arn", "ListTagsForResource"));
     }
 
     /**
-     * An S3 Control route names no object, so nothing of it is read as a bucket and a key: the ARN
-     * in its path is still taken as written, percent-encoded as the Go SDK sends it or not.
+     * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no resource type, so a request
+     * of them is checked on the wildcard alone, as other namespaces' no-resource actions are.
      */
     @Test
-    void s3ControlTaggingIsNotReadAsABucketAndAKey() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
-        when(uriInfo.getRequestUri())
-                .thenReturn(URI.create("http://localhost/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Arepro-bucket"));
-
-        assertEquals(List.of("arn:aws:s3:::repro-bucket"),
-                builder.buildResources("s3", "s3:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
+    void anS3ControlAccountRouteIsCheckedOnTheWildcardAlone() {
+        assertEquals(List.of("*"), s3("GET", "/v20180820/accesspoint", "ListAccessPoints"));
+        assertEquals(List.of("*"), s3("GET", "/v20180820/configuration/publicAccessBlock", "GetPublicAccessBlock"));
+        assertEquals(List.of("*"), s3("PUT", "/v20180820/configuration/publicAccessBlock", "PutPublicAccessBlock"));
     }
 
-    /** A tagging route naming no ARN stays on the wildcard, under which the handler refuses it. */
+    /** A data-plane request into a bucket named v20180820 keeps its own bucket and object. */
     @Test
-    void s3ControlTaggingNamingNoArnLeavesTheWildcard() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/not-an-arn");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:ListTagsForResource", ctx, "us-east-1", ACCOUNT, "aws"));
-    }
-
-    /**
-     * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no
-     * resource type, so the request is checked against the wildcard alone, as the no-resource
-     * actions of other namespaces are (the KMS list operations): a bucket-scoped statement,
-     * {@code arn:<partition>:s3:::*} or any other ARN, grants them nothing, and a NotResource
-     * naming any bucket denies the call.
-     */
-    @Test
-    void s3ControlAccountRoutesAreCheckedAgainstTheWildcardAlone() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/accesspoint");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:ListAccessPoints", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820/configuration/publicAccessBlock");
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:GetAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("*"),
-                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-gov-west-1", ACCOUNT,
-                        "aws-us-gov"));
-    }
-
-    /**
-     * The operation tells S3 Control's requests from the data plane, not the path: a request a
-     * data-plane action claims under the same prefix, a bucket actually named v20180820, keeps
-     * the bucket and object ARN of its own path, the slashes of its key included.
-     */
-    @Test
-    void aDataPlaneOperationUnderTheS3ControlPrefixKeepsItsOwnArn() {
-        when(uriInfo.getPath()).thenReturn("/v20180820/tags/key.txt");
-        assertEquals(List.of("arn:aws:s3:::v20180820/tags/key.txt"),
-                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820");
-        assertEquals(List.of("arn:aws:s3:::v20180820"),
-                builder.buildResources("s3", "s3:ListBucket", ctx, "us-east-1", ACCOUNT, "aws"));
-        when(uriInfo.getPath()).thenReturn("/v20180820/a/b.txt");
-        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/v20180820/a//b.txt"));
-        assertEquals(List.of("arn:aws:s3:::v20180820/a//b.txt"),
-                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
+    void aDataPlaneRequestUnderTheS3ControlPrefixKeepsItsOwnBucketAndObject() {
+        assertEquals(List.of("arn:aws:s3:::v20180820/tags/key.txt"), s3("PUT", "/v20180820/tags/key.txt", "PutObject"));
+        assertEquals(List.of("arn:aws:s3:::v20180820"), s3("GET", "/v20180820", "ListObjects"));
     }
 
     // ── The vendored table of request resources ─────────────────────────────────

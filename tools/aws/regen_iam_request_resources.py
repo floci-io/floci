@@ -274,7 +274,8 @@ from pathlib import Path
 
 import fetch_athena_glue_ddl_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
-                                          load_s3_required, s3_query_parameters, vendored_sections)
+                                          load_s3_required, s3_query_parameters, s3_version_choices,
+                                          vendored_sections)
 from regen_iam_passed_roles import (
     NAMESPACE_RE,
     OPERATION_RE,
@@ -303,10 +304,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect")
+              "ec2-instance-connect", "s3")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dynamodb", "iam", "kms", "s3")
+HAND_BUILT = ("apigateway", "bedrock", "dynamodb", "iam", "kms")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -581,6 +582,17 @@ def action_mapping(documents: list[dict]) -> dict[str, dict[str, str]]:
     for namespace, operations in sections["versioned"].items():
         for operation, choice in operations.items():
             mapped.setdefault(namespace, {}).setdefault(operation, choice["without"])
+    # One whose request names the version in its body takes the same types (DeleteObjects, s3:DeleteObject's), though
+    # no query tells which action a request needs.
+    if query is not None:
+        types = {action["Name"]: sorted(resource["Name"] for resource in action.get("Resources") or [])
+                 for document in documents if document.get("Name") == "s3" for action in document.get("Actions", [])}
+        for operation, choice in s3_version_choices(page).items():
+            without, with_ = (choice[side].split(":", 1)[1] for side in ("without", "with"))
+            if types.get(without) != types.get(with_):
+                raise ValueError(f"s3:{operation}: the S3 user guide's {choice['without']} and {choice['with']} act on "
+                                 f"different types, so neither's stand for the other's")
+            mapped.setdefault("s3", {}).setdefault(operation, choice["without"])
     for namespace, clients in sections["authorizedByModel"].items():
         for operation, action in clients.get(namespace, {}).items():
             mapped.setdefault(namespace, {}).setdefault(operation, action)

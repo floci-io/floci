@@ -226,16 +226,45 @@ final class IamRestRoutes {
 
     private Optional<Match> best(String scope, String method, String requestPath, MultivaluedMap<String, String> query,
                                  boolean spanned, MultivaluedMap<String, String> headers) {
-        Route best = null;
-        for (Route route : routes.getOrDefault(scope, Map.of()).getOrDefault(method, List.of())) {
-            if (route.matches(requestPath, query, spanned) && route.carries(headers)
-                    && (best == null || route.outranks(best))) {
-                best = route;
-            }
-        }
+        Route best = ranked(scope, method, requestPath, query, spanned, headers).best();
         return best == null ? Optional.empty()
                 : Optional.of(new Match(best.operation(), best.labelValues(requestPath, spanned), best.located(),
                         best.documented(), best.model()));
+    }
+
+    /**
+     * Whether the request is taken alike by the routes of two operations, none outranking the other: a request naming
+     * two of S3's sub-resources ({@code PUT /bucket?cors&policy}) matches both their routes, and no botocore client
+     * sends one, so which it is depends on the handler alone.
+     */
+    boolean ambiguous(String scope, String method, String path, MultivaluedMap<String, String> query,
+                      boolean movedUnderPrefix, MultivaluedMap<String, String> headers) {
+        String requestPath = IamActionRegistry.withoutTrailingSlash(path);
+        Ranked ranked = ranked(scope, method, requestPath, query, false, headers);
+        return ranked.best() == null && movedUnderPrefix
+                ? ranked(scope, method, requestPath, query, true, headers).tied() : ranked.tied();
+    }
+
+    /** The route a request matches that outranks the others it matches, and whether another operation's ties it. */
+    private record Ranked(Route best, boolean tied) {
+    }
+
+    private Ranked ranked(String scope, String method, String requestPath, MultivaluedMap<String, String> query,
+                          boolean spanned, MultivaluedMap<String, String> headers) {
+        List<Route> matching = new ArrayList<>();
+        Route best = null;
+        for (Route route : routes.getOrDefault(scope, Map.of()).getOrDefault(method, List.of())) {
+            if (route.matches(requestPath, query, spanned) && route.carries(headers)) {
+                matching.add(route);
+                if (best == null || route.outranks(best)) {
+                    best = route;
+                }
+            }
+        }
+        Route winner = best;
+        boolean tied = winner != null && matching.stream().anyMatch(route -> route != winner
+                && !winner.outranks(route) && !winner.operation().equals(route.operation()));
+        return new Ranked(best, tied);
     }
 
     /** The modelled denial status, or the existing protocol default when the model declares none. */

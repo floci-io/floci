@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.RequestResources;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -44,32 +45,6 @@ class IamRestRouteCoverageTest {
 
     /** The REST namespaces whose entries in {@code iam-authorized-actions.json} only the route table can apply. */
     private static final Set<String> ROUTED_NAMESPACES = Set.of("s3", "apigateway", "lambda");
-
-    /**
-     * The S3 Control operations Floci serves, the rest-routes entry of which is a route the
-     * registry maps. Every other operation of the s3control model has no route in Floci: the
-     * request falls through to the S3 data plane and is checked as the object or bucket
-     * operation that runs.
-     */
-    private static final Set<String> SERVED_S3_CONTROL_OPERATIONS = Set.of(
-            "DeletePublicAccessBlock", "GetPublicAccessBlock", "ListAccessPoints", "ListTagsForResource",
-            "PutPublicAccessBlock", "TagResource", "UntagResource");
-
-    /**
-     * The account-level Block Public Access, the one route the Service Reference cannot settle.
-     * It files S3's and S3 Control's GetPublicAccessBlock, PutPublicAccessBlock and
-     * DeletePublicAccessBlock under the bucket actions (s3:GetBucketPublicAccessBlock,
-     * s3:PutBucketPublicAccessBlock and s3:DeleteBucketPublicAccessBlock), one action between
-     * the two clients, although the account level is a different permission. The S3 User
-     * Guide's Block Public Access page gives the account level s3:PutAccountPublicAccessBlock
-     * to write and s3:GetAccountPublicAccessBlock to read, and a delete needs the same action
-     * as the write it undoes.
-     * https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html
-     */
-    private static final Map<String, String> ACCOUNT_PUBLIC_ACCESS_BLOCK_ACTIONS = Map.of(
-            "GetPublicAccessBlock", "s3:GetAccountPublicAccessBlock",
-            "PutPublicAccessBlock", "s3:PutAccountPublicAccessBlock",
-            "DeletePublicAccessBlock", "s3:PutAccountPublicAccessBlock");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 
@@ -157,14 +132,9 @@ class IamRestRouteCoverageTest {
     Stream<DynamicTest> everyOperationOfARoutedScopeResolvesToItsActionWhenFlociCanCheckIt() throws IOException {
         JsonNode document = load("/aws/rest-routes.json");
         JsonNode models = document.path("models");
-        JsonNode authorizedActions = load("/aws/iam-authorized-actions.json");
-        JsonNode authorized = authorizedActions.path("authorizedActions");
         JsonNode requestResources = load("/aws/iam-request-resources.json");
         Set<String> handBuilt = new HashSet<>();
         requestResources.path("handBuilt").forEach(namespace -> handBuilt.add(namespace.asText()));
-        Set<String> byMethod = new HashSet<>();
-        authorizedActions.path("authorizedByMethod").properties().forEach(scope ->
-                scope.getValue().forEach(operation -> byMethod.add(scope.getKey() + ":" + operation.asText())));
         List<DynamicTest> tests = new ArrayList<>();
         for (String model : routedModels(document)) {
             String scope = models.path(model).path("credentialScope").asText();
@@ -173,20 +143,22 @@ class IamRestRouteCoverageTest {
                 Map.Entry<String, JsonNode> operation = operations.next();
                 String method = operation.getValue().path("method").asText();
                 List<Route> routes = new ArrayList<>(List.of(new Route(scope, model, operation.getKey(), method,
-                        operation.getValue().path("requestUri").asText())));
+                        operation.getValue().path("requestUri").asText(), operation.getValue().path("requires"))));
                 operation.getValue().path("alternatives").forEach(alternative -> routes.add(new Route(scope, model,
                         operation.getKey(), alternative.path("method").asText(method),
                         alternative.path("requestUri").asText())));
-                boolean read = requestResources.path("operations").has(scope + ":" + operation.getKey());
+                // An unread operation names what it acts on in a body the reader does not read, so it is left to its
+                // service, as one whose resources nothing reads is.
+                boolean read = RequestResources.reads(scope + ":" + operation.getKey());
                 for (Route route : routes) {
-                    String action = byMethod.contains(scope + ":" + operation.getKey())
-                            ? scope + ":" + route.method()
-                            : authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey());
-                    String expected = handBuilt.contains(scope) || read
-                            || IamAuthorizedActions.actsOnNoResourceType(action)
-                            ? action : null;
-                    tests.add(DynamicTest.dynamicTest(route.toString(),
-                            () -> assertEquals(expected, resolve(route), route.toString())));
+                    tests.add(DynamicTest.dynamicTest(route.toString(), () -> {
+                        ContainerRequestContext request = route.request();
+                        String action = IamAuthorizedActions.actionFor(scope, operation.getKey(), route.method(),
+                                model, request.getUriInfo().getQueryParameters());
+                        String expected = handBuilt.contains(scope) || read
+                                || IamAuthorizedActions.actsOnNoResourceType(action) ? action : null;
+                        assertEquals(expected, registry.resolveRoute(scope, request), route.toString());
+                    }));
                 }
             }
         }
@@ -209,49 +181,22 @@ class IamRestRouteCoverageTest {
             while (operations.hasNext()) {
                 Map.Entry<String, JsonNode> operation = operations.next();
                 Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
-                        operation.getValue().path("requestUri").asText());
+                        operation.getValue().path("requestUri").asText(), operation.getValue().path("requires"));
                 tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(), () -> {
                     ContainerRequestContext request = route.request();
-                    String matched = IamRestRoutes.vendored().operation(scope, route.method(),
-                            request.getUriInfo().getPath(), request.getUriInfo().getQueryParameters()).orElse(null);
-                    assertEquals(IamAuthorizedActions.actionFor(scope, operation.getKey(), route.method()),
-                            matched == null ? null : IamAuthorizedActions.actionFor(scope, matched, route.method()),
-                            route.toString());
+                    MultivaluedMap<String, String> query = request.getUriInfo().getQueryParameters();
+                    String matched = IamRestRoutes.vendored().match(scope, route.method(),
+                                    request.getUriInfo().getPath(), query, false, request.getHeaders())
+                            .map(match -> IamAuthorizedActions.actionFor(scope, match.operation(), route.method(),
+                                    match.model(), query))
+                            .orElse(null);
+                    assertEquals(IamAuthorizedActions.actionFor(scope, operation.getKey(), route.method(), model, query),
+                            matched, route.toString());
+                    // No request an SDK sends on a route is one two operations' routes take alike, which is refused.
+                    assertFalse(IamRestRoutes.vendored().ambiguous(scope, route.method(), request.getUriInfo().getPath(),
+                            query, false, request.getHeaders()), route.toString());
                 }));
             }
-        }
-        return tests.stream();
-    }
-
-    /**
-     * Every route of the s3control model, which signs with the s3 scope. A route Floci serves is
-     * checked as the action the Service Reference gives the operation, with the account-level
-     * Block Public Access as its one written-down exception; a route Floci does not serve runs
-     * as the S3 data plane, so it must not resolve to any of the served routes' actions.
-     */
-    @TestFactory
-    Stream<DynamicTest> everyS3ControlRouteIsCheckedAsTheServiceReferenceGivesIt() throws IOException {
-        JsonNode models = load("/aws/rest-routes.json").path("models");
-        JsonNode authorized = load("/aws/iam-authorized-actions.json").path("authorizedActions");
-        Map<String, String> served = new HashMap<>();
-        for (String operation : SERVED_S3_CONTROL_OPERATIONS) {
-            served.put(operation, ACCOUNT_PUBLIC_ACCESS_BLOCK_ACTIONS.getOrDefault(operation,
-                    authorized.path("s3").path(operation).asText("s3:" + operation)));
-        }
-        List<DynamicTest> tests = new ArrayList<>();
-        Iterator<Map.Entry<String, JsonNode>> operations =
-                models.path("s3control").path("operations").fields();
-        while (operations.hasNext()) {
-            Map.Entry<String, JsonNode> operation = operations.next();
-            Route route = new Route("s3", "s3control", operation.getKey(),
-                    operation.getValue().path("method").asText(),
-                    operation.getValue().path("requestUri").asText());
-            String expected = served.get(operation.getKey());
-            tests.add(expected == null
-                    ? DynamicTest.dynamicTest("s3control " + operation.getKey() + " (not served)",
-                            () -> assertFalse(served.containsValue(resolve(route)), route.toString()))
-                    : DynamicTest.dynamicTest("s3control " + operation.getKey(),
-                            () -> assertEquals(expected, resolve(route), route.toString())));
         }
         return tests.stream();
     }

@@ -2693,8 +2693,17 @@ actions list the operations AWS checks as the action their HTTP method names (ab
 resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to
 the resource would be refused; no vendored route is one now. The routes of
 Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
-so none is checked differently. S3 is routed by its rules alone, since it tells apart the
-operations of one route by their query and headers. A route
+so none is checked differently. S3 and S3 Control are routed by their botocore routes too, both under the
+s3 scope: operations sharing a route are told apart by the query parameters and headers their requests
+require (`UploadPart`, on `PUT /{Bucket}/{Key+}` with `PutObject`, carries `partNumber` and `uploadId`),
+and an S3 Control request, which answers a denial in S3 Control's own envelope, by the model of the route
+it matches. A key keeps the slashes it was sent with, read as S3 reads it, so `PUT /bucket//email.txt`
+is checked on `arn:aws:s3:::bucket//email.txt`. `DeleteObjects` names its keys in its XML body, which the
+filter does not read, so S3 checks each key itself. S3 runs only what botocore routes, so the operation that runs is
+the one checked: `SelectObjectContent` is `POST ?select&select-type=2` and reads the current version, and a tagging
+ARN is decoded once, as the Go SDK encodes it. An S3 Control route Floci does not serve reaches no handler. A request two operations' routes take
+alike, none outranking the other, as one naming two of S3's sub-resources, runs as whichever its handler picks, so
+it is refused. A route
 matching nothing is not checked, as an unsigned REST request is not; the other REST services' routes
 are not vendored yet.
 
@@ -2726,7 +2735,8 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   and ACLs, checks the same actions, and offers the bucket policy the tag and Object Lock keys the
   request sets.
 - **Restore and select:** `RestoreObject` is checked as `s3:RestoreObject`, and
-  `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
+  `SelectObjectContent` as `s3:GetObject`, which the S3 user guide's permissions table requires for it
+  alone; botocore gives its request no version.
 - **Attributes:** `GetObjectAttributes` needs `s3:GetObject` and `s3:GetObjectAttributes`, as its
   API reference says.
 - **Copying:** `CopyObject` and `UploadPartCopy` also need `s3:GetObject` on the source object, or
@@ -2746,10 +2756,11 @@ An S3 object operation is checked as the action the S3 documentation gives it:
     user guide also says the permission does not apply to annotation operations, so deleting an
     annotation does not need it.
 - **Annotations:** object annotations use the `s3:*ObjectAnnotation` actions, and
-  `s3:ListObjectAnnotations` when no annotation name is given.
+  `s3:ListObjectAnnotations` when the request carries no `annotationName`.
 - **Versions:** a `versionId` selects the version action AWS checks.
-  - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed. Its
-    attributes need `s3:GetObjectVersion` and `s3:GetObjectVersionAttributes`.
+  - Reading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed. Its
+    attributes need `s3:GetObjectVersion` and `s3:GetObjectVersionAttributes`. Heading one needs
+    `s3:GetObject`, which the S3 user guide's permissions table gives `HeadObject` whatever version it names.
   - Deleting a version needs `s3:DeleteObjectVersion`, so a deny on it stops permanent deletes
     while a plain delete still adds a delete marker.
   - A version's ACL, tags and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl`,

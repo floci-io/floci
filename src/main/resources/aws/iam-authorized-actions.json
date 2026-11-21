@@ -1153,6 +1153,23 @@
       "TestDNSAnswer",
       "UpdateIpGuardrailPolicy"
     ],
+    "s3": [
+      "CreateJob",
+      "CreateStorageLensGroup",
+      "GetAccessPoint",
+      "GetAccountPublicAccessBlock",
+      "ListAccessGrantsInstances",
+      "ListAccessPoints",
+      "ListAccessPointsForObjectLambda",
+      "ListAllMyBuckets",
+      "ListJobs",
+      "ListMultiRegionAccessPoints",
+      "ListStorageLensConfigurations",
+      "ListStorageLensGroups",
+      "PutAccessPointPublicAccessBlock",
+      "PutAccountPublicAccessBlock",
+      "PutStorageLensConfiguration"
+    ],
     "s3tables": [
       "ListTableBuckets"
     ],

@@ -306,7 +306,10 @@ class IamRestRoutesTest {
         assertEquals(Optional.empty(), get("/nothing"));
     }
 
-    /** The vendored routes load, a model routed under the scope it signs with, and S3 is left to its rules. */
+    /**
+     * The vendored routes load, a model routed under the scope it signs with: S3 and S3 Control under the s3 scope, a
+     * route several operations share told apart by what each requires.
+     */
     @Test
     void theVendoredRoutesAreRead() {
         assertEquals(Optional.of("GetFunction"),
@@ -317,7 +320,32 @@ class IamRestRoutesTest {
                 IamRestRoutes.vendored().operation("es", "GET", "/2021-01-01/opensearch/domain/logs", null));
         assertEquals(Optional.of("DescribeElasticsearchDomain"),
                 IamRestRoutes.vendored().operation("es", "GET", "/2015-01-01/es/domain/logs", null));
-        assertEquals(Optional.empty(), IamRestRoutes.vendored().operation("s3", "GET", "/bucket", null));
+        assertEquals(Optional.of("ListObjects"), IamRestRoutes.vendored().operation("s3", "GET", "/bucket", null));
+        MultivaluedMap<String, String> upload = new MultivaluedHashMap<>();
+        upload.add("uploadId", "u");
+        assertEquals(Optional.of("ListParts"), IamRestRoutes.vendored().operation("s3", "GET", "/bucket/key", upload));
+        assertEquals(Optional.of("GetPublicAccessBlock"), IamRestRoutes.vendored()
+                .match("s3", "GET", "/v20180820/configuration/publicAccessBlock", null)
+                .filter(match -> "s3control".equals(match.model())).map(IamRestRoutes.Match::operation));
+    }
+
+    /**
+     * A request two operations' routes take alike, none outranking the other, is ambiguous: one naming two of S3's
+     * sub-resources. One a route requiring more takes over one requiring less is not.
+     */
+    @Test
+    void aRequestTwoOperationsRoutesTakeAlikeIsAmbiguous() {
+        MultivaluedMap<String, String> both = new MultivaluedHashMap<>();
+        both.add("cors", "");
+        both.add("policy", "");
+        assertTrue(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket", both, false, null));
+        MultivaluedMap<String, String> one = new MultivaluedHashMap<>();
+        one.add("cors", "");
+        assertFalse(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket", one, false, null));
+        MultivaluedMap<String, String> part = new MultivaluedHashMap<>();
+        part.add("partNumber", "1");
+        part.add("uploadId", "u");
+        assertFalse(IamRestRoutes.vendored().ambiguous("s3", "PUT", "/bucket/key", part, false, null));
     }
 
     @ParameterizedTest
