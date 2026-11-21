@@ -10,6 +10,7 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -67,6 +69,30 @@ class EksCfnProvisionerTest {
         assertEquals("LS0tLS1CRUdJTg==", r.getAttributes().get("CertificateAuthorityData"));
         assertEquals("https://oidc.eks.us-east-1.amazonaws.com/id/ABC",
                 r.getAttributes().get("OpenIdConnectIssuerUrl"));
+    }
+
+    @Test
+    void aTagsOnlyUpdateRollsBackNoClusterConfig() throws Exception {
+        // A tags-only update saves no cluster config, so its rollback writes none back over another caller's.
+        Cluster created = new Cluster();
+        created.setName("prod");
+        created.setArn("arn:aws:eks:us-east-1:000000000000:cluster/prod");
+        when(eks.createCluster(any(CreateClusterRequest.class))).thenReturn(created);
+        StackResource r = resource("AWS::EKS::Cluster", "Control");
+        provisioner.provision(r, props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\"}"),
+                ctx());
+        created.setTags(new HashMap<>(Map.of("team", "a")));
+        created.setLogging(new Logging());
+        when(eks.describeCluster("prod")).thenReturn(created);
+        JsonNode before = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\", "
+                + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"a\"}]}");
+        JsonNode after = props("{\"Name\": \"prod\", \"RoleArn\": \"arn:aws:iam::000000000000:role/eks\", "
+                + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"b\"}]}");
+        ProvisionContext update = new ProvisionContext(ctx().engine(), "us-east-1", "000000000000", "my-stack",
+                "prod", event -> { }, before, PropertyChanges.between("AWS::EKS::Cluster", true, before, after));
+        provisioner.provision(r, after, update);
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(eks, never()).restoreClusterConfig(any(), any(), any(), any());
     }
 
     @Test
