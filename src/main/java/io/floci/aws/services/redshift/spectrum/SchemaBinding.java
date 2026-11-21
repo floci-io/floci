@@ -14,4 +14,10 @@ interface SchemaBinding {
     default String bindingName() {
         return schemaName();
     }
+
+    static void require(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+    }
 }

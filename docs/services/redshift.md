@@ -1067,8 +1067,27 @@ kept, as in Redshift.
 - `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
   with `25001`, because the schema registration is not part of the PostgreSQL transaction.
 - `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
-- Schemas over Amazon MSK or Kafka are not supported.
 - `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### External schemas over Amazon MSK
+
+An external schema over an Amazon MSK cluster maps a local schema to the cluster for streaming ingestion.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
+FROM MSK
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
+AUTHENTICATION iam
+CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+
+- `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
+- The role and cluster ARN are not checked when the schema is created.
+- A statement that names a relation of the schema (`SELECT * FROM msk.my_topic`, `INSERT INTO msk.t`, `UPDATE msk.t`, `CREATE TABLE msk.t (...)`) is refused with SQLSTATE `0A000`. Streaming materialized views over MSK topics are not yet wired.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA` with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
 
 ### Streaming materialized views
 
