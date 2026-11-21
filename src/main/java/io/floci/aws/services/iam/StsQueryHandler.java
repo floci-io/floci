@@ -84,6 +84,7 @@ public class StsQueryHandler {
     private final CentralRootAccess centralRootAccess;
     private final WebIdentityTokenIssuer tokenIssuer;
     private final RequestContext requestContext;
+    private final IamConditionContextResolver conditionContextResolver;
     private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
@@ -106,10 +107,11 @@ public class StsQueryHandler {
                            DelegationRequestService delegationRequestService,
                            CentralRootAccess centralRootAccess,
                            WebIdentityTokenIssuer tokenIssuer,
-                           RequestContext requestContext) {
+                           RequestContext requestContext,
+                           IamConditionContextResolver conditionContextResolver) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
                 tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
+                centralRootAccess, tokenIssuer, requestContext, conditionContextResolver, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -123,6 +125,7 @@ public class StsQueryHandler {
                     CentralRootAccess centralRootAccess,
                     WebIdentityTokenIssuer tokenIssuer,
                     RequestContext requestContext,
+                    IamConditionContextResolver conditionContextResolver,
                     Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
@@ -138,6 +141,7 @@ public class StsQueryHandler {
         this.centralRootAccess = centralRootAccess;
         this.tokenIssuer = tokenIssuer;
         this.requestContext = requestContext;
+        this.conditionContextResolver = conditionContextResolver;
         this.clock = clock;
     }
 
@@ -407,7 +411,8 @@ public class StsQueryHandler {
      * in the header or presigned in the query, which for an IAM user or a session is the account
      * that owns the key rather than the default one. A role session is matched as the role that
      * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
-     * the request's keys: the global keys, {@code sts:RoleSessionName}, {@code sts:ExternalId}
+     * the request's keys: the global keys, those of its connection ({@code aws:SourceIp},
+     * {@code aws:SecureTransport} and its headers'), {@code sts:RoleSessionName}, {@code sts:ExternalId}
      * when the caller sends one, and the keys that say who is calling, which the resolved caller
      * writes itself so that a trust policy reads the same principal as any other policy. A
      * credential that resolves to no identity is the account root stand-in, carrying the account
@@ -444,6 +449,7 @@ public class StsQueryHandler {
 
         Map<String, List<String>> trustContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
+        conditionContextResolver.putRequestTransport(trustContext);
         trustContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
         String externalId = getParam(params, "ExternalId");
         if (externalId != null) {
