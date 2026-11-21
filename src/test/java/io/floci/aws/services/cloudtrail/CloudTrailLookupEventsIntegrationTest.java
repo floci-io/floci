@@ -10,6 +10,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudtrail.model.Event;
 import software.amazon.awssdk.services.cloudtrail.model.InvalidLookupAttributesException;
+import software.amazon.awssdk.services.cloudtrail.model.InvalidNextTokenException;
 import software.amazon.awssdk.services.cloudtrail.model.LookupAttributeKey;
 import software.amazon.awssdk.services.cloudtrail.model.LookupEventsResponse;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
@@ -96,10 +97,25 @@ class CloudTrailLookupEventsIntegrationTest {
         assertTrue(!first.events().get(0).eventTime().isBefore(first.events().get(1).eventTime()));
 
         try (CloudTrailClient cloudTrail = cloudTrail(account)) {
-            LookupEventsResponse second = cloudTrail.lookupEvents(r -> r.maxResults(2).nextToken(first.nextToken()));
+            LookupEventsResponse second = cloudTrail.lookupEvents(r -> r.maxResults(2).nextToken(first.nextToken())
+                    .lookupAttributes(a -> a.attributeKey(LookupAttributeKey.EVENT_SOURCE).attributeValue(SECRETS_MANAGER)));
             assertEquals(1, second.events().size());
             assertNull(second.nextToken());
             assertTrue(!first.events().get(1).eventTime().isBefore(second.events().getFirst().eventTime()));
+        }
+    }
+
+    @Test
+    void aNextTokenIsRefusedForADifferentLookup() {
+        String account = newAccount();
+        putSecretValues(account, 2);
+        String token = lookup(account, LookupAttributeKey.EVENT_SOURCE, SECRETS_MANAGER, 1).nextToken();
+        assertNotNull(token);
+
+        try (CloudTrailClient cloudTrail = cloudTrail(account)) {
+            assertThrows(InvalidNextTokenException.class, () -> cloudTrail.lookupEvents(r -> r.maxResults(1)
+                    .nextToken(token)
+                    .lookupAttributes(a -> a.attributeKey(LookupAttributeKey.EVENT_NAME).attributeValue("PutSecretValue"))));
         }
     }
 

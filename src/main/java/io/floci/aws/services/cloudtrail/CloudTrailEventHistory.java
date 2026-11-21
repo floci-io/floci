@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -23,6 +24,10 @@ final class CloudTrailEventHistory {
     static final int MAX_EVENTS_PER_REGION = 10_000;
     static final Duration RETENTION = Duration.ofDays(90);
 
+    /** The lookup attribute keys AWS accepts. */
+    static final Set<String> LOOKUP_ATTRIBUTE_KEYS = Set.of("EventId", "EventName", "ReadOnly", "Username",
+            "ResourceType", "ResourceName", "EventSource", "AccessKeyId");
+
     /** One recorded event; {@code sequence} orders events recorded within the same instant. */
     record HistoryEvent(long sequence, Instant eventTime, ObjectNode record) {}
 
@@ -33,10 +38,11 @@ final class CloudTrailEventHistory {
     private final AtomicLong sequence = new AtomicLong();
 
     void record(String accountId, String region, Instant eventTime, ObjectNode record) {
-        HistoryEvent event = new HistoryEvent(sequence.incrementAndGet(), eventTime, record.deepCopy());
+        ObjectNode copy = record.deepCopy();
         eventsByAccountAndRegion.compute(key(accountId, region), (ignored, events) -> {
             Deque<HistoryEvent> updated = events == null ? new ArrayDeque<>() : events;
-            updated.addLast(event);
+            // Numbered under the region's lock, so the deque, the sequence and the page order agree.
+            updated.addLast(new HistoryEvent(sequence.incrementAndGet(), eventTime, copy));
             while (updated.size() > MAX_EVENTS_PER_REGION) {
                 updated.removeFirst();
             }
@@ -50,9 +56,8 @@ final class CloudTrailEventHistory {
         Instant oldest = now.minus(RETENTION);
         List<HistoryEvent> matching = new ArrayList<>();
         eventsByAccountAndRegion.computeIfPresent(key(accountId, region), (ignored, events) -> {
-            while (!events.isEmpty() && events.peekFirst().eventTime().isBefore(oldest)) {
-                events.removeFirst();
-            }
+            // Event times are taken before the lock, so two concurrent writes can land out of time order.
+            events.removeIf(event -> event.eventTime().isBefore(oldest));
             events.descendingIterator().forEachRemaining(event -> {
                 if (inRange(event.eventTime(), startTime, endTime) && matches(event.record(), attribute)) {
                     matching.add(event);
@@ -80,9 +85,14 @@ final class CloudTrailEventHistory {
             case "Username" -> identity.path("userName").asText(null);
             case "AccessKeyId" -> identity.path("accessKeyId").asText(null);
             // The recorded events name no resources, so a resource attribute matches none of them.
-            default -> null;
+            case "ResourceType", "ResourceName" -> null;
+            default -> throw new IllegalArgumentException("Not a lookup attribute key: " + attribute.key());
         };
         return attribute.value().equals(actual);
+    }
+
+    void clear() {
+        eventsByAccountAndRegion.clear();
     }
 
     private static String key(String accountId, String region) {

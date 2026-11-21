@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -48,7 +49,7 @@ import java.util.regex.Pattern;
 import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
 
 @ApplicationScoped
-public class CloudTrailService implements StoredResourceArns {
+public class CloudTrailService implements StoredResourceArns, Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
@@ -536,6 +537,12 @@ public class CloudTrailService implements StoredResourceArns {
                                                                   CloudTrailEventHistory.LookupAttribute attribute,
                                                                   Instant startTime, Instant endTime) {
         return eventHistory.lookup(regionResolver.getAccountId(), region, attribute, startTime, endTime, Instant.now());
+    }
+
+    /** Trails live in storage, which reset wipes; the event history is held here. */
+    @Override
+    public void clear() {
+        eventHistory.clear();
     }
 
     /** Whether the current account has a trail, so a caller can skip building an event. */

@@ -22,15 +22,13 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.Objects;
 
 @ApplicationScoped
 public class CloudTrailJsonHandler {
 
     /** {@code LookupEvents} returns at most 50 events a page, whatever {@code MaxResults} asks for. */
     private static final int MAX_LOOKUP_EVENTS = 50;
-    private static final Set<String> LOOKUP_ATTRIBUTE_KEYS = Set.of("EventId", "EventName", "ReadOnly",
-            "Username", "ResourceType", "ResourceName", "EventSource", "AccessKeyId");
 
     private final CloudTrailService service;
     private final ObjectMapper mapper;
@@ -264,7 +262,7 @@ public class CloudTrailJsonHandler {
                 service.lookupEvents(region, attribute, startTime, endTime),
                 event -> String.format("%019d", Long.MAX_VALUE - event.sequence()),
                 maxResults == null ? MAX_LOOKUP_EVENTS : Math.min(maxResults, MAX_LOOKUP_EVENTS),
-                textOrNull(req, "NextToken"), "lookup-events",
+                textOrNull(req, "NextToken"), lookupNamespace(region, attribute, startTime, endTime),
                 token -> new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400));
         ObjectNode resp = mapper.createObjectNode();
         ArrayNode events = resp.putArray("Events");
@@ -287,9 +285,25 @@ public class CloudTrailJsonHandler {
         return Response.ok(resp).build();
     }
 
+    /**
+     * A token pages only the lookup that issued it: AWS requires the same parameters with it, and
+     * a token reused for another filter, time range or region is refused rather than read as a
+     * position in a different list.
+     */
+    private static String lookupNamespace(String region, CloudTrailEventHistory.LookupAttribute attribute,
+                                          Instant startTime, Instant endTime) {
+        return "lookup-events:" + Integer.toHexString(Objects.hash(region, attribute, startTime, endTime));
+    }
+
     /** AWS takes at most one lookup attribute, keyed by one of the documented names. */
     private static CloudTrailEventHistory.LookupAttribute lookupAttribute(JsonNode attributes) {
-        if (!attributes.isArray() || attributes.isEmpty()) {
+        if (attributes.isMissingNode() || attributes.isNull()) {
+            return null;
+        }
+        if (!attributes.isArray()) {
+            throw notConvertible(attributes, "a list");
+        }
+        if (attributes.isEmpty()) {
             return null;
         }
         if (attributes.size() > 1) {
@@ -297,20 +311,41 @@ public class CloudTrailJsonHandler {
                     "You cannot specify more than one lookup attribute.", 400);
         }
         JsonNode attribute = attributes.get(0);
-        String key = attribute.path("AttributeKey").asText(null);
-        String value = attribute.path("AttributeValue").asText(null);
-        if (key == null || !LOOKUP_ATTRIBUTE_KEYS.contains(key) || value == null) {
-            throw new AwsException("InvalidLookupAttributesException",
-                    "Specify a valid lookup attribute key and value.", 400);
+        if (!attribute.isObject()) {
+            throw notConvertible(attribute, "a structure");
         }
-        return new CloudTrailEventHistory.LookupAttribute(key, value);
+        JsonNode key = attribute.path("AttributeKey");
+        JsonNode value = attribute.path("AttributeValue");
+        if (!key.isTextual() || !CloudTrailEventHistory.LOOKUP_ATTRIBUTE_KEYS.contains(key.asText())
+                || !value.isTextual() || value.asText().isEmpty()) {
+            throw new AwsException("InvalidLookupAttributesException",
+                    "Specify a valid lookup attribute key and a non-empty value.", 400);
+        }
+        return new CloudTrailEventHistory.LookupAttribute(key.asText(), value.asText());
     }
 
+    /** An omitted or null bound does not filter; any other value must be epoch seconds. */
     private static Instant timestamp(JsonNode node) {
-        if (!node.isNumber()) {
+        if (node.isMissingNode() || node.isNull()) {
             return null;
         }
+        if (!node.isNumber()) {
+            throw notConvertible(node, "a Timestamp");
+        }
         return Instant.ofEpochMilli(Math.round(node.doubleValue() * 1000));
+    }
+
+    /** The {@code SerializationException} AWS answers for a member of the wrong JSON type. */
+    private static AwsException notConvertible(JsonNode node, String target) {
+        if (node.isObject()) {
+            return serialization("Start of structure or map found where not expected.");
+        }
+        if (node.isArray()) {
+            return serialization("Start of list found where not expected");
+        }
+        String kind = node.isTextual() ? "STRING_VALUE" : node.isBoolean()
+                ? (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE") : "NUMBER_VALUE";
+        return serialization(kind + " can not be converted to " + target);
     }
 
     /** An omitted or null {@code MaxResults} is optional and takes the service default. */

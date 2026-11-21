@@ -196,6 +196,21 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
+    void lookupEventsRefusesMalformedTimeBoundsAndLookupAttributes() {
+        invokeCloudTrail("LookupEvents", "{\"StartTime\":\"2026-01-01\"}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"EndTime\":true}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":{}}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":[\"EventName\"]}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents",
+                "{\"LookupAttributes\":[{\"AttributeKey\":\"EventName\",\"AttributeValue\":\"\"}]}")
+            .then().statusCode(400).body(containsString("InvalidLookupAttributesException"));
+    }
+
+    @Test
     void lookupEventsReturnsEmptyEventPage() {
         invokeCloudTrail("LookupEvents", """
                 {
