@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -1112,10 +1113,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
 
     /** Creates an UPDATE change set (with one "Name=value" parameter when given) and returns the DescribeChangeSet body. */
     private String describeChangeSet(String stackName, String changeSetName, String template, String param) {
-        RequestSpecification create = given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateChangeSet")
-            .formParam("StackName", stackName)
+        RequestSpecification create = cfn("CreateChangeSet", stackName)
             .formParam("ChangeSetName", changeSetName)
             .formParam("ChangeSetType", "UPDATE")
             .formParam("TemplateBody", template);
@@ -1125,15 +1123,10 @@ class CloudFormationChangeSetDiffIntegrationTest {
         }
         create.when().post("/").then().statusCode(200);
 
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeChangeSet")
-            .formParam("StackName", stackName)
+        return cfn("DescribeChangeSet", stackName)
             .formParam("ChangeSetName", changeSetName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
+            .when().post("/")
+            .then().statusCode(200)
             .extract().body().asString();
     }
 
@@ -1207,6 +1200,10 @@ class CloudFormationChangeSetDiffIntegrationTest {
             new DetailsRow("no-value", "AWS::SNS::Topic", "\"DisplayName\":\"a\"",
                 "\"DisplayName\":\"b\",\"KmsMasterKeyId\":{\"Ref\":\"AWS::NoValue\"}", null,
                 List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
+            new DetailsRow("edited-and-parameter", "AWS::SQS::Queue",
+                "\"QueueName\":\"cs-det-both\",\"Tags\":[{\"Key\":\"k\",\"Value\":{\"Ref\":\"P\"}}]",
+                "\"QueueName\":\"cs-det-both\",\"Tags\":[{\"Key\":\"k2\",\"Value\":{\"Ref\":\"P\"}}]", "P=v2",
+                List.of("Tags"), List.of("Tags||Never" + direct, "Tags||Never|ParameterReference|Static|P"), "False", true),
             new DetailsRow("nested-create-only", "AWS::Route53::HealthCheck", healthCheck("HTTP"), healthCheck("HTTPS"), null,
                 List.of("Properties"), List.of("Properties|HealthCheckConfig|Always" + direct), "True", true),
             new DetailsRow("condition", "AWS::SQS::Queue", "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet,
