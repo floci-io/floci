@@ -195,19 +195,6 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         return BackupWindows.backupWindowAfter(maintenanceWindow);
     }
 
-    /** A window given alone that leaves no room for the other kind, in AWS's words. */
-    public static AwsException noRoomForMaintenanceWindow() {
-        return new AwsException("InvalidParameterValue", "The specified backup window overlaps all "
-                + "available default maintenance windows. Shrink the backup window or specify a "
-                + "non-overlapping maintenance window.", 400);
-    }
-
-    public static AwsException noRoomForBackupWindow() {
-        return new AwsException("InvalidParameterValue", "The specified maintenance window overlaps "
-                + "all available default backup windows. Shrink the maintenance window or specify a "
-                + "non-overlapping backup window.", 400);
-    }
-
     public static AwsException overlappingWindows() {
         return BackupWindows.overlapping();
     }

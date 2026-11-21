@@ -463,13 +463,10 @@ AWS::RDS::DBCluster	PerformanceInsightsEnabled	accepted and ignored
 AWS::RDS::DBCluster	PerformanceInsightsKmsKeyId	accepted and ignored
 AWS::RDS::DBCluster	PerformanceInsightsRetentionPeriod	accepted and ignored
 AWS::RDS::DBCluster	Port	accepted and ignored
-AWS::RDS::DBCluster	PreferredBackupWindow	accepted and ignored
-AWS::RDS::DBCluster	PreferredMaintenanceWindow	accepted and ignored
 AWS::RDS::DBCluster	ReplicationSourceIdentifier	accepted and ignored
 AWS::RDS::DBCluster	ScalingConfiguration	accepted and ignored
 AWS::RDS::DBCluster	StorageType	accepted and ignored
 AWS::RDS::DBCluster	Tags	accepted and ignored
-AWS::RDS::DBCluster	VpcSecurityGroupIds	accepted and ignored
 AWS::RDS::DBCluster	WithExpressConfiguration	accepted and ignored
 AWS::RDS::DBClusterParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBClusterParameterGroup	Tags	accepted and ignored

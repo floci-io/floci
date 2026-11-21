@@ -7,6 +7,8 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -264,6 +266,155 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             stack("DeleteStack", stackName, null);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
+    }
+
+    @Test
+    void aClusterWithNoTemplateGroupsGetsTheVpcDefaultAndADroppedListGoesBackToIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-sg-" + suffix;
+        String clusterId = "cfn-sg-cluster-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "%s"%s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId, "password123", ""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            List<String> defaultGroup = clusterGroups(clusterId);
+            assertEquals(1, defaultGroup.size(), defaultGroup.toString());
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "password123",
+                    ", \"VpcSecurityGroupIds\": [\"sg-named\"]"));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-named"), clusterGroups(clusterId));
+
+            // A list the previous template declared and this one drops goes back to the VPC default.
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "password456", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(defaultGroup, clusterGroups(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void anUpdateLeavesGroupsSetOutsideTheStackAndDroppedSettingsKeepTheirValues() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-sg-out-" + suffix;
+        String clusterId = "cfn-sg-out-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "%s"%s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId, "password123",
+                    ", \"DeletionProtection\": true, \"PreferredBackupWindow\": \"03:00-04:00\","
+                    + " \"PreferredMaintenanceWindow\": \"mon:05:00-mon:06:00\""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            rds("ModifyDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-outside")
+            .when().post("/").then().statusCode(200);
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "password456", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-outside"), clusterGroups(clusterId));
+            XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
+                    .when().post("/").then().statusCode(200).extract().xmlPath();
+            assertEquals("true", xml.getString("**.find { it.name() == 'DeletionProtection' }"));
+            assertEquals("03:00-04:00", xml.getString("**.find { it.name() == 'PreferredBackupWindow' }"));
+            assertEquals("mon:05:00-mon:06:00",
+                    xml.getString("**.find { it.name() == 'PreferredMaintenanceWindow' }"));
+        } finally {
+            rds("ModifyDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("DeletionProtection", "false").when().post("/");
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void anExplicitEmptyGroupListKeepsTheDefaultOnCreateAndRestoresItOnUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-sg-empty-" + suffix;
+        String clusterId = "cfn-sg-empty-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "VpcSecurityGroupIds": %s}}}}
+                """;
+        try {
+            List<String> vpcDefault = vpcDefaultGroup(suffix);
+            stack("CreateStack", stackName, cluster.formatted(clusterId, "[]"));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(vpcDefault, clusterGroups(clusterId));
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "[\"sg-named\"]"));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-named"), clusterGroups(clusterId));
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "[]"));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(vpcDefault, clusterGroups(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {", \"VpcSecurityGroupIds\": [\"sg-second\"]", ""})
+    void aGroupChangeIsUndoneWhenALaterResourceFailsTheUpdate(String updatedGroups) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-sg-undo-" + suffix;
+        String clusterId = "cfn-sg-undo-" + suffix;
+        String cluster = """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"%s}}""";
+        // A member carrying its own roles is refused, after the cluster has been updated.
+        String failingMember = """
+                , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                  "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
+                  "DBInstanceClass": "db.r6g.large",
+                  "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
+        try {
+            stack("CreateStack", stackName, "{\"Resources\": {"
+                    + cluster.formatted(clusterId, ", \"VpcSecurityGroupIds\": [\"sg-first\"]") + "}}");
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            stack("UpdateStack", stackName, "{\"Resources\": {"
+                    + cluster.formatted(clusterId, updatedGroups) + failingMember + "}}");
+            // The cluster's other settings have no rollback, so the stack reports the rollback failed.
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-first"), clusterGroups(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /** The group a cluster created with none lands on, read from a throwaway cluster. */
+    private static List<String> vpcDefaultGroup(String suffix) {
+        String id = "cfn-sg-ref-" + suffix;
+        rds("CreateDBCluster").formParam("DBClusterIdentifier", id).formParam("Engine", "aurora-postgresql")
+                .formParam("MasterUsername", "dbadmin").formParam("MasterUserPassword", "password123")
+        .when().post("/").then().statusCode(200);
+        try {
+            return clusterGroups(id);
+        } finally {
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", id).formParam("SkipFinalSnapshot", "true")
+                    .when().post("/").then().statusCode(200);
+        }
+    }
+
+    private static List<String> clusterGroups(String clusterId) {
+        XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
+                .when().post("/").then().statusCode(200).extract().xmlPath();
+        return xml.getList("**.findAll { it.name() == 'VpcSecurityGroupId' }", String.class);
     }
 
     private static String template(String clusterId, String instanceId, String clusterRoles) {
