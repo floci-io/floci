@@ -24,8 +24,7 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     /** {@code region} is null when the statement names none, which leaves the cluster's own Region. */
     record CreateKinesisSchema(String schemaName, String region, String iamRoleArn,
                                boolean ifNotExists) implements ExternalStatement { }
-    /** {@code partition} is null when the statement omits {@code PARTITION}. */
-    record CreateMskSchema(String schemaName, String partition, String iamRoleArn, String authentication,
+    record CreateMskSchema(String schemaName, String iamRoleArn, String authentication,
                            String clusterArn, boolean ifNotExists) implements ExternalStatement { }
     record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
                        List<ColumnDefinition> partitionColumns, TableFormat format, String location,

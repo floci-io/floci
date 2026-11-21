@@ -78,16 +78,14 @@ class SpectrumMskSchemaPreparationTest {
         assertThat(binding.iamRoleArn(), equalTo(ROLE));
         assertThat(binding.authentication(), equalTo("IAM"));
         assertThat(binding.clusterArn(), equalTo(CLUSTER));
-        assertThat(binding.partition(), equalTo(null));
     }
 
     @Test
-    void keepsThePartitionAndAuthModeTheStatementNames() {
-        preparation.prepare("CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION 'aws-us-gov' IAM_ROLE '" + ROLE
+    void keepsTheAuthModeTheStatementNames() {
+        preparation.prepare("CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE '" + ROLE
                 + "' AUTHENTICATION none CLUSTER_ARN '" + CLUSTER + "'", SESSION, backend);
 
         MskSchemaBinding binding = bound("msk").orElseThrow();
-        assertThat(binding.partition(), equalTo("aws-us-gov"));
         assertThat(binding.authentication(), equalTo("NONE"));
     }
 
@@ -334,7 +332,7 @@ class SpectrumMskSchemaPreparationTest {
     @Test
     void aDropDoesNotUnbindASchemaThatWasRecreatedMeanwhile() {
         preparation.prepare(CREATE, SESSION, backend);
-        MskSchemaBinding newer = new MskSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "msk", null,
+        MskSchemaBinding newer = new MskSchemaBinding(ACCOUNT, SESSION.clusterKey(), "dev", "msk",
                 "arn:aws:iam::000000000000:role/Other", "NONE", CLUSTER);
         doAnswer(invocation -> {
             mskSchemas.unbind(ACCOUNT, SESSION.clusterKey(), "dev", "msk");

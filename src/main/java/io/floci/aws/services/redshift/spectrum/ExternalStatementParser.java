@@ -1,7 +1,5 @@
 package io.floci.aws.services.redshift.spectrum;
 
-import io.floci.aws.core.common.AwsPartition;
-import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.SqlParameterParser;
 import jakarta.enterprise.context.ApplicationScoped;
 
@@ -195,7 +193,6 @@ public class ExternalStatementParser {
 
     private static ExternalStatement.CreateMskSchema parseMskSchema(String schemaName, boolean ifNotExists,
                                                                     String tail) {
-        String partition = null;
         String iamRoleArn = null;
         String authentication = null;
         String clusterArn = null;
@@ -210,17 +207,6 @@ public class ExternalStatementParser {
             String keyword = tail.substring(pos, keyEnd).toUpperCase(Locale.ROOT);
             pos = skipWhitespace(tail, keyEnd);
             switch (keyword) {
-                case "PARTITION" -> {
-                    if (partition != null) {
-                        throw new SpectrumSqlException("42601", "Duplicate PARTITION clause");
-                    }
-                    TokenSlice slice = readValueToken(tail, pos, "PARTITION");
-                    pos = slice.end();
-                    String raw = requireQuotedLiteral(slice.text(), "PARTITION must be a single quoted partition name");
-                    AwsPartition known = AwsPartitions.find(raw).orElseThrow(() ->
-                            new SpectrumSqlException("22023", "Invalid PARTITION: " + raw));
-                    partition = known.id();
-                }
                 case "IAM_ROLE" -> {
                     if (iamRoleArn != null) {
                         throw new SpectrumSqlException("42601", "Duplicate IAM_ROLE clause");
@@ -269,7 +255,7 @@ public class ExternalStatementParser {
         if (clusterArn == null) {
             throw new SpectrumSqlException("42601", "CREATE EXTERNAL SCHEMA FROM MSK requires CLUSTER_ARN");
         }
-        return new ExternalStatement.CreateMskSchema(schemaName, partition, iamRoleArn, authentication,
+        return new ExternalStatement.CreateMskSchema(schemaName, iamRoleArn, authentication,
                 clusterArn, ifNotExists);
     }
 

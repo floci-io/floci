@@ -1076,13 +1076,12 @@ An external schema over an Amazon MSK cluster maps a local schema to the cluster
 ```sql
 CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
 FROM MSK
-[PARTITION 'aws']
 IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
 AUTHENTICATION iam
 CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
 ```
 
-`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode, cluster ARN and optional partition, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
 
 - `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
 - The role and cluster ARN are not checked when the schema is created.

@@ -155,9 +155,9 @@ public class SpectrumQueryPreparation {
     }
 
     public boolean referencesExternal(String sql, SpectrumSession session) {
-        Set<String> schemas = bindings(session).keySet();
-        Set<String> kinesisSchemaNames = kinesisBindings(session).keySet();
-        Set<String> mskSchemaNames = mskBindings(session).keySet();
+        Set<String> schemas = bindingsOf(registry, session).keySet();
+        Set<String> kinesisSchemaNames = bindingsOf(kinesisSchemas, session).keySet();
+        Set<String> mskSchemaNames = bindingsOf(mskSchemas, session).keySet();
         return !ExternalReferenceScanner.scan(sql, schemas).isEmpty()
                 || !ExternalReferenceScanner.scan(sql, kinesisSchemaNames).isEmpty()
                 || !ExternalReferenceScanner.scan(sql, mskSchemaNames).isEmpty()
@@ -172,16 +172,17 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateKinesisSchema ignored -> true;
             case ExternalStatement.CreateMskSchema ignored -> true;
             case ExternalStatement.CreateTable table -> session.inTransaction()
-                    || bindings(session).containsKey(table.schemaName())
-                    || kinesisBindings(session).containsKey(table.schemaName())
-                    || mskBindings(session).containsKey(table.schemaName());
-            case ExternalStatement.AddPartitions partitions -> bindings(session).containsKey(partitions.schemaName());
-            case ExternalStatement.DropTable table -> bindings(session).containsKey(table.schemaName());
-            case ExternalStatement.DropSchema schema -> bindings(session).containsKey(schema.schemaName())
-                    || kinesisBindings(session).containsKey(schema.schemaName())
-                    || mskBindings(session).containsKey(schema.schemaName());
+                    || bindingsOf(registry, session).containsKey(table.schemaName())
+                    || bindingsOf(kinesisSchemas, session).containsKey(table.schemaName())
+                    || bindingsOf(mskSchemas, session).containsKey(table.schemaName());
+            case ExternalStatement.AddPartitions partitions ->
+                    bindingsOf(registry, session).containsKey(partitions.schemaName());
+            case ExternalStatement.DropTable table -> bindingsOf(registry, session).containsKey(table.schemaName());
+            case ExternalStatement.DropSchema schema -> bindingsOf(registry, session).containsKey(schema.schemaName())
+                    || bindingsOf(kinesisSchemas, session).containsKey(schema.schemaName())
+                    || bindingsOf(mskSchemas, session).containsKey(schema.schemaName());
             case ExternalStatement.CreateStreamingView view -> streamSource(view.select(), session).isPresent()
-                    || !ExternalReferenceScanner.scan(view.select(), mskBindings(session).keySet()).isEmpty();
+                    || !ExternalReferenceScanner.scan(view.select(), bindingsOf(mskSchemas, session).keySet()).isEmpty();
             case ExternalStatement.RefreshView view ->
                     views.find(session, view.viewSchema(), view.viewName()).isPresent();
             case ExternalStatement.DropView view ->
@@ -213,18 +214,19 @@ public class SpectrumQueryPreparation {
         if (statement.orElse(null) instanceof ExternalStatement.CreateMskSchema schema) {
             return createMskSchema(schema, session, backend);
         }
-        Map<String, KinesisSchemaBinding> kinesis = kinesisBindings(session);
-        Map<String, MskSchemaBinding> msk = mskBindings(session);
+        Map<String, KinesisSchemaBinding> kinesis = bindingsOf(kinesisSchemas, session);
+        Map<String, MskSchemaBinding> msk = bindingsOf(mskSchemas, session);
         if (statement.orElse(null) instanceof ExternalStatement.DropSchema schema
                 && kinesis.containsKey(schema.schemaName())) {
             rejectTransaction(session);
-            dropKinesisSchema(schema, kinesis.get(schema.schemaName()), session, backend);
+            dropStreamingSchema(schema, kinesis.get(schema.schemaName()), kinesisSchemas,
+                    views.overSchema(session, schema.schemaName()), session, backend);
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.DropSchema schema
                 && msk.containsKey(schema.schemaName())) {
             rejectTransaction(session);
-            dropMskSchema(schema, msk.get(schema.schemaName()), session, backend);
+            dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas, List.of(), session, backend);
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view) {
@@ -233,7 +235,7 @@ public class SpectrumQueryPreparation {
                         "Streaming materialized views over MSK external schemas are not supported");
             }
             if (!ExternalReferenceScanner.scan(view.select(), kinesis.keySet()).isEmpty()) {
-                createStreamingView(view, kinesis, msk, session, backend);
+                createStreamingView(view, kinesis, session, backend);
                 return true;
             }
         }
@@ -252,7 +254,7 @@ public class SpectrumQueryPreparation {
                 return true;
             }
         }
-        Map<String, ExternalSchemaBinding> bindings = bindings(session);
+        Map<String, ExternalSchemaBinding> bindings = bindingsOf(registry, session);
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable && session.inTransaction()) {
             // Legacy-catalog tables are saved immediately too, so a rollback would leave them behind.
             throw new SpectrumSqlException("25001", "CREATE EXTERNAL TABLE cannot run inside a transaction block");
@@ -454,7 +456,7 @@ public class SpectrumQueryPreparation {
     }
 
     private void requireCurrentBinding(SpectrumSession session, ExternalSchemaBinding binding) {
-        if (!binding.equals(bindings(session).get(binding.schemaName()))) {
+        if (!binding.equals(bindingsOf(registry, session).get(binding.schemaName()))) {
             throw new SpectrumSqlException("42P01", "External schema binding changed; retry the statement");
         }
     }
@@ -518,7 +520,7 @@ public class SpectrumQueryPreparation {
             return existingSchemaOutcome(schema.schemaName(), schema.ifNotExists());
         }
         MskSchemaBinding binding = new MskSchemaBinding(session.accountId(), session.clusterKey(),
-                session.databaseName(), schema.schemaName(), schema.partition(), schema.iamRoleArn(),
+                session.databaseName(), schema.schemaName(), schema.iamRoleArn(),
                 schema.authentication(), schema.clusterArn());
         createBoundSchema(backend, schema.schemaName(), schema.ifNotExists(),
                 () -> metadata.refreshMsk(backend, binding), () -> mskSchemas.bind(binding));
@@ -568,11 +570,12 @@ public class SpectrumQueryPreparation {
         }
     }
 
-    private void dropKinesisSchema(ExternalStatement.DropSchema statement, KinesisSchemaBinding binding,
-                                   SpectrumSession session, BackendSql backend) {
+    private <B extends SchemaBinding> void dropStreamingSchema(ExternalStatement.DropSchema statement, B binding,
+                                                               SchemaBindingRegistry<B> schemaRegistry,
+                                                               List<KinesisViewBinding> dependents,
+                                                               SpectrumSession session, BackendSql backend) {
         requireSchemaOwner(backend, binding.schemaName());
         // CASCADE takes the streaming views that read the schema with it; RESTRICT stops on their staging tables.
-        List<KinesisViewBinding> dependents = views.overSchema(session, binding.schemaName());
         StringBuilder dropViews = new StringBuilder();
         if (statement.cascade()) {
             for (KinesisViewBinding dependent : dependents) {
@@ -587,40 +590,20 @@ public class SpectrumQueryPreparation {
             dependents.forEach(views::unbindIfCurrent);
         }
         // a concurrent drop and re-create of the name may have bound a newer schema meanwhile
-        if (binding.equals(kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
+        if (binding.equals(schemaRegistry.find(session.accountId(), session.clusterKey(), session.databaseName(),
                 binding.schemaName()).orElse(null))) {
-            kinesisSchemas.unbind(session.accountId(), session.clusterKey(), session.databaseName(),
-                    binding.schemaName());
-        }
-    }
-
-    private void dropMskSchema(ExternalStatement.DropSchema statement, MskSchemaBinding binding,
-                               SpectrumSession session, BackendSql backend) {
-        requireSchemaOwner(backend, binding.schemaName());
-        // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
-        backend.execute("DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
-                + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
-                + "; " + metadata.purgeSql(binding.schemaName()));
-        // a concurrent drop and re-create of the name may have bound a newer schema meanwhile
-        if (binding.equals(mskSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
-                binding.schemaName()).orElse(null))) {
-            mskSchemas.unbind(session.accountId(), session.clusterKey(), session.databaseName(),
+            schemaRegistry.unbind(session.accountId(), session.clusterKey(), session.databaseName(),
                     binding.schemaName());
         }
     }
 
     private Optional<ExternalReferenceScanner.Reference> streamSource(String select, SpectrumSession session) {
-        return ExternalReferenceScanner.scan(select, kinesisBindings(session).keySet()).stream().findFirst();
+        return ExternalReferenceScanner.scan(select, bindingsOf(kinesisSchemas, session).keySet()).stream().findFirst();
     }
 
     private void createStreamingView(ExternalStatement.CreateStreamingView view,
                                      Map<String, KinesisSchemaBinding> kinesis,
-                                     Map<String, MskSchemaBinding> msk,
                                      SpectrumSession session, BackendSql backend) {
-        if (!ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
-            throw new SpectrumSqlException("0A000",
-                    "Streaming materialized views over MSK external schemas are not supported");
-        }
         if (session.inTransaction()) {
             throw new SpectrumSqlException("0A000",
                     "CREATE MATERIALIZED VIEW over a stream inside a transaction is not supported");
@@ -659,27 +642,10 @@ public class SpectrumQueryPreparation {
         views.refresh(view, schema, catalogRegion(session), backend);
     }
 
-    private Map<String, KinesisSchemaBinding> kinesisBindings(SpectrumSession session) {
-        Map<String, KinesisSchemaBinding> bindings = new LinkedHashMap<>();
-        for (KinesisSchemaBinding binding : kinesisSchemas.list(session.accountId(), session.clusterKey(),
-                session.databaseName())) {
-            bindings.put(binding.schemaName(), binding);
-        }
-        return bindings;
-    }
-
-    private Map<String, MskSchemaBinding> mskBindings(SpectrumSession session) {
-        Map<String, MskSchemaBinding> bindings = new LinkedHashMap<>();
-        for (MskSchemaBinding binding : mskSchemas.list(session.accountId(), session.clusterKey(),
-                session.databaseName())) {
-            bindings.put(binding.schemaName(), binding);
-        }
-        return bindings;
-    }
-
-    private Map<String, ExternalSchemaBinding> bindings(SpectrumSession session) {
-        Map<String, ExternalSchemaBinding> bindings = new LinkedHashMap<>();
-        for (ExternalSchemaBinding binding : registry.list(session.accountId(), session.clusterKey(), session.databaseName())) {
+    private <B extends SchemaBinding> Map<String, B> bindingsOf(SchemaBindingRegistry<B> schemaRegistry,
+                                                                 SpectrumSession session) {
+        Map<String, B> bindings = new LinkedHashMap<>();
+        for (B binding : schemaRegistry.list(session.accountId(), session.clusterKey(), session.databaseName())) {
             bindings.put(binding.schemaName(), binding);
         }
         return bindings;

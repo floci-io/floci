@@ -72,41 +72,37 @@ public class ExternalMetadataWriter {
     }
 
     /**
-     * A schema over a Kinesis stream lists as kind 9 with no tables. Its stream is read only through a
-     * materialized view, and Redshift documents no external database name for it, so that column stays empty.
+     * A schema over a Kinesis stream lists as kind 9 with no tables.
      */
     String refreshKinesisSql(KinesisSchemaBinding binding) {
-        Map<String, Object> payload = row(
-                "eskind", KINESIS_SCHEMA_KIND,
-                "databasename", "",
-                "esoptions", json(Map.of("IAM_ROLE", binding.iamRoleArn())),
-                "tables", List.of(),
-                "columns", List.of(),
-                "partitions", List.of());
-        return "SELECT floci_internal.refresh_external_catalog(" + literal(binding.schemaName()) + ", "
-                + literal(json(payload)) + "::jsonb)";
+        return refreshStreamingSql(binding.schemaName(), KINESIS_SCHEMA_KIND,
+                Map.of("IAM_ROLE", binding.iamRoleArn()));
     }
 
     /**
-     * A schema over an Amazon MSK cluster lists as kind 10 with no tables. Its topics are read only through a
-     * streaming materialized view, and Redshift documents no external database name for it.
+     * A schema over an Amazon MSK cluster lists as kind 10 with no tables.
      */
     String refreshMskSql(MskSchemaBinding binding) {
-        Map<String, Object> options = new LinkedHashMap<>();
-        options.put("IAM_ROLE", binding.iamRoleArn());
-        options.put("AUTHENTICATION", binding.authentication());
-        options.put("CLUSTER_ARN", binding.clusterArn());
-        if (binding.partition() != null) {
-            options.put("PARTITION", binding.partition());
-        }
+        Map<String, Object> options = row(
+                "IAM_ROLE", binding.iamRoleArn(),
+                "AUTHENTICATION", binding.authentication(),
+                "CLUSTER_ARN", binding.clusterArn());
+        return refreshStreamingSql(binding.schemaName(), MSK_SCHEMA_KIND, options);
+    }
+
+    /**
+     * Streaming external schemas list with no tables: their streams or topics are read only through a
+     * streaming materialized view, and Redshift documents no external database name for them.
+     */
+    private String refreshStreamingSql(String schemaName, int kind, Map<String, ?> options) {
         Map<String, Object> payload = row(
-                "eskind", MSK_SCHEMA_KIND,
+                "eskind", kind,
                 "databasename", "",
                 "esoptions", json(options),
                 "tables", List.of(),
                 "columns", List.of(),
                 "partitions", List.of());
-        return "SELECT floci_internal.refresh_external_catalog(" + literal(binding.schemaName()) + ", "
+        return "SELECT floci_internal.refresh_external_catalog(" + literal(schemaName) + ", "
                 + literal(json(payload)) + "::jsonb)";
     }
 

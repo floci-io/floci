@@ -12,16 +12,10 @@ public record KinesisSchemaBinding(String accountId, String clusterKey, String d
                                    String schemaName, String region, String iamRoleArn)
         implements SchemaBinding {
     public KinesisSchemaBinding {
-        require(accountId, "accountId");
-        require(clusterKey, "clusterKey");
-        require(databaseName, "databaseName");
-        require(schemaName, "schemaName");
-        require(iamRoleArn, "iamRoleArn");
-    }
-
-    private static void require(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(field + " is required");
-        }
+        SchemaBinding.require(accountId, "accountId");
+        SchemaBinding.require(clusterKey, "clusterKey");
+        SchemaBinding.require(databaseName, "databaseName");
+        SchemaBinding.require(schemaName, "schemaName");
+        SchemaBinding.require(iamRoleArn, "iamRoleArn");
     }
 }

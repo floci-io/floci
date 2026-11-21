@@ -11,7 +11,6 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -34,7 +33,7 @@ class MskSchemaRegistryTest {
     }
 
     private static MskSchemaBinding binding(String cluster, String database, String schema) {
-        return new MskSchemaBinding(ACCOUNT, cluster, database, schema, null, ROLE, "IAM", CLUSTER);
+        return new MskSchemaBinding(ACCOUNT, cluster, database, schema, ROLE, "IAM", CLUSTER);
     }
 
     @Test
@@ -78,7 +77,7 @@ class MskSchemaRegistryTest {
 
     @Test
     void doesNotMixUpComponentsThatContainTheSeparator() {
-        registry.bind(new MskSchemaBinding(ACCOUNT, "c|1", "dev", "msk", null, ROLE, "IAM", CLUSTER));
+        registry.bind(new MskSchemaBinding(ACCOUNT, "c|1", "dev", "msk", ROLE, "IAM", CLUSTER));
 
         assertThat(registry.find(ACCOUNT, "c", "1|dev", "msk").isPresent(), equalTo(false));
         assertThat(registry.find(ACCOUNT, "c|1", "dev", "msk").isPresent(), equalTo(true));
@@ -107,25 +106,14 @@ class MskSchemaRegistryTest {
     }
 
     @Test
-    void keepsThePartitionOfASchemaThatNamesOne() {
-        registry.bind(new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", "aws-us-gov", ROLE, "NONE", CLUSTER));
-        registry.bind(binding("c1", "dev", "local"));
-
-        assertThat(registry.find(ACCOUNT, "c1", "dev", "msk").orElseThrow().partition(), equalTo("aws-us-gov"));
-        assertThat(registry.find(ACCOUNT, "c1", "dev", "local").orElseThrow().partition(), nullValue());
-    }
-
-    @Test
     void validatesRequiredFieldsAndAuthenticationMode() {
         assertThrows(IllegalArgumentException.class,
-                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", null, " ", "IAM", CLUSTER));
+                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", " ", "IAM", CLUSTER));
         assertThrows(IllegalArgumentException.class,
-                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "", null, ROLE, "IAM", CLUSTER));
+                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "", ROLE, "IAM", CLUSTER));
         assertThrows(IllegalArgumentException.class,
-                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", null, ROLE, "IAM", " "));
+                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", ROLE, "IAM", " "));
         assertThrows(IllegalArgumentException.class,
-                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", null, ROLE, "MTLS", CLUSTER));
-        assertThrows(IllegalArgumentException.class,
-                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", " ", ROLE, "IAM", CLUSTER));
+                () -> new MskSchemaBinding(ACCOUNT, "c1", "dev", "msk", ROLE, "MTLS", CLUSTER));
     }
 }

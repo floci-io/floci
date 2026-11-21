@@ -68,7 +68,6 @@ class ExternalStatementParserTest {
                 "CREATE EXTERNAL SCHEMA Msk FROM MSK IAM_ROLE 'arn:aws:iam::000000000000:role/R' "
                         + "AUTHENTICATION iam CLUSTER_ARN '" + clusterArn + "';").orElseThrow();
         assertThat(schema.schemaName(), equalTo("msk"));
-        assertThat(schema.partition(), nullValue());
         assertThat(schema.iamRoleArn(), equalTo("arn:aws:iam::000000000000:role/R"));
         assertThat(schema.authentication(), equalTo("IAM"));
         assertThat(schema.clusterArn(), equalTo(clusterArn));
@@ -76,31 +75,27 @@ class ExternalStatementParserTest {
     }
 
     @Test
-    void parsesMskSchemaWithPartitionIfNotExistsAuthNoneAndReorderedClauses() {
+    void parsesMskSchemaWithIfNotExistsAuthNoneAndReorderedClauses() {
         String clusterArn = "arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/orders/abc-123";
         ExternalStatement.CreateMskSchema schema = (ExternalStatement.CreateMskSchema) parser.parse(
                 "create external schema if not exists \"Msk\"\nfrom msk\n"
-                        + "partition 'aws-us-gov'\n"
                         + "cluster_arn '" + clusterArn + "'\n"
                         + "authentication none\n"
                         + "iam_role 'arn:aws-us-gov:iam::000000000000:role/R'").orElseThrow();
         assertThat(schema.schemaName(), equalTo("Msk"));
-        assertThat(schema.partition(), equalTo("aws-us-gov"));
         assertThat(schema.authentication(), equalTo("NONE"));
         assertThat(schema.clusterArn(), equalTo(clusterArn));
         assertThat(schema.ifNotExists(), equalTo(true));
     }
 
     @Test
-    void parsesMskSchemaWithCommentsEscapedQuotesAndUppercasePartition() {
+    void parsesMskSchemaWithCommentsAndEscapedQuotes() {
         ExternalStatement.CreateMskSchema schema = (ExternalStatement.CreateMskSchema) parser.parse(
                 "-- leading comment\nCREATE EXTERNAL SCHEMA msk FROM MSK /* inline */\n"
-                        + "PARTITION 'AWS-US-GOV' -- partition comment\n"
                         + "IAM_ROLE 'arn:aws-us-gov:iam::000000000000:role/O''Brien'\n"
                         + "AUTHENTICATION IAM\n"
                         + "CLUSTER_ARN 'arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/c''1/1' /* tail */;")
                 .orElseThrow();
-        assertThat(schema.partition(), equalTo("aws-us-gov"));
         assertThat(schema.iamRoleArn(), equalTo("arn:aws-us-gov:iam::000000000000:role/O'Brien"));
         assertThat(schema.clusterArn(), equalTo("arn:aws-us-gov:kafka:us-gov-west-1:000000000000:cluster/c'1/1"));
     }
@@ -133,9 +128,7 @@ class ExternalStatementParserTest {
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN ''",
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN",
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN unquoted",
-                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION '' IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
-                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION aws IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
-                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION 'aws' PARTITION 'aws' IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
+                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION 'aws' IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION scram CLUSTER_ARN " + cluster,
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " AUTHENTICATION iam AUTHENTICATION none CLUSTER_ARN " + cluster,
                 "CREATE EXTERNAL SCHEMA msk FROM MSK IAM_ROLE " + role + " IAM_ROLE " + role + " AUTHENTICATION iam CLUSTER_ARN " + cluster,
@@ -149,15 +142,6 @@ class ExternalStatementParserTest {
             SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(sql));
             assertThat(sql, error.sqlState(), equalTo("42601"));
         }
-    }
-
-    @Test
-    void rejectsAnUnknownPartitionOnAnMskSchema() {
-        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(
-                "CREATE EXTERNAL SCHEMA msk FROM MSK PARTITION 'not-a-partition' "
-                        + "IAM_ROLE 'arn:aws:iam::000000000000:role/R' AUTHENTICATION iam "
-                        + "CLUSTER_ARN 'arn:aws:kafka:us-east-1:000000000000:cluster/c/1'"));
-        assertThat(error.sqlState(), equalTo("22023"));
     }
 
     @Test
