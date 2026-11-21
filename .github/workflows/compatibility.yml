@@ -12,6 +12,7 @@ on:
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
       - 'docker/healthcheck.sh'
+      - 'docker/test_healthcheck.py'
       - 'docker/run-docker-tests.sh'
       - 'docker/test-run-docker-tests.sh'
       - 'docker/test-compat-socket.sh'
@@ -49,6 +50,9 @@ jobs:
 
       - name: Test Docker runner failure aggregation
         run: bash docker/test-run-docker-tests.sh
+
+      - name: Test container healthcheck listener
+        run: python3 -m unittest discover -s docker -p test_healthcheck.py
 
   compat-aws-cli-shim:
     name: compat / aws CLI endpoint resolution
