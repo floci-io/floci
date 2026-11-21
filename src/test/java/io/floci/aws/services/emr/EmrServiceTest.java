@@ -17,10 +17,12 @@ import org.junit.jupiter.api.function.Executable;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.PrimitiveIterator;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -971,6 +973,25 @@ class EmrServiceTest {
         assertEquals("InvalidRequestException", refused.getErrorCode());
         assertEquals("The supplied release label is invalid: .", refused.getMessage());
         assertEquals(Map.of("ErrorCode", "INVALID_RELEASE_LABEL"), refused.getExtendedData());
+    }
+
+    @Test
+    void publicAddressesStayValidPastTheDocumentationRangeAndVolumeIdsDifferBetweenClusters() {
+        assertEquals("203.0.113.1", EmrService.publicIpAddress(1));
+        assertEquals("203.0.113.254", EmrService.publicIpAddress(254));
+        assertEquals("100.64.0.1", EmrService.publicIpAddress(255));
+        assertEquals("100.64.1.1", EmrService.publicIpAddress(509));
+        assertEquals("100.65.0.1", EmrService.publicIpAddress(255 + 254 * 256));
+        Set<String> addresses = LongStream.rangeClosed(1, 70_000).mapToObj(EmrService::publicIpAddress)
+                .collect(Collectors.toSet());
+        assertEquals(70_000, addresses.size(), "no two instances share an address");
+        assertTrue(addresses.stream().allMatch(address -> Arrays.stream(address.split("\\."))
+                .mapToInt(Integer::parseInt).allMatch(octet -> octet >= 0 && octet <= 255)), "every octet is a byte");
+
+        String first = EmrService.ebsVolumeId("j-AAAAAAAAAAAAA", 1, 0);
+        assertTrue(first.matches("vol-[0-9a-f]{17}"), first);
+        assertFalse(first.equals(EmrService.ebsVolumeId("j-BBBBBBBBBBBBB", 1, 0)), "two clusters' volumes differ");
+        assertFalse(first.equals(EmrService.ebsVolumeId("j-AAAAAAAAAAAAA", 1, 1)), "an instance's volumes differ");
     }
 
     private static List<String> ids(List<EmrStep> steps) {

@@ -109,8 +109,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     /** The members of {@code Instances} Floci's RunJobFlow keeps nothing of, accepted with a warning. */
     private static final List<String> INSTANCES_NOT_STORED = List.of("Ec2SubnetIds", "AdditionalMasterSecurityGroups",
             "AdditionalSlaveSecurityGroups", "HadoopVersion");
-    /** The members of an instance group, and of an instance fleet, Floci's RunJobFlow keeps nothing of. */
-    private static final List<String> GROUP_NOT_STORED = List.of("EbsConfiguration", "CustomAmiId");
+    /** The members of an instance fleet Floci's RunJobFlow keeps nothing of. */
     private static final List<String> FLEET_NOT_STORED = List.of("LaunchSpecifications", "ResizeSpecifications");
     private static final String GROUPS = "groups";
     private static final String FLEETS = "fleets";
@@ -299,7 +298,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** Warns of each property, or member of {@code Instances}, its groups or fleets, RunJobFlow keeps nothing of. */
+    /** Warns of each property, or member of {@code Instances} or its fleets, RunJobFlow keeps nothing of. */
     private static void warnNotStored(String logicalId, JsonNode template) {
         List<String> ignored = new ArrayList<>();
         for (String name : CLUSTER_NOT_STORED) {
@@ -313,17 +312,9 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
                 ignored.add("Instances." + name);
             }
         }
-        List<JsonNode> groups = new ArrayList<>(List.of(instances.path("MasterInstanceGroup"),
-                instances.path("CoreInstanceGroup")));
-        instances.path("TaskInstanceGroups").forEach(groups::add);
         List<JsonNode> fleets = new ArrayList<>(List.of(instances.path("MasterInstanceFleet"),
                 instances.path("CoreInstanceFleet")));
         instances.path("TaskInstanceFleets").forEach(fleets::add);
-        for (String name : GROUP_NOT_STORED) {
-            if (groups.stream().anyMatch(group -> group.has(name))) {
-                ignored.add("an instance group's " + name);
-            }
-        }
         for (String name : FLEET_NOT_STORED) {
             if (fleets.stream().anyMatch(fleet -> fleet.has(name))) {
                 ignored.add("an instance fleet's " + name);
