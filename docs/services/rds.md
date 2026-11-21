@@ -190,7 +190,7 @@ checked against the instance's other window. Modifications apply immediately —
 `CreateDBCluster` and `ModifyDBCluster` store `VpcSecurityGroupIds` (a cluster given none gets its
 VPC's default security group), `PreferredBackupWindow` and `PreferredMaintenanceWindow`. Windows are
 checked like an instance's and the maintenance window is returned with lowercase day names.
-`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds`,
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds` and
 `PreferredBackupWindow` the same way, and a restored cluster given no group is put in its VPC's
 default security group.
 `AWS::RDS::DBCluster` applies `VpcSecurityGroupIds`, `PreferredBackupWindow` and
