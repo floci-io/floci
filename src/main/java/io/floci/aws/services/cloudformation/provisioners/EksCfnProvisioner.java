@@ -244,18 +244,21 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * are applied, and only when the template's value differs from the live cluster's. EksService has no
      * UpdateClusterVersion, so a changed Version is accepted with a warning and not applied. AWS lets
      * UpdateClusterConfig choose different subnets and security groups, but floci does not apply that, so a
-     * changed or dropped subnet or security group list fails the resource.
+     * changed or dropped subnet or security group list fails the resource. The snapshot holds, and the
+     * rollback restores, only the config families the update changes, taken from the same read the request is
+     * computed from.
      */
     private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live,
                                PropertyChanges changes) {
         warnIgnoredChanges("cluster", live.getName(), changes, CLUSTER_APPLIED);
+        // One read of the cluster: the request, the snapshot and the apply all start from it.
+        Cluster current = currentOr(live);
+        UpdateClusterConfigRequest configRequest = configRequest(props, ctx, changes, current);
         updateTagsInPlace(r, props, ctx, live.getArn(), live.getTags(), live.getName(), TAG_KEYS_ATTR, SNAPSHOT_ATTR,
                 () -> publish(r, live), true, snapshot -> {
                     snapshot.put("name", live.getName());
-                    // Read just before the apply, so the snapshot holds what the apply starts from.
-                    snapshotConfig(snapshot, currentOr(live));
+                    snapshotConfig(snapshot, current, configRequest);
                 }, () -> {
-                    UpdateClusterConfigRequest configRequest = configRequest(props, ctx, changes, currentOr(live));
                     if (configRequest != null) {
                         eksService.updateClusterConfig(live.getName(), configRequest);
                     }
@@ -419,15 +422,24 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         return current == null ? live : current;
     }
 
-    private static void snapshotConfig(ObjectNode snapshot, Cluster live) {
+    /**
+     * Saves the live value of each family {@code request} changes, and only those, so the rollback restores
+     * only what this update wrote and leaves a family another writer changed since untouched. A null request
+     * (a tag-only update) saves no config.
+     */
+    private static void snapshotConfig(ObjectNode snapshot, Cluster live, UpdateClusterConfigRequest request) {
+        if (request == null) {
+            return;
+        }
         ResourcesVpcConfig vpc = live.getResourcesVpcConfig();
-        if (vpc != null) {
+        if (request.resourcesVpcConfig() != null && vpc != null) {
             snapshot.set("endpoint", MAPPER.valueToTree(vpc));
         }
-        if (live.getLogging() != null) {
+        if (request.logging() != null && live.getLogging() != null) {
             snapshot.set("logging", MAPPER.valueToTree(live.getLogging()));
         }
-        if (live.getAccessConfig() != null && live.getAccessConfig().authenticationMode() != null) {
+        if (request.accessConfig() != null && live.getAccessConfig() != null
+                && live.getAccessConfig().authenticationMode() != null) {
             snapshot.put("authenticationMode", live.getAccessConfig().authenticationMode());
         }
     }
