@@ -61,12 +61,13 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Template properties the backing service does not store. The runtime's capacity provider,
-     * filesystems, lifecycle, platform version and request-header allowlist, and the memory's
-     * strategies, indexed keys, namespace keys and stream delivery have no representation in the
-     * emulated control plane; the endpoint model carries no tags.
+     * filesystems, hooks, lifecycle, platform version, request-header allowlist and resource
+     * configurations, and the memory's strategies, indexed keys, namespace keys and stream delivery
+     * have no representation in the emulated control plane; the endpoint model carries no tags.
      */
     private static final Set<String> RUNTIME_NOT_STORED = Set.of("CapacityProviderConfiguration",
-            "FilesystemConfigurations", "LifecycleConfiguration", "PlatformVersion", "RequestHeaderConfiguration");
+            "FilesystemConfigurations", "HooksConfiguration", "LifecycleConfiguration", "PlatformVersion",
+            "RequestHeaderConfiguration", "ResourceConfigurations");
     private static final Set<String> RUNTIME_ENDPOINT_NOT_STORED = Set.of("Tags");
     private static final Set<String> MEMORY_NOT_STORED = Set.of("IndexedKeys", "MemoryStrategies",
             "NamespaceKeys", "StreamDeliveryResources");

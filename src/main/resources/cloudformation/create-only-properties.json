@@ -874,7 +874,8 @@
   "AWS::Route53::HealthCheck": [
     "HealthCheckConfig/Type",
     "HealthCheckConfig/MeasureLatency",
-    "HealthCheckConfig/RequestInterval"
+    "HealthCheckConfig/RequestInterval",
+    "HealthCheckConfig/EndpointType"
   ],
   "AWS::Route53::HostedZone": [
     "Name",
@@ -902,7 +903,7 @@
     "DistanceMetric",
     "EncryptionConfiguration",
     "IndexName",
-    "MetadataConfiguration",
+    "MetadataConfiguration/NonFilterableMetadataKeys",
     "VectorBucketArn",
     "VectorBucketName"
   ],
