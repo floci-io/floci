@@ -1732,8 +1732,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ensureDefaultDhcpOptions(region, ownerAccountId);
         LOG.debugv("Seeding default EC2 resources for region {0}", region);
 
-        // Default VPC
-        String vpcId = defaultVpcId(region);
+        // Default VPC (#7307: derive default resource ids from both ownerAccountId and region)
+        String vpcId = defaultVpcId(region, ownerAccountId);
         Vpc defaultVpc = new Vpc();
         defaultVpc.setVpcId(vpcId);
         defaultVpc.setCidrBlock("172.31.0.0/16");
@@ -1742,7 +1742,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         defaultVpc.setOwnerId(ownerAccountId);
         defaultVpc.setRegion(region);
         defaultVpc.getCidrBlockAssociationSet().add(
-                new VpcCidrBlockAssociation("vpc-cidr-assoc-" + Ec2Ids.stableHex("vpc-cidr-assoc::" + region), "172.31.0.0/16"));
+                new VpcCidrBlockAssociation(
+                        "vpc-cidr-assoc-" + Ec2Ids.stableHex(
+                                "vpc-cidr-assoc::" + accountIdOrDefault(ownerAccountId) + "::" + region),
+                        "172.31.0.0/16"));
         vpcs.put(key(region, vpcId), defaultVpc);
         declareVpcNetwork(region, vpcId, "172.31.0.0/16");
 
@@ -1750,9 +1753,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String[] azSuffixes = MODELLED_ZONE_SUFFIXES;
         String[] cidrBlocks = {"172.31.0.0/20", "172.31.16.0/20", "172.31.32.0/20"};
         String[] subnetIds = {
-                defaultSubnetId(region, azSuffixes[0]),
-                defaultSubnetId(region, azSuffixes[1]),
-                defaultSubnetId(region, azSuffixes[2])};
+                defaultSubnetId(region, azSuffixes[0], ownerAccountId),
+                defaultSubnetId(region, azSuffixes[1], ownerAccountId),
+                defaultSubnetId(region, azSuffixes[2], ownerAccountId)};
         for (int i = 0; i < 3; i++) {
             Subnet subnet = new Subnet();
             subnet.setSubnetId(subnetIds[i]);
@@ -1771,10 +1774,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             declareSubnetNetwork(region, vpcId, subnetIds[i], cidrBlocks[i]);
         }
 
-        createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region));
+        createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region, ownerAccountId));
 
         // Default internet gateway
-        String igwId = defaultInternetGatewayId(region);
+        String igwId = defaultInternetGatewayId(region, ownerAccountId);
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
         igw.setOwnerId(ownerAccountId);
@@ -1782,8 +1785,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
-        String rtId = defaultRouteTableId(region);
-        String rtAssocId = defaultRouteTableAssociationId(region);
+        String rtId = defaultRouteTableId(region, ownerAccountId);
+        String rtAssocId = defaultRouteTableAssociationId(region, ownerAccountId);
         createMainRouteTable(region, defaultVpc, rtId, rtAssocId);
 
         RouteTable mainRt = routeTables.get(key(region, rtId)).orElse(null);
@@ -1792,12 +1795,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         // Default NACL - create and associate with default subnets
-        String defaultAclId = defaultNetworkAclId(region);
+        String defaultAclId = defaultNetworkAclId(region, ownerAccountId);
         createDefaultNetworkAcl(region, vpcId, defaultAclId);
         NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
         if (defaultAcl != null) {
             for (String subnetId : subnetIds) {
-                String assocId = defaultNetworkAclAssociationId(region, subnetId);
+                String assocId = defaultNetworkAclAssociationId(region, subnetId, ownerAccountId);
                 NetworkAclAssociation assoc = new NetworkAclAssociation();
                 assoc.setNetworkAclAssociationId(assocId);
                 assoc.setNetworkAclId(defaultAclId);
@@ -2425,17 +2428,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return region + "::" + id;
     }
 
-    // Default resource ids must be derived per region (lex00/floci#21): every region seeds its own
-    // default VPC/subnets/security group independently, but a literal id like "vpc-default"
-    // is identical text in every region's response even though storage itself is already
-    // correctly keyed by region. RdsService derives the same ids from these methods so its
-    // default DB subnet group resolves against the right region's default VPC.
+    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
+
+    // Default resource ids must be derived per account and region (lex00/floci#21, #7307): every
+    // account in every region seeds its own default VPC/subnets/security group independently, so
+    // their ids must include both the owning account and the region. RdsService and DocDbService
+    // derive the same ids from these methods so default subnet groups and security groups resolve
+    // against the caller's default VPC.
     public static String defaultVpcId(String region) {
-        return "vpc-" + Ec2Ids.stableHex("vpc::" + region);
+        return defaultVpcId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultVpcId(String region, String ownerAccountId) {
+        return "vpc-" + Ec2Ids.stableHex("vpc::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     public static String defaultSubnetId(String region, String azSuffix) {
-        return "subnet-" + Ec2Ids.stableHex("subnet::" + region + "::" + azSuffix);
+        return defaultSubnetId(region, azSuffix, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultSubnetId(String region, String azSuffix, String ownerAccountId) {
+        return "subnet-" + Ec2Ids.stableHex(
+                "subnet::" + accountIdOrDefault(ownerAccountId) + "::" + region + "::" + azSuffix);
     }
 
     public static boolean isModelledAvailabilityZone(String region, String zone) {
@@ -2443,57 +2457,86 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public static String defaultSecurityGroupId(String region) {
-        return "sg-" + Ec2Ids.stableHex("sg::" + region);
+        return defaultSecurityGroupId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultSecurityGroupId(String region, String ownerAccountId) {
+        return "sg-" + Ec2Ids.stableHex("sg::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     /**
      * Internet Gateway ID for the default network in a region: igw-<17 hex digits>.
      */
     public static String defaultInternetGatewayId(String region) {
-        return "igw-" + Ec2Ids.stableHex("igw::" + region);
+        return defaultInternetGatewayId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultInternetGatewayId(String region, String ownerAccountId) {
+        return "igw-" + Ec2Ids.stableHex("igw::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     /**
      * Main Route Table ID for the default network in a region: rtb-<17 hex digits>.
      */
     public static String defaultRouteTableId(String region) {
-        return "rtb-" + Ec2Ids.stableHex("rtb::" + region);
+        return defaultRouteTableId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultRouteTableId(String region, String ownerAccountId) {
+        return "rtb-" + Ec2Ids.stableHex("rtb::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     /**
      * Main Route Table Association ID for the default network in a region: rtbassoc-<17 hex digits>.
      */
     public static String defaultRouteTableAssociationId(String region) {
-        return "rtbassoc-" + Ec2Ids.stableHex("rtbassoc::" + region);
+        return defaultRouteTableAssociationId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultRouteTableAssociationId(String region, String ownerAccountId) {
+        return "rtbassoc-" + Ec2Ids.stableHex("rtbassoc::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     /**
      * Default Network ACL ID for the default network in a region: acl-<17 hex digits>.
      */
     public static String defaultNetworkAclId(String region) {
-        return "acl-" + Ec2Ids.stableHex("acl::" + region);
+        return defaultNetworkAclId(region, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultNetworkAclId(String region, String ownerAccountId) {
+        return "acl-" + Ec2Ids.stableHex("acl::" + accountIdOrDefault(ownerAccountId) + "::" + region);
     }
 
     /**
      * Network ACL Association ID for a default subnet in a region: aclassoc-<17 hex digits>.
      */
     public static String defaultNetworkAclAssociationId(String region, String subnetId) {
-        return "aclassoc-" + Ec2Ids.stableHex("aclassoc::" + region + "::" + subnetId);
+        return defaultNetworkAclAssociationId(region, subnetId, DEFAULT_ACCOUNT_ID);
+    }
+
+    public static String defaultNetworkAclAssociationId(String region, String subnetId, String ownerAccountId) {
+        return "aclassoc-" + Ec2Ids.stableHex(
+                "aclassoc::" + accountIdOrDefault(ownerAccountId) + "::" + region + "::" + subnetId);
+    }
+
+    private static String accountIdOrDefault(String ownerAccountId) {
+        return ownerAccountId == null || ownerAccountId.isBlank() ? DEFAULT_ACCOUNT_ID : ownerAccountId.trim();
     }
 
     // Resolves the default VPC/security-group id actually on file for a region, falling back to
     // the pre-lex00/floci#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
     // ids were made region-scoped. Seeding (ensureDefaultResources) always assigns the new
-    // region-scoped id going forward; these resolvers only cover lookups against what may already
-    // be on disk. Without this, a region seeded under the old scheme would silently lose its
-    // default VPC/security group to every caller that resolves them by computed id.
+    // account- and region-scoped id going forward; these resolvers only cover lookups against what
+    // may already be on disk. Without this, a region seeded under the old scheme would silently
+    // lose its default VPC/security group to every caller that resolves them by computed id.
     public String resolveDefaultVpcId(String region) {
-        String scoped = defaultVpcId(region);
+        String scoped = defaultVpcId(region, callerAccountId());
         if (vpcs.get(key(region, scoped)).isPresent()) {
             return scoped;
         }
-        // Legacy literals from before ids became region-scoped.
-        for (String legacy : List.of("vpc-default", "vpc-default-" + region)) {
+        // Legacy literals from before ids became account- and region-scoped.
+        for (String legacy : List.of("vpc-" + Ec2Ids.stableHex("vpc::" + region), "vpc-default", "vpc-default-" + region)) {
             if (vpcs.get(key(region, legacy)).isPresent()) {
                 return legacy;
             }
@@ -2502,12 +2545,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public String resolveDefaultSecurityGroupId(String region) {
-        String scoped = defaultSecurityGroupId(region);
+        String scoped = defaultSecurityGroupId(region, callerAccountId());
         if (securityGroups.get(key(region, scoped)).isPresent()) {
             return scoped;
         }
-        // Legacy literals from before ids became region-scoped.
-        for (String legacy : List.of("sg-default", "sg-default-" + region)) {
+        // Legacy literals from before ids became account- and region-scoped.
+        for (String legacy : List.of("sg-" + Ec2Ids.stableHex("sg::" + region), "sg-default", "sg-default-" + region)) {
             if (securityGroups.get(key(region, legacy)).isPresent()) {
                 return legacy;
             }

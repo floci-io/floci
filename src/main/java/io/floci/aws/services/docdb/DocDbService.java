@@ -339,7 +339,7 @@ public class DocDbService {
             }
             RdsSecurityGroups.requireInVpc(ec2Service, region, securityGroups, null);
         } else if (create) {
-            securityGroups = List.of(resolveDefaultSecurityGroupId(ec2Service, region));
+            securityGroups = List.of(resolveDefaultSecurityGroupId(ec2Service, region, regionResolver.getAccountId()));
         }
         String kmsKeyArn = resolveKmsKeyArn(settings.kmsKeyId(), region);
         String backup = settings.preferredBackupWindow();
@@ -385,13 +385,10 @@ public class DocDbService {
     }
 
     /** The security group a cluster's VPC security group ids fall back to: the service's
-     *  resolved default when it is up, the region's computed default otherwise. */
-    private static String resolveDefaultSecurityGroupId(Ec2Service ec2Service, String region) {
-        if (ec2Service == null) {
-            return Ec2Service.defaultSecurityGroupId(region);
-        }
-        String resolved = ec2Service.resolveDefaultSecurityGroupId(region);
-        return resolved != null ? resolved : Ec2Service.defaultSecurityGroupId(region);
+     *  resolved default when it is up, the account and region's computed default otherwise (#7307). */
+    private static String resolveDefaultSecurityGroupId(Ec2Service ec2Service, String region, String accountId) {
+        String resolved = ec2Service != null ? ec2Service.resolveDefaultSecurityGroupId(region) : null;
+        return resolved != null ? resolved : Ec2Service.defaultSecurityGroupId(region, accountId);
     }
 
     /** The family of the group a cluster is on; a group deleted since is judged by nothing. */
@@ -504,7 +501,8 @@ public class DocDbService {
             changed = true;
         }
         if (cluster.getVpcSecurityGroupIds() == null || cluster.getVpcSecurityGroupIds().isEmpty()) {
-            cluster.setVpcSecurityGroupIds(List.of(resolveDefaultSecurityGroupId(ec2Service, region)));
+            cluster.setVpcSecurityGroupIds(List.of(
+                    resolveDefaultSecurityGroupId(ec2Service, region, regionResolver.getAccountId())));
             changed = true;
         }
         if (cluster.getPreferredBackupWindow() == null) {
