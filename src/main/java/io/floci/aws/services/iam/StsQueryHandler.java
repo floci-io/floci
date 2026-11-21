@@ -1216,10 +1216,12 @@ public class StsQueryHandler {
         Optional<OutboundWebIdentityFederation> federation =
                 iamService.findEnabledOutboundWebIdentityFederation();
         if (federation.isEmpty()) {
+            // AWS's own fixed text for this refusal, which the model cannot supply: it states
+            // this error's code and its status and not its message, so a wording taken from the
+            // shape describes the error instead of answering with it. The IAM page carries the
+            // recording this sentence comes from.
             return AwsQueryResponse.error("OutboundWebIdentityFederationDisabledException",
-                    "The outbound web identity federation feature is not enabled for this account."
-                            + " To use this feature, you must first enable it through the AWS"
-                            + " Management Console or API.", AwsNamespaces.STS, 403);
+                    "OutboundWebIdentityFederation is disabled.", AwsNamespaces.STS, 403);
         }
         Instant issuedAt = clock.instant();
         Instant expiration = issuedAt.plusSeconds(
