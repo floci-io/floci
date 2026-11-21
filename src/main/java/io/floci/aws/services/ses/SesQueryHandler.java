@@ -648,13 +648,10 @@ public class SesQueryHandler {
         String templateArn = getParam(params, "TemplateArn");
         String templateDataRaw = getParam(params, "TemplateData");
 
-        boolean hasName = templateName != null && !templateName.isBlank();
-        boolean hasArn = templateArn != null && !templateArn.isBlank();
-        if (!hasName && !hasArn) {
-            throw new AwsException("InvalidParameterValue",
-                    "Template or TemplateArn is required.", 400);
+        if (templateName == null) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNullWithoutValue("template"));
         }
-        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
+        String resolvedName = sendTemplateName(templateName, templateArn, region);
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
         String configurationSetName = getParam(params, "ConfigurationSetName");
@@ -786,7 +783,7 @@ public class SesQueryHandler {
         // top-level members before the nested ones ('template' ahead of 'defaultTags.1.member.name'),
         // each group in the model's member order (probe-confirmed).
         List<String> violations = new ArrayList<>();
-        if (templateName == null && templateArn == null) {
+        if (templateName == null) {
             violations.add(SmithyValidationErrors.notNullWithoutValue("template"));
         }
         if (!params.containsKey("Destinations") && !hasParamWithPrefix(params, "Destinations.")) {
@@ -812,13 +809,7 @@ public class SesQueryHandler {
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String defaultDataRaw = getParam(params, "DefaultTemplateData");
 
-        boolean hasName = templateName != null && !templateName.isBlank();
-        boolean hasArn = templateArn != null && !templateArn.isBlank();
-        if (!hasName && !hasArn) {
-            throw new AwsException("InvalidParameterValue",
-                    "Template or TemplateArn is required.", 400);
-        }
-        String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
+        String resolvedName = sendTemplateName(templateName, templateArn, region);
 
         int lastIndex = destinations.last();
         if (lastIndex == 0) {
@@ -1736,6 +1727,18 @@ public class SesQueryHandler {
             }
             tags.add(new MessageTag(name, value));
         }
+    }
+
+    // The templated sends require Template whatever TemplateArn holds, word an empty one ahead of
+    // the ARN checks, and take a TemplateArn only beside the Template it names (probe-confirmed).
+    private static String sendTemplateName(String templateName, String templateArn, String region) {
+        if (templateName.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Template cannot be empty", 400);
+        }
+        if (templateArn != null && !templateArn.isBlank()) {
+            SesTemplateService.requireNameAlignsWithArn(templateName, templateArn, region);
+        }
+        return templateName;
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {

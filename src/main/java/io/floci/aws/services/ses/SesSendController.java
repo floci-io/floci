@@ -451,16 +451,12 @@ public class SesSendController {
         }
 
         String storedName(String region) {
-            return hasName() ? name : SesTemplateService.sendTemplateNameFromArn(arn, region);
+            return hasName() ? name : SesTemplateService.templateNameFromArn(arn, region);
         }
 
-        // AWS accepts a TemplateName beside a TemplateArn when both name the same template, and
-        // reports a malformed ARN first (probe-confirmed on SendEmail and SendBulkEmail).
         void requireNameAlignsWithArn(String region) {
-            if (hasName() && hasArn()
-                    && !name.equals(SesTemplateService.sendTemplateNameFromArn(arn, region))) {
-                throw new AwsException("BadRequestException", "The SES resource '" + name
-                        + "' does not align with the given ARN '" + arn + "'.", 400);
+            if (hasName() && hasArn()) {
+                SesTemplateService.requireNameAlignsWithArn(name, arn, region);
             }
         }
     }

@@ -240,7 +240,7 @@ class SesTemplateTest {
                             .build())
                     .content(EmailContent.builder()
                             .template(Template.builder()
-                                    .templateArn("arn:aws:ses:us-east-1:000000000000:template/" + name)
+                                    .templateArn(TestFixtures.arn("ses", "000000000000", "template/" + name))
                                     .templateData("{\"name\":\"Alice\"}")
                                     .build())
                             .build())
@@ -446,7 +446,7 @@ class SesTemplateTest {
                             .source(v1Sender)
                             .destination(d -> d.toAddresses("recipient@example.com"))
                             .template(name)
-                            .templateArn("arn:aws:ses:us-east-1:000000000000:template/" + name)
+                            .templateArn(TestFixtures.arn("ses", "000000000000", "template/" + name))
                             .templateData("{\"name\":\"Alice\"}")
                             .build());
             assertThat(response.messageId()).isNotBlank();
