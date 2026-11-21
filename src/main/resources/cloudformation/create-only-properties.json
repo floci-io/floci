@@ -528,6 +528,12 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::EMRContainers::VirtualCluster": [
+    "ContainerProvider",
+    "Name",
+    "SecurityConfigurationId",
+    "SessionEnabled"
+  ],
   "AWS::EMRServerless::Application": [
     "Name",
     "Type"
