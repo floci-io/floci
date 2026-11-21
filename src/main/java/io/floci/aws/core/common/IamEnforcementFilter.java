@@ -58,6 +58,8 @@ import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 /**
  * JAX-RS filter that enforces IAM policies on every incoming request when
  * {@code floci.services.iam.enforcement-enabled = true}
@@ -390,7 +392,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String akid = accountResolver.extractAccessKeyId(auth);
-        if ("test".equals(akid)) {
+        if (LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return; // root bypass
         }
 
@@ -1455,7 +1457,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return;
         }
         String akid = accountResolver.extractAccessKeyId(authorizationHeader);
-        if (akid == null || "test".equals(akid)) {
+        if (akid == null || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return;
         }
         String rawScope = extractCredentialScope(authorizationHeader);
@@ -1550,7 +1552,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     public Optional<String> statementRefusal(String operation, String statement, Map<String, String> names,
                                              boolean partitioned) {
         String akid = requestContext.getAccessKeyId();
-        if (!config.services().iam().enforcementEnabled() || akid == null || "test".equals(akid)) {
+        if (!config.services().iam().enforcementEnabled() || akid == null || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return Optional.empty();
         }
         String accountId = requestContext.getAccountId();
