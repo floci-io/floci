@@ -240,7 +240,7 @@ public class ElastiCacheContainerManager {
         String logGroup = "/aws/elasticache/cluster/" + groupId + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "elasticache:" + groupId);
         handle.setLogStream(logHandle);
 

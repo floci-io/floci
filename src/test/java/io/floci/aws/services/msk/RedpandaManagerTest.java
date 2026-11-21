@@ -638,7 +638,7 @@ class RedpandaManagerTest {
         ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
         manager.startContainer(newCluster());
 
-        verify(logStreamer).attachForAccount(eq("000000000000"), eq("container-789"),
+        verify(logStreamer).attachPolledForAccount(eq("000000000000"), eq("container-789"),
                 eq("/aws/msk/cluster/test-cluster"), eq("log-stream"), eq("us-east-1"),
                 eq("msk:test-cluster"));
         verify(lifecycleManager).createAndStart(specCaptor.capture());

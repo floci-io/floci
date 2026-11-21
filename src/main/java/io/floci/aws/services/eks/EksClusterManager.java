@@ -1752,9 +1752,9 @@ public class EksClusterManager
             try {
                 String logStream = "kube-apiserver-" + hash;
                 Closeable handle = fromNow
-                        ? logStreamer.attachFromNowForAccount(
+                        ? logStreamer.attachPolledFromNowForAccount(
                                 accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName())
-                        : logStreamer.attachForAccount(
+                        : logStreamer.attachPolledForAccount(
                                 accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName());
                 if (handle != null) {
                     handles.add(handle);

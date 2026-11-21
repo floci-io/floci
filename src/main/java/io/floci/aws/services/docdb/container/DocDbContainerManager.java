@@ -144,7 +144,7 @@ public class DocDbContainerManager {
         String logGroup = "/aws/docdb/cluster/" + clusterId + "/audit";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "docdb:" + clusterId);
         handle.setLogStream(logHandle);
 
