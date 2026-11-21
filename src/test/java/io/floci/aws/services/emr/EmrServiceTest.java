@@ -20,9 +20,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.PrimitiveIterator;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
@@ -857,6 +859,74 @@ class EmrServiceTest {
 
         assertEquals(4, nodes.size());
         assertTrue(nodes.stream().allMatch(ClusterStorage.Node::core), nodes.toString());
+    }
+
+    /**
+     * EC2InstanceIdsToTerminate ends the instances it names: their nodes go, the group's other instances keep their ids
+     * and nodes, and one the group gets later takes a new ordinal, not an ended one's.
+     */
+    @Test
+    void terminatingANamedInstanceTakesItsNodeAndLeavesTheOthersTheirs() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("named", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 3)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String core = cluster.getInstanceGroups().get(1).getId();
+        // The primary node is i-...1, and the core group's instances i-...2 to i-...4, ordinals 1 to 3.
+        String second = EmrService.ec2InstanceId(3);
+
+        service.modifyInstanceGroups(cluster.getId(), REGION, List.of(
+                new EmrService.InstanceGroupModification(core, null, null, null, List.of(second))));
+
+        EmrCluster shrunk = service.describeCluster(cluster.getId());
+        assertEquals(List.of("1-1", "1-3"), service.workerNodes(shrunk).stream().map(ClusterStorage.Node::id).toList());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRequestedInstanceCount());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRunningInstanceCount());
+        AwsException again = assertThrows(AwsException.class, () -> service.modifyInstanceGroups(cluster.getId(),
+                REGION, List.of(new EmrService.InstanceGroupModification(core, null, null, null, List.of(second)))));
+        assertEquals("ValidationException", again.getErrorCode());
+        AwsException master = assertThrows(AwsException.class, () -> service.modifyInstanceGroups(cluster.getId(),
+                REGION, List.of(new EmrService.InstanceGroupModification(cluster.getInstanceGroups().get(0).getId(),
+                        null, null, null, List.of(EmrService.ec2InstanceId(1))))));
+        assertEquals("InvalidRequestException", master.getErrorCode());
+
+        service.modifyInstanceGroups(cluster.getId(), REGION,
+                List.of(new EmrService.InstanceGroupModification(core, 3, null)));
+        assertEquals(List.of("1-1", "1-3", "1-4"), service.workerNodes(service.describeCluster(cluster.getId()))
+                .stream().map(ClusterStorage.Node::id).toList());
+    }
+
+    @Test
+    void anInstancesOrdinalSkipsThoseItsGroupEnded() {
+        assertEquals(List.of(1L, 4L, 5L, 7L), LongStream.rangeClosed(1, 4)
+                .map(k -> EmrService.ordinalAt(List.of(2, 3, 6), k)).boxed().toList());
+        // The walk from any instance gives the same ordinals.
+        for (long k = 1; k <= 4; k++) {
+            PrimitiveIterator.OfLong walk = EmrService.ordinalsFrom(List.of(2, 3, 6), k);
+            for (long next = k; next <= 6; next++) {
+                assertEquals(EmrService.ordinalAt(List.of(2, 3, 6), next), walk.nextLong(), "from " + k);
+            }
+        }
+    }
+
+    /** One group named twice with the same instance ends it once. */
+    @Test
+    void anInstanceNamedTwiceInOneRequestIsEndedOnce() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("twice", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 3)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String core = cluster.getInstanceGroups().get(1).getId();
+        EmrService.InstanceGroupModification end =
+                new EmrService.InstanceGroupModification(core, null, null, null, List.of(EmrService.ec2InstanceId(3)));
+
+        service.modifyInstanceGroups(cluster.getId(), REGION, List.of(end, end));
+
+        EmrCluster shrunk = service.describeCluster(cluster.getId());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRequestedInstanceCount());
+        assertEquals(List.of("1-1", "1-3"), service.workerNodes(shrunk).stream().map(ClusterStorage.Node::id).toList());
     }
 
     /** ModifyInstanceFleet's answer for a cluster that is starting or bootstrapping. */

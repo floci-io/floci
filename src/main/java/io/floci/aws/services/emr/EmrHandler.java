@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PrimitiveIterator;
 
 /**
  * EMR (elasticmapreduce) JSON 1.1 handler. Dispatched from {@link AwsJson11Controller}
@@ -423,6 +424,24 @@ public class EmrHandler {
             throw malformed(member + " must be a string");
         }
         return value.asText();
+    }
+
+    // EC2InstanceIdsToTerminate, a list of strings in the model; another JSON type is refused as string() refuses one.
+    private static List<String> instanceIds(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        List<String> ids = new ArrayList<>();
+        if (value.isArray()) {
+            for (JsonNode id : value) {
+                if (!id.isTextual()) {
+                    throw malformed("EC2InstanceIdsToTerminate must be a list of strings");
+                }
+                ids.add(id.asText());
+            }
+            return ids;
+        }
+        throw malformed("EC2InstanceIdsToTerminate must be a list of strings");
     }
 
     private static Long longOrNull(JsonNode value, String member) {
@@ -1003,13 +1022,7 @@ public class EmrHandler {
         long start = skip;
         int page = 0;
         List<ListedInstances> listed = listedInstances(cluster, terminated);
-        ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
-        long next = primary == null ? 1 : 1 + primary.count();
         for (ListedInstances set : listed) {
-            long first = set == primary ? 1 : next;
-            if (set != primary) {
-                next += set.count();
-            }
             if (!set.matches(groupId, groupTypes, fleetId, fleetType)
                     || !states.isEmpty() && !states.contains(set.state())) {
                 continue;
@@ -1018,11 +1031,14 @@ public class EmrHandler {
                 skip -= set.count();
                 continue;
             }
-            for (long ordinal = skip + 1; ordinal <= set.count(); ordinal++) {
+            long first = EmrService.firstIndex(listed, set);
+            PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(skip + 1);
+            for (long k = skip + 1; k <= set.count(); k++) {
                 if (page == INSTANCES_PER_PAGE) {
                     response.put("Marker", String.valueOf(start + page));
                     return Response.ok(response).build();
                 }
+                long ordinal = ordinals.nextLong();
                 arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated));
                 page++;
             }
@@ -1056,9 +1072,11 @@ public class EmrHandler {
         List<EmrInstanceGroup> groups = cluster.getInstanceGroups();
         for (EmrInstanceGroup group : groups) {
             int count = listedInstanceCount(group, terminated);
+            // All on the group's market, whatever their ordinals.
             listed.add(new ListedInstances(group.getId(), null, group.getInstanceGroupType(), group.getInstanceType(),
-                    EmrService.groupNumber(groups, group), count, group.getMarket(), count,
-                    instanceState(group.getState(), beingProvisioned(group), terminated)));
+                    EmrService.groupNumber(groups, group), count, group.getMarket(), Long.MAX_VALUE,
+                    instanceState(group.getState(), beingProvisioned(group), terminated),
+                    List.copyOf(group.getTerminatedOrdinals())));
         }
         List<EmrInstanceFleet> fleets = cluster.getInstanceFleets();
         for (EmrInstanceFleet fleet : fleets) {
@@ -1071,7 +1089,7 @@ public class EmrHandler {
             listed.add(new ListedInstances(null, fleet.getId(), fleet.getInstanceFleetType(),
                     fleet.getInstanceTypes().isEmpty() ? null : fleet.getInstanceTypes().getFirst(),
                     EmrService.fleetNumber(fleets, fleet), onDemand + spot, "ON_DEMAND", onDemand,
-                    instanceState(fleet.getState(), provisioning, terminated)));
+                    instanceState(fleet.getState(), provisioning, terminated), List.of()));
         }
         return listed;
     }
@@ -1108,13 +1126,34 @@ public class EmrHandler {
     /**
      * The instances ListInstances lists for one instance group or fleet: {@code count} of them, with addresses numbered
      * {@code number}, those after the first {@code spotAfter} on the spot market and the others on {@code market}, each
-     * in {@code state}.
+     * in {@code state}, none of them at the ordinals {@code terminated} (ascending), which EC2InstanceIdsToTerminate
+     * ended.
      */
     record ListedInstances(String groupId, String fleetId, String type, String instanceType, int number, long count,
-                           String market, long spotAfter, String state) {
+                           String market, long spotAfter, String state, List<Integer> terminated) {
 
         String marketOf(long ordinal) {
             return ordinal <= spotAfter ? market : "SPOT";
+        }
+
+        /** The ordinal of their {@code k}-th instance, counted from 1 ({@link EmrService#ordinalAt}). */
+        long ordinalAt(long k) {
+            return EmrService.ordinalAt(terminated, k);
+        }
+
+        /** Their ordinals from their {@code k}-th instance's on ({@link EmrService#ordinalsFrom}). */
+        PrimitiveIterator.OfLong ordinalsFrom(long k) {
+            return EmrService.ordinalsFrom(terminated, k);
+        }
+
+        /**
+         * How many places they take in the cluster's instance numbering: up to their last instance's ordinal, or a
+         * terminated instance's above it, which keeps its place, so that ending a group's last instance moves no other
+         * group's ids onto it.
+         */
+        long span() {
+            long live = count == 0 ? 0 : ordinalAt(count);
+            return terminated.isEmpty() ? live : Math.max(live, terminated.getLast());
         }
 
         /** Whether ListInstances' filters keep them: the group ones keep groups' instances, the fleet ones fleets'. */
@@ -1281,7 +1320,7 @@ public class EmrHandler {
                         g.path("InstanceGroupId").asText(null),
                         count.isMissingNode() || count.isNull() ? null : count.asInt(),
                         configurations.isArray() ? configurations.toString() : null,
-                        g.path("ReconfigurationType").asText(null)));
+                        g.path("ReconfigurationType").asText(null), instanceIds(g.path("EC2InstanceIdsToTerminate"))));
             }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
