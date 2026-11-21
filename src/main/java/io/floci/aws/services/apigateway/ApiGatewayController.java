@@ -1649,12 +1649,12 @@ public class ApiGatewayController {
 
     @GET
     @Path("/vpclinks")
-    public Response getV1VpcLinks(@Context HttpHeaders headers) {
+    public Response getV1VpcLinks(@Context HttpHeaders headers,
+                                  @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode items = result.putArray("item");
-        service.getVpcLinks(region).forEach(l -> items.add(toV1VpcLinkNode(l)));
-        return Response.ok(result.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<io.floci.aws.services.apigateway.model.VpcLink> page =
+                service.getVpcLinkPage(region, pageLimit(limit), position);
+        return pageResponse(page, this::toV1VpcLinkNode);
     }
 
     @GET
