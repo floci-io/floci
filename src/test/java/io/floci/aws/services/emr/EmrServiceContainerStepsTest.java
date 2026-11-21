@@ -756,6 +756,31 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aNodeOfAGroupWithItsOwnAmiRunsThatAmiAndHasThePublicAddressItsNameNames() {
+        EmrCluster requested = cluster("own-ami", true);
+        requested.setCustomAmiId("ami-0000000000000c1a5");
+        EmrInstanceGroup master = new EmrInstanceGroup();
+        master.setInstanceGroupType("MASTER");
+        master.setInstanceType("m5.xlarge");
+        master.setRequestedInstanceCount(1);
+        EmrInstanceGroup core = new EmrInstanceGroup();
+        core.setInstanceGroupType("CORE");
+        core.setInstanceType("m5.xlarge");
+        core.setRequestedInstanceCount(1);
+        core.setCustomAmiId("ami-00000000000000c0e");
+        requested.setInstanceGroups(new ArrayList<>(List.of(master, core)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        Instance primary = service.nodeInstance(cluster, "111111111111", 0, 1);
+        Instance coreNode = service.nodeInstance(cluster, "111111111111", 1, 1);
+
+        assertEquals("ami-0000000000000c1a5", primary.getImageId());
+        assertEquals("ami-00000000000000c0e", coreNode.getImageId());
+        assertEquals("203.0.113.2", coreNode.getPublicIpAddress());
+        assertEquals("ec2-203-0-113-2.compute-1.amazonaws.com", coreNode.getPublicDnsName());
+    }
+
+    @Test
     void aRelayThatCannotStartFailsTheStepThatWouldReadIt() {
         fixture.clusterStorage.metadata = true;
         fixture.clusterStorage.metadataFailure = new IllegalStateException("The relay did not listen");

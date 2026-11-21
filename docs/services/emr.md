@@ -207,6 +207,22 @@ The reference names no devices, so Floci names them `/dev/sdb`, `/dev/sdc` and o
 volumes to an instance is refused with `ValidationException` "There is a limit of 25 volumes per instance.", the
 Management Guide's own limit and sentence; AWS's error for it is not documented. `ModifyInstanceFleet` changes a
 fleet's target capacities only; the `InstanceTypeConfigs` it takes are not applied.
+An instance group keeps its `EbsConfiguration` and `CustomAmiId`, from `RunJobFlow` or `AddInstanceGroups`, and
+`ListInstanceGroups` gives them back as its `EbsBlockDevices`, one per volume named as a fleet's are, its
+`EbsOptimized` and its `CustomAmiId`, under the same limit of 25 volumes per instance; its instances' EC2 descriptions
+give its `CustomAmiId` as their image, over the cluster's. `ListInstances` gives each instance its `PublicIpAddress`,
+the one its `PublicDnsName` names, in 203.0.113.0/24, RFC 5737's documentation range, for a cluster's first 254
+instances and past them in 100.64.0.0/10, RFC 6598's shared address space. It gives an `EbsVolumes` entry for each
+device its group or instance type config gives it, with a volume id of Floci's own that differs between clusters.
+`ModifyInstanceGroups` keeps a group's `ShrinkPolicy`, which `ListInstanceGroups` gives back, and a shrink it comes with
+follows its `InstanceResizePolicy`: it ends the "Specific list of instances to be terminated when shrinking an instance
+group" first, then the group's last instances, passing the "Specific list of instances to be protected when shrinking an
+instance group". Those instances end as `EC2InstanceIdsToTerminate` ends them, so their ids are not taken again, and a
+later entry of the same request for the group counts from what an earlier one leaves. An id to terminate that is not
+one of the group's running instances is refused with `ValidationException`, as `EC2InstanceIdsToTerminate` refuses it,
+and so is a shrink the protected instances leave short, rather than ending one of them; AWS's answer to either is not
+documented, so the wording is Floci's. Its `DecommissionTimeout` changes nothing, as Floci's nodes have no
+decommissioning to wait for.
 `ModifyInstanceGroups` keeps the `Configurations` it gives a group, which `ListInstanceGroups` gives back with the
 group's `ConfigurationsVersion`. With `ReconfigurationType` `MERGE` they are merged into the group's own, as the Release
 Guide's "Reconfigure an instance group in a running cluster" has it: "This option only adds or modifies the new

@@ -27,6 +27,11 @@ public class EmrInstanceGroup {
     /** The group's Configurations as given, raw JSON; null when none. Applied at once, so it is also the last applied. */
     private String configurations;
     private long configurationsVersion;
+    /** The EbsConfiguration as given (EbsBlockDeviceConfigs and EbsOptimized), raw JSON; null when none. */
+    private String ebsConfiguration;
+    private String customAmiId;
+    /** The ShrinkPolicy the last ModifyInstanceGroups gave, raw JSON; null when none. */
+    private String shrinkPolicy;
 
     public EmrInstanceGroup() {}
 
@@ -79,4 +84,13 @@ public class EmrInstanceGroup {
 
     public String getAutoScalingPolicy() { return autoScalingPolicy; }
     public void setAutoScalingPolicy(String autoScalingPolicy) { this.autoScalingPolicy = autoScalingPolicy; }
+
+    public String getEbsConfiguration() { return ebsConfiguration; }
+    public void setEbsConfiguration(String ebsConfiguration) { this.ebsConfiguration = ebsConfiguration; }
+
+    public String getCustomAmiId() { return customAmiId; }
+    public void setCustomAmiId(String customAmiId) { this.customAmiId = customAmiId; }
+
+    public String getShrinkPolicy() { return shrinkPolicy; }
+    public void setShrinkPolicy(String shrinkPolicy) { this.shrinkPolicy = shrinkPolicy; }
 }

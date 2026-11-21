@@ -1003,7 +1003,7 @@ public class EmrHandler {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
-        requireEbsVolumeLimit(fleetNode);
+        requireFleetEbsVolumeLimit(fleetNode);
         return fleet;
     }
 
@@ -1065,13 +1065,14 @@ public class EmrHandler {
             }
             long first = EmrService.firstIndex(listed, set);
             PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(skip + 1);
+            ArrayNode devices = ebsBlockDevices(ebsConfigurationOf(cluster, set));
             for (long k = skip + 1; k <= set.count(); k++) {
                 if (page == INSTANCES_PER_PAGE) {
                     response.put("Marker", String.valueOf(start + page));
                     return Response.ok(response).build();
                 }
                 long ordinal = ordinals.nextLong();
-                arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated));
+                arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated, devices));
                 page++;
             }
             skip = 0;
@@ -1348,11 +1349,13 @@ public class EmrHandler {
             for (JsonNode g : groups) {
                 JsonNode count = g.path("InstanceCount");
                 JsonNode configurations = g.path("Configurations");
+                JsonNode shrink = g.path("ShrinkPolicy");
                 modifications.add(new EmrService.InstanceGroupModification(
                         g.path("InstanceGroupId").asText(null),
                         count.isMissingNode() || count.isNull() ? null : count.asInt(),
                         configurations.isArray() ? configurations.toString() : null,
-                        g.path("ReconfigurationType").asText(null), instanceIds(g.path("EC2InstanceIdsToTerminate"))));
+                        g.path("ReconfigurationType").asText(null), instanceIds(g.path("EC2InstanceIdsToTerminate")),
+                        shrink.isObject() ? shrink : null));
             }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
@@ -1611,7 +1614,44 @@ public class EmrHandler {
             setRawJson(node, "LastSuccessfullyAppliedConfigurations", g.getConfigurations());
             node.put("LastSuccessfullyAppliedConfigurationsVersion", g.getConfigurationsVersion());
         }
+        JsonNode ebs = readRawObject(g.getEbsConfiguration());
+        if (ebs != null) {
+            ArrayNode devices = ebsBlockDevices(ebs);
+            if (!devices.isEmpty()) {
+                node.set("EbsBlockDevices", devices);
+            }
+            if (ebs.hasNonNull("EbsOptimized")) {
+                node.put("EbsOptimized", ebs.path("EbsOptimized").asBoolean());
+            }
+        }
+        if (g.getCustomAmiId() != null) {
+            node.put("CustomAmiId", g.getCustomAmiId());
+        }
+        if (g.getShrinkPolicy() != null) {
+            setRawJson(node, "ShrinkPolicy", g.getShrinkPolicy());
+        }
         return node;
+    }
+
+    /**
+     * An EbsConfiguration as the EbsBlockDevices it gives each instance: one per volume, the way VolumesPerInstance
+     * counts them, with its VolumeSpecification, named {@code /dev/sdb} on, as the reference gives no device names.
+     */
+    private ArrayNode ebsBlockDevices(JsonNode ebs) {
+        ArrayNode devices = objectMapper.createArrayNode();
+        for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
+            // Bounded for a config stored before the limit was held at create.
+            int volumes = Math.min(device.path("VolumesPerInstance").asInt(1),
+                    EBS_VOLUMES_PER_INSTANCE - devices.size());
+            for (int volume = 0; volume < volumes; volume++) {
+                ObjectNode blockDevice = devices.addObject();
+                if (device.hasNonNull("VolumeSpecification")) {
+                    blockDevice.set("VolumeSpecification", device.get("VolumeSpecification"));
+                }
+                blockDevice.put("Device", deviceName(devices.size() - 1));
+            }
+        }
+        return devices;
     }
 
     /** An AutoScalingPolicyDescription: the stored Constraints and Rules with an ATTACHED status. */
@@ -1677,19 +1717,7 @@ public class EmrHandler {
                 specification.set("Configurations", config.get("Configurations"));
             }
             JsonNode ebs = config.path("EbsConfiguration");
-            ArrayNode devices = objectMapper.createArrayNode();
-            for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
-                // Bounded for a config stored before the limit was held at create.
-                int volumes = Math.min(device.path("VolumesPerInstance").asInt(1),
-                        EBS_VOLUMES_PER_INSTANCE - devices.size());
-                for (int volume = 0; volume < volumes; volume++) {
-                    ObjectNode blockDevice = devices.addObject();
-                    if (device.hasNonNull("VolumeSpecification")) {
-                        blockDevice.set("VolumeSpecification", device.get("VolumeSpecification"));
-                    }
-                    blockDevice.put("Device", deviceName(devices.size() - 1));
-                }
-            }
+            ArrayNode devices = ebsBlockDevices(ebs);
             if (!devices.isEmpty()) {
                 specification.set("EbsBlockDevices", devices);
             }
@@ -1715,13 +1743,15 @@ public class EmrHandler {
         return "/dev/sd" + letters;
     }
 
+    /** An instance of {@code set}, whose EBS block {@code devices} each instance of the set has. */
     private ObjectNode syntheticInstanceNode(EmrCluster cluster, ListedInstances set, long index, long ordinal,
-                                             boolean terminated) {
+                                             boolean terminated, ArrayNode devices) {
         String privateIp = EmrService.privateIpAddress(set.number(), ordinal);
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", EmrService.publicDnsName(index, cluster.getRegion()));
+        node.put("PublicIpAddress", EmrService.publicIpAddress(index));
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
         node.put("PrivateIpAddress", privateIp);
         if (set.groupId() != null) {
@@ -1737,7 +1767,42 @@ public class EmrHandler {
             node.put("InstanceType", set.instanceType());
         }
         node.putObject("Status").put("State", set.state());
+        if (!devices.isEmpty()) {
+            ArrayNode volumes = node.putArray("EbsVolumes");
+            for (int device = 0; device < devices.size(); device++) {
+                volumes.addObject().put("Device", devices.get(device).path("Device").asText())
+                        .put("VolumeId", EmrService.ebsVolumeId(cluster.getId(), index, device));
+            }
+        }
         return node;
+    }
+
+    /**
+     * The EbsConfiguration an instance of {@code set} was given: its group's, or, in a fleet, that of the
+     * InstanceTypeConfig of its instance type. An empty one for none.
+     */
+    private JsonNode ebsConfigurationOf(EmrCluster cluster, ListedInstances set) {
+        if (set.groupId() != null) {
+            for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+                if (set.groupId().equals(group.getId())) {
+                    JsonNode ebs = readRawObject(group.getEbsConfiguration());
+                    return ebs == null ? objectMapper.createObjectNode() : ebs;
+                }
+            }
+        }
+        if (set.fleetId() != null) {
+            for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+                if (set.fleetId().equals(fleet.getId())) {
+                    JsonNode configs = readRawArray(fleet.getInstanceTypeConfigs());
+                    for (JsonNode config : configs == null ? objectMapper.createArrayNode() : configs) {
+                        if (config.path("InstanceType").asText("").equals(set.instanceType())) {
+                            return config.path("EbsConfiguration");
+                        }
+                    }
+                }
+            }
+        }
+        return objectMapper.createObjectNode();
     }
 
     private ArrayNode tagArray(Map<String, String> tags) {
@@ -1802,6 +1867,12 @@ public class EmrHandler {
                 EmrService.validateAutoScalingPolicy(autoScaling, group.getInstanceGroupType());
                 group.setAutoScalingPolicy(autoScaling.toString());
             }
+            JsonNode ebs = g.path("EbsConfiguration");
+            if (ebs.isObject()) {
+                requireEbsVolumeLimit(ebs);
+                group.setEbsConfiguration(ebs.toString());
+            }
+            group.setCustomAmiId(g.path("CustomAmiId").asText(null));
             groups.add(group);
         }
         return groups;
@@ -1859,7 +1930,7 @@ public class EmrHandler {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
-        fleetsNode.forEach(EmrHandler::requireEbsVolumeLimit);
+        fleetsNode.forEach(EmrHandler::requireFleetEbsVolumeLimit);
         return fleets;
     }
 
@@ -1868,15 +1939,20 @@ public class EmrHandler {
      * Guide allows: "There is a limit of 25 volumes per instance." AWS's error for it is not documented, so the
      * ValidationException carrying that sentence is Floci's.
      */
-    private static void requireEbsVolumeLimit(JsonNode fleet) {
+    private static void requireFleetEbsVolumeLimit(JsonNode fleet) {
         for (JsonNode config : fleet.path("InstanceTypeConfigs")) {
-            long volumes = 0;
-            for (JsonNode device : config.path("EbsConfiguration").path("EbsBlockDeviceConfigs")) {
-                volumes += device.path("VolumesPerInstance").asLong(1);
-            }
-            if (volumes > EBS_VOLUMES_PER_INSTANCE) {
-                throw new AwsException("ValidationException", "There is a limit of 25 volumes per instance.", 400);
-            }
+            requireEbsVolumeLimit(config.path("EbsConfiguration"));
+        }
+    }
+
+    /** An EbsConfiguration's volumes, counted as VolumesPerInstance counts them, hold to AWS's limit per instance. */
+    private static void requireEbsVolumeLimit(JsonNode ebs) {
+        long volumes = 0;
+        for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
+            volumes += device.path("VolumesPerInstance").asLong(1);
+        }
+        if (volumes > EBS_VOLUMES_PER_INSTANCE) {
+            throw new AwsException("ValidationException", "There is a limit of 25 volumes per instance.", 400);
         }
     }
 
@@ -1994,6 +2070,20 @@ public class EmrHandler {
             return node.isArray() ? node : null;
         } catch (JsonProcessingException e) {
             LOG.warnv(e, "Failed to parse stored JSON array; ignored. Value: {0}", rawJson);
+            return null;
+        }
+    }
+
+    /** A stored raw JSON object, or null when there is none or it cannot be read. */
+    private JsonNode readRawObject(String rawJson) {
+        if (rawJson == null) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(rawJson);
+            return node.isObject() ? node : null;
+        } catch (JsonProcessingException e) {
+            LOG.warnv(e, "Failed to parse stored JSON object; ignored. Value: {0}", rawJson);
             return null;
         }
     }

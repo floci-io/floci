@@ -1463,15 +1463,21 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * reconfiguration type is OVERWRITE, and {@code instancesToTerminate} are EC2InstanceIdsToTerminate, none for null.
      */
     public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
-                                            String reconfigurationType, List<String> instancesToTerminate) {
+                                            String reconfigurationType, List<String> instancesToTerminate,
+                                            JsonNode shrinkPolicy) {
 
         public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {
-            this(instanceGroupId, instanceCount, configurations, null, null);
+            this(instanceGroupId, instanceCount, configurations, null, null, null);
         }
 
         public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
                                          String reconfigurationType) {
-            this(instanceGroupId, instanceCount, configurations, reconfigurationType, null);
+            this(instanceGroupId, instanceCount, configurations, reconfigurationType, null, null);
+        }
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                         String reconfigurationType, List<String> instancesToTerminate) {
+            this(instanceGroupId, instanceCount, configurations, reconfigurationType, instancesToTerminate, null);
         }
     }
 
@@ -1491,6 +1497,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             Map<String, EmrCluster> touched = new LinkedHashMap<>();
             List<EmrInstanceGroup> groups = new ArrayList<>();
             List<List<Integer>> terminations = new ArrayList<>();
+            Map<String, Set<Integer>> endings = new HashMap<>();
             for (int position = 1; position <= modifications.size(); position++) {
                 InstanceGroupModification mod = modifications.get(position - 1);
                 EmrCluster found = clusterId != null
@@ -1514,7 +1521,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         throw invalid("The instance count of a master instance group cannot be modified.");
                     }
                 }
-                terminations.add(ordinalsToTerminate(cluster, group, mod.instancesToTerminate()));
+                List<Integer> named = ordinalsToTerminate(cluster, group, mod.instancesToTerminate());
+                List<Integer> ending = new ArrayList<>(named);
+                // What the request's earlier entries for the same group end, so a shrink counts from what they leave.
+                Set<Integer> endingOfGroup = endings.computeIfAbsent(cluster.getId() + "/" + group.getId(),
+                        key -> new LinkedHashSet<>());
+                endingOfGroup.addAll(named);
+                if (mod.instanceCount() != null && mod.shrinkPolicy() != null) {
+                    List<Integer> shrink = shrinkOrdinals(cluster, group, mod.instanceCount(), mod.shrinkPolicy(),
+                            endingOfGroup);
+                    ending.addAll(shrink);
+                    endingOfGroup.addAll(shrink);
+                }
+                terminations.add(ending);
                 groups.add(group);
             }
             for (int i = 0; i < modifications.size(); i++) {
@@ -1534,6 +1553,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 if (mod.instanceCount() != null) {
                     group.setRequestedInstanceCount(mod.instanceCount());
                     group.setRunningInstanceCount(mod.instanceCount());
+                }
+                if (mod.shrinkPolicy() != null) {
+                    group.setShrinkPolicy(mod.shrinkPolicy().toString());
                 }
                 if (mod.configurations() != null) {
                     group.setConfigurations(MERGE.equals(mod.reconfigurationType())
@@ -1561,18 +1583,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         if ("MASTER".equals(group.getInstanceGroupType())) {
             throw invalid("The instance count of a master instance group cannot be modified.");
         }
-        List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
-        Map<String, Integer> current = new HashMap<>();
-        for (EmrHandler.ListedInstances set : listed) {
-            if (group.getId().equals(set.groupId())) {
-                long first = firstIndex(listed, set);
-                PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(1);
-                for (long k = 1; k <= set.count(); k++) {
-                    long ordinal = ordinals.nextLong();
-                    current.put(ec2InstanceId(first + ordinal - 1), (int) ordinal);
-                }
-            }
-        }
+        Map<String, Integer> current = runningOrdinals(cluster, group);
         List<Integer> ordinals = new ArrayList<>();
         for (String instanceId : new LinkedHashSet<>(instanceIds)) {
             Integer ordinal = current.get(instanceId);
@@ -1583,6 +1594,71 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             ordinals.add(ordinal);
         }
         return ordinals;
+    }
+
+    /** The group's instances as ListInstances gives them now: each EC2 instance id and its ordinal, in that order. */
+    private static Map<String, Integer> runningOrdinals(EmrCluster cluster, EmrInstanceGroup group) {
+        List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
+        Map<String, Integer> current = new LinkedHashMap<>();
+        for (EmrHandler.ListedInstances set : listed) {
+            if (group.getId().equals(set.groupId())) {
+                long first = firstIndex(listed, set);
+                PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(1);
+                for (long k = 1; k <= set.count(); k++) {
+                    long ordinal = ordinals.nextLong();
+                    current.put(ec2InstanceId(first + ordinal - 1), (int) ordinal);
+                }
+            }
+        }
+        return current;
+    }
+
+    /**
+     * The ordinals a shrink to {@code count} ends under a ShrinkPolicy's InstanceResizePolicy, beyond those already
+     * {@code ending}, by EC2InstanceIdsToTerminate or the request's earlier entries for the group: first its "Specific
+     * list of instances to be terminated when shrinking an instance group", then the group's last instances, passing
+     * its "Specific list of instances to be protected when shrinking an instance group". Ended this way, as named
+     * instances are, their ids are not taken again. An id to terminate that is not one of the group's running
+     * instances is refused, as EC2InstanceIdsToTerminate refuses it, and so is a shrink the protected instances leave
+     * short, rather than ending one of them. No source gives AWS's answer to either, so the wording is Floci's.
+     */
+    private static List<Integer> shrinkOrdinals(EmrCluster cluster, EmrInstanceGroup group, int count,
+                                                JsonNode shrinkPolicy, Set<Integer> ending) {
+        Map<String, Integer> running = runningOrdinals(cluster, group);
+        int shrinkBy = running.size() - ending.size() - count;
+        JsonNode resize = shrinkPolicy.path("InstanceResizePolicy");
+        if (shrinkBy <= 0 || !resize.isObject()) {
+            return List.of();
+        }
+        Set<String> protect = new HashSet<>();
+        resize.path("InstancesToProtect").forEach(id -> protect.add(id.asText()));
+        List<Integer> chosen = new ArrayList<>();
+        for (JsonNode id : resize.path("InstancesToTerminate")) {
+            Integer ordinal = running.get(id.asText());
+            if (ordinal == null) {
+                throw new AwsException("ValidationException", "Instance " + id.asText()
+                        + " is not a running instance of instance group " + group.getId() + ".", 400);
+            }
+            if (chosen.size() < shrinkBy && !ending.contains(ordinal) && !chosen.contains(ordinal)) {
+                chosen.add(ordinal);
+            }
+        }
+        List<Map.Entry<String, Integer>> fromTheEnd = new ArrayList<>(running.entrySet());
+        Collections.reverse(fromTheEnd);
+        for (Map.Entry<String, Integer> instance : fromTheEnd) {
+            if (chosen.size() >= shrinkBy) {
+                break;
+            }
+            Integer ordinal = instance.getValue();
+            if (!protect.contains(instance.getKey()) && !ending.contains(ordinal) && !chosen.contains(ordinal)) {
+                chosen.add(ordinal);
+            }
+        }
+        if (chosen.size() < shrinkBy) {
+            throw new AwsException("ValidationException", "Instance group " + group.getId() + " cannot shrink to "
+                    + count + " instances without ending one its shrink policy protects.", 400);
+        }
+        return chosen;
     }
 
     /**
@@ -3903,7 +3979,29 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     /** The public DNS name ListInstances gives a cluster's instance {@code index}, counted from 1, in a Region. */
     static String publicDnsName(long index, String region) {
-        return AwsEndpoints.ec2PublicDns("203.0.113." + index, region);
+        return AwsEndpoints.ec2PublicDns(publicIpAddress(index), region);
+    }
+
+    /**
+     * The public address ListInstances gives a cluster's instance {@code index}, counted from 1, the one its public DNS
+     * name names: in 203.0.113.0/24, RFC 5737's documentation range, for the first 254, and past them in
+     * 100.64.0.0/10, RFC 6598's shared address space, so no instance gets an address someone else holds.
+     */
+    static String publicIpAddress(long index) {
+        if (index <= 254) {
+            return "203.0.113." + index;
+        }
+        long n = index - 255;
+        return "100." + (64 + n / (254 * 256)) + "." + (n / 254) % 256 + "." + (n % 254 + 1);
+    }
+
+    /**
+     * The id ListInstances gives the {@code device}-th EBS volume, counted from 0, of cluster {@code clusterId}'s
+     * instance {@code index}: 17 hex digits, as EC2's are, the first 8 from the cluster, so two clusters' volumes
+     * differ.
+     */
+    static String ebsVolumeId(String clusterId, long index, int device) {
+        return "vol-" + String.format("%08x%09x", clusterId.hashCode(), index * 100 + device + 1);
     }
 
     /**
@@ -4000,10 +4098,18 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
         long index = ordinal;
         String instanceType = null;
+        String imageId = cluster.getCustomAmiId();
         for (EmrHandler.ListedInstances set : listed) {
             if (set.number() == group) {
                 index = firstIndex(listed, set) + ordinal - 1;
                 instanceType = set.instanceType();
+                // A group's own CustomAmiId is the one its instances run, over the cluster's.
+                for (EmrInstanceGroup instanceGroup : cluster.getInstanceGroups()) {
+                    if (set.groupId() != null && set.groupId().equals(instanceGroup.getId())
+                            && instanceGroup.getCustomAmiId() != null) {
+                        imageId = instanceGroup.getCustomAmiId();
+                    }
+                }
                 break;
             }
         }
@@ -4011,11 +4117,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         instance.setInstanceId(ec2InstanceId(index));
         instance.setOwnerId(accountId);
         instance.setInstanceType(instanceType);
-        instance.setImageId(cluster.getCustomAmiId());
+        instance.setImageId(imageId);
         String address = privateIpAddress(group, ordinal);
         instance.setPrivateIpAddress(address);
         instance.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(address, cluster.getRegion()));
         instance.setPublicDnsName(publicDnsName(index, cluster.getRegion()));
+        instance.setPublicIpAddress(publicIpAddress(index));
         instance.setPlacement(new Placement(availabilityZone(cluster)));
         instance.setRegion(cluster.getRegion());
         instance.setState(InstanceState.running());
