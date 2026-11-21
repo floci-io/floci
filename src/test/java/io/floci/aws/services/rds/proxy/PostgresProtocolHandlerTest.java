@@ -1953,6 +1953,7 @@ class PostgresProtocolHandlerTest {
             writeDataRow(out, "100", "t");
             writeCommandComplete(out, "SELECT 1");
             writeReadyForQuery(out);
+            answerReplicationGrant(in, out, "approle");
             assertEquals(true, readSimpleQuery(in).contains("pg_db_role_setting"));
             writeCommandComplete(out, "SELECT 0");
             writeReadyForQuery(out);
@@ -2242,6 +2243,7 @@ class PostgresProtocolHandlerTest {
                 writeDataRow(out, "100", "t");
                 writeCommandComplete(out, "SELECT 1");
                 writeReadyForQuery(out);
+                answerReplicationGrant(in, out, role);
             }
             String query = readSimpleQuery(in);
             if (query.contains("pg_db_role_setting")) {
@@ -2300,6 +2302,7 @@ class PostgresProtocolHandlerTest {
             writeReadyForQuery(out);
 
             answerRoleAdmission(in, out, "approle", true, false);
+            answerReplicationGrant(in, out, "approle");
             assertEquals(true, readSimpleQuery(in).contains("pg_db_role_setting"));
             for (String[] setting : roleDefaults) {
                 writeDataRow(out, setting[0], setting[1]);
@@ -2405,6 +2408,14 @@ class PostgresProtocolHandlerTest {
                                             boolean iam, boolean sessionRole) throws IOException {
         assertEquals(PostgresProtocolHandler.databaseRoleQuery(role, iam, sessionRole), readSimpleQuery(in));
         writeDataRow(out, "100", "t");
+        writeCommandComplete(out, "SELECT 1");
+        writeReadyForQuery(out);
+    }
+
+    private static void answerReplicationGrant(DataInputStream in, DataOutputStream out, String role)
+            throws IOException {
+        assertEquals(PostgresProtocolHandler.replicationGrantQuery(role), readSimpleQuery(in));
+        writeDataRow(out, "100", "f");
         writeCommandComplete(out, "SELECT 1");
         writeReadyForQuery(out);
     }

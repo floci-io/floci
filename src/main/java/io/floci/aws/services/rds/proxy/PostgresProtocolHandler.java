@@ -405,6 +405,10 @@ public class PostgresProtocolHandler {
                 }
             }
 
+            if (iamHandover && admittedRole != null && !endsWithErrorResponse(bufferedMessages)) {
+                grantReplicationToMember(backendIn, backendOut, clientUsername);
+            }
+
             String iamRole = null;
             List<SessionSetting> roleDefaultsAfterHandover = List.of();
             List<byte[]> notices = new ArrayList<>();
@@ -1256,6 +1260,23 @@ public class PostgresProtocolHandler {
     private static boolean hasReplicationPrivilege(InputStream in, OutputStream out) throws IOException {
         List<SessionSetting> rows = settingsFromDataRows(runQuery(in, out, replicationPrivilegeQuery()));
         return rows.size() == 1 && "t".equals(rows.getFirst().value());
+    }
+
+    static String replicationGrantQuery(String role) {
+        String name = "pg_catalog.convert_from(pg_catalog.decode('"
+                + HexFormat.of().formatHex(role.getBytes(StandardCharsets.UTF_8)) + "', 'hex'), 'UTF8')";
+        return "SELECT r.oid::pg_catalog.text, NOT r.rolsuper AND NOT r.rolreplication AND EXISTS ("
+                + "SELECT 1 FROM pg_catalog.pg_roles g WHERE g.rolname OPERATOR(pg_catalog.=) 'rds_replication' "
+                + "AND pg_catalog.pg_has_role(r.oid, g.oid, 'MEMBER')) "
+                + "FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) " + name;
+    }
+
+    private static void grantReplicationToMember(InputStream in, OutputStream out, String role)
+            throws IOException {
+        List<SessionSetting> rows = settingsFromDataRows(runQuery(in, out, replicationGrantQuery(role)));
+        if (rows.size() == 1 && "t".equals(rows.getFirst().value())) {
+            runQuery(in, out, "ALTER ROLE " + quoteIdentifier(role) + " WITH REPLICATION");
+        }
     }
 
     /**
