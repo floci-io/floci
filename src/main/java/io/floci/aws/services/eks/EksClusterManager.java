@@ -3313,7 +3313,7 @@ public class EksClusterManager
                 labels.put("eks.amazonaws.com/nodegroup", nodegroup.getNodegroupName()); // partition-literal: Kubernetes node label key is partition-invariant
             }
 
-            String imageId = resolveNodegroupImageId(nodegroup);
+            String imageId = resolveNodegroupImageId(nodegroup, region);
             if (imageId != null && !imageId.isBlank()) {
                 labels.put("eks.amazonaws.com/nodegroup-image", imageId); // partition-literal: Kubernetes node label key is partition-invariant
             }
@@ -3363,7 +3363,7 @@ public class EksClusterManager
         return nodeInstanceType(cluster);
     }
 
-    private String resolveNodegroupImageId(Nodegroup nodegroup) {
+    private String resolveNodegroupImageId(Nodegroup nodegroup, String region) {
         if (nodegroup != null) {
             if (nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
                 Object directImage = map.get("imageId");
@@ -3377,7 +3377,7 @@ public class EksClusterManager
                     String version = map.get("version") != null ? map.get("version").toString().trim() : null;
                     if ((id != null && !id.isBlank()) || (name != null && !name.isBlank())) {
                         try {
-                            LaunchTemplateData data = ec2.resolveLaunchTemplateData(null, id, name, version);
+                            LaunchTemplateData data = ec2.resolveLaunchTemplateData(region, id, name, version);
                             if (data != null && data.getImageId() != null && !data.getImageId().isBlank()) {
                                 return data.getImageId().trim();
                             }

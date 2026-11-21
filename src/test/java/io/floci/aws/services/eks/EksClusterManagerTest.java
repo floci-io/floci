@@ -46,6 +46,7 @@ import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
@@ -3525,6 +3526,38 @@ class EksClusterManagerTest {
                     .orElseThrow(() -> new AssertionError("node-labels arg missing"));
             Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
             assertEquals("m5.large", labels.get("node.kubernetes.io/instance-type"));
+        }
+
+        @Test
+        void nodegroupImageLabelIsTheCustomAmiOfALaunchTemplateInTheClustersRegion() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("custom-ami-group");
+            nodegroup.setVersion("1.30");
+            nodegroup.setAmiType("AL2_x86_64");
+            nodegroup.setLaunchTemplate(Map.of("id", "lt-0123456789abcdef0", "version", "2"));
+            nodeGroupStorage.put("us-west-2::prod-cluster/custom-ami-group", nodegroup);
+
+            LaunchTemplateData launchTemplate = new LaunchTemplateData();
+            launchTemplate.setImageId("ami-0fedcba9876543210");
+            Ec2Service ec2 = Mockito.mock(Ec2Service.class);
+            when(ec2.resolveLaunchTemplateData("us-west-2", "lt-0123456789abcdef0", null, "2")).thenReturn(launchTemplate);
+            manager.setEc2Service(ec2);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            String nodeLabelsArg = cmdCaptor.getValue().stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            assertEquals("ami-0fedcba9876543210", parseNodeLabels(nodeLabelsArg).get("eks.amazonaws.com/nodegroup-image"));
         }
 
         @Test
