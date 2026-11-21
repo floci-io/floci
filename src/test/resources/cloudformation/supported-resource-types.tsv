@@ -109,6 +109,7 @@ AWS::EFS::FileSystem	EfsCfnProvisioner
 AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
+AWS::EMR::Cluster	EmrCfnProvisioner
 AWS::EMR::SecurityConfiguration	EmrCfnProvisioner
 AWS::EMR::Studio	EmrStudioCfnProvisioner
 AWS::EMR::StudioSessionMapping	EmrStudioCfnProvisioner
