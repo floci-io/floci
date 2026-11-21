@@ -53,6 +53,14 @@ class VerifiedPermissionsServiceTest {
                 out.write(bytes);
             }
         });
+        fakeCedar.createContext("/v1/policy/parse", exchange -> {
+            byte[] bytes = "{\"effect\":\"permit\",\"ast\":{}}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        });
         fakeCedar.start();
     }
 
@@ -107,6 +115,22 @@ class VerifiedPermissionsServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.getSchema(store.policyStoreId(), REGION));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    // Catches: CloudFormation's bare policy id, which is all its Ref carries, finding no store, or the
+    // store of a policy in another Region, so the policy's update or delete goes to the wrong place.
+    @Test
+    void policyStoreIdOfNamesTheStoreHoldingThePolicyInTheRegion() throws Exception {
+        PolicyStore store = service.createPolicyStore(json("""
+                {"validationSettings":{"mode":"OFF"}}
+                """), REGION);
+        Policy policy = service.createPolicy(json("""
+                {"policyStoreId":"%s","definition":{"static":{"statement":"permit(principal, action, resource);"}}}
+                """.formatted(store.policyStoreId())), REGION);
+
+        assertEquals(store.policyStoreId(), service.policyStoreIdOf(policy.policyId(), REGION));
+        assertNull(service.policyStoreIdOf(policy.policyId(), "eu-west-1"));
+        assertNull(service.policyStoreIdOf("SPnosuchpolicy", REGION));
     }
 
     private JsonNode json(String value) throws Exception {

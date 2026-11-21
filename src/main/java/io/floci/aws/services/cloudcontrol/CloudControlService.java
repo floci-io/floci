@@ -452,20 +452,29 @@ public class CloudControlService {
         }
         ObjectNode model = desiredState != null && desiredState.isObject()
                 ? ((ObjectNode) desiredState).deepCopy() : mapper.createObjectNode();
-        model.put(primaryIdentifierField(typeName), physicalId);
+        // A policy template's physical id is <PolicyStoreId>|<PolicyTemplateId>; its model names the template alone.
+        int separator = physicalId.indexOf('|');
+        model.put(primaryIdentifierField(typeName),
+                "AWS::VerifiedPermissions::PolicyTemplate".equals(typeName) && separator >= 0
+                        ? physicalId.substring(separator + 1) : physicalId);
         return propertiesString(model);
     }
 
     /**
      * The identifier Cloud Control hands out for a created resource: the type's primary identifier,
      * which for most types is the physical id. A compound one joins its parts with {@code |}, as
-     * Cloud Control does; an {@code AWS::ApiGatewayV2::ApiMapping} is {@code <ApiMappingId>|<DomainName>},
-     * where CloudFormation's {@code Ref} is the bare id.
+     * Cloud Control does; an {@code AWS::ApiGatewayV2::ApiMapping} is {@code <ApiMappingId>|<DomainName>}
+     * and an {@code AWS::VerifiedPermissions::Policy} {@code <PolicyId>|<PolicyStoreId>}, where
+     * CloudFormation's {@code Ref} is the bare id.
      */
     private static String identifierOf(String typeName, String physicalId, JsonNode desiredState) {
         if ("AWS::ApiGatewayV2::ApiMapping".equals(typeName) && desiredState != null
                 && desiredState.path("DomainName").isTextual()) {
             return physicalId + "|" + desiredState.path("DomainName").asText();
+        }
+        if ("AWS::VerifiedPermissions::Policy".equals(typeName) && desiredState != null
+                && desiredState.path("PolicyStoreId").isTextual()) {
+            return physicalId + "|" + desiredState.path("PolicyStoreId").asText();
         }
         return physicalId;
     }
@@ -481,6 +490,9 @@ public class CloudControlService {
             case "AWS::EC2::RouteTable" -> "RouteTableId";
             case "AWS::EC2::LaunchTemplate" -> "LaunchTemplateId";
             case "AWS::ApiGatewayV2::ApiMapping" -> "ApiMappingId";
+            case "AWS::VerifiedPermissions::PolicyStore" -> "PolicyStoreId";
+            case "AWS::VerifiedPermissions::PolicyTemplate" -> "PolicyTemplateId";
+            case "AWS::VerifiedPermissions::Policy" -> "PolicyId";
             default -> "Id";
         };
     }
