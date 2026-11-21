@@ -611,14 +611,18 @@ public class SnsService implements Resettable, ResourceProvider {
         if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
             validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
         }
-        if (attributes != null && attributes.containsKey("Policy")) {
-            requirePolicyActionsInServiceScope(attributes.get("Policy"));
-        }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
 
         Topic existing = topicStore.get(key).orElse(null);
         if (existing != null) return new TopicCreation(existing, false);
+
+        // The policy is only stored for a newly created topic, so the scope check belongs
+        // after the replay: a repeated creation naming an out-of-scope policy still returns
+        // the existing topic, as AWS does, without ever storing that policy.
+        if (attributes != null && attributes.containsKey("Policy")) {
+            requirePolicyActionsInServiceScope(attributes.get("Policy"));
+        }
 
         Topic topic = new Topic(name, topicArn);
         if (attributes != null) topic.getAttributes().putAll(attributes);
@@ -902,7 +906,16 @@ public class SnsService implements Resettable, ResourceProvider {
             if (action == null || action.isNull()) {
                 continue;
             }
-            for (JsonNode value : action) {
+            // A statement's Action is either one string or a list of them; iterating a
+            // textual node yields nothing, so a single-string action must be checked
+            // directly, the same shape the service writes with putOneOrMany.
+            List<JsonNode> values = new ArrayList<>();
+            if (action.isTextual()) {
+                values.add(action);
+            } else if (action.isArray()) {
+                action.forEach(values::add);
+            }
+            for (JsonNode value : values) {
                 if (!value.isTextual()) {
                     continue;
                 }

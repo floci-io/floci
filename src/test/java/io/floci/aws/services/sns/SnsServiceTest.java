@@ -210,6 +210,46 @@ class SnsServiceTest {
     }
 
     @Test
+    void createTopicRefusesASingleStringActionOutsideTheServiceScope() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"sns:PublishBatch","Resource":"*"}]}""";
+        AwsException e = assertThrows(AwsException.class, () -> snsService.createTopic("string-action-topic",
+                Map.of("Policy", policy), Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(snsService.listTopics(REGION).isEmpty());
+    }
+
+    @Test
+    void setTopicAttributesRefusesASingleStringActionOutsideTheServiceScope() {
+        Topic topic = snsService.createTopic("policy-topic", null, null, REGION);
+        String old = topicPolicyGranting("sns:Publish");
+        snsService.setTopicAttributes(topic.getTopicArn(), "Policy", old, REGION);
+
+        String refused = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"sns:PublishBatch","Resource":"*"}]}""";
+        AwsException e = assertThrows(AwsException.class, () -> snsService.setTopicAttributes(
+                topic.getTopicArn(), "Policy", refused, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals(old, snsService.getTopicAttributes(topic.getTopicArn(), REGION).get("Policy"));
+    }
+
+    @Test
+    void repeatedCreateReturnsTheExistingTopicEvenWithAnOutOfScopePolicy() {
+        snsService.createTopic("replayed-topic", null, null, REGION);
+
+        SnsService.TopicCreation replayed = snsService.createTopicWithStatus("replayed-topic",
+                Map.of("Policy", topicPolicyGranting("sns:PublishBatch")), Map.of(), REGION);
+
+        assertFalse(replayed.created());
+        String policy = snsService.getTopicAttributes(replayed.topic().getTopicArn(), REGION).get("Policy");
+        assertTrue(policy != null && !policy.contains("PublishBatch"),
+                "the replayed creation must not store the supplied out-of-scope policy");
+        assertEquals(1, snsService.listTopics(REGION).size());
+    }
+
+    @Test
     void addPermissionAcceptsReceive() {
         Topic topic = snsService.createTopic("receive-topic", null, null, REGION);
         snsService.addPermission(topic.getTopicArn(), "receive-grant",
