@@ -325,6 +325,16 @@ public final class CfnRollback {
     public static final String APPCONFIG_UPDATE_SNAPSHOT_ATTR = "__FlociAppConfigUpdateSnapshot";
 
     /**
+     * Holds what a Verified Permissions policy store, policy template or static policy was before an
+     * in-place update changed it: the store's validation mode, description, deletion protection,
+     * schema and the tags the stack owns, a template's or policy's statement, description and name. A
+     * later resource failing the update puts it back through {@code rollbackUpdate}, and the
+     * provisioner carries it onto the restored resource through
+     * {@code mergeFailedUpdateResourceTracking}.
+     */
+    public static final String VERIFIED_PERMISSIONS_UPDATE_SNAPSHOT_ATTR = "__FlociVerifiedPermissionsUpdateSnapshot";
+
+    /**
      * Holds the members an AppSync GraphQL API, data source, function, resolver or API key carried
      * before an in-place update changed or cleared them, in the request shape its update call takes,
      * with the identifiers that address it, so a failed stack update can put them back. Written by
