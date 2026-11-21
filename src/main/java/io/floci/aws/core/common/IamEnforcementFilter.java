@@ -1552,7 +1552,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     public Optional<String> statementRefusal(String operation, String statement, Map<String, String> names,
                                              boolean partitioned) {
         String akid = requestContext.getAccessKeyId();
-        if (!config.services().iam().enforcementEnabled() || akid == null || "test".equals(akid)) {
+        if (!config.services().iam().enforcementEnabled() || akid == null || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return Optional.empty();
         }
         String accountId = requestContext.getAccountId();

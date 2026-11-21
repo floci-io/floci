@@ -45,6 +45,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
 
 /**
  * The checks an {@code IamAuth} endpoint makes before a request reaches the function: a SigV4
@@ -276,7 +277,7 @@ public class LambdaWebIamAuth {
      */
     private String secretKey(String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
-            return LEGACY_ACCESS_KEY_ID;
+            return LEGACY_SECRET_KEY;
         }
         if (SessionTokenCheck.of(iamService, accessKeyId, sessionToken) != SessionTokenCheck.VALID) {
             return null;
