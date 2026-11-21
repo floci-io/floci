@@ -12,6 +12,7 @@
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::EKS::Cluster": "AWS::EKS::Cluster",
+    "AWS::EMRContainers::VirtualCluster": "AWS::EMRContainers::VirtualCluster",
     "AWS::EMRServerless::Application": "AWS::EMRServerless::Application",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
@@ -1949,6 +1950,97 @@
       "members": {
         "Enabled": "Boolean"
       }
+    },
+    "AWS::EMRContainers::VirtualCluster": {
+      "type": "structure",
+      "members": {
+        "Arn": "String",
+        "ContainerProvider": "AWS::EMRContainers::VirtualCluster/ContainerProvider",
+        "Id": "AWS::EMRContainers::VirtualCluster.Id",
+        "Name": "AWS::EMRContainers::VirtualCluster.Name",
+        "Tags": "AWS::EMRContainers::VirtualCluster.Tags",
+        "SecurityConfigurationId": "AWS::EMRContainers::VirtualCluster.SecurityConfigurationId",
+        "SessionEnabled": "Boolean"
+      },
+      "required": [
+        "Name",
+        "ContainerProvider"
+      ]
+    },
+    "AWS::EMRContainers::VirtualCluster.Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "AWS::EMRContainers::VirtualCluster.Name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[\\.\\-_/#A-Za-z0-9]+"
+    },
+    "AWS::EMRContainers::VirtualCluster.SecurityConfigurationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[0-9a-z]+"
+    },
+    "AWS::EMRContainers::VirtualCluster.Tags": {
+      "type": "list",
+      "member": "AWS::EMRContainers::VirtualCluster/Tag"
+    },
+    "AWS::EMRContainers::VirtualCluster/ContainerInfo": {
+      "type": "structure",
+      "members": {
+        "EksInfo": "AWS::EMRContainers::VirtualCluster/EksInfo"
+      },
+      "required": [
+        "EksInfo"
+      ]
+    },
+    "AWS::EMRContainers::VirtualCluster/ContainerProvider": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Id": "AWS::EMRContainers::VirtualCluster/ContainerProvider.Id",
+        "Info": "AWS::EMRContainers::VirtualCluster/ContainerInfo"
+      },
+      "required": [
+        "Type",
+        "Id",
+        "Info"
+      ]
+    },
+    "AWS::EMRContainers::VirtualCluster/ContainerProvider.Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[0-9A-Za-z][A-Za-z0-9\\-_]*"
+    },
+    "AWS::EMRContainers::VirtualCluster/EksInfo": {
+      "type": "structure",
+      "members": {
+        "Namespace": "AWS::EMRContainers::VirtualCluster/EksInfo.Namespace"
+      },
+      "required": [
+        "Namespace"
+      ]
+    },
+    "AWS::EMRContainers::VirtualCluster/EksInfo.Namespace": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+    },
+    "AWS::EMRContainers::VirtualCluster/Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String"
+      },
+      "required": [
+        "Value",
+        "Key"
+      ]
     },
     "AWS::EMRServerless::Application": {
       "type": "structure",

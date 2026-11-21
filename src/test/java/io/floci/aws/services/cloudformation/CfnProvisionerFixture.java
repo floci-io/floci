@@ -76,6 +76,7 @@ import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EmrContainersCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EmrServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsCfnProvisioner;
@@ -154,6 +155,7 @@ import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
 import io.floci.aws.services.elasticache.ElastiCacheService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.emrcontainers.EmrContainersService;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
 import io.floci.aws.services.emrserverless.EmrServerlessService;
 import io.floci.aws.services.eventbridge.EventBridgeService;
@@ -280,6 +282,7 @@ final class CfnProvisionerFixture {
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
         private CodeDeployService codeDeployService;
+        private EmrContainersService emrContainersService;
         private EmrServerlessService emrServerlessService;
         private EmrServerlessJobRunService emrServerlessJobRunService;
         private TransferService transferService;
@@ -568,6 +571,9 @@ final class CfnProvisionerFixture {
             if (codeDeployService != null) {
                 discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
             }
+            if (emrContainersService != null) {
+                discovered.add(new EmrContainersCfnProvisioner(emrContainersService));
+            }
             if (emrServerlessService != null && emrServerlessJobRunService != null) {
                 discovered.add(new EmrServerlessCfnProvisioner(emrServerlessService, emrServerlessJobRunService));
             }
@@ -798,6 +804,11 @@ final class CfnProvisionerFixture {
 
         public Builder codeDeploy(CodeDeployService v) {
             this.codeDeployService = v;
+            return this;
+        }
+
+        public Builder emrContainers(EmrContainersService v) {
+            this.emrContainersService = v;
             return this;
         }
 
