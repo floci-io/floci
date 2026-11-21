@@ -205,8 +205,16 @@ without its `InstanceType`, both required, is refused with the framework's `Vali
 neither bid price, the defaults the API reference gives, and its `EbsConfiguration` as one `EbsBlockDevice` per volume.
 The reference names no devices, so Floci names them `/dev/sdb`, `/dev/sdc` and on. A config attaching more than 25
 volumes to an instance is refused with `ValidationException` "There is a limit of 25 volumes per instance.", the
-Management Guide's own limit and sentence; AWS's error for it is not documented. `ModifyInstanceFleet` changes a
-fleet's target capacities only; the `InstanceTypeConfigs` it takes are not applied.
+Management Guide's own limit and sentence; AWS's error for it is not documented. A fleet keeps its
+`LaunchSpecifications`, `ResizeSpecifications` and `Context`, which `ListInstanceFleets` gives back, and
+`ModifyInstanceFleet` changes the target capacities, `ResizeSpecifications`, `InstanceTypeConfigs` and `Context` it
+gives; Floci provisions nothing the specifications would steer, so they change no instance. The configs replace the
+fleet's own, as the Management Guide's "Reconfiguring instance fleets" warns: "Not including fields can result in
+overwriting specifications you declared at launch". They must name every instance type the fleet has, as "You must
+include all instance types that are part of your instance fleet in the modify request"; one that leaves a type out is
+refused with `InvalidRequestException`, AWS's error for it not being documented. Its configs are checked as
+`AddInstanceFleet` checks them, and on both calls specifications that are not an object, or a `Context` that is not a
+string, are refused with `SerializationException`, as every member of the wrong JSON type is.
 An instance group keeps its `EbsConfiguration` and `CustomAmiId`, from `RunJobFlow` or `AddInstanceGroups`, and
 `ListInstanceGroups` gives them back as its `EbsBlockDevices`, one per volume named as a fleet's are, its
 `EbsOptimized` and its `CustomAmiId`, under the same limit of 25 volumes per instance; its instances' EC2 descriptions
