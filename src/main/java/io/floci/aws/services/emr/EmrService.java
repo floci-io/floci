@@ -64,6 +64,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -74,6 +75,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.PrimitiveIterator;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1449,21 +1451,29 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is, and a null
-     * reconfiguration type is OVERWRITE.
+     * One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is, a null
+     * reconfiguration type is OVERWRITE, and {@code instancesToTerminate} are EC2InstanceIdsToTerminate, none for null.
      */
     public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
-                                            String reconfigurationType) {
+                                            String reconfigurationType, List<String> instancesToTerminate) {
 
         public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {
-            this(instanceGroupId, instanceCount, configurations, null);
+            this(instanceGroupId, instanceCount, configurations, null, null);
+        }
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                         String reconfigurationType) {
+            this(instanceGroupId, instanceCount, configurations, reconfigurationType, null);
         }
     }
 
     /**
      * Resizes or reconfigures instance groups in place. ClusterId is optional in the request, so
      * without it each group is looked up across the account's clusters in the Region. Every modification is
-     * checked before any is applied.
+     * checked before any is applied. A group's EC2InstanceIdsToTerminate end those of its instances: "After you
+     * terminate the instances, the instance group will not return to its original requested size", so its requested
+     * count goes down by as many, and the others keep their ids, addresses and nodes. An InstanceCount beside them is
+     * the group's size after that.
      */
     public void modifyInstanceGroups(String clusterId, String region, List<InstanceGroupModification> modifications) {
         run(() -> {
@@ -1472,6 +1482,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
             Map<String, EmrCluster> touched = new LinkedHashMap<>();
             List<EmrInstanceGroup> groups = new ArrayList<>();
+            List<List<Integer>> terminations = new ArrayList<>();
             for (int position = 1; position <= modifications.size(); position++) {
                 InstanceGroupModification mod = modifications.get(position - 1);
                 EmrCluster found = clusterId != null
@@ -1495,11 +1506,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         throw invalid("The instance count of a master instance group cannot be modified.");
                     }
                 }
+                terminations.add(ordinalsToTerminate(cluster, group, mod.instancesToTerminate()));
                 groups.add(group);
             }
             for (int i = 0; i < modifications.size(); i++) {
                 InstanceGroupModification mod = modifications.get(i);
                 EmrInstanceGroup group = groups.get(i);
+                // Those another entry for the same group has not ended already.
+                List<Integer> ended = terminations.get(i).stream()
+                        .filter(ordinal -> !group.getTerminatedOrdinals().contains(ordinal)).toList();
+                if (!ended.isEmpty()) {
+                    List<Integer> ordinals = new ArrayList<>(group.getTerminatedOrdinals());
+                    ordinals.addAll(ended);
+                    Collections.sort(ordinals);
+                    group.setTerminatedOrdinals(ordinals);
+                    group.setRequestedInstanceCount(Math.max(0, group.getRequestedInstanceCount() - ended.size()));
+                    group.setRunningInstanceCount(Math.max(0, group.getRunningInstanceCount() - ended.size()));
+                }
                 if (mod.instanceCount() != null) {
                     group.setRequestedInstanceCount(mod.instanceCount());
                     group.setRunningInstanceCount(mod.instanceCount());
@@ -1514,6 +1537,66 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             touched.forEach(clusterStore::put);
             touched.values().forEach(this::resizeNodes);
         });
+    }
+
+    /**
+     * The ordinals of the group's instances that {@code instanceIds} name, each one of its instances now as
+     * ListInstances gives it; none for no ids. A master group's are refused as its count is, and an id that is not one
+     * of the group's instances with ValidationException, as ModifyInstanceGroups' other refusals are recorded; no
+     * source gives AWS's wording, so it is Floci's.
+     */
+    private static List<Integer> ordinalsToTerminate(EmrCluster cluster, EmrInstanceGroup group,
+                                                     List<String> instanceIds) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return List.of();
+        }
+        if ("MASTER".equals(group.getInstanceGroupType())) {
+            throw invalid("The instance count of a master instance group cannot be modified.");
+        }
+        List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
+        Map<String, Integer> current = new HashMap<>();
+        for (EmrHandler.ListedInstances set : listed) {
+            if (group.getId().equals(set.groupId())) {
+                long first = firstIndex(listed, set);
+                PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(1);
+                for (long k = 1; k <= set.count(); k++) {
+                    long ordinal = ordinals.nextLong();
+                    current.put(ec2InstanceId(first + ordinal - 1), (int) ordinal);
+                }
+            }
+        }
+        List<Integer> ordinals = new ArrayList<>();
+        for (String instanceId : new LinkedHashSet<>(instanceIds)) {
+            Integer ordinal = current.get(instanceId);
+            if (ordinal == null) {
+                throw new AwsException("ValidationException", "Instance " + instanceId
+                        + " is not a running instance of instance group " + group.getId() + ".", 400);
+            }
+            ordinals.add(ordinal);
+        }
+        return ordinals;
+    }
+
+    /**
+     * The index, in the cluster's instance numbering, of the first place {@code set} takes: 1 for the primary node's
+     * group or fleet, and after the places of those before it for the others.
+     */
+    static long firstIndex(List<EmrHandler.ListedInstances> listed, EmrHandler.ListedInstances set) {
+        EmrHandler.ListedInstances primary = listed.stream().filter(other -> other.number() == 0).findFirst()
+                .orElse(null);
+        if (set == primary) {
+            return 1;
+        }
+        long next = primary == null ? 1 : 1 + primary.span();
+        for (EmrHandler.ListedInstances other : listed) {
+            if (other == set) {
+                return next;
+            }
+            if (other != primary) {
+                next += other.span();
+            }
+        }
+        throw new IllegalArgumentException("The instances are not the cluster's");
     }
 
     /**
@@ -3230,7 +3313,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 count = isCore ? Math.max(count, floor) : count;
                 asked += Math.max(count, 0);
                 addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), count, isCore, isCore ? core : task,
-                        maxWorkerNodes);
+                        maxWorkerNodes, group.getTerminatedOrdinals());
             }
         }
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
@@ -3240,7 +3323,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 long capacity = (long) fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
                 long count = isCore ? Math.max(capacity, floor) : capacity;
                 asked += Math.max(count, 0);
-                addNodes(cluster, number, count, isCore, isCore ? core : task, maxWorkerNodes);
+                addNodes(cluster, number, count, isCore, isCore ? core : task, maxWorkerNodes, List.of());
             }
         }
         List<ClusterStorage.Node> nodes = new ArrayList<>(core);
@@ -3253,10 +3336,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return nodes;
     }
 
-    // Up to count nodes of the group, as long as the list holds fewer than limit.
+    // Up to count nodes of the group, as long as the list holds fewer than limit, none at an ordinal terminated holds.
     private static void addNodes(EmrCluster cluster, int group, long count, boolean core,
-                                 List<ClusterStorage.Node> nodes, int limit) {
-        for (int ordinal = 1; ordinal <= count && nodes.size() < limit; ordinal++) {
+                                 List<ClusterStorage.Node> nodes, int limit, List<Integer> terminated) {
+        PrimitiveIterator.OfLong ordinals = ordinalsFrom(terminated, 1);
+        for (long k = 1; k <= count && nodes.size() < limit; k++) {
+            long ordinal = ordinals.nextLong();
             String id = group + "-" + ordinal;
             nodes.add(new ClusterStorage.Node(id,
                     AwsRegions.ec2PrivateIpDnsName(privateIpAddress(group, ordinal), cluster.getRegion()), core,
@@ -3809,6 +3894,52 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
+     * The ordinal, counted from 1, of a group's {@code k}-th instance, when EC2InstanceIdsToTerminate has ended its
+     * instances {@code terminated} (ascending): the {@code k}-th ordinal that is not one of them, so an instance keeps
+     * its ordinal, and with it its id and addresses, while another of its group is ended.
+     */
+    static long ordinalAt(List<Integer> terminated, long k) {
+        long ordinal = k;
+        for (int gone : terminated) {
+            if (gone > ordinal) {
+                break;
+            }
+            ordinal++;
+        }
+        return ordinal;
+    }
+
+    /**
+     * A group's instance ordinals from its {@code k}-th on, in order, as {@link #ordinalAt} gives each: the terminated
+     * ones before the {@code k}-th are passed once, and each later one as the walk reaches it, so a page of instances
+     * costs its own length and not that times the group's terminations.
+     */
+    static PrimitiveIterator.OfLong ordinalsFrom(List<Integer> terminated, long k) {
+        long first = ordinalAt(terminated, k);
+        return new PrimitiveIterator.OfLong() {
+            private long next = first;
+            // The terminated ordinals passed so far: as many as the first ordinal is past k.
+            private int passed = (int) (first - k);
+
+            @Override
+            public boolean hasNext() {
+                return true;
+            }
+
+            @Override
+            public long nextLong() {
+                long current = next;
+                next = current + 1;
+                while (passed < terminated.size() && terminated.get(passed) == next) {
+                    next++;
+                    passed++;
+                }
+                return current;
+            }
+        };
+    }
+
+    /**
      * The private IPv4 address of the instance {@code ordinal}, counted from 1, of a cluster's instance group numbered
      * {@code group}: an instance keeps it while its cluster's other groups resize, as an EC2 instance does.
      */
@@ -3854,17 +3985,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      */
     Instance nodeInstance(EmrCluster cluster, String accountId, int group, long ordinal) {
         List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
-        EmrHandler.ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
-        long next = primary == null ? 1 : 1 + primary.count();
         long index = ordinal;
         String instanceType = null;
         for (EmrHandler.ListedInstances set : listed) {
-            long first = set == primary ? 1 : next;
-            if (set != primary) {
-                next += set.count();
-            }
             if (set.number() == group) {
-                index = first + ordinal - 1;
+                index = firstIndex(listed, set) + ordinal - 1;
                 instanceType = set.instanceType();
                 break;
             }

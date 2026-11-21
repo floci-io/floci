@@ -154,7 +154,15 @@ synthetic IDs and addresses of the `MASTER`
 group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
 `DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
 address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while
-another resizes. An instance fleet has an instance for each unit of its capacity, its on-demand ones first, each of the
+another resizes. `ModifyInstanceGroups`' `EC2InstanceIdsToTerminate` ends those instances of a group, which leave the
+listing and, in the `docker` runner mode, take their core or task node with them, its HDFS blocks moved first; "After
+you terminate the instances, the instance group will not return to its original requested size", so the group's
+requested and running counts go down by as many. The group's other instances keep their IDs, addresses and nodes, as
+do the cluster's other groups', and an instance the group gets later takes a new ID, not an ended one's. An
+`InstanceCount` beside them is the group's size after that. An ID that is not one of the group's instances is refused
+with `ValidationException`, and a `MASTER` group's with `InvalidRequestException`, as its count is; AWS's wording for
+these is not documented, so it is Floci's. An instance fleet has an instance for each unit of its capacity, its
+on-demand ones first, each of the
 first instance type in its `InstanceTypeConfigs`. `InstanceGroupId` and `InstanceGroupTypes` keep instance groups'
 instances, `InstanceFleetId` and `InstanceFleetType` instance fleets', and a call's filters all apply together.
 `ListInstances` retains each group's or fleet's
