@@ -7402,10 +7402,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 String detailType = eventName.startsWith("ObjectCreated") ? "Object Created"
                         : eventName.startsWith("ObjectAnnotation") ? "Object Annotation"
                         : "Object Deleted";
-                Map<String, Object> entry = new java.util.HashMap<>();
-                entry.put("Source", "aws.s3");
-                entry.put("DetailType", detailType);
-                entry.put("Detail", buildS3EventBridgeDetail(bucketName, key, eventName, obj, region));
+                Map<String, Object> entry = EventBridgeService.serviceEventEntry("aws.s3", detailType,
+                        buildS3EventBridgeDetail(bucketName, key, eventName, obj, region),
+                        S3ResourceArns.bucket(bucketPartition(bucketName), bucketName));
                 eventBridgeService.putEvents(List.of(entry), region);
                 LOG.debugv("Fired S3 event {0} to EventBridge default bus", eventName);
             } catch (Exception e) {
@@ -7450,9 +7449,15 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    /** The EventBridge {@code reason}: {@code Lifecycle Expiration} for a deletion by a lifecycle rule. */
+    /** EventBridge names the creating API rather than the classic notification event. */
     private static String eventBridgeReason(String eventName) {
-        return isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
+        return switch (eventName) {
+            case "ObjectCreated:Put" -> "PutObject";
+            case "ObjectCreated:Post" -> "POST Object";
+            case "ObjectCreated:Copy" -> "CopyObject";
+            case "ObjectCreated:CompleteMultipartUpload" -> "CompleteMultipartUpload";
+            default -> isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
+        };
     }
 
     private static boolean isLifecycleEvent(String eventName) {
