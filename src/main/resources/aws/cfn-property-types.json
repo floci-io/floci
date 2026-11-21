@@ -12,6 +12,7 @@
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::EKS::Cluster": "AWS::EKS::Cluster",
+    "AWS::EMRServerless::Application": "AWS::EMRServerless::Application",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
     "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion",
@@ -1948,6 +1949,389 @@
       "members": {
         "Enabled": "Boolean"
       }
+    },
+    "AWS::EMRServerless::Application": {
+      "type": "structure",
+      "members": {
+        "Architecture": "AWS::EMRServerless::Application/Architecture",
+        "Name": "AWS::EMRServerless::Application.Name",
+        "ReleaseLabel": "AWS::EMRServerless::Application.ReleaseLabel",
+        "Type": "String",
+        "InitialCapacity": "AWS::EMRServerless::Application/InitialCapacityConfigMap",
+        "MaximumCapacity": "AWS::EMRServerless::Application/MaximumAllowedResources",
+        "Tags": "AWS::EMRServerless::Application.Tags",
+        "AutoStartConfiguration": "AWS::EMRServerless::Application/AutoStartConfiguration",
+        "AutoStopConfiguration": "AWS::EMRServerless::Application/AutoStopConfiguration",
+        "ImageConfiguration": "AWS::EMRServerless::Application/ImageConfigurationInput",
+        "MonitoringConfiguration": "AWS::EMRServerless::Application/MonitoringConfiguration",
+        "RuntimeConfiguration": "AWS::EMRServerless::Application/ConfigurationList",
+        "InteractiveConfiguration": "AWS::EMRServerless::Application/InteractiveConfiguration",
+        "NetworkConfiguration": "AWS::EMRServerless::Application/NetworkConfiguration",
+        "Arn": "AWS::EMRServerless::Application.Arn",
+        "ApplicationId": "AWS::EMRServerless::Application.ApplicationId",
+        "WorkerTypeSpecifications": "AWS::EMRServerless::Application/WorkerTypeSpecificationInputMap",
+        "SchedulerConfiguration": "AWS::EMRServerless::Application/SchedulerConfiguration",
+        "IdentityCenterConfiguration": "AWS::EMRServerless::Application/IdentityCenterConfiguration"
+      },
+      "required": [
+        "ReleaseLabel",
+        "Type"
+      ]
+    },
+    "AWS::EMRServerless::Application.ApplicationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "AWS::EMRServerless::Application.Arn": {
+      "type": "string",
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):emr-serverless:.+:(\\d{12}):\\/applications\\/[0-9a-zA-Z]+$"
+    },
+    "AWS::EMRServerless::Application.Name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._\\/#-]+$"
+    },
+    "AWS::EMRServerless::Application.ReleaseLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    },
+    "AWS::EMRServerless::Application.Tags": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/Tag"
+    },
+    "AWS::EMRServerless::Application/Architecture": {
+      "type": "string"
+    },
+    "AWS::EMRServerless::Application/AutoStartConfiguration": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean"
+      }
+    },
+    "AWS::EMRServerless::Application/AutoStopConfiguration": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "IdleTimeoutMinutes": "Integer"
+      }
+    },
+    "AWS::EMRServerless::Application/Classification": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": ".*\\S.*"
+    },
+    "AWS::EMRServerless::Application/CloudWatchLoggingConfiguration": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "LogGroupName": "AWS::EMRServerless::Application/LogGroupName",
+        "LogStreamNamePrefix": "AWS::EMRServerless::Application/LogStreamNamePrefix",
+        "EncryptionKeyArn": "AWS::EMRServerless::Application/EncryptionKeyArn",
+        "LogTypeMap": "AWS::EMRServerless::Application/CloudWatchLoggingConfiguration.LogTypeMap"
+      }
+    },
+    "AWS::EMRServerless::Application/CloudWatchLoggingConfiguration.LogTypeMap": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/LogTypeMapKeyValuePair"
+    },
+    "AWS::EMRServerless::Application/ConfigurationList": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/ConfigurationObject"
+    },
+    "AWS::EMRServerless::Application/ConfigurationObject": {
+      "type": "structure",
+      "members": {
+        "Classification": "AWS::EMRServerless::Application/Classification",
+        "Properties": "AWS::EMRServerless::Application/ConfigurationObject.Properties",
+        "Configurations": "AWS::EMRServerless::Application/ConfigurationObject.Configurations"
+      },
+      "required": [
+        "Classification"
+      ]
+    },
+    "AWS::EMRServerless::Application/ConfigurationObject.Configurations": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/ConfigurationObject"
+    },
+    "AWS::EMRServerless::Application/ConfigurationObject.Properties": {
+      "type": "map",
+      "value": "AWS::EMRServerless::Application/SensitivePropertiesMap"
+    },
+    "AWS::EMRServerless::Application/CpuSize": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15,
+      "pattern": "^[1-9][0-9]*(\\s)?(vCPU|vcpu|VCPU)?$"
+    },
+    "AWS::EMRServerless::Application/DiskSize": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15,
+      "pattern": "^[1-9][0-9]*(\\s)?(GB|gb|gB|Gb)$"
+    },
+    "AWS::EMRServerless::Application/DiskType": {
+      "type": "string",
+      "pattern": "^(SHUFFLE_OPTIMIZED|[Ss]huffle_[Oo]ptimized|STANDARD|[Ss]tandard)$"
+    },
+    "AWS::EMRServerless::Application/EncryptionKeyArn": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 2048,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):kms:[a-zA-Z0-9\\-]*:(\\d{12})?:key\\/[a-zA-Z0-9-]+$"
+    },
+    "AWS::EMRServerless::Application/IdentityCenterConfiguration": {
+      "type": "structure",
+      "members": {
+        "IdentityCenterInstanceArn": "AWS::EMRServerless::Application/IdentityCenterConfiguration.IdentityCenterInstanceArn",
+        "UserBackgroundSessionsEnabled": "Boolean"
+      }
+    },
+    "AWS::EMRServerless::Application/IdentityCenterConfiguration.IdentityCenterInstanceArn": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$"
+    },
+    "AWS::EMRServerless::Application/ImageConfigurationInput": {
+      "type": "structure",
+      "members": {
+        "ImageUri": "AWS::EMRServerless::Application/ImageConfigurationInput.ImageUri"
+      }
+    },
+    "AWS::EMRServerless::Application/ImageConfigurationInput.ImageUri": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^([a-z0-9]+[a-z0-9-.]*)\\/((?:[a-z0-9]+(?:[._-][a-z0-9]+)*\\/)*[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:\\:([a-zA-Z0-9_][a-zA-Z0-9-._]{0,299})|@(sha256:[0-9a-f]{64}))$"
+    },
+    "AWS::EMRServerless::Application/InitialCapacityConfig": {
+      "type": "structure",
+      "members": {
+        "WorkerCount": "Integer",
+        "WorkerConfiguration": "AWS::EMRServerless::Application/WorkerConfiguration"
+      },
+      "required": [
+        "WorkerCount",
+        "WorkerConfiguration"
+      ]
+    },
+    "AWS::EMRServerless::Application/InitialCapacityConfigKeyValuePair": {
+      "type": "structure",
+      "members": {
+        "Key": "AWS::EMRServerless::Application/InitialCapacityConfigKeyValuePair.Key",
+        "Value": "AWS::EMRServerless::Application/InitialCapacityConfig"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EMRServerless::Application/InitialCapacityConfigKeyValuePair.Key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "pattern": "^[a-zA-Z]+[-_]*[a-zA-Z]+$"
+    },
+    "AWS::EMRServerless::Application/InitialCapacityConfigMap": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/InitialCapacityConfigKeyValuePair"
+    },
+    "AWS::EMRServerless::Application/InteractiveConfiguration": {
+      "type": "structure",
+      "members": {
+        "LivyEndpointEnabled": "Boolean",
+        "StudioEnabled": "Boolean",
+        "SessionEnabled": "Boolean"
+      }
+    },
+    "AWS::EMRServerless::Application/LogGroupName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[\\.\\-_/#A-Za-z0-9]+$"
+    },
+    "AWS::EMRServerless::Application/LogStreamNamePrefix": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^:*]*$"
+    },
+    "AWS::EMRServerless::Application/LogTypeList": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/LogTypeString"
+    },
+    "AWS::EMRServerless::Application/LogTypeMapKeyValuePair": {
+      "type": "structure",
+      "members": {
+        "Key": "AWS::EMRServerless::Application/WorkerTypeString",
+        "Value": "AWS::EMRServerless::Application/LogTypeList"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EMRServerless::Application/LogTypeString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "pattern": "^[a-zA-Z]+[-_]*[a-zA-Z]+$"
+    },
+    "AWS::EMRServerless::Application/ManagedPersistenceMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "EncryptionKeyArn": "AWS::EMRServerless::Application/EncryptionKeyArn"
+      }
+    },
+    "AWS::EMRServerless::Application/MaximumAllowedResources": {
+      "type": "structure",
+      "members": {
+        "Cpu": "AWS::EMRServerless::Application/CpuSize",
+        "Memory": "AWS::EMRServerless::Application/MemorySize",
+        "Disk": "AWS::EMRServerless::Application/DiskSize"
+      },
+      "required": [
+        "Cpu",
+        "Memory"
+      ]
+    },
+    "AWS::EMRServerless::Application/MemorySize": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15,
+      "pattern": "^[1-9][0-9]*(\\s)?(GB|gb|gB|Gb)?$"
+    },
+    "AWS::EMRServerless::Application/MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "S3MonitoringConfiguration": "AWS::EMRServerless::Application/S3MonitoringConfiguration",
+        "ManagedPersistenceMonitoringConfiguration": "AWS::EMRServerless::Application/ManagedPersistenceMonitoringConfiguration",
+        "CloudWatchLoggingConfiguration": "AWS::EMRServerless::Application/CloudWatchLoggingConfiguration",
+        "PrometheusMonitoringConfiguration": "AWS::EMRServerless::Application/PrometheusMonitoringConfiguration"
+      }
+    },
+    "AWS::EMRServerless::Application/NetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "SubnetIds": "AWS::EMRServerless::Application/NetworkConfiguration.SubnetIds",
+        "SecurityGroupIds": "AWS::EMRServerless::Application/NetworkConfiguration.SecurityGroupIds"
+      }
+    },
+    "AWS::EMRServerless::Application/NetworkConfiguration.SecurityGroupIds": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/SecurityGroupId"
+    },
+    "AWS::EMRServerless::Application/NetworkConfiguration.SubnetIds": {
+      "type": "list",
+      "member": "AWS::EMRServerless::Application/SubnetId"
+    },
+    "AWS::EMRServerless::Application/PrometheusMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "RemoteWriteUrl": "AWS::EMRServerless::Application/RemoteWriteUrl"
+      }
+    },
+    "AWS::EMRServerless::Application/RemoteWriteUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 10280,
+      "pattern": "^https://aps-workspaces.([a-z]{2}-[a-z-]{1,20}-[1-9]).amazonaws(.[0-9A-Za-z]{2,4})+/workspaces/[-_.0-9A-Za-z]{1,100}/api/v1/remote_write$"
+    },
+    "AWS::EMRServerless::Application/S3MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "LogUri": "AWS::EMRServerless::Application/UriString",
+        "EncryptionKeyArn": "AWS::EMRServerless::Application/EncryptionKeyArn"
+      }
+    },
+    "AWS::EMRServerless::Application/SchedulerConfiguration": {
+      "type": "structure",
+      "members": {
+        "QueueTimeoutMinutes": "Integer",
+        "MaxConcurrentRuns": "Integer"
+      }
+    },
+    "AWS::EMRServerless::Application/SecurityGroupId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[-0-9a-zA-Z]+"
+    },
+    "AWS::EMRServerless::Application/SensitivePropertiesMap": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": ".*\\S.*"
+    },
+    "AWS::EMRServerless::Application/SubnetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[-0-9a-zA-Z]+"
+    },
+    "AWS::EMRServerless::Application/Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "AWS::EMRServerless::Application/Tag.Key",
+        "Value": "AWS::EMRServerless::Application/Tag.Value"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EMRServerless::Application/Tag.Key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9 /_.:=+@-]+$"
+    },
+    "AWS::EMRServerless::Application/Tag.Value": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9 /_.:=+@-]*$"
+    },
+    "AWS::EMRServerless::Application/UriString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 10280,
+      "pattern": "[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDBFF-\\uDC00\\uDFFF\\r\\n\\t]*"
+    },
+    "AWS::EMRServerless::Application/WorkerConfiguration": {
+      "type": "structure",
+      "members": {
+        "Cpu": "AWS::EMRServerless::Application/CpuSize",
+        "Memory": "AWS::EMRServerless::Application/MemorySize",
+        "Disk": "AWS::EMRServerless::Application/DiskSize",
+        "DiskType": "AWS::EMRServerless::Application/DiskType"
+      },
+      "required": [
+        "Cpu",
+        "Memory"
+      ]
+    },
+    "AWS::EMRServerless::Application/WorkerTypeSpecificationInput": {
+      "type": "structure",
+      "members": {
+        "ImageConfiguration": "AWS::EMRServerless::Application/ImageConfigurationInput"
+      }
+    },
+    "AWS::EMRServerless::Application/WorkerTypeSpecificationInputMap": {
+      "type": "map",
+      "value": "AWS::EMRServerless::Application/WorkerTypeSpecificationInput"
+    },
+    "AWS::EMRServerless::Application/WorkerTypeString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "pattern": "^[a-zA-Z]+[-_]*[a-zA-Z]+$"
     },
     "AWS::Events::Rule": {
       "type": "structure",

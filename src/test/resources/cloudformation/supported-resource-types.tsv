@@ -109,6 +109,7 @@ AWS::EFS::FileSystem	EfsCfnProvisioner
 AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
+AWS::EMRServerless::Application	EmrServerlessCfnProvisioner
 AWS::ElastiCache::CacheCluster	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ReplicationGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ServerlessCache	ElastiCacheServerlessCfnProvisioner
