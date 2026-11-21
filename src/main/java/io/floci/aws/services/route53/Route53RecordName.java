@@ -18,7 +18,7 @@ public final class Route53RecordName {
      * "Normalizing the Route 53 condition key values"): without the final dot, and with {@code *} as {@code \052}.
      */
     public static String conditionName(String name) {
-        return spell(name);
+        return format(name, true);
     }
 
     /**
@@ -30,7 +30,7 @@ public final class Route53RecordName {
         if (name == null || name.isEmpty()) {
             return name;
         }
-        return spell(name) + ".";
+        return format(name, true) + ".";
     }
 
     /**
@@ -42,27 +42,13 @@ public final class Route53RecordName {
         if (name == null || name.isEmpty()) {
             return name;
         }
-        String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
-        byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
-        StringBuilder decoded = new StringBuilder(bytes.length + 1);
-        for (int index = 0; index < bytes.length; index++) {
-            int value = bytes[index] & 0xFF;
-            if (value == '\\' && isEscapeCode(bytes, index + 1)) {
-                value = (bytes[index + 1] - '0') * 64 + (bytes[index + 2] - '0') * 8 + (bytes[index + 3] - '0');
-                index += 3;
-            }
-            if (value >= 'A' && value <= 'Z') {
-                value += 'a' - 'A';
-            }
-            decoded.append((char) value);
-        }
-        return decoded.append('.').toString();
+        return format(name, false) + ".";
     }
 
-    private static String spell(String name) {
+    private static String format(String name, boolean escape) {
         String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
         byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
-        StringBuilder spelled = new StringBuilder(bytes.length);
+        StringBuilder out = new StringBuilder(bytes.length);
         for (int index = 0; index < bytes.length; index++) {
             int value = bytes[index] & 0xFF;
             boolean escaped = value == '\\' && isEscapeCode(bytes, index + 1);
@@ -73,14 +59,14 @@ public final class Route53RecordName {
             if (value >= 'A' && value <= 'Z') {
                 value += 'a' - 'A';
             }
-            if (value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || value == '-' || value == '_'
-                    || value == '.' && !escaped) {
-                spelled.append((char) value);
+            if (!escape || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+                    || value == '-' || value == '_' || value == '.' && !escaped) {
+                out.append((char) value);
             } else {
-                spelled.append(String.format(Locale.ROOT, "\\%03o", value));
+                out.append(String.format(Locale.ROOT, "\\%03o", value));
             }
         }
-        return spelled.toString();
+        return out.toString();
     }
 
     /** Whether the three bytes from {@code start} are the octal digits of a byte, {@code 000} to {@code 377}. */
