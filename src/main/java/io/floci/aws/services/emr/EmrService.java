@@ -241,11 +241,15 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final long MAX_IDLE_TIMEOUT_SECONDS = 604_800;
     // StepConcurrencyLevel: "You can specify a minimum of 1 step and a maximum of 256 steps" (ModifyCluster), "The
     // maximum value is 256" (RunJobFlow). And "only 256 steps can be RUNNING or PENDING at any given time" (Management
-    // Guide), and "A maximum of 256 steps are allowed in each CancelSteps request". No source gives AWS's answer to
-    // any of them, so their words are Floci's.
+    // Guide), and "With Amazon EMR releases 7.14.0 and later, the maximum number of steps you can cancel per request
+    // is 100. With earlier releases, the maximum is 256 steps per request" ("Cancel steps"). No source gives AWS's
+    // answer to any of them, so their words are Floci's.
     private static final int MAX_STEP_CONCURRENCY = 256;
     private static final int MAX_ACTIVE_STEPS = 256;
     private static final int MAX_CANCELLED_STEPS = 256;
+    private static final int MAX_CANCELLED_STEPS_FROM_7_14 = 100;
+    private static final String TERMINATE_PROCESS = "TERMINATE_PROCESS";
+    private static final List<String> STEP_CANCELLATION_OPTIONS = List.of("SEND_INTERRUPT", TERMINATE_PROCESS);
     // A release label's major, minor and patch versions.
     private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})\\.(\\d{1,6})");
     private static final int MAX_PORT = 65_535;
@@ -730,6 +734,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public record CancelStepInfo(String stepId, String status, String reason) {}
 
     public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
+        return cancelSteps(clusterId, stepIds, null);
+    }
+
+    /**
+     * Cancels the steps with {@code option}, SEND_INTERRUPT (the default, for null) or TERMINATE_PROCESS, the model's
+     * StepCancellationOption ({@link EmrClusterLifecycle#cancel}).
+     */
+    public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds, String option) {
+        if (option != null && !STEP_CANCELLATION_OPTIONS.contains(option)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(option, "stepCancellationOption", STEP_CANCELLATION_OPTIONS));
+        }
+        boolean terminateProcess = TERMINATE_PROCESS.equals(option);
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             // CancelSteps is "Available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0".
@@ -737,15 +754,17 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw invalid("CancelSteps is available only in Amazon EMR versions 4.8.0 and later, excluding"
                         + " version 5.0.0, and cluster " + clusterId + " runs " + cluster.getReleaseLabel() + ".");
             }
-            if (stepIds.size() > MAX_CANCELLED_STEPS) {
-                throw invalid("A CancelSteps request can cancel at most " + MAX_CANCELLED_STEPS + " steps, and this"
-                        + " one names " + stepIds.size() + ".");
+            int most = releaseAtLeast(cluster.getReleaseLabel(), 7, 14, 0)
+                    ? MAX_CANCELLED_STEPS_FROM_7_14 : MAX_CANCELLED_STEPS;
+            if (stepIds.size() > most) {
+                throw invalid("A CancelSteps request can cancel at most " + most + " steps on release "
+                        + cluster.getReleaseLabel() + ", and this one names " + stepIds.size() + ".");
             }
             List<CancelStepInfo> result = new ArrayList<>();
             for (String stepId : stepIds) {
                 EmrStep step = stepOf(cluster, stepId).orElse(null);
                 String refusal = step == null ? "Step does not exist."
-                        : lifecycle.cancel(cluster, step, now(), regionOf(cluster));
+                        : lifecycle.cancel(cluster, step, now(), regionOf(cluster), terminateProcess);
                 result.add(refusal == null
                         ? new CancelStepInfo(stepId, "SUBMITTED", null)
                         : new CancelStepInfo(stepId, "FAILED", refusal));
@@ -2793,6 +2812,18 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState())).isPresent();
     }
 
+    /**
+     * Whether a step's driver may go on, in its reset: RUNNING, or, once its driver runs, interrupted and free to end
+     * on its own. One interrupted before its driver started has no process to signal, so it does not start.
+     */
+    private synchronized boolean mayGoOn(StepLaunch launch, boolean driverStarted) {
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
+                .flatMap(cluster -> stepOf(cluster, launch.stepId()))
+                .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState()) || (driverStarted
+                        && EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState()) && step.isInterrupted()))
+                .isPresent();
+    }
+
     // Whether a command's cluster still runs, in the reset it was handed off in.
     private synchronized boolean commandGoing(CommandLaunch launch) {
         return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
@@ -2882,7 +2913,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         executionRole(cluster, step, accountId), Map.of(), hive.arguments(), hive.runner(),
                         Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null,
                         EmrSparkSteps.hiveEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
-                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
+                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null).asInterruptible();
             } else if (application == null && command == null) {
                 job = null;
             } else {
@@ -2897,7 +2928,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null);
+                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null)
+                        .asInterruptible();
             }
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
                     teardowns.get());
@@ -2908,8 +2940,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
 
         @Override
-        public void stop(EmrStep step) {
-            sparkRunner.stop(step.getId());
+        public void stop(EmrStep step, boolean terminateProcess) {
+            if (terminateProcess) {
+                sparkRunner.stop(step.getId());
+            } else {
+                sparkRunner.interrupt(step.getId());
+            }
         }
     }
 
@@ -3926,7 +3962,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         @Override
         public boolean cancelled() {
             return teardowns.get() != launch.teardownsBefore()
-                    || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
+                    || !RequestScopes.callAs(launch.accountId(), launch.region(),
+                            () -> mayGoOn(launch, driverStarted));
         }
     }
 

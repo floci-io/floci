@@ -105,8 +105,11 @@ given time", a `CANCEL_PENDING` one counted as running), which `RunJobFlow` and 
 step is not submitted and the action fails with a message that the ActionOnFailure setting is not valid"), which
 `AddJobFlowSteps` refuses with `ValidationException`, a step naming none taking `TERMINATE_CLUSTER`, as it is
 submitted, and so refused too; and `CancelSteps` "Available only
-in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0", with at most 256 steps a request, refused otherwise
-with `InvalidRequestException`.
+in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0", with at most 100 steps a request from release
+7.14.0 and 256 before it ("With Amazon EMR releases 7.14.0 and later, the maximum number of steps you can cancel per
+request is 100. With earlier releases, the maximum is 256 steps per request"), refused otherwise with
+`InvalidRequestException`. A `StepCancellationOption` other than `SEND_INTERRUPT` and `TERMINATE_PROCESS` gets the
+framework's enum message.
 
 In the `docker` runner mode a cancelled `RUNNING` step is `CANCEL_PENDING` while its driver stops, and keeps its
 place among the running steps until the driver is gone: then it is `CANCELLED`, and the next `PENDING` step starts.
@@ -114,7 +117,13 @@ That is Floci's reading of the Management Guide's "Canceling a running step does
 running, assuming no change to stepConcurrencyLevel", beside "Canceling a running or pending step removes that step
 from the active step count"; its step events have a `CANCEL_PENDING` row, "was cancelled at Time and is pending
 cancellation". Cancelling a `CANCEL_PENDING` step again answers `SUBMITTED`, and the step is `CANCELLED` however
-its driver ends. The step's container stops, and what the applications it started on YARN have logged goes to
+its driver ends. `StepCancellationOption` says how the driver goes, as the Management Guide's "Cancel steps" describes:
+with `SEND_INTERRUPT`, the default, "EMR sends a SIGTERM signal to the step", and the step's command, which a step's
+container runs under an init process so that the signal reaches it, may catch it to clean up, or runs on if it
+ignores it; with `TERMINATE_PROCESS` "EMR sends a SIGKILL signal to the step and all its descendant processes which
+terminates them immediately", as Floci's cancel always did. A `TERMINATE_PROCESS` cancel kills a step a
+`SEND_INTERRUPT` one left running, and a cluster's end kills it too. The step's container stops, and what the
+applications it started on YARN have logged goes to
 `containers/` (see **Output**), while an application in `--deploy-mode cluster` runs on to its end: EMR's cancel
 signals the step and its descendant processes, and "asynchronous processes are not affected", as the Management
 Guide puts it. In the `immediate` mode nothing runs, so a cancelled `RUNNING` step is `CANCELLED` at once and makes
