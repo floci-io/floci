@@ -90,7 +90,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, Map<String, Long>> dedupStore;
     private final StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore;
     private final ConcurrentHashMap<String, GuardedMessageQueue> messagesByQueue = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Object> queueLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicLong> queueLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, DeduplicationIdentity>> deduplicationIdentityCache =
@@ -1482,9 +1482,10 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     private void notifyReceivers(String storageKey) {
-        Object lock = queueLocks.get(storageKey);
+        AtomicLong lock = queueLocks.get(storageKey);
         if (lock != null) {
             synchronized (lock) {
+                lock.incrementAndGet();
                 lock.notifyAll();
             }
         }
@@ -1538,13 +1539,14 @@ public class SqsService implements Resettable, ResourceProvider {
 
         long start = System.currentTimeMillis();
         long maxWait = resolveWaitTimeSeconds(queue, waitTimeSeconds) * 1000L;
-        Object lock = queueLocks.computeIfAbsent(storageKey, k -> new Object());
+        AtomicLong lock = queueLocks.computeIfAbsent(storageKey, k -> new AtomicLong());
         // The queue incarnation this call polls against. DeleteQueue removes it
         // from messagesByQueue (and CreateQueue registers a fresh instance), so
         // an identity change tells a parked long poll that its queue is gone.
         GuardedMessageQueue polledQueue = getOrCreateQueue(storageKey);
 
         while (true) {
+            long notification = lock.get();
             if (messagesByQueue.get(storageKey) != polledQueue) {
                 // The queue was deleted mid-poll (and possibly recreated under
                 // the same URL). Finish empty-handed: a receive opened against
@@ -1569,7 +1571,10 @@ public class SqsService implements Resettable, ResourceProvider {
             }
             try {
                 synchronized (lock) {
-                    lock.wait(Math.min(1000, maxWait - elapsed));
+                    // A delivery after the empty check must trigger a retry, even before wait().
+                    if (lock.get() == notification) {
+                        lock.wait(Math.min(1000, maxWait - elapsed));
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -1653,6 +1658,7 @@ public class SqsService implements Resettable, ResourceProvider {
             }
             String dlqStorageKey = regionKey(region, dlqUrl);
             getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
+            notifyReceivers(dlqStorageKey);
             LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
         }
 
@@ -1923,7 +1929,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // remainder runs on the background worker at the requested rate, draining
         // one message at a time so the source queue stays observably populated.
         long initialMoved = 0;
-        if (moveOneMessage(srcQueueInitial, destUrl, region)) {
+        if (moveOneMessage(srcQueueInitial, srcKey, destUrl, region)) {
             initialMoved = 1;
             updateMoveTaskCounter(taskHandle, initialMoved);
         }
@@ -1948,6 +1954,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (destUrl != null) {
             String destKey = regionKey(region, destUrl);
             getOrCreateQueue(destKey).addAll(List.of(moved));
+            notifyReceivers(destKey);
             return true;
         }
         if (msg.getOriginalSourceQueueUrl() != null) {
@@ -1957,6 +1964,7 @@ public class SqsService implements Resettable, ResourceProvider {
             // the queue any future receive will see.
             String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
             getOrCreateQueue(originKey).addAll(List.of(moved));
+            notifyReceivers(originKey);
             return true;
         }
         return false;
@@ -1972,13 +1980,14 @@ public class SqsService implements Resettable, ResourceProvider {
     /** Move the head message of {@code sourceQueue}. Returns {@code false} when there is
      *  nothing to move, the target queue is missing, or delivery failed; in the latter case
      *  the message is put back at the head so the source keeps its order. */
-    private boolean moveOneMessage(GuardedMessageQueue sourceQueue, String destUrl, String region) {
+    private boolean moveOneMessage(GuardedMessageQueue sourceQueue, String sourceKey, String destUrl, String region) {
         Message message = sourceQueue.drainFirstIf(msg -> canDeliverMovedMessage(msg, destUrl, region));
         if (message == null) {
             return false;
         }
         try {
             if (deliverMovedMessage(message, destUrl, region)) {
+                notifyReceivers(sourceKey);
                 return true;
             }
         } catch (RuntimeException e) {
@@ -2014,7 +2023,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     }
                 }
                 removeExpiredMessages(srcKey);
-                if (!moveOneMessage(srcQueue, destUrl, region)) {
+                if (!moveOneMessage(srcQueue, srcKey, destUrl, region)) {
                     break;
                 }
                 moved++;
