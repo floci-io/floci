@@ -1,6 +1,8 @@
 package io.floci.aws.core.common;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -19,15 +21,54 @@ import java.util.Optional;
  * points at.
  *
  * <p>Implemented by the service that owns such resources or whose requests name them (EventBridge, for its
- * connections and API destinations; Application Auto Scaling, for its scalable targets; Redshift Data, for the
- * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
- * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
- * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
- * invitations and shares of other accounts they act on); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
- * for the namespace a request is of, so IAM never depends on that service directly.</p>
+ * connections and API destinations; Application Auto Scaling, for its scalable targets and their tags; Redshift
+ * Data, for the Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment
+ * Cryptography, for the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a
+ * tag call's resource and the tags of a cluster or a session; IAM Identity Center, for the accounts its permission
+ * sets are provisioned to and the tags of an instance,
+ * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
+ * of an index or a view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on, OAM for
+ * the tags of a sink or a link, and RAM for the tags of a resource share;
+ * Secrets Manager, for the secret a name or an ARN names, random suffix included, and its tags; EventBridge
+ * Scheduler, for its default schedule group and its groups' tags;
+ * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
+ * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
+ * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the
+ * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
+ * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
+ * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
+ * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
+ * for the tags of a table and its indexes; ECR, for the tags of a repository; Redshift, for the key a snapshot records
+ * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
+ * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
+ * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
+ * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
+ * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
+ * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
+ * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
+ * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for
+ * the tags of an application; S3 Vectors, for the tags of a vector bucket or an index; Timestream for InfluxDB, for the
+ * tags of a DB instance, a DB cluster, a parameter group or a backup; CloudTrail, for the tags of a trail; Budgets, for
+ * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an action;
+ * CodePipeline, for the tags of a pipeline, a webhook or a custom action type; DataSync, for the tags of an agent, a
+ * location or a task; Global Accelerator, for the tags of an accelerator, a listener or an endpoint group; EMR
+ * Serverless, for the tags of an application, a job run or a session; EMR on EKS, for the tags of a virtual cluster, a
+ * job run, a managed endpoint, a job template or a security configuration; Cost Explorer, for the tags of an anomaly
+ * monitor or subscription; Security Hub, for the tags of a hub or a configuration policy; Control Tower, for the tags
+ * of a landing zone or an enabled control; GuardDuty, for the tags of a detector or a Malware Protection plan; Cloud
+ * Map, for the tags of a namespace or a service; Elastic Load Balancing, for the tags of a load balancer, a target
+ * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
+ * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
+ * for the tags of a cluster; EKS, for the tags of a cluster, a node group, a Fargate profile, an add-on, a Pod Identity
+ * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
+ * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
+ * delivery destination or a delivery; Pricing Calculator, for the tags of a workload estimate); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
- * {@code through}, a default, {@code forwarded}): never a fact about what an operation acts on, which the table alone
+ * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
  * says, from botocore and the Service Reference, or from what AWS says where neither carries it.</p>
  */
 public interface StoredResourceArns {
@@ -42,6 +83,17 @@ public interface StoredResourceArns {
      * type is not one it finds.
      */
     Optional<String> find(String type, List<String> names, String region);
+
+    /**
+     * The resource resolved by an ARN in its own account and Region, without substituting the caller's
+     * coordinates (a layer version), or as the service's handler reads the ARN where it reads it first as the
+     * caller's (a secret a full or partial ARN names, in the ARN's Region, before one another account holds under
+     * that full ARN). Empty when the service has no such resource or does not resolve ARN selectors this way.
+     * Used only for operations read by the generated request-resource table.
+     */
+    default Optional<String> resolveStoredArn(String arn) {
+        return Optional.empty();
+    }
 
     /**
      * The ARNs of the resources the caller's resource named by {@code value} in {@code member}, as the table writes
@@ -63,6 +115,26 @@ public interface StoredResourceArns {
      */
     default Optional<String> recorded(String arn, String member) {
         return Optional.empty();
+    }
+
+    /**
+     * The tags of the resource stored under {@code arn}, in the account and Region the ARN names, by key, which the
+     * resource-tag keys the table gives the ARN's type take as their values ({@code aws:ResourceTag/<key>}); empty
+     * when the service holds no such resource or keeps no tags on it. Read on every request checked on such an ARN,
+     * so it reads the one resource the ARN names and leaves the resource as it is (a secret's last-accessed date).
+     */
+    default Map<String, String> storedTags(String arn) {
+        return Map.of();
+    }
+
+    /**
+     * {@code tags} as {@link #storedTags} answers them: in their order, a copy the caller may keep, and a tag without
+     * a value as an empty one, as a resource-tag condition key reads it.
+     */
+    static Map<String, String> withEmptyValues(Map<String, String> tags) {
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
+        return copy;
     }
 
     /**
@@ -96,9 +168,10 @@ public interface StoredResourceArns {
     /**
      * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
      * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
-     * to, a RAM invitation sent to the caller or a share another account owns), so a request naming it is checked on
-     * that ARN alone; false when that account holds no such resource. Whether the caller may use it is the handler's
-     * to answer after the check. Read by the ARN alone, as it runs on every such request.
+     * to, a RAM invitation sent to the caller, a share another account owns or a role STS assumes in its account), so
+     * a request naming it is checked on that ARN alone; false when that account holds no such resource. Whether the
+     * caller may use it is the handler's to answer after the check. Read by the ARN alone, as it runs on every such
+     * request.
      */
     default boolean reachedInItsAccount(String arn, String accountId) {
         return false;

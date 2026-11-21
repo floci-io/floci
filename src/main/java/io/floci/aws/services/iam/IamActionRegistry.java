@@ -710,11 +710,13 @@ public class IamActionRegistry {
                 return rule.action();
             }
         }
-        Optional<String> operation = restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, path),
-                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
-        if (operation.isPresent()) {
-            String action = IamAuthorizedActions.actionFor(credentialScope, operation.get(), method);
-            if (checkedAsAws(credentialScope, operation.get(), action)) {
+        MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        Optional<IamRestRoutes.Match> match = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
+                query, movedUnderPrefix(ctx), ctx.getHeaders());
+        if (match.isPresent()) {
+            String action = IamAuthorizedActions.actionFor(credentialScope, match.get().operation(), method,
+                    match.get().model(), query);
+            if (checkedAsAws(credentialScope, match.get().operation(), action)) {
                 return action;
             }
         }
@@ -738,23 +740,79 @@ public class IamActionRegistry {
         if (credentialScope == null || !routes.routes(credentialScope)) {
             return Map.of();
         }
-        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
-                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx))
-                .map(IamRestRoutes.Match::labels).orElse(Map.of());
+        return matchedRoute(routes, credentialScope, ctx).map(IamRestRoutes.Match::labels).orElse(Map.of());
     }
 
-    /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */
-    public static Map<String, String> routeMemberLocations(String operation, ContainerRequestContext ctx) {
+    /**
+     * Whether a request of the credential scope is taken by a route of a model AWS documents on a page of its own
+     * rather than in botocore, as Glue's Iceberg REST endpoint is: such a request is another API's, Apache Iceberg's
+     * REST catalog, so it carries none of its operation's members, and one its body gives was added by the caller.
+     */
+    public static boolean takenByDocumentedRoute(String credentialScope, ContainerRequestContext ctx) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        return credentialScope != null && routes.documents(credentialScope)
+                && matchedRoute(routes, credentialScope, ctx).map(IamRestRoutes.Match::documented).orElse(false);
+    }
+
+    /**
+     * The vendored route of the credential scope a request's method, path and query match, as {@link #resolveRoute}
+     * matches it.
+     */
+    private static Optional<IamRestRoutes.Match> matchedRoute(IamRestRoutes routes, String credentialScope,
+                                                              ContainerRequestContext ctx) {
+        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
+                ctx.getHeaders());
+    }
+
+    /**
+     * Whether the path of a request sent to the URI {@code uriInfo} gives is one of the credential scope's vendored
+     * model, whatever method it is sent with: matched still percent-encoded, so an encoded {@code /} stays inside
+     * its label and an unencoded one ends it. True for a scope whose routes are not vendored, which the model
+     * cannot answer for.
+     */
+    public static boolean modelRoutes(String credentialScope, UriInfo uriInfo) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        return !routes.routes(credentialScope)
+                || routes.takesPath(credentialScope, sentPath(uriInfo), uriInfo.getQueryParameters());
+    }
+
+    /** Keep the modeled operation when AWS authorizes its route under a different action name. */
+    public String operationForRoute(String credentialScope, String action, ContainerRequestContext ctx) {
+        if (credentialScope == null || action == null) {
+            return action;
+        }
+        String method = ctx.getMethod().toUpperCase();
+        MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)), query,
+                        movedUnderPrefix(ctx), ctx.getHeaders())
+                .filter(match -> action.equals(IamAuthorizedActions.actionFor(credentialScope, match.operation(),
+                        method, match.model(), query)))
+                .map(match -> credentialScope + ":" + match.operation())
+                .orElse(action);
+    }
+
+    /**
+     * The vendored route a request of an operation matched: the member locations of a generated alternative route
+     * ({@code located}; absent entries keep the operation's model locations) and the botocore model whose route it is
+     * ({@code model}), which tells apart the clients of an operation several serve.
+     */
+    public record RouteMembers(Map<String, String> located, String model) {
+        static final RouteMembers NONE = new RouteMembers(Map.of(), null);
+    }
+
+    /** The route a request of the operation matches, {@link RouteMembers#NONE} for one it matches none of. */
+    public static RouteMembers routeMembers(String operation, ContainerRequestContext ctx) {
         int separator = operation.indexOf(':');
         if (separator < 0 || ctx.getMethod() == null || ctx.getUriInfo() == null
                 || ctx.getUriInfo().getRequestUri() == null) {
-            return Map.of();
+            return RouteMembers.NONE;
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
-                        movedUnderPrefix(ctx))
+                        movedUnderPrefix(ctx), ctx.getHeaders())
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
-                .map(IamRestRoutes.Match::located).orElse(Map.of());
+                .map(match -> new RouteMembers(match.located(), match.model())).orElse(RouteMembers.NONE);
     }
 
     /**

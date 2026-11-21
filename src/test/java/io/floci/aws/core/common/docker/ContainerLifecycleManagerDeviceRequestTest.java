@@ -106,7 +106,7 @@ class ContainerLifecycleManagerDeviceRequestTest {
 
     private ContainerLifecycleManager manager() {
         return new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config);
+                dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec specWithDeviceRequests(List<DeviceRequest> deviceRequests) {

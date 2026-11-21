@@ -43,7 +43,7 @@ class ContainerLifecycleManagerImageLabelsTest {
     EmulatorConfig config;
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
+        return new ContainerLifecycleManager(dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     private void imageInspectReturns(Map<String, String> labels) {

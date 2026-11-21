@@ -1,17 +1,16 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.PerServicePersistentStorageProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+/** Turning IAM off turns STS off too. {@link PerServicePersistentStorageProfile} turns IAM off. */
 @QuarkusTest
-@TestProfile(IamStsSharedEnablementIntegrationTest.IamDisabledProfile.class)
+@TestProfile(PerServicePersistentStorageProfile.class)
 class IamStsSharedEnablementIntegrationTest {
 
     @Inject
@@ -21,12 +20,5 @@ class IamStsSharedEnablementIntegrationTest {
     void disablingIamAlsoDisablesSts() {
         assertFalse(serviceRegistry.isServiceEnabled("iam"));
         assertFalse(serviceRegistry.isServiceEnabled("sts"));
-    }
-
-    public static final class IamDisabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enabled", "false");
-        }
     }
 }

@@ -219,7 +219,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). RDS metadata operations "
-                        + "keep working and DB instances still reach 'available', but they have no "
+                        + "keep working and DB instances still reach ''available'', but they have no "
                         + "backing database container until a daemon becomes reachable.",
                         e.getMessage());
             }
@@ -240,13 +240,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     /**
@@ -935,6 +929,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
                         CREATE ROLE rds_iam;
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') THEN
+                        CREATE ROLE rds_replication;
+                    END IF;
                 END
                 $$;
                 """;
@@ -1106,9 +1103,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
-     * Waits for a MySQL or MariaDB server started with a parameter group's options to accept TCP
-     * connections. The image checks the options before it starts anything, and the server reads
-     * them again as it starts, so a container that stops here refused one of them. A server still
+     * Waits for a server started with a parameter group's options to accept TCP connections. The
+     * MySQL and MariaDB images check the options before they start anything, and every server reads
+     * them as it starts, so a container that stops here refused one of them. A server still
      * starting when the wait ends is left to finish, as one started without a group is.
      */
     private void awaitServerWithParameterGroup(String containerName, String containerId, int enginePort) {
@@ -1278,7 +1275,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         files.put("dump.sql", sqlDump);
         files.put("restore.sh", postgresRestoreScript());
         runSnapshotScript(containerId, "postgres-restore", files,
-                new String[]{"sh", "/tmp/restore.sh", effectiveUser}, 60, 120, "psql restore");
+                new String[]{"sh", "/tmp/restore.sh", effectiveUser}, List.of(), 60, 120, "psql restore");
     }
 
     /**
@@ -1290,7 +1287,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * tries, throws with {@code operation} and the command's error output.
      */
     private String runSnapshotScript(String containerId, String uploadName, Map<String, String> files,
-                                     String[] cmd, int attempts, int timeoutSeconds, String operation) {
+                                     String[] cmd, List<String> env, int attempts, int timeoutSeconds,
+                                     String operation) {
         try (Lease _ = holdContainer(containerId)) {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
@@ -1304,30 +1302,53 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     "/tmp", uploadName, out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
-            ContainerExec.Result result = null;
-            for (int i = 0; i < attempts; i++) {
-                result = execInContainer(containerId, cmd, timeoutSeconds);
-                if (result.exitCode() != 2) {
-                    break;
+            boolean succeeded = false;
+            try {
+                ContainerExec.Result result = null;
+                for (int i = 0; i < attempts; i++) {
+                    result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, env,
+                            timeoutSeconds);
+                    if (result.exitCode() != 2) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
+                    }
                 }
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
-                }
-            }
 
-            if (result == null || result.exitCode() != 0) {
-                String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException(operation + " failed with exit code "
-                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+                if (result == null || result.exitCode() != 0) {
+                    String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
+                    throw new RuntimeException(operation + " failed with exit code "
+                            + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+                }
+                succeeded = true;
+                return result.stdout();
+            } finally {
+                // On success the script's own EXIT trap has removed it.
+                if (!succeeded && files.containsKey("dump.sql")) {
+                    removeDump(containerId);
+                }
             }
-            return result.stdout();
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to run " + operation, e);
+        }
+    }
+
+    /**
+     * Removes the uploaded dump when the script could not: it gave up on a server that never answered,
+     * or its exec timed out or was killed. Best effort, since the container may be gone.
+     */
+    private void removeDump(String containerId) {
+        try {
+            ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
+                    new String[]{"rm", "-f", "/tmp/dump.sql"}, 30);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not remove /tmp/dump.sql from {0}: {1}", containerId, e.getMessage());
         }
     }
 
@@ -1343,11 +1364,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     public String createMysqlSnapshot(DatabaseEngine engine, String containerId,
                                       String masterUsername, String masterPassword) {
         MysqlTools tools = MysqlTools.of(engine);
-        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
-                "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
+        String[] cmd = {"sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
                 tools.dumpFlags(), tools.accountClause(), tools.roleFilter()};
         return runSnapshotScript(containerId, "mysql-dump", Map.of("floci-mysql-dump.sh", mysqlDumpScript()),
-                cmd, 120, 300, tools.dump());
+                cmd, mysqlPasswordEnv(masterPassword), 120, 300, tools.dump());
     }
 
     /**
@@ -1361,9 +1381,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         Map<String, String> files = new LinkedHashMap<>();
         files.put("dump.sql", sqlDump);
         files.put("restore.sh", mysqlRestoreScript());
-        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
-                "sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
-        runSnapshotScript(containerId, "mysql-restore", files, cmd, 120, 300, tools.client() + " restore");
+        String[] cmd = {"sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
+        runSnapshotScript(containerId, "mysql-restore", files, cmd, mysqlPasswordEnv(masterPassword), 120, 300,
+                tools.client() + " restore");
     }
 
     /**
@@ -1385,6 +1405,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
     }
 
+    /** The password goes in the exec's own environment, so it is not part of the command Docker records. */
+    private static List<String> mysqlPasswordEnv(String masterPassword) {
+        return List.of("MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword));
+    }
+
     private static String mysqlUser(String masterUsername) {
         return masterUsername != null && !masterUsername.isBlank() ? masterUsername : "root";
     }
@@ -1393,20 +1418,23 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         return """
                 #!/bin/sh
                 # usage: floci-mysql-dump.sh <client> <dump> <user> <dump flags> <account clause> <role filter>
-                # The password arrives in MYSQL_PWD. Names are read one per line, so a schema or
-                # account name with spaces stays one argument.
+                # The password arrives in MYSQL_PWD. Names are read one per line, so the client
+                # escapes a newline in one as \\n (batch mode without -r) and unesc restores it.
                 set -ef
                 C="$1"; D="$2"; U="$3"; FLAGS="$4"; ACCOUNT_CLAUSE="$5"; ROLE_FILTER="$6"
                 SQL() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -r -e "$1"; }
+                NAMES() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -e "$1"; }
+                # Sets R to the name in $1 with its escapes undone; the dot keeps a trailing newline.
+                unesc() { R=$(printf '%b.' "$1"); R=${R%.}; }
                 # Exit 2: the server does not accept the master user over TCP yet. Past this point a
                 # failure exits 1, even mysqldump's own exit 2, so it is not retried as one.
                 SQL "SELECT 1" >/dev/null 2>&1 || exit 2
                 trap 'rc=$?; if [ "$rc" = 2 ]; then exit 1; fi' EXIT
-                DBS=$(SQL "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
+                DBS=$(NAMES "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
                   ('mysql','sys','performance_schema','information_schema')")
                 set --
                 while IFS= read -r db; do
-                  if [ -n "$db" ]; then set -- "$@" "$db"; fi
+                  if [ -n "$db" ]; then unesc "$db"; set -- "$@" "$R"; fi
                 done <<EOF
                 $DBS
                 EOF
@@ -1415,17 +1443,18 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                   "$D" -h127.0.0.1 --protocol=TCP -u"$U" --routines --events --triggers \\
                     --single-transaction --hex-blob --no-tablespaces $FLAGS --databases "$@"
                 fi
-                ROLES=$(SQL "SELECT QUOTE(user) FROM mysql.user WHERE $ROLE_FILTER")
-                ACCOUNTS=$(SQL "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN \\
+                ROLES=$(NAMES "SELECT QUOTE(user) FROM mysql.user WHERE $ROLE_FILTER")
+                ACCOUNTS=$(NAMES "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN \\
                   ('','root','mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','healthcheck','PUBLIC') $ACCOUNT_CLAUSE")
                 # Every role and account is created before any grant, which can name a role.
                 while IFS= read -r role; do
-                  if [ -n "$role" ]; then echo "CREATE ROLE IF NOT EXISTS $role;"; fi
+                  if [ -n "$role" ]; then unesc "$role"; echo "CREATE ROLE IF NOT EXISTS $R;"; fi
                 done <<EOF
                 $ROLES
                 EOF
                 while IFS= read -r acct; do
                   if [ -n "$acct" ]; then
+                    unesc "$acct"; acct=$R
                     # MySQL prints a binary password hash as hex only when asked; MariaDB has no such setting.
                     stmt=$(SQL "SET SESSION print_identified_with_as_hex = ON; SHOW CREATE USER $acct" 2>/dev/null \\
                            || SQL "SHOW CREATE USER $acct")
@@ -1435,7 +1464,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 $ACCOUNTS
                 EOF
                 while IFS= read -r grantee; do
-                  if [ -n "$grantee" ]; then SQL "SHOW GRANTS FOR $grantee" | sed 's/$/;/'; fi
+                  # Batch mode without -r prints each statement on one line (a newline in a name is \\n), so one row is
+                  # one statement whatever a name contains; %b undoes the escapes.
+                  if [ -n "$grantee" ]; then unesc "$grantee"; NAMES "SHOW GRANTS FOR $R" | while IFS= read -r g; do printf '%b;\\n' "$g"; done; fi
                 done <<EOF
                 $ROLES
                 $ACCOUNTS
@@ -1449,6 +1480,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 #!/bin/sh
                 # usage: restore.sh <client> <user>; the password arrives in MYSQL_PWD.
                 C="$1"; U="$2"
+                # The dump holds every schema and account; leave none behind for FILE-privileged readers.
+                # Exit 2 means the server is not up: the caller retries, and needs the dump.
+                trap 'rc=$?; [ "$rc" = 2 ] || rm -f /tmp/dump.sql' EXIT
                 "$C" -h127.0.0.1 --protocol=TCP -u"$U" -e "SELECT 1" >/dev/null 2>&1 || exit 2
                 "$C" -h127.0.0.1 --protocol=TCP -u"$U" < /tmp/dump.sql || exit 1
                 """;
@@ -1487,6 +1521,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 #!/bin/sh
                 set -e
                 USER="$1"
+                # The dump holds every database; leave none behind. Exit 2 means the server is not up:
+                # the caller retries, and needs it.
+                trap 'rc=$?; [ "$rc" = 2 ] || rm -f /tmp/dump.sql /tmp/dump_filtered.sql' EXIT
 
                 # Drop every database but postgres, template0 and template1, including template
                 # databases an image creates at startup (PostGIS's template_postgis), which the dump
@@ -1502,6 +1539,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 # Exclude the master user CREATE ROLE statement to avoid conflicts during restore
                 sed -e "s/^CREATE ROLE \\\"\\?$USER\\\"\\?.*;/-- &/" /tmp/dump.sql > /tmp/dump_filtered.sql
                 mv /tmp/dump_filtered.sql /tmp/dump.sql
+                chmod 600 /tmp/dump.sql
 
                 # Drop all non-current-user, non-system roles
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
@@ -1513,7 +1551,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
                 # Replay the dump connected to postgres
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
-                """;
+
+                # A dump taken before Floci created a predefined role does not recreate it
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres <<'SQL'
+                """ + postgresIamRoleInitSql() + "SQL\n";
     }
 
     private static void addTarEntry(
@@ -1523,7 +1564,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         TarArchiveEntry entry =
                 new TarArchiveEntry(name);
         entry.setSize(bytes.length);
-        entry.setMode(0755);
+        // The dump holds every schema; only root, who restores it, may read it.
+        entry.setMode(name.endsWith(".sql") ? 0600 : 0755);
         tar.putArchiveEntry(entry);
         tar.write(bytes);
         tar.closeArchiveEntry();
@@ -1649,18 +1691,24 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
-     * A parameter group's overrides as MySQL or MariaDB server options. Each takes the
-     * {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one an older server
-     * does not have) is skipped with a warning instead of stopping the server. A value that is a
-     * formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS from the
-     * instance class and is left to the server's default, as are the parameters that decide
-     * where the server listens and keeps its data, which Floci controls, and the ones that would
-     * lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
+     * A parameter group's overrides as server options. PostgreSQL takes only
+     * {@code rds.logical_replication}, whose value of 1 becomes {@code wal_level=logical}; its
+     * other values, and SQL Server's, give no options. For MySQL or MariaDB each
+     * override takes the {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one
+     * an older server does not have) is skipped with a warning instead of stopping the server. A
+     * value that is a formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS
+     * from the instance class and is left to the server's default, as are the parameters that
+     * decide where the server listens and keeps its data, which Floci controls, and the ones that
+     * would lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
      * Aurora's {@code binlog_format=OFF}, which turns binary logging off, through
      * {@code --skip-log-bin}.
      */
     public static List<String> engineParameterOptions(
             DatabaseEngine engine, Map<String, String> engineParameters) {
+        if (engine == DatabaseEngine.POSTGRES && engineParameters != null
+                && "1".equals(engineParameters.get("rds.logical_replication"))) {
+            return List.of("-c", "wal_level=logical");
+        }
         if (engineParameters == null || engineParameters.isEmpty()
                 || (engine != DatabaseEngine.MYSQL && engine != DatabaseEngine.MARIADB)) {
             return List.of();

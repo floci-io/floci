@@ -17,8 +17,10 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IamRestRoutesTest {
 
@@ -105,6 +107,29 @@ class IamRestRoutesTest {
 
     private final IamRestRoutes routes = routes(ROUTES);
 
+    /**
+     * A model AWS documents outside botocore routes another API's requests, which carry none of the operation's
+     * members: each of its routes, Glue's Iceberg REST endpoint's among the vendored ones, says so, and a botocore
+     * model's does not.
+     */
+    @Test
+    void aDocumentedModelsRoutesTakeRequestsCarryingNoMembers() {
+        IamRestRoutes documented = routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": {\"page\": \"https://docs.example/svc\"},"));
+        assertTrue(documented.documents("svc"));
+        assertTrue(documented.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+        assertFalse(routes.documents("svc"));
+        assertFalse(routes.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        assertTrue(vendored.match("glue", "POST", "/iceberg/v1/catalogs/:/namespaces/db/tables/t", null)
+                .orElseThrow().documented());
+        assertFalse(vendored.match("lambda", "GET", "/2015-03-31/functions/fn", null).orElseThrow().documented());
+
+        assertThrows(IllegalStateException.class, () -> routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": \"a page\",")));
+    }
+
     @Test
     void routeDataIsBundledWithTheApplicationRatherThanOnlyWithTests() throws Exception {
         URL application = IamActionRegistry.class.getProtectionDomain().getCodeSource().getLocation();
@@ -183,6 +208,57 @@ class IamRestRoutesTest {
                 query("list-type", "2")));
         assertEquals(Optional.of("ListVersions"), routes.operation("svc", "GET", "/versions",
                 query("list-type", "1")));
+    }
+
+    /**
+     * Operations sharing a route are told apart by what botocore requires their request to carry: S3's UploadPart, on
+     * {@code PUT /{Bucket}/{Key+}} with PutObject, requires {@code partNumber} and {@code uploadId}, and CopyObject the
+     * {@code x-amz-copy-source} header. The route requiring more wins when the request carries it all, a header is
+     * matched whatever its case, and with no headers known a route requiring one cannot be told to match.
+     */
+    @Test
+    void operationsSharingARouteAreToldApartByWhatTheirRequestMustCarry() {
+        IamRestRoutes table = routes("""
+                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                  "PutObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"},
+                  "CopyObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"headers": ["x-amz-copy-source"]}},
+                  "UploadPart": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"query": ["partNumber", "uploadId"]}},
+                  "UploadPartCopy": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                     "requires": {"query": ["partNumber", "uploadId"], "headers": ["x-amz-copy-source"]}}
+                }}}}""");
+        MultivaluedMap<String, String> part = query("partNumber", "1");
+        part.add("uploadId", "u");
+        MultivaluedMap<String, String> copy = new MultivaluedHashMap<>();
+        copy.add("X-Amz-Copy-Source", "b/k");
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals(Optional.of("PutObject"), operation(table, null, none));
+        assertEquals(Optional.of("CopyObject"), operation(table, null, copy));
+        assertEquals(Optional.of("UploadPart"), operation(table, part, none));
+        assertEquals(Optional.of("UploadPartCopy"), operation(table, part, copy));
+        // One of the two query parameters is not enough, and without headers a copy is read as the plain write.
+        assertEquals(Optional.of("PutObject"), operation(table, query("partNumber", "1"), none));
+        assertEquals(Optional.of("PutObject"), table.operation("obj", "PUT", "/b/k", null));
+        assertEquals(Optional.of("objects"), table.match("obj", "PUT", "/b/k", null, false, copy)
+                .map(IamRestRoutes.Match::model));
+    }
+
+    /** A deprecated operation yields to the current one of the same route and conditions. */
+    @Test
+    void aDeprecatedOperationYieldsToTheCurrentOneOfItsRoute() {
+        IamRestRoutes table = routes("""
+                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                  "GetBucketLifecycle": {"method": "GET", "requestUri": "/{Bucket}?lifecycle", "deprecated": true},
+                  "GetBucketLifecycleConfiguration": {"method": "GET", "requestUri": "/{Bucket}?lifecycle"}
+                }}}}""");
+        assertEquals(Optional.of("GetBucketLifecycleConfiguration"),
+                table.operation("obj", "GET", "/b", query("lifecycle", "")));
+    }
+
+    private static Optional<String> operation(IamRestRoutes table, MultivaluedMap<String, String> query,
+                                              MultivaluedMap<String, String> headers) {
+        return table.match("obj", "PUT", "/b/k", query, false, headers).map(IamRestRoutes.Match::operation);
     }
 
     /** A trailing slash is dropped, as the router drops it, and an encoded slash stays inside its label. */

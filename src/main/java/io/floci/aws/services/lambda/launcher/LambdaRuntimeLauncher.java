@@ -4,8 +4,8 @@ import io.floci.aws.services.lambda.model.LambdaFunction;
 
 /**
  * Starts and stops Lambda execution environments. Implementations back each
- * environment with a concrete runtime: a Docker container ({@link ContainerLauncher})
- * or a Kubernetes pod ({@code KubernetesPodLauncher}). Selected at startup by
+ * environment with a concrete runtime: a Docker container ({@link ContainerLauncher}),
+ * a Kubernetes pod ({@code KubernetesPodLauncher}) or a local process ({@link ProcessLauncher}). Selected at startup by
  * {@code floci.services.lambda.executor}.
  */
 public interface LambdaRuntimeLauncher {

@@ -31,22 +31,28 @@ Environment metadata is stored in-process. No Docker containers are started. The
 Floci starts two containers per environment:
 
 - `floci-aws-mwaa-<account>.<region>.<name>-db`: a private `postgres` metadata database, never given a published host port; it's only ever reached by the sibling Airflow container over the Docker network.
-- `floci-aws-mwaa-<account>.<region>.<name>-airflow`: a real `apache/airflow` container running **LocalExecutor** (webserver + scheduler in one process tree). `AirflowVersion` genuinely selects the image tag (`apache/airflow:<version>-python3.11` for versions through 2.10.x, `apache/airflow:<version>-python3.12` from 2.11.0 onward, matching the Airflow/Python pairing real Amazon MWAA runs for each version), validated against `supported-versions`. Unlike some Floci services where a requested version is echoed back but not actually applied, MWAA always runs the exact Airflow version requested.
+- `floci-aws-mwaa-<account>.<region>.<name>-airflow`: a real `apache/airflow` container running **LocalExecutor** (webserver + scheduler in one process tree). `AirflowVersion` genuinely selects the image tag (`apache/airflow:<version>-python3.11` for versions through 2.10.x, `apache/airflow:<version>-python3.12` from 2.11.0 onward, matching the Airflow/Python pairing real Amazon MWAA runs for each version), validated against `supported-versions`. The default list holds every Airflow 2.x version Amazon MWAA offers (2.7.2, 2.8.1, 2.9.2, 2.10.1, 2.10.3, 2.11.0 and 2.11.2) plus 2.10.5, 2.9.3 and 2.8.4, which Floci offered before and real MWAA does not. Airflow 3.x is not offered: the container runs the Airflow 2 `webserver`. Unlike some Floci services where a requested version is echoed back but not actually applied, MWAA always runs the exact Airflow version requested.
 
 `AirflowConfigurationOptions` is applied too, not just echoed back: each `section.key` entry becomes an `AIRFLOW__SECTION__KEY` environment variable on the Airflow container, the same mechanism real Amazon MWAA uses, so a DAG's `conf.get("section", "key")` sees the configured value. A malformed key (missing the `section.key` dot) or one that would collide with a variable Floci itself manages (the executor, database connection, or security keys) is skipped and logged, rather than silently breaking the environment's required wiring. `CreateEnvironment` also enforces the same key/value shape botocore does for this field (a 1-64 character key matching `[a-z]+([a-z0-9._]*[a-z0-9_]+)?`, a 1-65536 character printable-ASCII value), since Floci is reachable via raw HTTP or CLI `--cli-input-json`, which bypasses the SDKs' own client-side validation. This only applies at creation time: `UpdateEnvironment` still rejects `AirflowConfigurationOptions` (see [Not Implemented](#not-implemented) below), so changing an option on an existing environment requires deleting and recreating it.
 
 Legacy environments retain the region recorded in their ARN. A request in another region does not
 adopt that environment; recreate it in the requested region instead.
 
-Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` and `scheduler` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Postgres or Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through, or Postgres itself dying), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling dead containers forever.
+Once Airflow's unauthenticated `/health` endpoint reports `metadatabase`, `scheduler` and `triggerer` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Postgres or Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through, or Postgres itself dying), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling dead containers forever.
 
 ### Web/CLI proxy
 
-Floci runs its own HTTP proxy per environment (published on a host port from the configured range) that fronts the real Airflow webserver: every request is forwarded through to Airflow as-is, **except** `POST /aws_mwaa/cli`, which the proxy intercepts itself. It validates the `Authorization: Bearer <CliToken>` from `CreateCliToken`, then runs supported Amazon MWAA Airflow CLI commands inside the container via `docker exec` and returns the AWS-documented `{stdout, stderr}` (base64) shape. Unsupported commands return an error in `stderr` without reaching the container. The supported commands match the [Amazon MWAA Airflow v2 CLI list](https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html); every Airflow version Floci currently offers is at least 2.8.4. `Environment.WebserverUrl` and the URL returned by `CreateWebLoginToken` both point at this proxy, so Airflow-UI browsing and the CLI-token flow go through the same place.
+Floci runs its own HTTP proxy per environment (published on a host port from the configured range) that fronts the real Airflow webserver: every request is forwarded through to Airflow as-is, **except** `POST /aws_mwaa/cli`, which the proxy intercepts itself. It validates the `Authorization: Bearer <CliToken>` from `CreateCliToken`, then runs supported Amazon MWAA Airflow CLI commands inside the container via `docker exec` and returns the AWS-documented `{stdout, stderr}` (base64) shape. Unsupported commands return an error in `stderr` without reaching the container. The supported commands match the [Amazon MWAA Airflow v2 CLI list](https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html); as in that list, `providers notifications` needs Airflow 2.8 or later, so a 2.7.2 environment refuses it. `Environment.WebserverUrl` and the URL returned by `CreateWebLoginToken` both point at this proxy, so Airflow-UI browsing and the CLI-token flow go through the same place.
+
+### Web login (`CreateWebLoginToken`)
+
+The token from `CreateWebLoginToken` works the way Amazon MWAA's [Apache Airflow REST API guide](https://docs.aws.amazon.com/mwaa/latest/userguide/access-mwaa-apache-airflow-rest-api.html) describes. POST it as the `token` form field to `/aws_mwaa/login` on the `WebServerHostname`. The proxy signs in to Airflow's own login form as the `admin` user Floci created for the environment, and answers `302` to `/home` with Airflow's `session` cookie. That cookie opens the Airflow UI and the REST API, for example `GET /api/v1/dags` or `POST /api/v1/dags/{dag_id}/dagRuns`. A token is valid for 60 seconds, as on AWS. An unknown or expired token gets `401`.
+
+With `floci.tls.enabled`, `WebserverUrl` and `WebServerHostname` name an `https` endpoint, and the proxy serves TLS with Floci's own server certificate, so a client that builds `https://{WebServerHostname}` (as AWS's sample code does) reaches it.
 
 ### Startup scripts (`StartupScriptS3Path`)
 
-If configured, the script is fetched from S3 at environment-creation time and injected into the Airflow container before it starts (before `airflow db migrate`/scheduler/webserver), matching real MWAA's ordering. Two behaviors worth knowing about since they're not obvious from the API surface:
+If configured, the script is fetched from S3 at environment-creation time and injected into the Airflow container before it starts. It runs first, then `requirements.txt` is installed, then `airflow db migrate` and the triggerer, scheduler and webserver start, matching real MWAA's ordering. Variables the script exports (a private index URL for `pip`, for example) are still set when `requirements.txt` installs, at creation and on every later reinstall. Two behaviors worth knowing about since they're not obvious from the API surface:
 
 - The `airflow` OS user is granted passwordless `sudo` inside the container specifically so scripts using `sudo apt-get ...`-style commands (the pattern shown in AWS's own startup-script documentation) work — the stock `apache/airflow` image ships `sudo` but requires a password by default, so without this grant any `sudo` line would hang.
 - A fixed set of Floci-managed environment variables (the Fernet key, the database connection string, the executor setting, and the AWS-SDK-redirection variables described below) are snapshotted before the script runs and restored immediately after, so a script that touches one of these — intentionally or not — can't break the environment. This mirrors real MWAA's "reserved environment variables" behavior.
@@ -55,6 +61,10 @@ If configured, the script is fetched from S3 at environment-creation time and in
 ### AWS SDK calls from DAG code
 
 The Airflow container is pointed back at Floci itself (`AWS_ENDPOINT_URL`, placeholder credentials, region) using the same mechanism Lambda and ECS containers already use to reach the emulator — so a DAG's own `boto3.client("s3")`/`boto3.client("secretsmanager")` calls resolve against Floci instead of attempting to reach real AWS.
+
+### VPC (`NetworkConfiguration`)
+
+Amazon MWAA runs an environment's workers in the subnets its `NetworkConfiguration` names. Floci puts the Airflow container on that VPC's Docker network, at an address leased from the first subnet, the way it places EC2 instances and VPC-configured Lambda functions, so a DAG reaches an EC2 instance, or anything else in the VPC, by its private IP. The container keeps the network it was created on, where its metadata database is. A subnet EC2 does not know, or `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=false`, leaves it there alone. Security groups are not enforced, as for EC2. As on AWS, `DeleteSubnet` refuses a subnet an environment uses (`DependencyViolation`), and `UpdateEnvironment` changes only the security groups: an environment's subnets, and so its VPC, are fixed at creation.
 
 !!! note "Docker socket required"
     Real mode starts privileged Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other.
@@ -67,9 +77,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "4566:4566"
+      - "8700-8799:8700-8799"
     environment:
       FLOCI_SERVICES_MWAA_DOCKER_NETWORK: my_project_default
 ```
+
+Publishing the proxy range, as above, makes each environment's `WebserverUrl` reachable from the host. Floci still hands out ports from a range its own container publishes, since each proxy listens inside Floci's container, and skips a port in it another container publishes. Floci finds its own container by its hostname, so leave `hostname:` unset or set it to the container's name.
 
 ## Configuration
 
@@ -78,7 +91,7 @@ services:
 | `FLOCI_SERVICES_MWAA_ENABLED` | `true` | Enable the MWAA service |
 | `FLOCI_SERVICES_MWAA_MOCK` | `false` | Metadata-only mode (no Docker) |
 | `FLOCI_SERVICES_MWAA_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Metadata-database Docker image |
-| `FLOCI_SERVICES_MWAA_SUPPORTED_VERSIONS` | `2.10.5,2.9.3,2.8.4` | Comma-separated `AirflowVersion` allow-list; `CreateEnvironment` rejects any other value |
+| `FLOCI_SERVICES_MWAA_SUPPORTED_VERSIONS` | `2.11.2,2.11.0,2.10.5,2.10.3,2.10.1,2.9.3,2.9.2,2.8.4,2.8.1,2.7.2` | Comma-separated `AirflowVersion` allow-list; `CreateEnvironment` rejects any other value |
 | `FLOCI_SERVICES_MWAA_DEFAULT_VERSION` | `2.10.5` | `AirflowVersion` used when the request omits one |
 | `FLOCI_SERVICES_MWAA_PROXY_BASE_PORT` | `8700` | First port in the web/CLI proxy range |
 | `FLOCI_SERVICES_MWAA_PROXY_MAX_PORT` | `8799` | Last port in the web/CLI proxy range |
@@ -86,11 +99,11 @@ services:
 | `FLOCI_SERVICES_MWAA_DOCKER_NETWORK` | *(unset)* | Docker network for the Postgres/Airflow containers (falls back to the global `FLOCI_SERVICES_DOCKER_NETWORK`, then Floci's own network) |
 | `FLOCI_SERVICES_MWAA_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave Postgres/Airflow containers running after Floci stops |
 | `FLOCI_SERVICES_MWAA_DAG_SYNC_INTERVAL_SECONDS` | `30` | How often to poll S3 for DAG and `requirements.txt` changes |
-| `FLOCI_SERVICES_MWAA_INSTALL_REQUIREMENTS` | `true` | Install `RequirementsS3Path` (via `pip install -r`) when it changes |
+| `FLOCI_SERVICES_MWAA_INSTALL_REQUIREMENTS` | `true` | Install `RequirementsS3Path` (via `pip install -r`) before Airflow starts, and again when it changes |
 
 ## DAG and requirements sync
 
-Every `dag-sync-interval-seconds`, Floci lists the environment's `DagS3Path` prefix in the bucket referenced by `SourceBucketArn` and copies any changed files into the container's `/opt/airflow/dags` — reusing Floci's existing in-process S3 emulation rather than any new AWS-facing surface. `RequirementsS3Path`, if set, is fetched and `pip install -r`'d the same way whenever its content changes. A broken DAG file or a failing `pip install` is logged but never fails the environment, matching real MWAA behavior.
+Every `dag-sync-interval-seconds`, Floci lists the environment's `DagS3Path` prefix in the bucket referenced by `SourceBucketArn` and copies any changed files into the container's `/opt/airflow/dags`, reusing Floci's existing in-process S3 emulation rather than any new AWS-facing surface. `RequirementsS3Path`, if set, is fetched at creation and installed inside the container after the startup script and before Airflow starts, so a DAG can import its packages from the first parse. If that first install fails, the first DAG-sync pass logs pip's exit code and installs the file again. After that it is installed again whenever its content changes. Every install stops after 15 minutes, and reinstalls run in the background, one at a time per environment, so a slow one never holds up the DAG sync. A broken DAG file or a failing `pip install` is logged but never fails the environment, matching real MWAA behavior.
 
 ## ARN Format
 
@@ -185,8 +198,6 @@ The following are current, known gaps:
 
 - `PluginsS3Path` is accepted and stored on the environment but not fetched or applied — real MWAA's `plugins.zip` mechanism for shipping custom binaries has no equivalent here yet.
 - `UpdateEnvironment` supports metadata-only fields (tags, description, logging-config toggles). Changing `AirflowVersion`, `AirflowConfigurationOptions`, or `RequirementsS3Path` requires deleting and recreating the environment — these would require recreating the running container, which is out of scope for an in-place update today.
-- `CreateWebLoginToken` returns a stubbed token rather than performing a real Airflow FAB/JWT SSO handshake.
-- No per-component `MWAA_AIRFLOW_COMPONENT` environment variable — real MWAA runs the startup script separately on webserver, scheduler, and worker; Floci runs webserver and scheduler together in one container, so there's no per-component distinction to expose.
-- No `triggerer` process — DAGs using deferrable operators will log warnings, since only the scheduler and webserver run.
+- No per-component `MWAA_AIRFLOW_COMPONENT` environment variable. Real MWAA runs the startup script separately on webserver, scheduler, and worker; Floci runs the webserver, scheduler and triggerer together in one container, so there's no per-component distinction to expose.
 - Docker container and volume names are namespace-aware (via `FLOCI_DOCKER_RESOURCE_NAMESPACE`, same as every other Docker-backed service) but not scoped by AWS account id — two accounts creating an identically-named environment can collide. This is a pre-existing characteristic shared by every Docker-backed Floci service (EKS, RDS, ...), not unique to MWAA.
 - Environments loaded from persistent storage on Floci restart are not automatically reconnected to their Docker containers — again, a gap shared by every Docker-backed service today, not specific to MWAA.

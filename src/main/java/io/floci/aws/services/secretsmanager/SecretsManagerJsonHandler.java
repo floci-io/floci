@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.IamEnforcementFilter;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -46,6 +47,11 @@ public class SecretsManagerJsonHandler {
         this.objectMapper = objectMapper;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.eventPublisher = eventPublisher;
+    }
+
+    /** The secrets the service finds, random suffix included, for a caller naming the resources of a request. */
+    public StoredResourceArns storedResourceArns() {
+        return service;
     }
 
     /**

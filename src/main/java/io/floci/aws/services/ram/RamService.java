@@ -375,6 +375,30 @@ public class RamService implements StoredResourceArns {
         return share.filter(shared -> !"DELETED".equals(shared.getStatus())).isPresent();
     }
 
+    /**
+     * The tags held on the resource share stored under {@code arn}, in the account that owns it, which the ARN names,
+     * read in place, when the caller may see that share as GetResourceShares shows it: one it owns, or one another
+     * account made visible to it. Shares are kept by their whole ARN, so the ARN is matched whole. Empty for an ARN
+     * naming no share or one the caller cannot see, so a decision never turns on a share RAM hides from it.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!isResourceShareArn(arn) || !(shares instanceof AccountAwareStorageBackend<ResourceShare> aware)) {
+            return Map.of();
+        }
+        String caller = aware.accountId();
+        Map<String, String> held = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(shares, AwsArnUtils.parse(arn).accountId(), arn)
+                .filter(share -> isVisible(share, caller, "SELF") || isVisible(share, caller, "OTHER-ACCOUNTS"))
+                .map(ResourceShare::getTags)
+                .ifPresent(tags -> tags.forEach((key, value) -> {
+                    if (key != null && value != null) {
+                        held.put(key, value);
+                    }
+                }));
+        return held;
+    }
+
     private List<ResourceShareInvitation> allInvitations() {
         if (invitations instanceof AccountAwareStorageBackend<ResourceShareInvitation> accountAware) {
             return accountAware.scanAllAccounts();

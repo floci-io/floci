@@ -98,6 +98,26 @@ public class ContainerBuilder {
         return resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver);
     }
 
+    /**
+     * The address {@link Builder#withEmbeddedDns} hands a container as its first resolver, when a
+     * container on the network {@link Builder#withDockerNetwork} picks for {@code serviceNetwork} can
+     * reach it; empty when it cannot or the embedded DNS server is not running. Exposed for a container
+     * that must name that resolver alone in a file of its own, as a k3s node does for its pods, where an
+     * unreachable one leaves no resolver at all. Floci in a container listens on its own address on its
+     * own network, which Docker isolates from every other user-defined network. Floci running natively
+     * listens on the Docker bridge address, which every container already gets as its resolver.
+     */
+    public Optional<String> embeddedDnsServerIpReachableOn(Optional<String> serviceNetwork) {
+        Optional<String> dnsServerIp = embeddedDnsServer != null ? embeddedDnsServer.getServerIp() : Optional.empty();
+        Optional<String> flociNetwork = currentContainerNetworkResolver != null
+                ? currentContainerNetworkResolver.resolveNetworkName()
+                : Optional.empty();
+        if (dnsServerIp.isEmpty() || flociNetwork.isEmpty()) {
+            return dnsServerIp;
+        }
+        return resolveDockerNetwork(serviceNetwork).equals(flociNetwork) ? dnsServerIp : Optional.empty();
+    }
+
     private static Optional<String> resolveDockerNetwork(Optional<String> serviceNetwork, EmulatorConfig config,
                                                          CurrentContainerNetworkResolver currentContainerNetworkResolver) {
         return serviceNetwork
@@ -230,6 +250,7 @@ public class ContainerBuilder {
         private Long memorySwappiness;
         private boolean javaTrustStore;
         private String dnsName;
+        private final List<String> joinedNetworks = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -441,6 +462,17 @@ public class ContainerBuilder {
          */
         public Builder withDnsName(String name) {
             this.dnsName = name;
+            return this;
+        }
+
+        /**
+         * Joins the container to {@code network} too, a user-defined network, before it starts, with no alias of its
+         * own there, so it reaches the containers on that network from its first moment.
+         */
+        public Builder withJoinedNetwork(String network) {
+            if (network != null && !network.isBlank() && !joinedNetworks.contains(network)) {
+                joinedNetworks.add(network);
+            }
             return this;
         }
 
@@ -861,7 +893,8 @@ public class ContainerBuilder {
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
                             shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness),
                     javaTrustStore,
-                    dnsName
+                    dnsName,
+                    List.copyOf(joinedNetworks)
             );
         }
     }

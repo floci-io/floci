@@ -6,6 +6,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -260,36 +262,36 @@ class GuardDutyControllerIntegrationTest {
         String detectorId = createDetector(authorization, "{\"enable\":true,\"tags\":{\"env\":\"test\"}}");
         String arn = "arn:aws:guardduty:" + EAST + ":000000000208:detector/" + detectorId;
 
-        given()
+        given().urlEncodingEnabled(false)
                 .contentType("application/json")
                 .header("Authorization", authorization)
                 .body("{\"tags\":{\"team\":\"security\"}}")
                 .when()
-                .post("/tags/" + arn)
+                .post(tagsPath(arn))
                 .then()
                 .statusCode(204);
 
-        given()
+        given().urlEncodingEnabled(false)
                 .header("Authorization", authorization)
                 .when()
-                .get("/tags/" + arn)
+                .get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("tags.env", equalTo("test"))
                 .body("tags.team", equalTo("security"));
 
-        given()
+        given().urlEncodingEnabled(false)
                 .header("Authorization", authorization)
                 .queryParam("tagKeys", "env")
                 .when()
-                .delete("/tags/" + arn)
+                .delete(tagsPath(arn))
                 .then()
                 .statusCode(204);
 
-        given()
+        given().urlEncodingEnabled(false)
                 .header("Authorization", authorization)
                 .when()
-                .get("/tags/" + arn)
+                .get(tagsPath(arn))
                 .then()
                 .statusCode(200)
                 .body("tags.team", equalTo("security"));
@@ -310,5 +312,10 @@ class GuardDutyControllerIntegrationTest {
                 .statusCode(200)
                 .body("detectorId", notNullValue())
                 .extract().path("detectorId");
+    }
+
+    /** The modeled {@code /tags/{ResourceArn}}, the ARN encoded as one path segment as an SDK sends it. */
+    private static String tagsPath(String arn) {
+        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
     }
 }

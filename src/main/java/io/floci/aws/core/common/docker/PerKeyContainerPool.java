@@ -2,9 +2,11 @@ package io.floci.aws.core.common.docker;
 
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -46,6 +48,68 @@ public class PerKeyContainerPool {
      * nothing left able to ever stop it again.
      */
     private final AtomicLong generation = new AtomicLong();
+    private final ConcurrentHashMap<String, Integer> activeUses = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, List<StartedContainer>> retiredContainers = new ConcurrentHashMap<>();
+
+    /** Protects every container observed during an admitted use, including an unhealthy predecessor. */
+    public void beginUse(String key) {
+        activeUses.merge(key, 1, Integer::sum);
+    }
+
+    /** Releases a use and removes retired containers once the last admitted use has finished. */
+    public void endUse(String key) {
+        Object lock = startLocks.computeIfAbsent(key, k -> new Object());
+        synchronized (lock) {
+            AtomicBoolean drained = new AtomicBoolean();
+            activeUses.compute(key, (k, active) -> {
+                if (active == null) {
+                    throw new IllegalStateException("No active container use for key " + key);
+                }
+                drained.set(active == 1);
+                return active == 1 ? null : active - 1;
+            });
+            if (drained.get()) {
+                stopRetired(key, true);
+            }
+        }
+    }
+
+    private void stopRetired(String key, boolean strict) {
+        List<StartedContainer> retired = retiredContainers.get(key);
+        if (retired == null) {
+            return;
+        }
+        RuntimeException failure = null;
+        for (StartedContainer container : List.copyOf(retired)) {
+            try {
+                lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
+                retired.remove(container);
+            } catch (RuntimeException e) {
+                if (strict) {
+                    failure = accumulateFailure(failure, e);
+                } else {
+                    LOG.warnv(e, "Could not remove retired sidecar container {0} for key {1}; cleanup can retry",
+                            container.containerId(), key);
+                }
+            }
+        }
+        if (retired.isEmpty()) {
+            retiredContainers.remove(key, retired);
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static RuntimeException accumulateFailure(RuntimeException failure, RuntimeException next) {
+        if (failure == null) {
+            return next;
+        }
+        if (failure != next) {
+            failure.addSuppressed(next);
+        }
+        return failure;
+    }
 
     /**
      * @param healthPath path (e.g. {@code /-/ping}) appended to a container's base URL to probe
@@ -75,7 +139,21 @@ public class PerKeyContainerPool {
             }
             if (existing != null) {
                 LOG.warnv("Sidecar container for key {0} is no longer healthy; restarting it", key);
-                lifecycleManager.stopAndRemove(existing.containerId(), null);
+                StartedContainer predecessor = existing;
+                AtomicBoolean retained = new AtomicBoolean();
+                // Admission and detachment share a short map operation, never startup or Docker I/O.
+                // A use admitted after detachment cannot discover the predecessor in containers.
+                activeUses.compute(key, (k, active) -> {
+                    retained.set(active != null);
+                    if (active != null) {
+                        retiredContainers.computeIfAbsent(key, unused -> new ArrayList<>()).add(predecessor);
+                    }
+                    containers.remove(key, predecessor);
+                    return active;
+                });
+                if (!retained.get()) {
+                    lifecycleManager.stopAndRemove(existing.containerId(), null);
+                }
             }
             long startedGeneration = generation.get();
             StartedContainer started = starter.start();
@@ -112,7 +190,7 @@ public class PerKeyContainerPool {
      * brand-new one just to find out it has nothing.
      */
     public boolean isTracked(String key) {
-        return containers.containsKey(key);
+        return containers.containsKey(key) || retiredContainers.containsKey(key);
     }
 
     /**
@@ -138,14 +216,27 @@ public class PerKeyContainerPool {
         }
         Object lock = startLocks.computeIfAbsent(key, k -> new Object());
         synchronized (lock) {
+            RuntimeException failure = null;
+            try {
+                stopRetired(key, strict);
+            } catch (RuntimeException e) {
+                failure = e;
+            }
             StartedContainer container = containers.get(key);
             if (container != null) {
-                if (strict) {
-                    lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
-                } else {
-                    lifecycleManager.stopAndRemove(container.containerId(), null);
+                try {
+                    if (strict) {
+                        lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
+                    } else {
+                        lifecycleManager.stopAndRemove(container.containerId(), null);
+                    }
+                    containers.remove(key, container);
+                } catch (RuntimeException e) {
+                    failure = accumulateFailure(failure, e);
                 }
-                containers.remove(key, container);
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }
@@ -153,6 +244,16 @@ public class PerKeyContainerPool {
     /** Stops and removes every container this pool has started, then forgets them all. */
     public void stopAll() {
         generation.incrementAndGet();
+        for (String key : List.copyOf(retiredContainers.keySet())) {
+            Object lock = startLocks.computeIfAbsent(key, k -> new Object());
+            synchronized (lock) {
+                try {
+                    stopRetired(key, false);
+                } catch (RuntimeException e) {
+                    LOG.debugv(e, "Failed to stop retired sidecar containers for key {0}", key);
+                }
+            }
+        }
         if (containers.isEmpty()) {
             return;
         }
@@ -171,7 +272,10 @@ public class PerKeyContainerPool {
     public void stopAllStrictExcept(Set<String> protectedKeys) {
         generation.incrementAndGet();
         RuntimeException failure = null;
-        for (String key : List.copyOf(containers.keySet())) {
+        Set<String> keys = ConcurrentHashMap.newKeySet();
+        keys.addAll(containers.keySet());
+        keys.addAll(retiredContainers.keySet());
+        for (String key : keys) {
             if (protectedKeys.contains(key)) {
                 continue;
             }

@@ -35,7 +35,7 @@ public class LambdaFunction {
     private String s3Bucket;
     private String s3Key;
     private Map<String, String> environment = new HashMap<>();
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private List<Map<String, Object>> policies = new ArrayList<>();
     private long lastModified;
     private String revisionId;

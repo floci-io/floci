@@ -1,5 +1,6 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import org.junit.jupiter.api.BeforeEach;
@@ -240,5 +241,15 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
                     Files.write(destination, content);
                     return Optional.of(new NuGetExternalConnectionClient.FetchedFile(content.length));
                 });
+    }
+
+    /** An upstream deleted since a search order named it has no connection to fetch through. */
+    @Test
+    void aDeletedRepositoryHasNoExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, "deleted"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Repository 'deleted' not found.", 404));
+
+        assertFalse(importer.hasExternalConnection(REGION, DOMAIN, OWNER, "deleted"));
+        assertTrue(importer.hasExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY));
     }
 }

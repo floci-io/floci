@@ -6,9 +6,9 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambdaweb.LambdaWebCodeBuckets;
 import io.floci.aws.services.lambdaweb.LambdaWebRoles;
-import io.floci.aws.services.lambdaweb.LambdaWebZips;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -55,7 +55,7 @@ class CloudFormationLambdaWebIntegrationTest {
     void stackProvisionsFunctionRevisionAndEndpoint() {
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionName = "cfn-web-" + suffix;
         String stackName = "cfn-web-stack-" + suffix;
@@ -121,7 +121,7 @@ class CloudFormationLambdaWebIntegrationTest {
     void aRevisionOnCodeThatIsNotAZipFailsItsResource() {
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         s3Service.putObject(BUCKET, "notzip.zip", "this is not a zip\n".getBytes(StandardCharsets.UTF_8),
                 "application/zip", Map.of());
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -157,7 +157,7 @@ class CloudFormationLambdaWebIntegrationTest {
     void aCustomResourceIsGivenRegionalEndpointsAsAnObject() {
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionName = "cfn-web-probe-" + suffix;
         String stackName = "cfn-web-probe-stack-" + suffix;
@@ -193,7 +193,7 @@ class CloudFormationLambdaWebIntegrationTest {
     void regionalEndpointsIsAnObjectThatAnOutputCannotHold() {
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionName = "cfn-web-regional-" + suffix;
         String stackName = "cfn-web-regional-stack-" + suffix;

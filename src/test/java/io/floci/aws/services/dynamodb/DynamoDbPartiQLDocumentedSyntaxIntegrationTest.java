@@ -264,6 +264,16 @@ class DynamoDbPartiQLDocumentedSyntaxIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Must have hash key in ORDER BY clause when more than one hash key condition"
                     + " specified in WHERE clause."));
+        statement(select + "WHERE (pk = 'o' AND Total = 1) OR (pk = 'p' AND Total = 2) ORDER BY sk")
+            .statusCode(400)
+            .body("message", equalTo("Must have hash key in ORDER BY clause when more than one hash key condition"
+                    + " specified in WHERE clause."));
+        statement(select + "WHERE (pk = 'o' AND Total = 1) OR Total = 2 ORDER BY sk")
+            .statusCode(400)
+            .body("message", equalTo("Must have at least one non-optional hash key condition in WHERE clause"
+                    + " when using ORDER BY clause."));
+        statement(select + "WHERE (pk = 'o' AND Total = 1) OR (pk = 'p' AND Total = 2) ORDER BY pk")
+            .statusCode(200);
     }
 
     @Test

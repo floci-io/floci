@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -141,7 +142,7 @@ class EcsServicePlatformVersionIntegrationTest {
         CreateServiceRequest.Builder request = CreateServiceRequest.builder().cluster(cluster).serviceName(SERVICE)
                 .taskDefinition(taskDefinition).desiredCount(desiredCount).platformVersion(platformVersion)
                 .networkConfiguration(NetworkConfiguration.builder().awsvpcConfiguration(network -> network
-                        .subnets("subnet-default-us-east-1-a")).build());
+                        .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"))).build());
         if (provider == null) {
             request.launchType("FARGATE");
         } else {

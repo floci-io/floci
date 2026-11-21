@@ -7,7 +7,9 @@ name: IAM Data Drift
 # operations that pass a Lambda network connector, the table of the
 # tagging actions operations that tag what they create need, the table of the resources each
 # operation's request names, the DynamoDB condition key table, the IAM condition key table, the
-# S3 Control tag condition key table, and the request condition key table (Lambda Web and Redshift). That
+# S3 Control tag condition key table, and the request condition key table (Lambda Web and Redshift). It
+# also checks the routes rest-routes.json takes from the AWS page that documents an endpoint botocore does
+# not model (Glue's Iceberg REST endpoint). That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -15,11 +17,12 @@ name: IAM Data Drift
 # Two triggers, for two different failures:
 #
 #   - On a pull request that touches a vendored file or its generator, which is where a
-#     hand-typed or mistyped entry would enter the repository. A pull request that does not touch
-#     them cannot introduce one, so it does not run and cannot be failed by an outage. For the same
-#     reason, one that does checks only the files it touches, each with its generator and the
-#     modules that generator imports (the paths in the Makefile, above iam-data-verify): drift in a
-#     file it leaves alone is not its doing, and the weekly run reports it.
+#     hand-typed or mistyped entry would enter the repository. It checks only the files it touches,
+#     each with its generator and the modules that generator imports (the paths in the Makefile,
+#     above iam-data-verify): drift in a file it leaves alone is not its doing, and the weekly run
+#     reports it. Changes to Makefile, this workflow or the selector tests also trigger the job
+#     so the selector regression tests run. Those changes alone select no live-data checks and
+#     cannot be failed by an upstream data outage.
 #   - Weekly, because the files also go stale without anyone touching them: AWS ships services
 #     and actions, and occasionally retires them. Tying the only upstream check to pull request
 #     activity would mean a quiet month is a month with no drift detection at all.
@@ -36,6 +39,7 @@ name: IAM Data Drift
 on:
   pull_request:
     paths:
+      - 'Makefile'
       - 'src/main/resources/aws/iam-service-namespaces.json'
       - 'src/main/resources/aws/iam-action-resources.json'
       - 'tools/aws/regen_service_namespaces.py'
@@ -69,9 +73,13 @@ on:
       - 'src/main/resources/aws/request-condition-keys.json'
       - 'tools/aws/regen_request_condition_keys.py'
       - 'tools/aws/test_regen_request_condition_keys.py'
+      - 'src/main/resources/aws/rest-routes.json'
+      - 'tools/aws/regen_rest_routes.py'
+      - 'tools/aws/test_regen_rest_routes.py'
       - 'tools/aws/regen_partitions.py'
       - 'tools/aws/regen_query_services.py'
       - '.github/workflows/iam-data-drift.yml'
+      - 'tools/aws/test_iam_data_verify.py'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.
     - cron: '0 6 * * 1'
@@ -105,6 +113,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Test IAM verification selection
+        run: python3 -m unittest discover -s tools/aws -p test_iam_data_verify.py
+
       # IAM role-tag coverage also depends on which operations name a role in pinned botocore.
       - name: Install the pinned botocore
         run: pip install -r tools/aws/requirements.txt
@@ -116,7 +127,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
-            make iam-data-verify CHANGED="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+            changed_file="$RUNNER_TEMP/iam-changed-paths.txt"
+            if ! git diff --name-only HEAD^1 HEAD > "$changed_file"; then
+              : > "$changed_file"
+            fi
+            make iam-data-verify CHANGED_FILE="$changed_file"
           else
             make iam-data-verify
           fi

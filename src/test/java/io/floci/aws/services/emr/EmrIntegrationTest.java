@@ -236,6 +236,37 @@ class EmrIntegrationTest {
                 .body("Step.Status.State", equalTo("COMPLETED"));
     }
 
+    /** A step's own log destination and key, its StepMonitoringConfiguration, read back as DescribeStep's members. */
+    @Test
+    void aStepGivesBackItsOwnLogUriAndEncryptionKey() {
+        String cluster = emr("RunJobFlow", "{\"Name\":\"step-logs\",\"ReleaseLabel\":\"emr-7.11.0\","
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            List<String> ids = emr("AddJobFlowSteps", "{\"JobFlowId\":\"" + cluster + "\",\"Steps\":["
+                    + "{\"Name\":\"logged\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]},\"StepMonitoringConfiguration\":{"
+                    + "\"S3MonitoringConfiguration\":{\"LogUri\":\"s3://step-logs/\","
+                    + "\"EncryptionKeyArn\":\"arn:aws:kms:us-east-1:000000000000:key/k\"}}},"
+                    + "{\"Name\":\"plain\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]}}]}")
+                    .then().statusCode(200).extract().jsonPath().getList("StepIds", String.class);
+
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(0) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step.LogUri", equalTo("s3://step-logs/"))
+                    .body("Step.EncryptionKeyArn", equalTo("arn:aws:kms:us-east-1:000000000000:key/k"));
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(1) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step", not(hasKey("LogUri")));
+            emr("ListSteps", "{\"ClusterId\":\"" + cluster + "\",\"StepIds\":[\"" + ids.get(0) + "\"]}")
+                    .then().statusCode(200)
+                    .body("Steps[0].LogUri", equalTo("s3://step-logs/"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + cluster + "\"]}").then().statusCode(200);
+        }
+    }
+
     @Test
     @Order(8)
     void listStepsNewestFirst() {
@@ -291,7 +322,7 @@ class EmrIntegrationTest {
                 .then().statusCode(200)
                 .body("SecurityConfiguration", equalTo("{\"EncryptionConfiguration\":{}}"));
 
-        emrService.describeSecurityConfiguration("floci-emr-sec")
+        emrService.describeSecurityConfiguration("floci-emr-sec", "us-east-1")
                 .setCreationDateTime(Instant.ofEpochMilli(1_761_000_000_123L));
         try {
             JsonNode describedTime = objectMapper.readTree(emr("DescribeSecurityConfiguration",
@@ -315,6 +346,39 @@ class EmrIntegrationTest {
         } finally {
             emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
                     .then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(19)
+    void aClusterNamesASecurityConfigurationThatExists() {
+        String instances = "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}";
+        emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-missing\"," + instances + "}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Security configuration does not exist: floci-emr-missing"));
+        emr("ListClusters", "{}")
+                .then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'secured' }", hasSize(0));
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200)
+                .body("Cluster", not(hasKey("SecurityConfiguration")));
+
+        emr("CreateSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\","
+                + "\"SecurityConfiguration\":\"{\\\"EncryptionConfiguration\\\":{}}\"}")
+                .then().statusCode(200);
+        String secured = null;
+        try {
+            secured = emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-cluster-sec\","
+                    + instances + "}").then().statusCode(200).extract().path("JobFlowId");
+            emr("DescribeCluster", "{\"ClusterId\":\"" + secured + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.SecurityConfiguration", equalTo("floci-emr-cluster-sec"));
+        } finally {
+            if (secured != null) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + secured + "\"]}").then().statusCode(200);
+            }
+            emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\"}").then().statusCode(200);
         }
     }
 
@@ -515,5 +579,87 @@ class EmrIntegrationTest {
         cluster.setName(name);
         cluster.setKeepJobFlowAliveWhenNoSteps(true);
         return emrService.runJobFlow(cluster, "us-east-1");
+    }
+    @Test
+    @Order(20)
+    void aClustersAvailabilityZoneIsTheOneItsPlacementNamesElseItsRegionsFirst() {
+        String placed = emr("RunJobFlow", "{\"Name\":\"placed\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"Placement\":{\"AvailabilityZone\":\"us-east-1c\"}}}").then().statusCode(200).extract()
+                .path("JobFlowId");
+        String unplaced = emr("RunJobFlow",
+                "{\"Name\":\"unplaced\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            emr("DescribeCluster", "{\"ClusterId\":\"" + placed + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1c"));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + unplaced + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1a"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + placed + "\",\"" + unplaced + "\"]}")
+                    .then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(21)
+    void aClusterGivenAsItsInstanceTypesAndCountGetsAMasterGroupAndACoreGroupOfTheRest() {
+        String uniform = emr("RunJobFlow", "{\"Name\":\"uniform\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"SlaveInstanceType\":\"m5.large\",\"InstanceCount\":3}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        // One instance serves as both the master and the core node.
+        String single = emr("RunJobFlow", "{\"Name\":\"single\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"InstanceCount\":1}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        // Instance groups given are the cluster's, whatever else it names.
+        String grouped = emr("RunJobFlow", "{\"Name\":\"grouped\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"SlaveInstanceType\":\"m5.large\",\"InstanceCount\":3,"
+                + "\"InstanceGroups\":[{\"Name\":\"only\",\"InstanceRole\":\"MASTER\","
+                + "\"InstanceType\":\"m5.2xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String master = "InstanceGroups.find { it.InstanceGroupType == 'MASTER' }.";
+        String core = "InstanceGroups.find { it.InstanceGroupType == 'CORE' }.";
+        // Core nodes need their instance type: "all three must be present".
+        emr("RunJobFlow", "{\"Name\":\"no-core-type\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"MasterInstanceType\":\"m5.xlarge\",\"InstanceCount\":3}}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("SlaveInstanceType is required when InstanceCount is greater than 1."));
+        emr("ListClusters", "{}")
+                .then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'no-core-type' }", hasSize(0));
+        try {
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(2))
+                    .body(master + "Name", equalTo("Master InstanceGroup"))
+                    .body(master + "InstanceType", equalTo("m5.xlarge"))
+                    .body(master + "Market", equalTo("ON_DEMAND"))
+                    .body(master + "RequestedInstanceCount", equalTo(1))
+                    .body(core + "Name", equalTo("Core InstanceGroup"))
+                    .body(core + "InstanceType", equalTo("m5.large"))
+                    .body(core + "Market", equalTo("ON_DEMAND"))
+                    .body(core + "RequestedInstanceCount", equalTo(2));
+            emr("ListInstances", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("Instances", hasSize(3));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + uniform + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.InstanceCollectionType", equalTo("INSTANCE_GROUP"));
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + single + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(1))
+                    .body(master + "Name", equalTo("Master InstanceGroup"))
+                    .body(master + "RequestedInstanceCount", equalTo(1));
+            emr("ListInstanceGroups", "{\"ClusterId\":\"" + grouped + "\"}")
+                    .then().statusCode(200)
+                    .body("InstanceGroups", hasSize(1))
+                    .body(master + "Name", equalTo("only"))
+                    .body(master + "InstanceType", equalTo("m5.2xlarge"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + uniform + "\",\"" + single + "\",\"" + grouped
+                    + "\"]}").then().statusCode(200);
+        }
     }
 }

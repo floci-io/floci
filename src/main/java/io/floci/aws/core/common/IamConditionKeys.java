@@ -6,17 +6,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
- * The {@code iam:} condition keys an IAM request carries in its own members, and those read from the
- * role or user it names, generated from the AWS Service Reference and pinned botocore by
- * {@code tools/aws/regen_iam_condition_keys.py}.
+ * The {@code iam:} condition keys an IAM request carries in its own members, those read from the
+ * role or user it names, and those read from the record of the resource it names, generated from the
+ * AWS Service Reference and pinned botocore by {@code tools/aws/regen_iam_condition_keys.py}.
  */
 final class IamConditionKeys {
 
     record RequestTags(String member, String keyMember, String valueMember) {}
 
+    /**
+     * A key the reference publishes on a resource type: the type, the member of its record the value is read
+     * from, and the pattern the type's ARN format makes, which says whether an ARN is one of that type.
+     */
+    record Resource(String type, String member, Pattern arn) {}
+
     private record Table(Map<String, Map<String, String>> members, Map<String, Map<String, String>> targets,
+                         Map<String, Map<String, Resource>> resources,
                          Map<String, Map<String, RequestTags>> requestTags) {}
 
     private static final Table TABLE = VendoredResources.read(
@@ -24,6 +32,9 @@ final class IamConditionKeys {
                 JsonNode document = new ObjectMapper().readTree(input);
                 return new Table(section(document.path("read"), entry -> text(entry, "member")),
                         section(document.path("fromTarget"), entry -> text(entry, "target")),
+                        section(document.path("fromResource"), entry -> new Resource(text(entry, "type"),
+                                text(entry, "member"),
+                                RequestResourceMembers.pattern(text(entry, "arn")))),
                         section(document.path("requestTags"), entry -> new RequestTags(text(entry, "member"),
                                 entry.has("keyMember") ? text(entry, "keyMember") : null,
                                 entry.has("keyMember") ? text(entry, "valueMember") : null)));
@@ -62,6 +73,14 @@ final class IamConditionKeys {
      */
     static Map<String, String> targets(String action) {
         return TABLE.targets().getOrDefault(action, Map.of());
+    }
+
+    /**
+     * Each condition key a request for {@code action} takes from the resource it names, to the type of that
+     * resource and the member of its record holding the value; empty when none.
+     */
+    static Map<String, Resource> resources(String action) {
+        return TABLE.resources().getOrDefault(action, Map.of());
     }
 
     static Map<String, RequestTags> requestTags(String action) {

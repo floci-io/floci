@@ -59,6 +59,9 @@ public class AutoScalingGroup {
     // Set only by EnableMetricsCollection/DisableMetricsCollection. 1Minute is the only granularity
     // the model allows, so the metric names are all that needs storing.
     private List<String> enabledMetrics = new ArrayList<>();
+    // The group EKS keeps for a managed node group. EKS owns its capacity: Auto Scaling never launches,
+    // terminates or replaces its instances, which are the cluster's node.
+    private boolean eksManaged;
 
     public AutoScalingGroup() {}
 
@@ -186,4 +189,7 @@ public class AutoScalingGroup {
 
     public List<String> getEnabledMetrics() { return enabledMetrics; }
     public void setEnabledMetrics(List<String> v) { this.enabledMetrics = v != null ? new ArrayList<>(v) : new ArrayList<>(); }
+
+    public boolean isEksManaged() { return eksManaged; }
+    public void setEksManaged(boolean v) { this.eksManaged = v; }
 }

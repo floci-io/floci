@@ -26,6 +26,14 @@ class PostgresWireTest {
     }
 
     @Test
+    void quoteIdentifierAlwaysQuotesAndDoublesQuotes() {
+        assertEquals("\"admin\"", PostgresWire.quoteIdentifier("admin"));
+        assertEquals("\"App\"", PostgresWire.quoteIdentifier("App"));
+        assertEquals("\"a\"\"b\"", PostgresWire.quoteIdentifier("a\"b"));
+        assertEquals("\"select\"", PostgresWire.quoteIdentifier("select"));
+    }
+
+    @Test
     void aMessageIsFramedWithALengthThatCountsItself() throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         PostgresWire.write(out, 'Q', PostgresWire.cStringBytes("SELECT 1"));

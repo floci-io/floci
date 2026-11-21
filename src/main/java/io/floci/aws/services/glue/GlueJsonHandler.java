@@ -47,6 +47,7 @@ public class GlueJsonHandler {
     private final GlueCrawlerRunService crawlerRunService;
     private final GlueTriggerService triggerService;
     private final GlueSchemaRegistryService schemaRegistryService;
+    private final GlueCatalogService catalogService;
     private final ObjectMapper mapper;
 
     @Inject
@@ -55,12 +56,14 @@ public class GlueJsonHandler {
                            GlueCrawlerRunService crawlerRunService,
                            GlueTriggerService triggerService,
                            GlueSchemaRegistryService schemaRegistryService,
+                           GlueCatalogService catalogService,
                            ObjectMapper mapper) {
         this.glueService = glueService;
         this.jobRunService = jobRunService;
         this.crawlerRunService = crawlerRunService;
         this.triggerService = triggerService;
         this.schemaRegistryService = schemaRegistryService;
+        this.catalogService = catalogService;
         this.mapper = mapper;
     }
 
@@ -86,12 +89,39 @@ public class GlueJsonHandler {
                 glueService.createDatabase(db, tags, region);
                 yield Response.ok().build();
             }
+            case "CreateCatalog" -> {
+                catalogService.createCatalog(request.path("Name").asText(null), request.get("CatalogInput"),
+                        request.has("Tags") ? mapper.convertValue(request.get("Tags"), STRING_MAP) : null, region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "GetCatalog" -> Response.ok(Map.of("Catalog",
+                    catalogService.getCatalog(request.path("CatalogId").asText(null), region))).build();
+            case "GetCatalogs" -> {
+                GlueService.Page<GlueCatalog> page = catalogService.getCatalogs(
+                        request.path("ParentCatalogId").asText(null), request.path("Recursive").asBoolean(false),
+                        request.path("IncludeRoot").asBoolean(false),
+                        Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException"),
+                        Pagination.parseNextToken(request, "NextToken", "InvalidInputException"), region);
+                yield Response.ok(pageResponse("CatalogList", page.items(), page.nextToken())).build();
+            }
+            case "UpdateCatalog" -> {
+                catalogService.updateCatalog(request.path("CatalogId").asText(null), request.get("CatalogInput"),
+                        region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "DeleteCatalog" -> {
+                catalogService.deleteCatalog(request.path("CatalogId").asText(null), region);
+                yield Response.ok(Map.of()).build();
+            }
             case "GetDatabase" -> {
                 String name = request.get("Name").asText();
-                Database db = glueService.getDatabase(name);
+                String catalogId = request.path("CatalogId").asText(null);
+                Database db = catalogService.isDefaultCatalog(catalogId)
+                        ? glueService.getDatabase(name)
+                        : catalogService.getDatabase(catalogId, name, region);
                 yield Response.ok(Map.of("Database", db)).build();
             }
-            case "GetDatabases" -> handleGetDatabases(request);
+            case "GetDatabases" -> handleGetDatabases(request, region);
             case "DeleteDatabase" -> {
                 String name = request.get("Name").asText();
                 glueService.deleteDatabase(name, region);
@@ -112,7 +142,10 @@ public class GlueJsonHandler {
             case "GetTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
-                Table table = glueService.getTable(dbName, tableName);
+                String catalogId = request.path("CatalogId").asText(null);
+                Table table = catalogService.isDefaultCatalog(catalogId)
+                        ? glueService.getTable(dbName, tableName)
+                        : catalogService.getTable(catalogId, dbName, tableName, region);
                 yield Response.ok(Map.of("Table", GlueService.withReadDefaults(table))).build();
             }
             case "CreatePartitionIndex" -> {
@@ -143,8 +176,10 @@ public class GlueJsonHandler {
                 Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
                 String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
                 String dbName = request.get("DatabaseName").asText();
-                GlueService.Page<Table> page = glueService.getTables(
-                        dbName, maxResults, nextToken);
+                String catalogId = request.path("CatalogId").asText(null);
+                GlueService.Page<Table> page = catalogService.isDefaultCatalog(catalogId)
+                        ? glueService.getTables(dbName, maxResults, nextToken)
+                        : catalogService.getTables(catalogId, dbName, maxResults, nextToken, region);
                 List<Table> tables = page.items().stream().map(GlueService::withReadDefaults).toList();
                 yield Response.ok(pageResponse("TableList", tables, page.nextToken())).build();
             }
@@ -234,7 +269,7 @@ public class GlueJsonHandler {
             case "DeleteUserDefinedFunction" -> handleDeleteUserDefinedFunction(request);
             case "CreateRegistry" -> handleCreateRegistry(request, region);
             case "GetRegistry" -> handleGetRegistry(request, region);
-            case "ListRegistries" -> handleListRegistries(request);
+            case "ListRegistries" -> handleListRegistries(request, region);
             case "UpdateRegistry" -> handleUpdateRegistry(request, region);
             case "DeleteRegistry" -> handleDeleteRegistry(request, region);
             case "CreateSchema" -> handleCreateSchema(request, region);
@@ -249,9 +284,9 @@ public class GlueJsonHandler {
             case "DeleteSchemaVersions" -> handleDeleteSchemaVersions(request, region);
             case "GetSchemaVersionsDiff" -> handleGetSchemaVersionsDiff(request, region);
             case "CheckSchemaVersionValidity" -> handleCheckSchemaVersionValidity(request);
-            case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request);
-            case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request);
-            case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request);
+            case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request, region);
+            case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request, region);
+            case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "GetTags" -> handleGetTags(request, region);
@@ -895,8 +930,8 @@ public class GlueJsonHandler {
         return Response.ok(registry).build();
     }
 
-    private Response handleListRegistries(JsonNode request) {
-        GlueSchemaRegistryService.Page<Registry> page = schemaRegistryService.listRegistries(readMaxResults(request), readNextToken(request));
+    private Response handleListRegistries(JsonNode request, String region) {
+        GlueSchemaRegistryService.Page<Registry> page = schemaRegistryService.listRegistries(region, readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("Registries", registryListItems(page.items()), page.nextToken())).build();
     }
 
@@ -1112,10 +1147,13 @@ public class GlueJsonHandler {
         return vn.asLong();
     }
 
-    private Response handleGetDatabases(JsonNode request) {
-        GlueService.Page<Database> page = glueService.getDatabases(
-                Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException"),
-                Pagination.parseNextToken(request, "NextToken", "InvalidInputException"));
+    private Response handleGetDatabases(JsonNode request, String region) {
+        Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
+        String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
+        String catalogId = request.path("CatalogId").asText(null);
+        GlueService.Page<Database> page = catalogService.isDefaultCatalog(catalogId)
+                ? glueService.getDatabases(maxResults, nextToken)
+                : catalogService.getDatabases(catalogId, maxResults, nextToken, region);
         return Response.ok(pageResponse("DatabaseList", page.items(), page.nextToken())).build();
     }
 
@@ -1231,25 +1269,25 @@ public class GlueJsonHandler {
         return instant != null ? instant.toString() : null;
     }
 
-    private Response handlePutSchemaVersionMetadata(JsonNode request) {
+    private Response handlePutSchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value, region);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 
-    private Response handleRemoveSchemaVersionMetadata(JsonNode request) {
+    private Response handleRemoveSchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value, region);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 
-    private Response handleQuerySchemaVersionMetadata(JsonNode request) {
+    private Response handleQuerySchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         List<GlueSchemaRegistryService.MetadataKeyValueFilter> filters = new ArrayList<>();
         JsonNode list = request.get("MetadataList");
@@ -1260,7 +1298,7 @@ public class GlueJsonHandler {
                 filters.add(new GlueSchemaRegistryService.MetadataKeyValueFilter(k, v));
             }
         }
-        Map<String, ?> infoMap = schemaRegistryService.querySchemaVersionMetadata(svId, filters);
+        Map<String, ?> infoMap = schemaRegistryService.querySchemaVersionMetadata(svId, filters, region);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("MetadataInfoMap", infoMap);
         response.put("SchemaVersionId", svId);

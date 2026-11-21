@@ -1,27 +1,18 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
 @QuarkusTest
-@TestProfile(Ec2VcpuAdmissionIntegrationTest.TwoVcpus.class)
+@TestProfile(ServicesOffSettingsProfile.class)
 class Ec2VcpuAdmissionIntegrationTest {
-    public static class TwoVcpus implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.servicequotas.standard-on-demand-vcpus", "2",
-                    "floci.services.ec2.enforce-vcpu-quotas", "true");
-        }
-    }
-
     private static String auth(String account, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + account + "/20260205/us-east-1/" + service + "/aws4_request";
     }

@@ -12,20 +12,10 @@ import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
-import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
-import io.floci.aws.services.eks.EksController;
-import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.kms.KmsService;
-import io.floci.aws.services.lambda.LambdaArnUtils;
-import io.floci.aws.services.lambda.durable.DurableTokens;
-import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
 import io.floci.aws.services.s3.S3ControlArnUtils;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.s3.S3ResourceArns;
-import io.floci.aws.services.secretsmanager.SecretsManagerService;
-import io.floci.aws.services.sqs.SqsService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -48,8 +38,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -61,7 +49,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ResourceArnBuilder {
 
-    private static final Pattern ACCESS_POLICY_ARN = Pattern.compile(EksController.ACCESS_POLICY_ARN);
 
     /** The only scheme IAM accepts on an OIDC provider URL, and the part its ARN drops. */
     private static final String OIDC_URL_SCHEME = "https://";
@@ -70,12 +57,6 @@ public class ResourceArnBuilder {
 
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
-
-    /**
-     * Stands in for the random suffix of a secret that {@code CreateSecret} has not made yet. Each
-     * {@code ?} matches the one character a {@code secret:<name>-??????} policy expects there.
-     */
-    private static final String UNASSIGNED_SECRET_SUFFIX = "-??????";
 
     /** Where an S3 Control tagging route carries the ARN of the resource it acts on. */
     private static final String S3_CONTROL_TAGS_PREFIX = "/v20180820/tags/";
@@ -95,12 +76,6 @@ public class ResourceArnBuilder {
      * which IamService itself does not depend on, and a direct injection would close that loop.
      */
     private final Instance<IamService> iamService;
-    /** Looked up lazily for the same reason, to resolve a secret named by its name or a partial ARN. */
-    private final Instance<SecretsManagerService> secretsManagerService;
-    /** Looked up lazily for the same reason, to read the image a MicroVM runs. */
-    private final Instance<LambdaMicrovmsService> microvmsService;
-    /** Looked up lazily for the same reason, to read the ARN an EKS cluster or what it holds is stored under. */
-    private final Instance<EksService> eksService;
     /** Looked up lazily for the same reason, to resolve a key named by an id, an alias or an ARN to its stored ARN. */
     private final Instance<KmsService> kmsService;
     /**
@@ -117,56 +92,25 @@ public class ResourceArnBuilder {
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService,
-                              Instance<EksService> eksService,
                               Instance<KmsService> kmsService,
                               Instance<StoredResourceArns> storedResourceArns,
                               CurrentVertxRequest currentVertxRequest) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
-        this.secretsManagerService = secretsManagerService;
-        this.microvmsService = microvmsService;
-        this.eksService = eksService;
         this.kmsService = kmsService;
         this.storedResourceArns = storedResourceArns;
         this.currentVertxRequest = currentVertxRequest;
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService,
-                              Instance<EksService> eksService,
                               Instance<KmsService> kmsService,
                               Instance<StoredResourceArns> storedResourceArns) {
-        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService,
-                storedResourceArns, null);
+        this(objectMapper, iamService, kmsService, storedResourceArns, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService,
-                              Instance<EksService> eksService,
                               Instance<KmsService> kmsService) {
-        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService, null);
-    }
-
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService,
-                              Instance<EksService> eksService) {
-        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, null);
-    }
-
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService) {
-        this(objectMapper, iamService, secretsManagerService, microvmsService, null);
-    }
-
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService) {
-        this(objectMapper, iamService, secretsManagerService, null);
+        this(objectMapper, iamService, kmsService, null);
     }
 
     ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
@@ -182,7 +126,7 @@ public class ResourceArnBuilder {
     }
 
     ResourceArnBuilder(ObjectMapper objectMapper, CurrentVertxRequest currentVertxRequest) {
-        this(objectMapper, null, null, null, null, null, null, currentVertxRequest);
+        this(objectMapper, null, null, null, currentVertxRequest);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -197,9 +141,9 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Scheduler, Pipes and DSQL ARNs are minted in
-     * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
-     * the deployment's partition rather than {@code aws}.
+     * The resources a request is checked against. API Gateway ARNs are minted in {@code partition}, the request's, as
+     * that service mints its own, so a Region no partition publishes gets the deployment's partition rather than
+     * {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
@@ -223,17 +167,8 @@ public class ResourceArnBuilder {
                 : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, ctx, region);
-            case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
-            case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
-            case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
-            case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
-            case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
-            case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
-            case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
-            case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
-            case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
@@ -278,59 +213,6 @@ public class ResourceArnBuilder {
             }
         }
         return null;
-    }
-
-    private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode body = readJsonBody(ctx);
-        if (body == null) {
-            return "*";
-        }
-        String path = IamActionRegistry.decodedPath(ctx);
-        boolean create = path.endsWith("/groups") || path.endsWith("/groups/");
-        String group = create ? body.path("Name").asText()
-                : body.path("Group").asText(body.path("GroupName").asText());
-        if (group.isEmpty()) {
-            return "*";
-        }
-        return AwsArnUtils.looksLikeArn(group) ? group
-                : AwsArnUtils.Arn.of("resource-groups", region, accountId, "group/" + group).toString();
-    }
-
-    /** Uses the serving operation and the same raw names as the handler. */
-    public List<String> buildLogResources(String action, ContainerRequestContext ctx,
-                                          String region, String accountId, String partition) {
-        // Operations the vendored table reads take their resources from it.
-        if (RequestResources.reads(action)) {
-            return namedResources("logs", action, ctx, region, accountId, partition);
-        }
-        boolean stream = "logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action);
-        boolean group = switch (action) {
-            case "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
-                    "logs:DeleteRetentionPolicy" -> true;
-            default -> false;
-        };
-        if (!stream && !group && !LogGroupTagTarget.supports(action)) {
-            return List.of("*");
-        }
-        JsonNode body = readJsonBody(ctx);
-        if (body == null) {
-            return List.of("*");
-        }
-        if (LogGroupTagTarget.supports(action)) {
-            String resourceArn = body.path("resourceArn").asText();
-            // A delivery source, destination or delivery is tagged through the same operations.
-            if (CloudWatchLogsDeliveryService.isDeliveryResourceArn(resourceArn)) {
-                return List.of(resourceArn);
-            }
-            if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
-                return List.of(resourceArn);
-            }
-            return List.of(LogGroupTagTarget.resolve(resourceArn, region, accountId, partition).arn());
-        }
-        String name = body.path("logGroupName").asText();
-        String resource = "log-group:" + name + (stream
-                ? ":log-stream:" + body.path("logStreamName").asText() : ":*");
-        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId, resource).toString());
     }
 
     // ── IAM ─────────────────────────────────────────────────────────────────────
@@ -431,26 +313,29 @@ public class ResourceArnBuilder {
      * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
      * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, an Organizations
      * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
-     * service's tree, and a request id for the five delegation actions that name one.
+     * service's tree, and a request id for the six delegation actions that name one.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
      * {@code IamActionResourcesTest} reads to tell a type one of these covers from a type nothing
      * resolves.
      */
-    static final Map<String, DerivedResolver> DERIVED_RESOLVERS = Map.of(
-            "CreateServiceLinkedRole", ResourceArnBuilder::serviceLinkedRoleArn,
-            "GetAccessKeyLastUsed",
-            (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId),
-            "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn,
-            "GenerateOrganizationsAccessReport",
-            ResourceArnBuilder::organizationsAccessReportArn,
-            "AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn,
-            "GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn);
+    // Map.ofEntries rather than Map.of: this map passed ten pairs when the forward action gained
+    // its resource, and Map.of has no overload beyond ten.
+    static final Map<String, DerivedResolver> DERIVED_RESOLVERS = Map.ofEntries(
+            Map.entry("CreateServiceLinkedRole", ResourceArnBuilder::serviceLinkedRoleArn),
+            Map.entry("GetAccessKeyLastUsed",
+                    (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId)),
+            Map.entry("GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn),
+            Map.entry("GenerateOrganizationsAccessReport",
+                    ResourceArnBuilder::organizationsAccessReportArn),
+            Map.entry("AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("GetDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("UpdateDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("SendDelegationToken", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn));
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -648,9 +533,12 @@ public class ResourceArnBuilder {
      * actions use, one step earlier, because this family passes an id where they pass an ARN.
      *
      * <p>{@code CreateDelegationRequest} is not here: IAM mints the id, so the request names no
-     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is not here
-     * either, AWS publishing no authorizable action for it at all, so it carries no type to
-     * resolve.
+     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is here,
+     * which corrects what this note said before: the customer-side page "Managing Permissions for
+     * Delegation Requests" lists {@code iam:UpdateDelegationRequest} among the permissions an
+     * administrator grants, describing it as "Forward a delegation request to an administrator for
+     * approval", so it is an authorizable action and it names the request its id names, as its
+     * siblings do.
      */
     private List<String> delegationRequestArn(ContainerRequestContext ctx, String region,
                                               String accountId) {
@@ -972,345 +860,6 @@ public class ResourceArnBuilder {
         }
     }
 
-    // ── Lambda ──────────────────────────────────────────────────────────────────
-
-    /**
-     * The function a Lambda request acts on, as an IAM policy names it. An invoke runs the function
-     * in the account and Region its full or partial ARN names, so it is evaluated against that
-     * function, and against the version or alias it names in the function name or in
-     * {@code Qualifier}, since Lambda authorizes a qualified call against the qualified ARN (Lambda
-     * Developer Guide, "Referencing functions in the Resource section of policies"). The reads
-     * {@link #readsInTheAccountItNames} names act in the account a qualified ARN names too. Every
-     * other route acts on the caller's own function of that name, whatever account an ARN names.
-     * Those are evaluated unqualified, because not every one of them acts on the qualifier it is
-     * given.
-     */
-    private String buildLambdaArn(String path, ContainerRequestContext ctx, String region, String accountId) {
-        String webFunctionArn = webFunctionArn(path, region, accountId);
-        if (webFunctionArn != null) {
-            return webFunctionArn;
-        }
-        String microvmArn = microvmArn(path, ctx, region, accountId);
-        if (microvmArn != null) {
-            return microvmArn;
-        }
-        // TagResource, ListTags and UntagResource name the tagged function, image or other resource by its ARN.
-        if (path.startsWith("/2017-03-31/tags/")) {
-            return lambdaTaggedArn(path.substring("/2017-03-31/tags/".length()), accountId);
-        }
-        String executionArn = durableExecutionArn(path);
-        if (executionArn == null) {
-            executionArn = durableCallbackExecutionArn(path);
-        }
-        if (executionArn != null) {
-            return executionArn;
-        }
-        String childArn = lambdaChildArn(path, ctx, region, accountId);
-        if (childArn != null) {
-            return childArn;
-        }
-        // path: /2015-03-31/functions/name or similar
-        String name = extractSegmentAfter(path, "functions");
-        if (name == null) {
-            return createdFunctionArn(path, ctx, region, accountId);
-        }
-        if (path.endsWith("/code-signing-config")) {
-            return codeSigningFunctionArn(name, region, accountId);
-        }
-        boolean qualifiedTarget = path.endsWith("/functions/" + name + "/invocations")
-                || path.endsWith("/functions/" + name + "/response-streaming-invocations")
-                || path.endsWith("/functions/" + name + "/provisioned-concurrency");
-        try {
-            if (!qualifiedTarget) {
-                LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(name);
-                boolean namedAccount = readsInTheAccountItNames(path, name, ref, ctx);
-                return AwsArnUtils.Arn.of("lambda",
-                        namedAccount ? ref.region() : region,
-                        namedAccount ? ref.account() : accountId,
-                        "function:" + ref.name()).toString();
-            }
-            LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithQualifier(
-                    name, ctx.getUriInfo().getQueryParameters().getFirst("Qualifier"));
-            String resource = ref.qualifier() != null
-                    ? "function:" + ref.name() + ":" + ref.qualifier()
-                    : "function:" + ref.name();
-            return AwsArnUtils.Arn.of("lambda",
-                    ref.region() != null ? ref.region() : region,
-                    ref.account() != null ? ref.account() : accountId,
-                    resource).toString();
-        } catch (AwsException e) {
-            // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
-            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
-        }
-    }
-
-    /** Code-signing attachment routes use Lambda's broader NamespacedFunctionName shape. */
-    private static String codeSigningFunctionArn(String name, String region, String accountId) {
-        try {
-            LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveNamespacedFunctionName(name);
-            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + ref.name()).toString();
-        } catch (AwsException e) {
-            // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
-            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
-        }
-    }
-
-    /**
-     * The function {@code CreateFunction} makes, which its body names, in the caller's account and Region, as
-     * every route but an invoke acts there: the Service Reference gives it the {@code function} resource, so
-     * its own action, and the tagging action its tags need, are checked on that function. {@code *} for any
-     * other route that names no function.
-     */
-    private String createdFunctionArn(String path, ContainerRequestContext ctx, String region, String accountId) {
-        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || !"/2015-03-31/functions".equals(path)) {
-            return "*";
-        }
-        JsonNode body = readJsonBody(ctx);
-        JsonNode name = body == null ? null : body.get("FunctionName");
-        if (name == null || !name.isTextual() || name.asText().isEmpty()) {
-            return "*";
-        }
-        try {
-            return AwsArnUtils.Arn.of("lambda", region, accountId,
-                    "function:" + LambdaArnUtils.resolve(name.asText()).name()).toString();
-        } catch (AwsException e) {
-            // A name Lambda refuses, which its handler answers with a 400 before creating anything.
-            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name.asText()).toString();
-        }
-    }
-
-    /**
-     * The resource of a Lambda event source mapping, code signing config or layer route, as the Service
-     * Reference gives it. A mapping is looked up by its UUID, a config by the id that ends its ARN and a
-     * layer version by its layer's name as given, an ARN included, and its number, each in the request's
-     * account and Region, so that is the resource checked. A layer route's path is split as the router
-     * splits it, before decoding, so an encoded {@code /} stays inside the layer's name, and its version
-     * number is read as Lambda parses it, so {@code 01} is version 1. {@code PublishLayerVersion} is checked
-     * against the layer and {@code GetLayerVersionByArn} against the version its {@code Arn} names, its
-     * number read the same way. Listing configs, layers or a layer's versions, and creating a config, name
-     * no resource, so they are {@code *}. Null for every other Lambda route.
-     */
-    private static String lambdaChildArn(String path, ContainerRequestContext ctx, String region, String accountId) {
-        String mapping = segmentAfterPrefix(path, "/2015-03-31/event-source-mappings/");
-        if (mapping != null) {
-            return AwsArnUtils.Arn.of("lambda", region, accountId, "event-source-mapping:" + mapping).toString();
-        }
-        if (path.startsWith("/2020-04-22/code-signing-configs")) {
-            String config = segmentAfterPrefix(path, "/2020-04-22/code-signing-configs/");
-            return config == null ? "*"
-                    : AwsArnUtils.Arn.of("lambda", region, accountId,
-                            "code-signing-config:" + trailingName(config)).toString();
-        }
-        if (path.equals("/2018-10-31/layers")) {
-            String arn = ctx.getUriInfo().getQueryParameters().getFirst("Arn");
-            boolean byArn = "LayerVersion".equals(ctx.getUriInfo().getQueryParameters().getFirst("find"));
-            return byArn && AwsArnUtils.isArnFor(arn, "lambda") ? layerVersionArn(arn) : "*";
-        }
-        String layers = "/2018-10-31/layers/";
-        if (!path.startsWith(layers)) {
-            return null;
-        }
-        String raw = IamActionRegistry.rawPath(ctx);
-        if (!raw.startsWith(layers)) {
-            return "*";
-        }
-        String[] segments = raw.substring(layers.length()).split("/");
-        if (segments.length < 2 || !"versions".equals(segments[1])) {
-            return "*";
-        }
-        String layer = "layer:" + pathSegment(segments[0]);
-        if (segments.length == 2) {
-            return "POST".equalsIgnoreCase(ctx.getMethod())
-                    ? AwsArnUtils.Arn.of("lambda", region, accountId, layer).toString() : "*";
-        }
-        return AwsArnUtils.Arn.of("lambda", region, accountId,
-                layer + ":" + layerVersion(pathSegment(segments[2]))).toString();
-    }
-
-    /** A layer version ARN, its version number written as Lambda parses it. */
-    private static String layerVersionArn(String arn) {
-        int colon = arn.lastIndexOf(':');
-        return arn.substring(0, colon + 1) + layerVersion(arn.substring(colon + 1));
-    }
-
-    /** A layer version number as Lambda parses it, so {@code 01} is 1; as given when it is no number. */
-    private static String layerVersion(String version) {
-        try {
-            return Long.toString(Long.parseLong(version));
-        } catch (NumberFormatException e) {
-            return version;
-        }
-    }
-
-    /**
-     * A path segment as sent, decoded as a path parameter is: a {@code +} stays a {@code +}. A malformed
-     * escape is kept as sent.
-     */
-    private static String pathSegment(String raw) {
-        try {
-            return URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            return raw;
-        }
-    }
-
-    /**
-     * The resource of a Lambda MicroVM or network connector route, as the Service Reference gives it:
-     * {@code microvm-image:<name>} for an action on an image, its versions and builds, and
-     * {@code network-connector:<id>} for one on a connector. An identifier given as an ARN is taken for
-     * its trailing name, in the request's account and Region, since that is the resource the service
-     * looks up and acts on, whatever account or Region the ARN names. {@code RunMicrovm} is checked
-     * against the image its {@code imageIdentifier} names, read the same way, an action on a running
-     * MicroVM against the image that MicroVM runs, and a managed image's versions against the managed
-     * image. Creating an image or a connector, listing them and listing MicroVMs name no resource, so
-     * they are {@code *}, as is a MicroVM the account does not hold. Null for every other Lambda route.
-     */
-    private String microvmArn(String path, ContainerRequestContext ctx, String region, String accountId) {
-        if (path.startsWith("/2025-09-09/")) {
-            String image = segmentAfterPrefix(path, "/2025-09-09/microvm-images/");
-            if (image != null) {
-                return microvmImageArn(region, accountId, image);
-            }
-            String managed = segmentAfterPrefix(path, "/2025-09-09/managed-microvm-images/");
-            if (managed != null) {
-                return LambdaMicrovmsService.namesManagedImage(managed)
-                        ? LambdaMicrovmsService.managedImageArn(region) : "*";
-            }
-            String microvm = segmentAfterPrefix(path, "/2025-09-09/microvms/");
-            if (microvm != null) {
-                return runningMicrovmImageArn(region, microvm);
-            }
-            if (path.equals("/2025-09-09/microvms") && "POST".equalsIgnoreCase(ctx.getMethod())) {
-                JsonNode body = readJsonBody(ctx);
-                String identifier = body == null ? null : body.path("imageIdentifier").asText(null);
-                return identifier == null || identifier.isBlank() ? "*" : microvmImageArn(region, accountId, identifier);
-            }
-            return "*";
-        }
-        if (path.startsWith("/2026-04-04/")) {
-            String connector = segmentAfterPrefix(path, "/2026-04-04/network-connectors/");
-            return connector == null ? "*"
-                    : AwsArnUtils.Arn.of("lambda", region, accountId,
-                            "network-connector:" + trailingName(connector)).toString();
-        }
-        return null;
-    }
-
-    private static String microvmImageArn(String region, String accountId, String identifier) {
-        return AwsArnUtils.Arn.of("lambda", region, accountId, "microvm-image:" + trailingName(identifier)).toString();
-    }
-
-    /** The image the caller's MicroVM runs, or {@code *} when the account holds no such MicroVM to act on. */
-    private String runningMicrovmImageArn(String region, String microvmId) {
-        if (microvmsService == null) {
-            return "*";
-        }
-        return microvmsService.get().findMicrovm(region, microvmId)
-                .map(vm -> vm.imageArn)
-                .filter(arn -> arn != null && !arn.isBlank())
-                .orElse("*");
-    }
-
-    /** An identifier's name: an ARN's part after its last {@code :}, as the MicroVM service unwraps it. */
-    private static String trailingName(String identifier) {
-        return AwsArnUtils.looksLikeArn(identifier) ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
-    }
-
-    /**
-     * The resource a Lambda tag route acts on, from the ARN it names. Tagging looks a function up by the
-     * ARN's Region and name, and a MicroVM image or network connector by the ARN's Region and trailing
-     * name, in the caller's own account whatever account the ARN names, so that resource is the one
-     * checked. The MicroVM tag handler takes only a Lambda ARN naming an image or a connector with no
-     * version, so the target is read through {@link LambdaMicrovmsService#taggedResource}, as it reads it.
-     * Any other ARN, an event source mapping's included, has to name its resource exactly or is
-     * refused, so it is checked as written.
-     */
-    private static String lambdaTaggedArn(String tagged, String accountId) {
-        // The image or connector LambdaMicrovmsService tags: the caller's own, in the ARN's Region.
-        Optional<String> microvmResource = LambdaMicrovmsService.taggedResource(tagged);
-        if (microvmResource.isPresent()) {
-            String region = AwsArnUtils.parse(tagged).region();
-            if (!region.isBlank()) {
-                return AwsArnUtils.Arn.of("lambda", region, accountId, microvmResource.get()).toString();
-            }
-        }
-        if (!AwsArnUtils.looksLikeArn(tagged)) {
-            return "*";
-        }
-        try {
-            LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(tagged);
-            return ref.qualifier() != null ? tagged
-                    : AwsArnUtils.Arn.of("lambda", ref.region(), accountId, "function:" + ref.name()).toString();
-        } catch (AwsException e) {
-            // Not a function ARN Lambda takes, which it tags only when the ARN names the resource exactly.
-            return tagged;
-        }
-    }
-
-    /**
-     * The resource of an EventBridge Scheduler route: {@code schedule/<group>/<name>}, the group read where
-     * Scheduler reads it, the body's {@code GroupName} on a create or an update and {@code groupName}
-     * otherwise, and {@code default} when the request names none; {@code schedule-group/<name>}; or the
-     * ARN a tagging route names. The list routes name no resource.
-     */
-    private String buildSchedulerArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                     String partition) {
-        String schedule = segmentAfterPrefix(path, "/schedules/");
-        if (schedule != null) {
-            String group;
-            if ("POST".equalsIgnoreCase(ctx.getMethod()) || "PUT".equalsIgnoreCase(ctx.getMethod())) {
-                JsonNode body = readJsonBody(ctx);
-                group = body == null ? null : body.path("GroupName").asText(null);
-            } else {
-                group = ctx.getUriInfo().getQueryParameters().getFirst("groupName");
-            }
-            if (group == null || group.isBlank()) {
-                group = "default";
-            }
-            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
-                    "schedule/" + group + "/" + schedule).toString();
-        }
-        String scheduleGroup = segmentAfterPrefix(path, "/schedule-groups/");
-        if (scheduleGroup != null) {
-            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
-                    "schedule-group/" + scheduleGroup).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /**
-     * The resource of an Aurora DSQL route, as the Service Authorization Reference names it: the cluster
-     * a cluster route names, the stream a stream route names (its cluster, to create or list streams), or
-     * the ARN a tagging route names. CreateCluster and ListClusters are checked against
-     * {@code cluster/*}, as DSQL checks them (measured).
-     */
-    private String buildDsqlArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                String partition) {
-        String cluster = "/cluster".equals(path) ? "*" : segmentAfterPrefix(path, "/cluster/");
-        if (cluster == null) {
-            cluster = segmentAfterPrefix(path, "/clusters/");
-        }
-        String streamCluster = segmentAfterPrefix(path, "/stream/");
-        if (streamCluster != null) {
-            String stream = segmentAfterPrefix(path, "/stream/" + streamCluster + "/");
-            cluster = stream == null ? streamCluster : streamCluster + "/stream/" + stream;
-        }
-        if (cluster != null) {
-            return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /** The resource of an EventBridge Pipes route: {@code pipe/<name>}, or the ARN a tagging route names. */
-    private String buildPipesArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                 String partition) {
-        String pipe = segmentAfterPrefix(path, "/v1/pipes/");
-        if (pipe != null) {
-            return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
-        }
-        return taggedResource(ctx);
-    }
-
     /**
      * API Gateway authorizes a management call as its HTTP method on the path it names, in the Region serving
      * it and with no account: {@code GET /restapis/abc/stages} acts on
@@ -1354,130 +903,6 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resource of an EKS route, as the Service Reference gives it, in the caller's account, where EKS
-     * looks everything up. A cluster is the ARN EKS holds it under, or for one it holds none of, the ARN a
-     * create mints in the request's Region; {@code CreateCluster} is checked against the cluster its body
-     * names, as the EKS user guide's example policy for creating a cluster grants it. A node group, Fargate
-     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under in the request's
-     * Region (clusters are Regional), which ends in an id the request does not carry, or {@code *} when EKS
-     * holds none to act on; listing or creating
-     * them, and every other route under a cluster, act on the cluster. The path is split as the router
-     * splits it, before decoding, so an encoded {@code /} stays inside a name, and an access entry's
-     * principal is the rest of the path, as EKS takes it. {@code DescribeUpdate} acts on the add-on its
-     * {@code addonName} names, since the updates EKS keeps are its add-ons', and otherwise on the cluster. A
-     * tagging route acts on the caller's cluster named by what follows the ARN's last {@code /}, as EKS tags
-     * it, whatever the ARN names before that. Deregistering a cluster acts on that cluster, and an EKS
-     * Anywhere subscription route on the subscription its id names. Listing clusters, registering one, the
-     * account-wide reads, and an identity provider config or capability, which end in an id Floci does not
-     * keep, name no resource, so they are {@code *}.
-     */
-    private String buildEksArn(String path, ContainerRequestContext ctx, String region, String accountId) {
-        if (path.equals("/tags") || path.startsWith("/tags/")) {
-            String tagged = taggedArn(ctx);
-            int slash = tagged == null ? -1 : tagged.lastIndexOf('/');
-            return slash < 0 || slash == tagged.length() - 1 ? "*"
-                    : eksClusterArn(tagged.substring(slash + 1), region, accountId);
-        }
-        String[] segments = IamActionRegistry.routedPath(ctx).substring(1).split("/", -1);
-        if (segments.length == 1) {
-            JsonNode body = "clusters".equals(segments[0]) && "POST".equalsIgnoreCase(ctx.getMethod())
-                    ? readJsonBody(ctx) : null;
-            String cluster = body == null ? null : body.path("name").asText(null);
-            return cluster == null || cluster.isBlank() ? "*" : eksClusterArn(cluster, region, accountId);
-        }
-        String name = pathSegment(segments[1]);
-        if (name.isEmpty()) {
-            return "*";
-        }
-        return switch (segments[0]) {
-            case "clusters" -> eksClusterRouteArn(name, segments, ctx.getMethod(), region, accountId);
-            case "cluster-registrations" -> eksClusterArn(name, region, accountId);
-            case "eks-anywhere-subscriptions" ->
-                    AwsArnUtils.Arn.of("eks", region, accountId, "eks-anywhere-subscription/" + name).toString();
-            default -> "*";
-        };
-    }
-
-    /** The resource of a {@code method} route under the cluster {@code cluster}, its path split into {@code segments}. */
-    private String eksClusterRouteArn(String cluster, String[] segments, String method, String region,
-                                      String accountId) {
-        if (segments.length < 4 || segments[3].isEmpty()) {
-            return eksClusterArn(cluster, region, accountId);
-        }
-        String collection = segments[2];
-        return switch (collection) {
-            case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
-                    eksHeldArn(cluster, collection, pathSegment(segments[3]), region);
-            case "access-entries" -> eksHeldArn(cluster, collection,
-                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))),
-                    region);
-            case "updates" -> {
-                // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
-                // its add-on, so the update is checked against the add-on it was made to.
-                Optional<String> addon = segments.length == 4
-                        ? eksHeld(cluster, collection, pathSegment(segments[3]), region)
-                        : Optional.empty();
-                yield addon.orElseGet(() -> eksClusterArn(cluster, region, accountId));
-            }
-            case "identity-provider-configs" ->
-                    "associate".equals(segments[3]) ? eksClusterArn(cluster, region, accountId) : "*";
-            case "capabilities" -> "*";
-            default -> eksClusterArn(cluster, region, accountId);
-        };
-    }
-
-    /**
-     * Where an access entry's principal ends in {@code segments}: before {@code access-policies} on the routes
-     * that act on the entry's policies, as the router reads them (a DELETE only when a cluster access policy
-     * ARN follows), and at the end on every other route.
-     */
-    private static int accessEntryEnd(String[] segments, String method) {
-        int last = segments.length - 1;
-        if (("GET".equalsIgnoreCase(method) || "POST".equalsIgnoreCase(method))
-                && last > 3 && "access-policies".equals(segments[last])) {
-            return last;
-        }
-        if ("DELETE".equalsIgnoreCase(method)) {
-            for (int i = last - 1; i > 3; i--) {
-                if ("access-policies".equals(segments[i]) && ACCESS_POLICY_ARN.matcher(
-                        String.join("/", List.of(segments).subList(i + 1, segments.length))).matches()) {
-                    return i;
-                }
-            }
-        }
-        return segments.length;
-    }
-
-    /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
-    private String eksClusterArn(String name, String region, String accountId) {
-        return eksHeld(name, null, null, region)
-                .orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
-    }
-
-    /** The ARN EKS holds {@code name} of {@code collection} in the cluster under, or {@code *} when it holds none. */
-    private String eksHeldArn(String cluster, String collection, String name, String region) {
-        return eksHeld(cluster, collection, name, region).orElse("*");
-    }
-
-    /**
-     * The ARN EKS holds the resource under, when the cluster is in {@code region}. EKS clusters are Regional, so a
-     * request signed for another Region does not reach them, and is checked as acting on a resource of its own Region.
-     */
-    private Optional<String> eksHeld(String cluster, String collection, String name, String region) {
-        if (eksService == null) {
-            return Optional.empty();
-        }
-        return eksService.get().findResourceArn(cluster, collection, name)
-                .filter(arn -> region.equals(AwsArnUtils.regionOrDefault(arn, null)));
-    }
-
-    /** The ARN a shared tagging route names, or {@code *} for any other route. */
-    private String taggedResource(ContainerRequestContext ctx) {
-        String arn = taggedArn(ctx);
-        return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
-    }
-
-    /**
      * The ARN a shared tagging route acts on, read where its controller reads it: after {@code /tags/} or
      * {@code /v1/tags/} in the path; on {@code POST /tags}, the body's {@code resourceArn}; and on the other
      * bare routes, the {@code resourceArn} query parameter. Null for any other route, or when the request
@@ -1500,104 +925,16 @@ public class ResourceArnBuilder {
         return null;
     }
 
-    /** The path segment right after {@code prefix}, or null when the path doesn't start with it or names none. */
-    private static String segmentAfterPrefix(String path, String prefix) {
-        if (!path.startsWith(prefix)) {
-            return null;
-        }
-        String rest = path.substring(prefix.length());
-        int slash = rest.indexOf('/');
-        String segment = slash < 0 ? rest : rest.substring(0, slash);
-        return segment.isEmpty() ? null : segment;
-    }
-
     /**
-     * The resource of a Lambda Web Functions route. An action on a revision or an endpoint is evaluated
-     * against that child's ARN; an action on the function, a create of a revision or endpoint, the list of
-     * either, and the tag and resource-policy routes against the function's (Lambda Developer Guide,
-     * "Lambda Web Function permissions"). ListWebFunctions, GetWebAccountSettings and CreateWebFunction
-     * name no resource. Null for every other Lambda route.
+     * A path segment as sent, decoded as a path parameter is: a {@code +} stays a {@code +}. A malformed
+     * escape is kept as sent.
      */
-    public static String webFunctionArn(String path, String region, String accountId) {
-        if (!path.startsWith("/2025-03-07/")) {
-            return null;
+    private static String pathSegment(String raw) {
+        try {
+            return URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return raw;
         }
-        String rest = path.substring("/2025-03-07/".length());
-        if (rest.startsWith("tags/") || rest.startsWith("resource-policy/")) {
-            String arn = rest.substring(rest.indexOf('/') + 1);
-            return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
-        }
-        if (!rest.startsWith("web-functions/")) {
-            return "*";
-        }
-        List<String> segments = new ArrayList<>(List.of(rest.substring("web-functions/".length()).split("/")));
-        if (segments.isEmpty() || segments.getFirst().isEmpty()) {
-            return "*";
-        }
-        String functionArn;
-        if (AwsArnUtils.looksLikeArn(segments.getFirst()) && segments.size() > 1) {
-            // A function ARN carries one slash: arn:...:web-function/<name>.
-            functionArn = segments.get(0) + "/" + segments.get(1);
-            segments.subList(0, 2).clear();
-        } else {
-            functionArn = AwsArnUtils.Arn.of("lambda", region, accountId,
-                    "web-function/" + segments.getFirst()).toString();
-            segments.removeFirst();
-        }
-        if (segments.size() >= 2 && ("revisions".equals(segments.get(0)) || "endpoints".equals(segments.get(0)))) {
-            String child = "revisions".equals(segments.get(0)) ? "revision" : "endpoint";
-            String id = String.join("/", segments.subList(1, segments.size()));
-            if (AwsArnUtils.looksLikeArn(id) && id.contains("/" + child + "/")) {
-                // A revision or endpoint ARN ends in its id: arn:...:web-function/<name>/revision/<id>.
-                id = id.substring(id.lastIndexOf('/') + 1);
-            }
-            return functionArn + "/" + child + "/" + id;
-        }
-        return functionArn;
-    }
-
-    /**
-     * {@code GetFunction}, {@code GetFunctionConfiguration} and {@code ListDurableExecutionsByFunction}
-     * read a function named by a qualified full ARN in the account the ARN names, where the version or
-     * alias is resolved ({@code LambdaService.getFunction(region, name, qualifier)}). Unqualified, or
-     * by partial ARN, they read the caller's own function of that name, as every other route acts.
-     */
-    private static boolean readsInTheAccountItNames(String path, String name,
-                                                    LambdaArnUtils.ResolvedFunctionRef ref,
-                                                    ContainerRequestContext ctx) {
-        if (!"GET".equals(ctx.getMethod()) || !AwsArnUtils.looksLikeArn(name)) {
-            return false;
-        }
-        String route = path.substring(path.indexOf("/functions/" + name) + "/functions/".length() + name.length());
-        if (!route.isEmpty() && !route.equals("/configuration") && !route.equals("/durable-executions")) {
-            return false;
-        }
-        String qualifier = ctx.getUriInfo().getQueryParameters().getFirst("Qualifier");
-        return ref.qualifier() != null || (qualifier != null && !qualifier.isBlank());
-    }
-
-    /** Durable execution actions are authorized against the execution ARN, which carries the version. */
-    private static String durableExecutionArn(String path) {
-        String prefix = "/durable-executions/";
-        int executions = path.indexOf(prefix);
-        if (executions < 0) {
-            return null;
-        }
-        Matcher matcher = LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
-        return matcher.lookingAt() ? matcher.group() : null;
-    }
-
-    /** A callback id carries its execution ARN, so the callback actions are authorized against that execution. */
-    private static String durableCallbackExecutionArn(String path) {
-        String prefix = "/durable-execution-callbacks/";
-        int callbacks = path.indexOf(prefix);
-        int action = path.lastIndexOf('/');
-        if (callbacks < 0 || action <= callbacks + prefix.length()) {
-            return null;
-        }
-        return DurableTokens.callbackExecutionArn(path.substring(callbacks + prefix.length(), action))
-                .filter(arn -> LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(arn).matches())
-                .orElse(null);
     }
 
     // ── Bedrock ──────────────────────────────────────────────────────────────────
@@ -1616,42 +953,6 @@ public class ResourceArnBuilder {
             resourceArn = body == null ? null : body.path("resourceArn").asText(null);
         }
         return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
-    }
-
-    // ── SQS ─────────────────────────────────────────────────────────────────────
-    private String buildSqsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String queueUrl = firstFormParam(ctx, "QueueUrl");
-        if (queueUrl == null) {
-            JsonNode json = readJsonBody(ctx);
-            if (json != null && json.isObject()) {
-                if (json.hasNonNull("QueueUrl")) {
-                    queueUrl = json.get("QueueUrl").asText().trim();
-                } else if (json.hasNonNull("QueueName")) {
-                    String queueName = json.get("QueueName").asText().trim();
-                    if (!queueName.isEmpty()) {
-                        return AwsArnUtils.Arn.of("sqs", region, accountId, queueName).toString();
-                    }
-                }
-            }
-        }
-        if (queueUrl != null && !queueUrl.isEmpty()) {
-            return SqsService.queueArn(queueUrl, AwsRegions.partitionFor(region), region, accountId);
-        }
-        return AwsArnUtils.Arn.of("sqs", region, accountId, "*").toString();
-    }
-
-    // ── SNS ─────────────────────────────────────────────────────────────────────
-    private String buildSnsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String topicArn = firstFormParam(ctx, "TopicArn");
-        if (topicArn == null) {
-            JsonNode json = readJsonBody(ctx);
-            if (json != null && json.isObject() && json.hasNonNull("TopicArn")) {
-                topicArn = json.get("TopicArn").asText().trim();
-            }
-        }
-        return (topicArn != null && !topicArn.isEmpty())
-                ? topicArn
-                : AwsArnUtils.Arn.of("sns", region, accountId, "*").toString();
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
@@ -1813,89 +1114,6 @@ public class ResourceArnBuilder {
             return tableName;
         }
         return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
-    }
-
-    // ── Kinesis ──────────────────────────────────────────────────────────────────
-    private String buildKinesisArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode json = readJsonBody(ctx);
-        if (json != null && json.isObject()) {
-            if (json.hasNonNull("StreamARN")) {
-                String streamArn = json.get("StreamARN").asText().trim();
-                if (!streamArn.isEmpty()) {
-                    return streamArn;
-                }
-            }
-            if (json.hasNonNull("StreamName")) {
-                String streamName = json.get("StreamName").asText().trim();
-                if (!streamName.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(streamName, "kinesis")) {
-                        return streamName;
-                    }
-                    return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/" + streamName).toString();
-                }
-            }
-            if (json.hasNonNull("ResourceARN")) {
-                String resourceArn = json.get("ResourceARN").asText().trim();
-                if (!resourceArn.isEmpty()) {
-                    return resourceArn;
-                }
-            }
-        }
-        return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/*").toString();
-    }
-
-    // ── Secrets Manager ──────────────────────────────────────────────────────────
-
-    /**
-     * Uses the serving operation, as {@link #buildLogResources} does: {@code CreateSecret}
-     * names the secret in {@code Name} and every other operation in {@code SecretId}, so a field the
-     * handler does not read cannot choose the resource. A minted ARN takes the request's partition,
-     * the one the secret is created in, which a region Floci does not know cannot be mapped to.
-     */
-    public List<String> buildSecretsManagerResources(String action, ContainerRequestContext ctx,
-                                                     String region, String accountId, String partition) {
-        return List.of(buildSecretsManagerArn(action, ctx, region, accountId, partition));
-    }
-
-    /**
-     * A secret named by its name or a partial ARN is authorized against its full ARN, random suffix
-     * included, so a {@code secret:<name>-??????} policy matches it as it does on AWS. The suffix of
-     * the secret {@code CreateSecret} is making is not assigned until it is created.
-     */
-    private String buildSecretsManagerArn(String action, ContainerRequestContext ctx, String region,
-                                          String accountId, String partition) {
-        JsonNode json = readJsonBody(ctx);
-        if (json != null && json.isObject()) {
-            if ("secretsmanager:CreateSecret".equals(action)) {
-                if (json.hasNonNull("Name")) {
-                    String name = json.get("Name").asText().trim();
-                    if (!name.isEmpty()) {
-                        return secretArn(name + UNASSIGNED_SECRET_SUFFIX, region, accountId, partition);
-                    }
-                }
-            } else if (json.hasNonNull("SecretId")) {
-                String secretId = json.get("SecretId").asText().trim();
-                if (!secretId.isEmpty()) {
-                    Optional<String> stored = storedSecretArn(secretId, region, accountId);
-                    if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
-                        return stored.orElse(secretId);
-                    }
-                    return stored.orElseGet(() -> secretArn(secretId, region, accountId, partition));
-                }
-            }
-        }
-        return secretArn("*", region, accountId, partition);
-    }
-
-    private Optional<String> storedSecretArn(String secretId, String region, String accountId) {
-        if (secretsManagerService == null) {
-            return Optional.empty();
-        }
-        return secretsManagerService.get().findArn(accountId, secretId, region);
-    }
-
-    private static String secretArn(String name, String region, String accountId, String partition) {
-        return new AwsArnUtils.Arn(partition, "secretsmanager", region, accountId, "secret:" + name).toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
@@ -2203,32 +1421,6 @@ public class ResourceArnBuilder {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    private String extractSegmentAfter(String path, String segment) {
-        String marker = "/" + segment + "/";
-        int idx = path.indexOf(marker);
-        if (idx < 0) return null;
-        String after = path.substring(idx + marker.length());
-        // take only the first segment (stop at next /)
-        int slash = after.indexOf('/');
-        return slash > 0 ? after.substring(0, slash) : after;
-    }
-
-    // ── STS ─────────────────────────────────────────────────────────────────────
-    /**
-     * Uses the serving operation, as {@link #buildLogResources} does: {@code AssumeRole} is
-     * authorized against the role it names, so a policy can allow assuming one role and not another.
-     * Every other operation keeps {@code *}, so a {@code RoleArn} it never reads cannot choose its resource.
-     */
-    public List<String> buildStsResources(String action, ContainerRequestContext ctx) {
-        return List.of("sts:AssumeRole".equals(action) ? buildAssumeRoleArn(ctx) : "*");
-    }
-
-    private String buildAssumeRoleArn(ContainerRequestContext ctx) {
-        String roleArn = firstFormParam(ctx, "RoleArn");
-        // Untrimmed: the handler assumes the role named by this exact string.
-        return roleArn == null || roleArn.isBlank() ? "*" : roleArn;
     }
 
     /**

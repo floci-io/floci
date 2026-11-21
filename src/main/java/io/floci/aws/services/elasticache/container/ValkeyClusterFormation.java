@@ -1,5 +1,6 @@
 package io.floci.aws.services.elasticache.container;
 
+import io.floci.aws.services.elasticache.model.Endpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -12,6 +13,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
@@ -22,6 +24,10 @@ import java.util.function.Predicate;
  * <p>Commands are issued from the JVM over each node's Floci-reachable endpoint;
  * the addresses handed to MEET are the nodes' Docker-network IPs, because that is
  * where the nodes reach <em>each other</em>.
+ *
+ * <p>{@link #secureReplication} later gives every node a replication user to sign in to its
+ * primary with, once the auth proxy is about to turn a node's {@code default} user off to
+ * enforce access strings.
  */
 @ApplicationScoped
 public class ValkeyClusterFormation {
@@ -98,6 +104,41 @@ public class ValkeyClusterFormation {
                     groupId, String.valueOf(numNodeGroups), String.valueOf(nodes.size()));
         } catch (IOException e) {
             throw new RuntimeException("Cluster formation for group " + groupId + " failed: " + e.getMessage(), e);
+        } finally {
+            clients.forEach(RespClient::closeQuietly);
+        }
+    }
+
+    /**
+     * Gives every node of a formed cluster a replication user and has it sign in to its primary with
+     * that user, so replication keeps authenticating once a node's {@code default} user is off. Any
+     * node can become a primary, so every node both accepts the user and signs in with it. Run only
+     * when the first node is about to turn {@code default} off: until then every session is that
+     * unrestricted user, which could read the password back with {@code CONFIG GET masterauth}.
+     *
+     * @param nodes the endpoints Floci reaches the nodes on
+     */
+    public void secureReplication(String groupId, List<Endpoint> nodes) {
+        String user = "floci-replication-" + UUID.randomUUID();
+        String password = UUID.randomUUID().toString();
+        List<RespClient> clients = new ArrayList<>(nodes.size());
+        try {
+            for (Endpoint node : nodes) {
+                clients.add(new RespClient(node.address(), node.port()));
+            }
+            for (RespClient client : clients) {
+                try {
+                    client.callString("ACL", "SETUSER", user, "reset", "on", ">" + password,
+                            "+ping", "+sync", "+psync", "+replconf");
+                    client.callString("CONFIG", "SET", "masteruser", user);
+                    client.callString("CONFIG", "SET", "masterauth", password);
+                } catch (RespError e) {
+                    // Left out: the server's reply can quote the password back.
+                    throw new IOException("a node refused the replication credentials");
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Securing replication for group " + groupId + " failed: " + e.getMessage(), e);
         } finally {
             clients.forEach(RespClient::closeQuietly);
         }
@@ -205,10 +246,14 @@ public class ValkeyClusterFormation {
         private final OutputStream out;
 
         RespClient(String host, int port) throws IOException {
+            this(host, port, READ_TIMEOUT_MS);
+        }
+
+        RespClient(String host, int port, int readTimeoutMs) throws IOException {
             socket = new Socket();
             socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
             socket.setTcpNoDelay(true);
-            socket.setSoTimeout(READ_TIMEOUT_MS);
+            socket.setSoTimeout(readTimeoutMs);
             in = socket.getInputStream();
             out = socket.getOutputStream();
         }

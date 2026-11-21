@@ -22,6 +22,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.CustomResourceLiveness;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServiceRegistry;
@@ -61,6 +62,7 @@ import io.floci.aws.services.scheduler.model.Schedule;
 import io.floci.aws.services.scheduler.model.ScheduleRequest;
 import io.floci.aws.services.sns.SnsJsonHandler;
 import io.floci.aws.services.sqs.SqsJsonHandler;
+import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenTimeout;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenWait;
 import io.floci.aws.services.stepfunctions.model.Execution;
@@ -285,6 +287,7 @@ public class AslExecutor {
     private final EmrServerlessTaskInvoker emrServerlessTaskInvoker;
     private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
     private final Clock clock;
@@ -319,7 +322,8 @@ public class AslExecutor {
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
                        EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
-                       SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker) {
+                       SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker,
+                       RegionResolver regionResolver) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -327,7 +331,7 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -347,7 +351,7 @@ public class AslExecutor {
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
                 EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
-                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker) {
+                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
@@ -383,6 +387,11 @@ public class AslExecutor {
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
+        // Built without one, as by the constructors kept for tests, it reads the configuration's default Region, as
+        // the injected resolver does.
+        this.regionResolver = regionResolver != null || config == null
+                ? regionResolver
+                : new RegionResolver(config.defaultRegion(), config.defaultAccountId());
         this.clock = clock;
         this.sleeper = sleeper;
         this.nestedWaiter = nestedWaiter != null ? nestedWaiter : ExecutionStatusSubscription::awaitChange;
@@ -417,7 +426,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -439,7 +448,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1260,9 +1269,16 @@ public class AslExecutor {
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
     private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials,
                                String taskToken) {
+        // NestedTaskCredentials has decided this one. Its callback form does not reach it, so it is decided here.
+        if (credentials != null && taskToken == null && NestedTaskCredentials.isNested(integration)) {
+            return;
+        }
         Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
                 redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
-                taskToken != null);
+                taskToken != null, new TaskPermissions.ControlServices(
+                        cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
+                        sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
+                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
         if (required.isEmpty()) {
             return;
         }
@@ -1270,7 +1286,18 @@ public class AslExecutor {
             NestedTaskCredentials.validateShape(credentials);
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
-                required.get().deniedError(), required.get().permissions());
+                required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /**
+     * A Distributed Map's reads and writes are evaluated as its execution role, before the S3 call that needs them.
+     * An execution with a mock test case is evaluated too: a test case cannot mock a Map state, so its S3 calls stay
+     * real, as an unmocked task's call in that execution does and is evaluated.
+     */
+    private void authorizeMapS3(StateMachine sm, String refusedError, List<Permission> permissions) {
+        if (iamEnforcementEnabled()) {
+            lambdaTaskAuthorizer.authorizeMapS3(sm, refusedError, permissions);
+        }
     }
 
     private boolean iamEnforcementEnabled() {
@@ -1471,7 +1498,7 @@ public class AslExecutor {
         // DynamoDB optimized integrations (4 actions)
         if (integration.isOptimizedService("dynamodb")) {
             String operation = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             try {
                 return invokeDynamoDb(operation, input, region);
             } catch (AwsException e) {
@@ -1482,56 +1509,56 @@ public class AslExecutor {
         // AWS SDK service integrations: DynamoDB
         if (integration.isSdkService("dynamodb")) {
             String camelCaseAction = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
         }
 
         // AWS SDK service integrations: Redshift Data API (provisioned clusters and Serverless workgroups)
         if (integration.isSdkService("redshiftdata") && integration.suffix().isEmpty()) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkRedshiftData(integration, input, region);
         }
 
         // AWS SDK service integration: RDS Data API ExecuteStatement
         if (integration.isSdkService("rdsdata")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkRdsData(integration, input, region);
         }
 
         // SQS optimized integration
         if (integration.is("sqs", "sendMessage")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeOptimizedSqsSendMessage(input, region);
         }
 
         // HTTP optimized integration
         if (integration.is("http", "invoke")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeHttp(input, region);
         }
 
         // AWS SDK service integration: SQS SendMessage
         if (integration.isSdk("sqs", "sendMessage")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkSqsSendMessage(input, region);
         }
 
         // SNS optimized integration
         if (integration.is("sns", "publish")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "SNS.");
         }
 
         // AWS SDK service integration: SNS Publish
         if (integration.isSdk("sns", "publish")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "Sns.");
         }
 
         // AWS SDK service integration: CloudFormation (query protocol → JSON)
         if (integration.isSdkService("cloudformation")) {
             String action = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkCloudFormation(action, input, region);
         }
 
@@ -1546,7 +1573,8 @@ public class AslExecutor {
         }
 
         if (SdkManagementTaskInvoker.supports(integration)) {
-            return sdkManagementTaskInvoker.invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
+            return sdkManagementTaskInvoker.invoke(integration, input,
+                    regionResolver.regionOf(sm.getStateMachineArn()));
         }
 
         // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
@@ -1554,13 +1582,19 @@ public class AslExecutor {
         // variant arrives here as the bare runTask resource and simply launches the task while the token
         // future blocks for SendTaskSuccess.
         if (integration.isAnySuffix("ecs", "runTask")) {
+            // AWS defines request-response, .sync and .waitForTaskToken for ecs:runTask, so any other
+            // pattern (.sync:2) is refused before a task is launched rather than after.
+            String suffix = integration.suffix();
+            if (!suffix.isEmpty() && !".sync".equals(suffix) && !".waitForTaskToken".equals(suffix)) {
+                throw OptimizedIntegrations.unsupported(integration);
+            }
             // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
             // upstream). Its failure semantics match .sync — a task placement failure fails the state —
             // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
             String mode = taskToken != null
                     ? ".waitForTaskToken"
                     : integration.suffix();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
                     jobSubmitted);
         }
@@ -1568,7 +1602,7 @@ public class AslExecutor {
         // EMR optimized integrations: request-response and .sync. AWS supports no .waitForTaskToken
         // variant, so one carrying a token falls through to Unsupported resource.
         if (integration.isOptimizedService("elasticmapreduce") && taskToken == null) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEmr(integration, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
                     jobSubmitted);
         }
@@ -1576,33 +1610,33 @@ public class AslExecutor {
         // EMR Serverless optimized integrations: request-response and .sync, with no .waitForTaskToken
         // variant either.
         if (integration.isOptimizedService("emr-serverless") && taskToken == null) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEmrServerless(integration, input, region, executionArn, executionDeadlineNanos,
                     taskDeadlineNanos, jobSubmitted);
         }
 
         // AWS SDK service integrations: Step Functions
         if (integration.isSdkService("sfn")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkSfn(integration, input, region);
         }
 
         // AWS SDK service integrations: EventBridge Scheduler
         if (integration.isSdkService("scheduler")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkScheduler(integration, input, region);
         }
 
         // EventBridge optimized integration
         if (integration.is("events", "putEvents")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeOptimizedPutEvents(input, region);
         }
 
         // Nested state machine integration
         if (integration.isAnySuffix("states", "startExecution")) {
             String mode = integration.suffix();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeNestedStateMachine(mode, input, region, executionArn, executionDeadlineNanos,
                     taskDeadlineNanos, rawParameters, jobSubmitted);
         }
@@ -1674,7 +1708,7 @@ public class AslExecutor {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
         AwsPartition partition = AwsPartitions.find(AwsArnUtils.parse(stateMachineArn).partition())
-                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(extractRegionFromArn(stateMachineArn)));
+                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(regionResolver.regionOf(stateMachineArn)));
         for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
             region.put("RegionName", name.id());
@@ -2320,12 +2354,6 @@ public class AslExecutor {
             return resp;
         }
 
-        if (!".sync".equals(mode)) {
-            // Only request-response (""), .sync and .waitForTaskToken are valid; reject typos rather
-            // than silently treating an unknown suffix as .sync.
-            throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
-        }
-
         // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
         // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
         // fail the state, otherwise tasks beyond the first would run unmonitored. The wait is bounded
@@ -2458,23 +2486,43 @@ public class AslExecutor {
                 + "] which was managing this resource was aborted";
     }
 
-    /** Best effort, like AWS: a task that is already gone does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a task that is already gone, which ECS answers with InvalidParameterException, does not
+     * change how the state ends, nor does one already stopped, which StopTask answers as it is. Any other refusal is a
+     * fault, raised as the integration's ECS error once every task has been asked to stop, as the emr-serverless undo
+     * raises its own; any other failure is raised at once.
+     */
     private void stopEcsTasks(String cluster, List<String> taskArns, String executionArn, String region) {
+        FailStateException fault = null;
         for (String taskArn : taskArns) {
             try {
                 ecsService.stopTask(cluster, taskArn, syncAbortCause(executionArn), region);
-            } catch (RuntimeException e) {
+            } catch (AwsException e) {
+                if (!"InvalidParameterException".equals(e.getErrorCode())) {
+                    fault = fault != null ? fault : new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
+                    continue;
+                }
                 LOG.warnv("ecs:runTask.sync ended before its task {0} did, and the task could not be stopped: {1}",
                         taskArn, e.getMessage());
             }
         }
+        if (fault != null) {
+            throw fault;
+        }
     }
 
-    /** Best effort, like AWS: a child that already ended does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a child that is gone, which Step Functions answers with ExecutionDoesNotExist, does not
+     * change how the state ends, nor does one that already ended, which StopExecution leaves as it is. Any other
+     * refusal is a fault, raised as the integration names a refused StartExecution, and any other failure is raised.
+     */
     private void abortChildExecution(String childExecutionArn, String executionArn) {
         try {
             sfnService.get().stopExecution(childExecutionArn, syncAbortCause(executionArn), null);
-        } catch (RuntimeException e) {
+        } catch (AwsException e) {
+            if (!"ExecutionDoesNotExist".equals(e.getErrorCode())) {
+                throw new FailStateException(optimizedSfnErrorName(e.getErrorCode()), e.getMessage());
+            }
             LOG.warnv("states:startExecution.sync ended before its child {0} did, and the child could not be stopped: {1}",
                     childExecutionArn, e.getMessage());
         }
@@ -3325,7 +3373,7 @@ public class AslExecutor {
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
         JsonNode mapInput = applyInputPath(stateDef, input, context);
-        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables, sm);
         JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
@@ -3842,7 +3890,7 @@ public class AslExecutor {
     }
 
     private MapRunIdentity newMapRunIdentity(JsonNode stateDef, StateMachine sm, JsonNode context) {
-        String region = extractRegionFromArn(sm.getStateMachineArn());
+        String region = regionResolver.regionOf(sm.getStateMachineArn());
         String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         String smName = context.path("StateMachine").path("Name").asText(sm.getName());
         String label = stateDef.path("Label").asText(null);
@@ -3868,7 +3916,7 @@ public class AslExecutor {
         String transformation = writerConfig.path("Transformation").asText("NONE");
         String outputType = writerConfig.path("OutputType").asText("JSON");
 
-        String region = extractRegionFromArn(sm.getStateMachineArn());
+        String region = regionResolver.regionOf(sm.getStateMachineArn());
         String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         String smName = context.path("StateMachine").path("Name").asText(sm.getName());
 
@@ -3899,6 +3947,9 @@ public class AslExecutor {
                         "ResultWriter " + (jsonata ? "Arguments" : "Parameters")
                                 + " must resolve to an object", "ResultWriter/Arguments");
             }
+            // Every object is evaluated before the first is written, so a refusal leaves no partial export.
+            authorizeMapS3(sm, "States.ResultWriterFailed",
+                    TaskPermissions.resultWriterExport(loc, mapRun.id(), !failedChildren.isEmpty(), sm));
             JsonNode bucketNode = loc.get("Bucket");
             if (bucketNode == null) {
                 throw new FailStateException("States.ResultWriterFailed",
@@ -3934,12 +3985,10 @@ public class AslExecutor {
             // The run id alone keys the exported result set under the user-supplied S3 prefix.
             String mapRunId = mapRun.id();
             String mapRunArn = mapRun.arn();
-            String base = prefix.isEmpty()
-                    ? mapRunId + "/"
-                    : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+            String base = TaskPermissions.resultWriterBase(prefix, mapRunId);
 
-            String succeededKey = base + "SUCCEEDED_0.json";
-            String manifestKey = base + "manifest.json";
+            String succeededKey = base + TaskPermissions.RESULT_WRITER_SUCCEEDED;
+            String manifestKey = base + TaskPermissions.RESULT_WRITER_MANIFEST;
 
             byte[] succeededBytes = serializeResultFile(formatted, outputType);
             s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
@@ -3950,7 +3999,7 @@ public class AslExecutor {
             ObjectNode resultFiles = manifest.putObject("ResultFiles");
             ArrayNode failedFiles = resultFiles.putArray("FAILED");
             if (!failedChildren.isEmpty()) {
-                String failedKey = base + "FAILED_0.json";
+                String failedKey = base + TaskPermissions.RESULT_WRITER_FAILED;
                 byte[] failedBytes = serializeResultFile(
                         formatFailedChildren(failedChildren, region, account, smName, mapRun.label()),
                         outputType);
@@ -4078,8 +4127,8 @@ public class AslExecutor {
         return objectMapper.writeValueAsBytes(formatted);
     }
 
-    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
-                                             boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
+    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                             ObjectNode variables, StateMachine sm) throws Exception {
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
@@ -4092,7 +4141,7 @@ public class AslExecutor {
         }
 
         if (stateDef.has("ItemReader")) {
-            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables);
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables, sm);
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
@@ -4103,7 +4152,7 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveItemReaderItems(JsonNode itemReader, JsonNode input,
                                                     JsonNode context, boolean jsonata,
-                                                    ObjectNode variables) throws Exception {
+                                                    ObjectNode variables, StateMachine sm) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
         boolean listObjects = integration != null && integration.is("s3", "listObjectsV2");
@@ -4114,7 +4163,7 @@ public class AslExecutor {
 
         int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
         if (listObjects) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems, sm);
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
@@ -4126,6 +4175,7 @@ public class AslExecutor {
         JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderGetObject(bucket, key, sm));
         if (bucket == null || key == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
         }
@@ -4285,13 +4335,14 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
                                                      boolean jsonata, ObjectNode variables,
-                                                     int maxItems) throws Exception {
+                                                     int maxItems, StateMachine sm) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
+        String prefix = parameters.path("Prefix").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderListObjects(bucket, prefix, sm));
         if (bucket == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
         }
-        String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
         try {
@@ -6177,7 +6228,7 @@ public class AslExecutor {
         }
         details.put("resource", profile.resource());
         if ("Task".equals(profile.prefix())) {
-            details.put("region", extractRegionFromArn(sm.getStateMachineArn()));
+            details.put("region", regionResolver.regionOf(sm.getStateMachineArn()));
             details.put("parameters", effectiveInput.toString());
         } else {
             details.put("input", effectiveInput.toString());
@@ -6468,10 +6519,6 @@ public class AslExecutor {
         } catch (Exception e) {
             return objectMapper.createObjectNode();
         }
-    }
-
-    private String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, config.defaultRegion());
     }
 
     private String normalizeS3Region(String region) {

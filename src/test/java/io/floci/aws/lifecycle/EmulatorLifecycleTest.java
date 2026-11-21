@@ -9,6 +9,7 @@ import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
@@ -42,12 +43,16 @@ import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.floci.aws.testutil.LogCapture;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.HttpServerStart;
 import io.vertx.core.http.HttpServerOptions;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.event.ObservesAsync;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -61,14 +66,10 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
-import java.text.MessageFormat;
+import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.logging.Handler;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -92,6 +93,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.EcsServiceConfig ecsServiceConfig;
     @Mock private EmulatorConfig.EcsTaskRoleCredentialsConfig ecsTaskRoleCredentialsConfig;
     @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
+    @Mock private EmulatorConfig.CodeArtifactServiceConfig codeArtifactServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
     @Mock private IamService iamService;
@@ -119,6 +121,7 @@ class EmulatorLifecycleTest {
     @Mock private ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
     @Mock private EksService eksService;
+    @Mock private CodeArtifactService codeArtifactService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -161,6 +164,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
+        Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
@@ -182,9 +187,30 @@ class EmulatorLifecycleTest {
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
+    }
+
+    @Test
+    void preparesContainerOwnersBeforeRetiringSharedCredentials() {
+        ContainerTeardown first = Mockito.mock(ContainerTeardown.class);
+        ContainerTeardown second = Mockito.mock(ContainerTeardown.class);
+        when(containerTeardowns.iterator()).thenReturn(List.of(first, second).iterator());
+        when(ecsTaskRoleCredentialsConfig.enabled()).thenReturn(true);
+
+        emulatorLifecycle.onStop(new ShutdownEvent());
+
+        InOrder order = Mockito.inOrder(first, second, storageFactory, ecsTaskRoleCredentialsServer);
+        order.verify(storageFactory).flushAll();
+        order.verify(first).beginTeardown();
+        order.verify(second).beginTeardown();
+        order.verify(ecsTaskRoleCredentialsServer).stop();
+        order.verify(first).stopManagedContainers();
+        order.verify(second).stopManagedContainers();
+        order.verify(storageFactory).shutdownAll();
+        verify(first).beginTeardown();
+        verify(second).beginTeardown();
     }
 
     private void stubStorageConfig() {
@@ -210,6 +236,19 @@ class EmulatorLifecycleTest {
         inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
         inOrder.verify(iamService).sweepOrphanedEc2InstanceSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void givesStoredCodeArtifactDomainsTheirRootPackageGroupOnceStorageIsLoaded() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, codeArtifactService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(codeArtifactService).seedRootPackageGroups();
     }
 
     @Test
@@ -300,6 +339,19 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elbV2Service).restorePersistedRuntime();
         inOrder.verify(ecsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void quarkusRunsTheBootRestoresWithoutWaitingForARequest() throws NoSuchMethodException {
+        // EcsService and EksService are created lazily, and creating them is what restores their
+        // persisted state; the tests above show onStart and onHttpStart do it. They only run at
+        // boot because the container fires them: onStart observes StartupEvent and onHttpStart
+        // observes HttpServerStart, on a bean the container manages.
+        assertTrue(EmulatorLifecycle.class.isAnnotationPresent(ApplicationScoped.class));
+        Method onStart = EmulatorLifecycle.class.getDeclaredMethod("onStart", StartupEvent.class);
+        assertTrue(onStart.getParameters()[0].isAnnotationPresent(Observes.class));
+        Method onHttpStart = EmulatorLifecycle.class.getDeclaredMethod("onHttpStart", HttpServerStart.class);
+        assertTrue(onHttpStart.getParameters()[0].isAnnotationPresent(ObservesAsync.class));
     }
 
     @Test
@@ -768,32 +820,7 @@ class EmulatorLifecycleTest {
 
     /** Collects the messages EmulatorLifecycle logs while {@code action} runs. */
     private List<String> lifecycleLogMessages(Runnable action) {
-        Logger logger = Logger.getLogger(EmulatorLifecycle.class.getName());
-        List<String> messages = new CopyOnWriteArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                Object[] parameters = logRecord.getParameters();
-                messages.add(parameters == null || parameters.length == 0
-                        ? logRecord.getMessage()
-                        : MessageFormat.format(logRecord.getMessage(), parameters));
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            logger.removeHandler(handler);
-        }
-        return messages;
+        return LogCapture.capture(EmulatorLifecycle.class, action).stream().map(LogCapture::formatted).toList();
     }
 
     @Test

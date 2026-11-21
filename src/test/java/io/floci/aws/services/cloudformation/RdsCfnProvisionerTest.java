@@ -78,6 +78,7 @@ class RdsCfnProvisionerTest {
     private CfnResourceDispatcher provisioner;
     private Function<String, String> importResolver;
     private Map<String, Boolean> conditions;
+    private Map<String, String> parameters;
 
     @BeforeEach
     void setUp() {
@@ -88,6 +89,7 @@ class RdsCfnProvisionerTest {
         ssmService = mock(SsmService.class);
         importResolver = name -> null;
         conditions = Map.of();
+        parameters = Map.of();
         provisioner = CfnProvisionerFixture.builder()
                 .ssm(ssmService)
                 .secretsManager(secretsManagerService)
@@ -97,8 +99,12 @@ class RdsCfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine() {
+        return engine(parameters);
+    }
+
+    private CloudFormationTemplateEngine engine(Map<String, String> parameterValues) {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
-                "stack/id", Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                "stack/id", parameterValues, Map.of(), Map.of(), conditions, Map.of(), mapper,
                 importResolver);
     }
 
@@ -264,7 +270,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterResourceId()).thenReturn("cluster-ABCDEFGHIJKLMNOP");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -283,7 +289,41 @@ class RdsCfnProvisionerTest {
         assertEquals("cluster-ABCDEFGHIJKLMNOP", r.getAttributes().get("DBClusterResourceId"));
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", "16.3",
                 "admin", "secret", "appdb", false, null, null, null, false, "us-east-1",
-                null, null, null, false, null, null, false);
+                null, null, null, false, null, null, false, null, false);
+    }
+
+    @Test
+    void dbClusterPassesTemplateGroupsProtectionAndWindowsToTheRequestSettings() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "VpcSecurityGroupIds":["sg-a","sg-b"],"DeletionProtection":true,
+                 "PreferredBackupWindow":"03:00-04:00","PreferredMaintenanceWindow":"Mon:05:00-Mon:06:00"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings("mycluster", "us-east-1", List.of("sg-a", "sg-b"),
+                "03:00-04:00", "Mon:05:00-Mon:06:00");
+    }
+
+    @Test
+    void dbClusterWithoutTemplateGroupsLeavesGroupsToTheServiceDefault() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql"}
+                """);
+        verify(rdsService).setDbClusterRequestSettings(eq("mycluster"), eq("us-east-1"), isNull(),
+                nullable(String.class), nullable(String.class));
     }
 
     @Test
@@ -331,6 +371,25 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void anUpdateWindowOverlappingTheStoredOneFailsBeforeTheClusterIsModified() {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(existing.getPreferredMaintenanceWindow()).thenReturn("mon:05:00-mon:06:00");
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), any(), any(), any(), any(), any())).thenReturn(existing);
+
+        StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","MasterUserPassword":"changed",
+                 "PreferredBackupWindow":"05:00-06:00"}
+                """, "us-east-1", "mycluster", Map.of("DBClusterIdentifier", "mycluster"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("must not overlap"), r.getStatusReason());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).setDbClusterRequestSettings(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void dbClusterEnableHttpEndpointOnANonAuroraEngineFailsBeforeCreating() {
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"dataapi","Engine":"postgres","EnableHttpEndpoint":true}
@@ -338,7 +397,7 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("Aurora"), r.getStatusReason());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -347,7 +406,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -356,7 +415,7 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-west-2",
-                null, null, null, false, null, null, false);
+                null, null, null, false, null, null, false, null, false);
     }
 
     @Test
@@ -365,7 +424,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -376,7 +435,7 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1",
-                0.0, 16.0, 600, false, null, null, false);
+                0.0, 16.0, 600, false, null, null, false, null, false);
     }
 
     @Test
@@ -385,7 +444,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -395,7 +454,7 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1",
-                null, null, null, false, null, "serverless", true);
+                null, null, null, false, null, "serverless", true, null, false);
     }
 
     @Test
@@ -434,7 +493,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -447,7 +506,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
                 eq("resolved-user"), eq("resolved-secret"), eq("appdb"), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(secretsManagerService, times(2))
                 .getSecretValue("my-secret", null, null, "us-west-2");
     }
@@ -486,7 +545,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -499,7 +558,7 @@ class RdsCfnProvisionerTest {
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
                 anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue("my-secret", null, null, "us-east-1");
     }
@@ -514,7 +573,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -529,7 +588,7 @@ class RdsCfnProvisionerTest {
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
                 anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -544,7 +603,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -559,7 +618,7 @@ class RdsCfnProvisionerTest {
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
                 anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -574,7 +633,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -589,7 +648,7 @@ class RdsCfnProvisionerTest {
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
                 anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -670,7 +729,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -684,7 +743,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
                 eq("admin"), eq("resolved-ssm"), eq("appdb"), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -696,7 +755,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -709,7 +768,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("resolved-user"), eq("secret"), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -721,7 +780,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -734,7 +793,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first,second"), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), eq("us-east-1"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -824,7 +883,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -837,7 +896,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first-password"), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), eq("us-west-2"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(ssmService, never()).getParameter(any(), any());
     }
 
@@ -854,7 +913,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -867,7 +926,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first-password"), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), eq("us-west-2"),
-                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(ssmService, never()).getParameter(any(), any());
     }
 
@@ -1472,7 +1531,7 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "secret", false,
                 null, null, null, "us-east-1");
     }
@@ -1488,7 +1547,7 @@ class RdsCfnProvisionerTest {
         };
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean())).thenAnswer(echo);
+                anyBoolean(), any(), anyBoolean())).thenAnswer(echo);
     }
 
     /** The unnamed cluster a previous CreateStack left on file under a generated physical id. */
@@ -1525,7 +1584,7 @@ class RdsCfnProvisionerTest {
         assertEquals(replacement, r.getAttributes().get("DBClusterIdentifier"));
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
                 "admin", "secret", null, false, null, null, null, false, "us-east-1",
-                null, null, null, false, null, "serverless", false);
+                null, null, null, false, null, "serverless", false, null, false);
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).deleteDbCluster(any(), any());
 
@@ -1538,7 +1597,7 @@ class RdsCfnProvisionerTest {
         InOrder inOrder = inOrder(rdsService);
         inOrder.verify(rdsService).createDbCluster(eq(replacement), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         inOrder.verify(rdsService).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
         verify(rdsService, never()).deleteDbCluster(replacement, "us-east-1");
         provisioner.clearUpdate(r);
@@ -1559,7 +1618,7 @@ class RdsCfnProvisionerTest {
         assertNotEquals(PRIOR_CLUSTER, replacement);
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1",
-                null, null, null, false, null, null, true);
+                null, null, null, false, null, null, true, null, false);
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
         assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
         verify(rdsService, never()).deleteDbCluster(any(), any());
@@ -1573,7 +1632,7 @@ class RdsCfnProvisionerTest {
         priorUnnamedCluster("provisioned", false);
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
-                anyBoolean()))
+                anyBoolean(), any(), anyBoolean()))
                 .thenThrow(new AwsException("InvalidParameterCombination",
                         "The engine mode serverless is not supported for aurora-postgresql 16.3.", 400));
 
@@ -1753,7 +1812,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -1796,7 +1855,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).deleteDbCluster(any(), any());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "rotated", false,
                 null, null, null, "us-east-1");
     }
@@ -1873,7 +1932,7 @@ class RdsCfnProvisionerTest {
         assertNotEquals(PRIOR_CLUSTER, replacement);
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null, null, null,
                 "reports", false, null, null, null, false, "us-east-1",
-                null, null, null, false, null, null, false);
+                null, null, null, false, null, null, false, null, false);
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).deleteDbCluster(any(), any());
         assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
@@ -1942,7 +2001,7 @@ class RdsCfnProvisionerTest {
                 null, null, null, "us-east-1");
         verify(rdsService, times(1)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         assertEquals(record, r.getAttributes().get(CREATE_ONLY_ATTR));
         assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
         assertFalse(provisioner.hasReplacementUpdate(r));
@@ -2042,7 +2101,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, "us-east-1");
         verify(rdsService, times(2)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), anyBoolean());
+                anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
     }
 
     @Test
@@ -2072,8 +2131,13 @@ class RdsCfnProvisionerTest {
     private static final String PLAIN = "{\"Engine\":\"postgres\"}";
     private static final String SG_FIRST = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-first\"]}";
     private static final String SG_SECOND = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-second\"]}";
+    private static final String MOVED_TO_SG_SECOND =
+            "{\"Engine\":\"postgres\",\"DBSubnetGroupName\":\"app-subnets\",\"VPCSecurityGroups\":[\"sg-second\"]}";
     private static final String ENCRYPTED = "{\"Engine\":\"postgres\",\"StorageEncrypted\":true}";
     private static final String MEMBER = "{\"DBClusterIdentifier\":\"cluster\"";
+    private static final String MEMBER_ON_PARAMETER = MEMBER + ",\"VPCSecurityGroups\":[{\"Ref\":\"Value\"}]}";
+    private static final String ENCRYPTED_BY_PARAMETER =
+            "{\"Engine\":\"postgres\",\"StorageEncrypted\":{\"Ref\":\"Value\"}}";
 
     /** What one {@code createDbInstance} call asked for, of what these tests read. */
     private record CreateRequest(String id, List<String> groups, DbInstanceSettings settings) { }
@@ -2083,7 +2147,13 @@ class RdsCfnProvisionerTest {
      * {@code createDbInstance} call made since, that one first.
      */
     private record Created(StackResource resource, String id, String template, DbInstance onFile,
-                           List<CreateRequest> requests) { }
+                           List<CreateRequest> requests) {
+
+        /** This instance as an UpdateStack to {@code json} left it, {@code updated}, still under the created id. */
+        Created updatedBy(StackResource updated, String json) {
+            return new Created(updated, id, json, onFile, requests);
+        }
+    }
 
     /**
      * A CreateStack of the unnamed instance {@code json}. RdsService then has it on file with
@@ -2105,9 +2175,36 @@ class RdsCfnProvisionerTest {
 
     /** An UpdateStack from the template the instance was created with to {@code json}. */
     private StackResource updateInstance(Created created, String json) {
-        return provisioner.provision("Db", "AWS::RDS::DBInstance", props(json), engine(), "us-east-1",
+        return updateInstance(created, json, engine());
+    }
+
+    /**
+     * As {@link #updateInstance(Created, String)}, with {@code json} resolved by {@code current}; the
+     * previous template still resolves with {@link #engine()}, as the stack was deployed.
+     */
+    private StackResource updateInstance(Created created, String json, CloudFormationTemplateEngine current) {
+        return provisioner.provision("Db", "AWS::RDS::DBInstance", props(json), current, "us-east-1",
                 "000000000000", "my-stack", created.id(), created.resource().getAttributes(), event -> { },
-                props(created.template()));
+                props(created.template()), null, null, engine());
+    }
+
+    /**
+     * An instance created from {@code template} with the stack parameter {@code Value} at
+     * {@code before}, then updated to {@code updated} with it at {@code after}; the previous template
+     * still resolves with {@code before}. The result is the updated resource under the created id.
+     */
+    private Created updateThroughParameter(String template, String updated, String before, String after,
+                                           String... groupsOnFile) {
+        return updateThroughParameter(template, updated, before, after, created -> { }, groupsOnFile);
+    }
+
+    /** As above, with {@code beforeUpdate} given the created instance first. */
+    private Created updateThroughParameter(String template, String updated, String before, String after,
+                                           Consumer<Created> beforeUpdate, String... groupsOnFile) {
+        parameters = Map.of("Value", before);
+        Created created = createInstance(template, groupsOnFile);
+        beforeUpdate.accept(created);
+        return created.updatedBy(updateInstance(created, updated, engine(Map.of("Value", after))), updated);
     }
 
     /** An instance created on {@code sg-first}, then updated to {@code json}; it is kept, under the same id. */
@@ -2127,7 +2224,18 @@ class RdsCfnProvisionerTest {
         Created created = createInstance(ENCRYPTED);
         StackResource replaced = updateInstance(created, PLAIN);
         assertNotEquals(created.id(), replaced.getPhysicalId());
-        return new Created(replaced, created.id(), PLAIN, created.onFile(), created.requests());
+        return created.updatedBy(replaced, PLAIN);
+    }
+
+    /** Makes {@code groupIds} the default groups of whatever VPC an update leaves the instance in. */
+    private void vpcDefaultGroups(List<String> groupIds) {
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any(), any())).thenReturn(groupIds);
+    }
+
+    /** Asserts the update neither modified the instance nor changed its VPC security groups. */
+    private void assertInstanceUntouched() {
+        assertEquals(0, modifyCalls());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
     }
 
     /** How many times the provisioner asked RdsService to modify an instance, whatever the arguments. */
@@ -2169,6 +2277,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         InOrder order = inOrder(rdsService);
+        order.verify(rdsService).requireVpcSecurityGroupsFit("us-east-1", r.getPhysicalId(), null, List.of("sg-second"));
         order.verify(rdsService).modifyDbInstance(eq(r.getPhysicalId()), any(), any(), any(), any(), any(), any(),
                 any(), any(DbInstanceSettings.class));
         order.verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-second"));
@@ -2181,13 +2290,51 @@ class RdsCfnProvisionerTest {
 
     @Test
     void droppedGroupsPutTheInstanceOnItsVpcsDefaultGroupAndARollbackPutsThemBack() {
-        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any())).thenReturn(List.of("sg-default"));
+        vpcDefaultGroups(List.of("sg-default"));
 
         StackResource r = updateFromFirstGroup(PLAIN);
 
         verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-default"));
         assertTrue(provisioner.rollbackUpdate(r));
         verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
+    @Test
+    void droppedGroupsTakeTheDefaultGroupOfTheVpcTheUpdateMovesTheInstanceTo() {
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any(), eq("app-subnets")))
+                .thenReturn(List.of("sg-app-default"));
+
+        StackResource r = updateFromFirstGroup("{\"Engine\":\"postgres\",\"DBSubnetGroupName\":\"app-subnets\"}");
+
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-app-default"));
+    }
+
+    @Test
+    void anUpdateWhoseGroupsDoNotFitTheVpcItLeavesTheInstanceInFailsBeforeAnythingChanges() {
+        doThrow(new AwsException("InvalidParameterCombination",
+                "The DB instance and EC2 security group are in different VPCs.", 400))
+                .when(rdsService).requireVpcSecurityGroupsFit(eq("us-east-1"), any(), eq("app-subnets"),
+                        eq(List.of("sg-second")));
+
+        StackResource r = updateFromFirstGroup(MOVED_TO_SG_SECOND);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("different VPCs"), r.getStatusReason());
+        assertInstanceUntouched();
+    }
+
+    @Test
+    void aRollbackLeavesTheGroupsOfAnInstanceTheUpdateMovedToAnotherVpc() {
+        // A rollback does not move the instance back, and the old VPC's groups cannot go on it there.
+        StackResource r = updateFromFirstGroup(MOVED_TO_SG_SECOND, created -> {
+            when(created.onFile().getVpcId()).thenReturn("vpc-default", "vpc-app");
+            when(created.onFile().getDbSubnetGroupName()).thenReturn("default", "app-subnets");
+        });
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-second"));
+        assertFalse(provisioner.rollbackUpdate(r), "the move to another VPC has no rollback here");
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
     }
 
     @ParameterizedTest
@@ -2200,8 +2347,7 @@ class RdsCfnProvisionerTest {
             String template, String updated, String defaultGroup) {
         // AWS's handler gives the VPC's default group only to a standalone instance whose previous
         // template declared groups, and only when there is such a group; a member's are its cluster's.
-        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any()))
-                .thenReturn(defaultGroup == null ? List.of() : List.of(defaultGroup));
+        vpcDefaultGroups(defaultGroup == null ? List.of() : List.of(defaultGroup));
         Created created = createInstance(template, "sg-manual");
 
         StackResource r = updateInstance(created, updated);
@@ -2212,18 +2358,19 @@ class RdsCfnProvisionerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
-        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]}",
-        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]}"
+        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]} | sg-first",
+        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]} | sg-first",
+        MEMBER_ON_PARAMETER + " | " + MEMBER_ON_PARAMETER + " | sg-second"
     })
-    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated) {
+    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated,
+                                                                              String groupNow) {
         // AWS's handler sends the change to ModifyDBInstance, and RDS refuses it for a member, even one
-        // that names the groups the member already has.
-        StackResource r = updateInstance(createInstance(template, "sg-cluster"), updated);
+        // that names the groups the member already has, or changes them only through a parameter.
+        StackResource r = updateThroughParameter(template, updated, "sg-first", groupNow, "sg-cluster").resource();
 
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("Modify vpc security group for the DB Cluster"), r.getStatusReason());
-        assertEquals(0, modifyCalls());
-        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+        assertInstanceUntouched();
     }
 
     @Test
@@ -2299,10 +2446,9 @@ class RdsCfnProvisionerTest {
         String replacement = replaced.resource().getPhysicalId();
         assertEquals(new CreateRequest(replacement, List.of(), DbInstanceSettings.defaults()),
                 replaced.requests().get(1));
-        assertEquals(0, modifyCalls());
+        assertInstanceUntouched();
         verify(rdsService, never()).deleteDbInstance(any(), any());
         verify(rdsService, never()).deleteDbInstance(any());
-        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
         assertEquals(replaced.id(), provisioner.updateCleanupPhysicalId(replaced.resource()));
 
         assertTrue(provisioner.completeUpdate(replaced.resource()).complete());
@@ -2354,18 +2500,21 @@ class RdsCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', value = {ENCRYPTED + " | false", PLAIN + " | true"})
+    @CsvSource(delimiter = '|', value = {
+        ENCRYPTED + " | " + ENCRYPTED + " | true | false",
+        ENCRYPTED + " | " + PLAIN + " | true | true",
+        ENCRYPTED_BY_PARAMETER + " | " + ENCRYPTED_BY_PARAMETER + " | false | true"
+    })
     void anInstanceFromBeforeStorageEncryptedWasRecordedIsComparedWithThePreviousTemplate(
-            String updated, boolean replaced) {
-        // Its template said true, but nothing records that, so the update reads the previous template:
-        // keeping true keeps the instance, dropping it replaces the instance.
-        Created created = createInstance(ENCRYPTED);
-        created.resource().getAttributes().remove(ENCRYPTION_ATTR);
+            String template, String updated, String encryptedNow, boolean replaced) {
+        // Its template said true, but nothing records that, so the update reads the previous template,
+        // resolved with the parameters it was deployed with: keeping true keeps the instance, dropping
+        // it, or turning the parameter it reads to false, replaces the instance.
+        Created result = updateThroughParameter(template, updated, "true", encryptedNow,
+                created -> created.resource().getAttributes().remove(ENCRYPTION_ATTR));
 
-        StackResource r = updateInstance(created, updated);
-
-        assertEquals(replaced, !created.id().equals(r.getPhysicalId()));
-        assertEquals(String.valueOf(!replaced), r.getAttributes().get(ENCRYPTION_ATTR));
+        assertEquals(replaced, !result.id().equals(result.resource().getPhysicalId()));
+        assertEquals(String.valueOf(!replaced), result.resource().getAttributes().get(ENCRYPTION_ATTR));
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.floci.aws.services.apigateway;
 
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.CredentialScope;
 import io.floci.aws.core.common.auth.SessionTokenCheck;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
@@ -19,6 +20,9 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.time.Instant;
+
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
 
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
@@ -56,9 +60,6 @@ public class ExecuteApiSigV4Authorizer {
 
     /** Where a temporary credential's session token rides: a header, or a presigned query parameter. */
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
-
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
 
     private final IamService iamService;
     private final RegionResolver regionResolver;
@@ -118,7 +119,7 @@ public class ExecuteApiSigV4Authorizer {
 
     private Result verify(String httpMethod, HttpHeaders headers, UriInfo uriInfo, byte[] body,
                           String signedRequestPath) throws Exception {
-        MultivaluedMap<String, String> queryParameters = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParameters = ResteasyRequests.queryParameters(uriInfo);
         String authorization = headers == null ? null : headers.getHeaderString(HttpHeaders.AUTHORIZATION);
         boolean presigned = SigV4SignedRequest.ALGORITHM.equals(queryParameters.getFirst("X-Amz-Algorithm"));
 

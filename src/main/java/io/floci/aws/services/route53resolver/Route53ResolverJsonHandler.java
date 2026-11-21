@@ -42,37 +42,42 @@ public class Route53ResolverJsonHandler {
                 case "CreateFirewallDomainList" -> firewallDomainListResponse(
                         service.createFirewallDomainList(request, region, accountId));
                 case "DeleteFirewallDomainList" -> firewallDomainListResponse(
-                        service.deleteFirewallDomainList(text(request, "FirewallDomainListId")));
+                        service.deleteFirewallDomainList(text(request, "FirewallDomainListId"), region));
 
                 case "CreateResolverEndpoint" -> resolverEndpointResponse(
                         service.createResolverEndpoint(request, region, accountId));
                 case "DeleteResolverEndpoint" -> resolverEndpointResponse(
-                        service.deleteResolverEndpoint(text(request, "ResolverEndpointId")));
+                        service.deleteResolverEndpoint(text(request, "ResolverEndpointId"), region));
                 case "GetResolverEndpoint" -> resolverEndpointResponse(
-                        service.getResolverEndpoint(text(request, "ResolverEndpointId")));
-                case "ListResolverEndpoints" -> handleListResolverEndpoints();
+                        service.getResolverEndpoint(text(request, "ResolverEndpointId"), region));
+                case "ListResolverEndpoints" -> handleListResolverEndpoints(region);
                 case "ListResolverEndpointIpAddresses" -> handleListResolverEndpointIpAddresses(
-                        text(request, "ResolverEndpointId"));
+                        text(request, "ResolverEndpointId"), region);
                 case "UpdateResolverEndpoint" -> resolverEndpointResponse(
-                        service.updateResolverEndpoint(text(request, "ResolverEndpointId"), request));
+                        service.updateResolverEndpoint(text(request, "ResolverEndpointId"), request, region));
 
                 case "CreateResolverRule" -> resolverRuleResponse(
                         service.createResolverRule(request, region, accountId));
                 case "DeleteResolverRule" -> resolverRuleResponse(
-                        service.deleteResolverRule(text(request, "ResolverRuleId")));
+                        service.deleteResolverRule(text(request, "ResolverRuleId"), region));
                 case "GetResolverRule" -> resolverRuleResponse(
-                        service.getResolverRule(text(request, "ResolverRuleId")));
-                case "ListResolverRules" -> handleListResolverRules();
+                        service.getResolverRule(text(request, "ResolverRuleId"), region));
+                case "ListResolverRules" -> handleListResolverRules(request, region);
                 case "UpdateResolverRule" -> resolverRuleResponse(
-                        service.updateResolverRule(text(request, "ResolverRuleId"), request.path("Config")));
+                        service.updateResolverRule(text(request, "ResolverRuleId"), request.path("Config"), region));
 
                 case "AssociateResolverRule" -> resolverRuleAssociationResponse(
-                        service.associateResolverRule(request));
+                        service.associateResolverRule(request, region));
                 case "DisassociateResolverRule" -> resolverRuleAssociationResponse(
-                        service.disassociateResolverRule(request));
+                        service.disassociateResolverRule(request, region));
                 case "GetResolverRuleAssociation" -> resolverRuleAssociationResponse(
-                        service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId")));
-                case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations();
+                        service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId"), region));
+                case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations(region);
+
+                case "UpdateResolverDnssecConfig" -> dnssecConfigResponse(service.updateResolverDnssecConfig(
+                        request, region, accountId));
+                case "GetResolverDnssecConfig" -> dnssecConfigResponse(service.getResolverDnssecConfig(
+                        text(request, "ResourceId"), region));
 
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
@@ -115,7 +120,7 @@ public class Route53ResolverJsonHandler {
             node.put("ManagedOwnerName", list.managedOwnerName());
             node.put("Name", list.name());
         }
-        for (ObjectNode custom : service.listCustomFirewallDomainLists()) {
+        for (ObjectNode custom : service.listCustomFirewallDomainLists(region)) {
             lists.add(custom);
         }
         return Response.ok(result).build();
@@ -123,7 +128,7 @@ public class Route53ResolverJsonHandler {
 
     private Response handleGetFirewallDomainList(JsonNode request, String region) {
         String id = text(request, "FirewallDomainListId");
-        Optional<ObjectNode> custom = service.getCustomFirewallDomainList(id);
+        Optional<ObjectNode> custom = service.getCustomFirewallDomainList(id, region);
         if (custom.isPresent()) {
             return firewallDomainListResponse(custom.get());
         }
@@ -150,18 +155,18 @@ public class Route53ResolverJsonHandler {
         return Response.ok(objectMapper.createObjectNode().set("ResolverEndpoint", endpoint)).build();
     }
 
-    private Response handleListResolverEndpoints() {
+    private Response handleListResolverEndpoints(String region) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode endpoints = result.putArray("ResolverEndpoints");
-        for (ObjectNode endpoint : service.listResolverEndpoints()) {
+        for (ObjectNode endpoint : service.listResolverEndpoints(region)) {
             endpoints.add(endpoint);
         }
         return Response.ok(result).build();
     }
 
-    private Response handleListResolverEndpointIpAddresses(String endpointId) {
+    private Response handleListResolverEndpointIpAddresses(String endpointId, String region) {
         ObjectNode result = objectMapper.createObjectNode();
-        result.putArray("IpAddresses").addAll(service.listResolverEndpointIpAddresses(endpointId));
+        result.putArray("IpAddresses").addAll(service.listResolverEndpointIpAddresses(endpointId, region));
         return Response.ok(result).build();
     }
 
@@ -171,10 +176,10 @@ public class Route53ResolverJsonHandler {
         return Response.ok(objectMapper.createObjectNode().set("ResolverRule", rule)).build();
     }
 
-    private Response handleListResolverRules() {
+    private Response handleListResolverRules(JsonNode request, String region) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode rules = result.putArray("ResolverRules");
-        for (ObjectNode rule : service.listResolverRules()) {
+        for (ObjectNode rule : service.listResolverRules(request.get("Filters"), region)) {
             rules.add(rule);
         }
         return Response.ok(result).build();
@@ -187,12 +192,16 @@ public class Route53ResolverJsonHandler {
                 .set("ResolverRuleAssociation", association)).build();
     }
 
-    private Response handleListResolverRuleAssociations() {
+    private Response handleListResolverRuleAssociations(String region) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode associations = result.putArray("ResolverRuleAssociations");
-        for (ObjectNode association : service.listResolverRuleAssociations()) {
+        for (ObjectNode association : service.listResolverRuleAssociations(region)) {
             associations.add(association);
         }
         return Response.ok(result).build();
+    }
+
+    private Response dnssecConfigResponse(ObjectNode config) {
+        return Response.ok(objectMapper.createObjectNode().set("ResolverDNSSECConfig", config)).build();
     }
 }

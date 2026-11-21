@@ -11,6 +11,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -21,16 +22,18 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 /** Stores Cost Anomaly Detection configuration without generating anomalies or notifications. */
 @ApplicationScoped
-public class CostAnomalyService implements Resettable {
+public class CostAnomalyService implements Resettable, StoredResourceArns {
 
     private static final BigDecimal MAX_THRESHOLD = new BigDecimal("10000000000");
     private static final Pattern TAG_TEXT = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*");
@@ -203,6 +206,37 @@ public class CostAnomalyService implements Resettable {
             updatedTags.remove(tagText(key, true));
         }
         storage.putForAccount(account, arn, resource);
+    }
+
+    @Override
+    public String namespace() {
+        return "ce";
+    }
+
+    /** A request names a monitor or a subscription by its ARN: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the anomaly monitor or subscription whose ARN is {@code arn}, in the request's account, where the
+     * handlers read: an ARN of another account names none. Both are stored under their whole ARN, so the read is in
+     * place under that key, a record stored before storage was account-aware included. Every write puts a new record,
+     * under this service's lock, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ce") || !AwsArnUtils.parse(arn).accountId().equals(monitors.accountId())) {
+            return Map.of();
+        }
+        String account = monitors.accountId();
+        Map<String, String> tags = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(monitors, account, arn)
+                .or(() -> AccountAwareStorageBackend.readInAccount(subscriptions, account, arn))
+                .ifPresent(resource -> resource.path("tags").properties()
+                        .forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText(""))));
+        return tags;
     }
 
     @Override

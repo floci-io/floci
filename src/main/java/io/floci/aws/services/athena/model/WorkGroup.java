@@ -23,7 +23,7 @@ public class WorkGroup {
     private Instant creationTime;
 
     @JsonProperty("Tags")
-    private List<WorkGroupTag> tags = new ArrayList<>();
+    private volatile List<WorkGroupTag> tags = new ArrayList<>();
 
     @JsonProperty("Configuration")
     private WorkGroupConfiguration configuration;

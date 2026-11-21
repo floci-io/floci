@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.Resettable;
@@ -110,13 +111,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    /** Documented default page size for GetUsage. */
-    private static final int DEFAULT_USAGE_LIMIT = 25;
+    /** Documented default page size for the paged list calls. */
+    private static final int DEFAULT_PAGE_SIZE = 25;
     /**
      * Documented maximum results per page. A larger {@code limit} is accepted, as real API Gateway
      * accepts one, but the page returned is still capped here.
      */
-    private static final int MAX_USAGE_PAGE_SIZE = 500;
+    private static final int MAX_PAGE_SIZE = 500;
 
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
@@ -1110,7 +1111,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 if (!"replace" .equals(opType) && !"add" .equals(opType)) continue;
 
                 if ("/description" .equals(path)) {
-                    stage.setDescription(value);
+                    // UpdateStage has no remove for the description, so an empty value clears it.
+                    stage.setDescription(value == null || value.isEmpty() ? null : value);
                 } else if ("/deploymentId" .equals(path)) {
                     stage.setDeploymentId(value);
                 } else if ("/tracingEnabled" .equals(path)) {
@@ -1133,6 +1135,18 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         stageStore.put(stageKey(region, apiId, stageName), stage);
         return stage;
+    }
+
+    /**
+     * Writes back the deployment id and description of a stage as a stack update's snapshot held
+     * them, a null description included, which a patch cannot express. For the stack rollback only.
+     */
+    public void restoreStage(String region, String apiId, Stage snapshot) {
+        Stage stage = getStage(region, apiId, snapshot.getStageName());
+        stage.setDeploymentId(snapshot.getDeploymentId());
+        stage.setDescription(snapshot.getDescription());
+        stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        stageStore.put(stageKey(region, apiId, snapshot.getStageName()), stage);
     }
 
     private static final List<String> METHOD_SETTING_KEYS = List.of(
@@ -1219,12 +1233,12 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         Authorizer authorizer = new Authorizer();
         authorizer.setId(authorizerId);
         authorizer.setName((String) request.get("name"));
-        authorizer.setType((String) request.get("type"));
+        authorizer.setType(validateAuthorizerType((String) request.get("type")));
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
-        validateRequestAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
-                authorizer.getAuthorizerResultTtlInSeconds());
+        validateAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
+                authorizer.getAuthorizerResultTtlInSeconds(), false);
         // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
         if (request.get("providerARNs") instanceof List<?> arns) {
             List<String> providerArns = new ArrayList<>();
@@ -1251,6 +1265,34 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return authorizerStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<Authorizer> getAuthorizerPage(String region, String apiId, Integer limit,
+                                                         String position) {
+        return pageById(getAuthorizers(region, apiId), Authorizer::getId, limit, position);
+    }
+
+    /**
+     * One page of a list, sorted by id here. The token is the id of the last item returned, and
+     * an unrecognised token is a {@code BadRequestException}, as on AWS.
+     */
+    private static <T> PaginatedResult<T> pageById(List<T> items, Function<T, String> idOf, Integer limit,
+                                                   String position) {
+        List<T> sorted = items.stream().sorted(Comparator.comparing(idOf)).toList();
+        int pageSize = resolvePageSize(limit);
+        int start = 0;
+        if (position != null && !position.isBlank()) {
+            while (start < sorted.size() && !position.equals(idOf.apply(sorted.get(start)))) {
+                start++;
+            }
+            if (start == sorted.size()) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            start++;
+        }
+        int end = Math.min(start + pageSize, sorted.size());
+        String nextPosition = end < sorted.size() ? idOf.apply(sorted.get(end - 1)) : null;
+        return new PaginatedResult<>(List.copyOf(sorted.subList(start, end)), nextPosition);
+    }
+
     public void deleteAuthorizer(String region, String apiId, String authorizerId) {
         getAuthorizer(region, apiId, authorizerId);
         authorizerStore.delete(authorizerKey(region, apiId, authorizerId));
@@ -1261,9 +1303,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         // The store hands back live objects, so every op is validated against pending values first and
         // only applied once the whole patch is known to be good.
         String newName = authorizer.getName();
+        String newType = authorizer.getType();
         String newAuthorizerUri = authorizer.getAuthorizerUri();
         String newIdentitySource = authorizer.getIdentitySource();
         String newTtl = authorizer.getAuthorizerResultTtlInSeconds();
+        boolean identityOrTypePatched = false;
+        List<String> newProviderArns = authorizer.getProviderARNs() == null
+                ? null : new ArrayList<>(authorizer.getProviderARNs());
         if (patchOperations != null) {
         for (Map<String, String> op : patchOperations) {
             if (op == null) {
@@ -1272,18 +1318,34 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             String path = op.get("path");
             String value = op.get("value");
             String opType = op.get("op");
-            if (!"add".equals(opType) && !"replace".equals(opType)) {
+            // remove clears the identity source and takes one pool ARN off the list.
+            boolean clearable = "/identitySource".equals(path);
+            boolean providerArns = "/providerARNs".equals(path);
+            boolean remove = "remove".equals(opType) && (clearable || providerArns);
+            boolean add = "add".equals(opType) || ("replace".equals(opType) && !providerArns);
+            if (!add && !remove) {
                 throw new AwsException("BadRequestException", "Invalid operation", 400);
             }
-            if (path == null || value == null) {
+            if (path == null || (value == null && !(remove && clearable))) {
                 throw new AwsException("BadRequestException", "Missing path or value", 400);
             }
             if ("/name".equals(path)) {
                 newName = value;
+            } else if ("/type".equals(path)) {
+                newType = validateAuthorizerType(value);
+                identityOrTypePatched = true;
             } else if ("/authorizerUri".equals(path)) {
                 newAuthorizerUri = value;
             } else if ("/identitySource".equals(path)) {
-                newIdentitySource = value;
+                newIdentitySource = remove ? null : value;
+                identityOrTypePatched = true;
+            } else if (providerArns) {
+                newProviderArns = newProviderArns == null ? new ArrayList<>() : newProviderArns;
+                if (remove) {
+                    newProviderArns.remove(value);
+                } else if (!newProviderArns.contains(value)) {
+                    newProviderArns.add(value);
+                }
             } else if ("/authorizerResultTtlInSeconds".equals(path)) {
                 // Validate before accepting: the store hands back live objects, and an unparseable TTL
                 // would break serialisation on every later GetAuthorizer/GetAuthorizers.
@@ -1300,16 +1362,59 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             }
         }
         }
-        validateRequestAuthorizerIdentitySource(authorizer.getType(), newIdentitySource, newTtl);
-        authorizer.setName(newName);
-        authorizer.setAuthorizerUri(newAuthorizerUri);
-        authorizer.setIdentitySource(newIdentitySource);
-        authorizer.setAuthorizerResultTtlInSeconds(newTtl);
-        authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
+        validateAuthorizerIdentitySource(newType, newIdentitySource, newTtl, identityOrTypePatched);
+        return writeAuthorizer(region, apiId, authorizer, newName, newType, newAuthorizerUri,
+                newIdentitySource, newTtl, newProviderArns);
+    }
+
+    /** The authorizer types AWS accepts; a missing type is left to the caller, as create always did. */
+    private static String validateAuthorizerType(String type) {
+        if (type != null && !List.of("TOKEN", "REQUEST", "COGNITO_USER_POOLS").contains(type)) {
+            throw new AwsException("BadRequestException",
+                    "Authorizer type must be TOKEN, REQUEST or COGNITO_USER_POOLS", 400);
+        }
+        return type;
+    }
+
+    /**
+     * Writes back an authorizer exactly as a stack update's snapshot held it, a null URI included,
+     * which a patch cannot express. For the stack rollback only.
+     */
+    public void restoreAuthorizer(String region, String apiId, Authorizer snapshot) {
+        writeAuthorizer(region, apiId, getAuthorizer(region, apiId, snapshot.getId()), snapshot.getName(),
+                snapshot.getType(), snapshot.getAuthorizerUri(), snapshot.getIdentitySource(),
+                snapshot.getAuthorizerResultTtlInSeconds(),
+                snapshot.getProviderARNs() == null ? null : new ArrayList<>(snapshot.getProviderARNs()));
+    }
+
+    private Authorizer writeAuthorizer(String region, String apiId, Authorizer authorizer, String name,
+                                       String type, String authorizerUri, String identitySource, String ttl,
+                                       List<String> providerArns) {
+        authorizer.setName(name);
+        authorizer.setType(type);
+        authorizer.setAuthorizerUri(authorizerUri);
+        authorizer.setIdentitySource(identitySource);
+        authorizer.setAuthorizerResultTtlInSeconds(ttl);
+        authorizer.setProviderARNs(providerArns);
+        authorizerStore.put(authorizerKey(region, apiId, authorizer.getId()), authorizer);
         return authorizer;
     }
 
-    private static void validateRequestAuthorizerIdentitySource(String type, String identitySource, String ttl) {
+    /**
+     * Checks the identity source of an authorizer's final values: AWS requires it for REQUEST when
+     * caching is on, and for TOKEN and COGNITO_USER_POOLS. Create does not enforce the second rule
+     * yet, and a patch enforces it only when it has an op on {@code /identitySource} or {@code /type}
+     * ({@code requiredForTokenAndCognito}), so an authorizer created without one can still be renamed.
+     */
+    private static void validateAuthorizerIdentitySource(String type, String identitySource, String ttl,
+                                                         boolean requiredForTokenAndCognito) {
+        if (requiredForTokenAndCognito && ("TOKEN".equals(type) || "COGNITO_USER_POOLS".equals(type))) {
+            if (identitySource == null || identitySource.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "Identity source is required for a " + type + " authorizer", 400);
+            }
+            return;
+        }
         if (!"REQUEST".equals(type)) {
             return;
         }
@@ -1669,6 +1774,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .toList();
     }
 
+    /**
+     * One {@code GetUsagePlans} page: the {@code keyId}-filtered plans, paged by {@code limit} and
+     * {@code position} like the other API Gateway collections.
+     */
+    public PaginatedResult<UsagePlan> getUsagePlanPage(String region, String keyId, Integer limit,
+                                                       String position) {
+        return pageById(getUsagePlans(region, keyId), UsagePlan::getId, limit, position);
+    }
+
     /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
@@ -1790,7 +1904,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         if (end.isBefore(start)) {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
-        int pageSize = resolveUsageLimit(limit);
+        int pageSize = resolvePageSize(limit);
 
         List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
                 .filter(key -> keyId == null || keyId.isBlank() || keyId.equals(key.getId()))
@@ -1848,9 +1962,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     }
 
     /**
-     * Resolves the effective page size, which is not the same thing as accepting the request.
+     * Resolves the effective page size of a paged list call ({@code GetUsage}, {@code GetAuthorizers},
+     * {@code GetDocumentationParts}), which is not the same thing as accepting the request.
      *
-     * <p>Request acceptance and response page size are separate. Probed against real API Gateway,
+     * <p>Request acceptance and response page size are separate. The probe below was made against
+     * {@code GetUsage} on real API Gateway:
      * every {@code limit} from 500 up to {@link Integer#MAX_VALUE} is accepted without error, so
      * none is rejected here either. What that probe does <em>not</em> establish is that the service
      * ever returns more than 500 entries in one page, and the documented contract says 500 is the
@@ -1861,14 +1977,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
      * {@code limit=-1} with an {@code InternalFailure}, which is a fault rather than a contract, so
      * a page size below one is rejected as a bad request instead of reproducing a 500.
      */
-    static int resolveUsageLimit(Integer limit) {
+    static int resolvePageSize(Integer limit) {
         if (limit == null) {
-            return DEFAULT_USAGE_LIMIT;
+            return DEFAULT_PAGE_SIZE;
         }
         if (limit < 1) {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
-        return Math.min(limit, MAX_USAGE_PAGE_SIZE);
+        return Math.min(limit, MAX_PAGE_SIZE);
     }
 
     /**
@@ -2262,6 +2378,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return requestValidatorStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<RequestValidator> getRequestValidatorPage(String region, String apiId, Integer limit,
+                                                                     String position) {
+        return pageById(getRequestValidators(region, apiId), RequestValidator::getId, limit, position);
+    }
+
     public void deleteRequestValidator(String region, String apiId, String validatorId) {
         getRequestValidator(region, apiId, validatorId);
         requestValidatorStore.delete(requestValidatorKey(region, apiId, validatorId));
@@ -2389,6 +2510,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return modelStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<Model> getModelPage(String region, String apiId, Integer limit, String position) {
+        return pageById(getModels(region, apiId), Model::getId, limit, position);
+    }
+
     public void deleteModel(String region, String apiId, String modelName) {
         getModel(region, apiId, modelName);
         modelStore.delete(modelKey(region, apiId, modelName));
@@ -2443,9 +2568,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid documentation part id specified", 404));
     }
 
-    public record DocumentationPartPage(List<DocumentationPart> items, String position) {}
-
-    public DocumentationPartPage getDocumentationParts(String region, String apiId, String type, String name,
+    public PaginatedResult<DocumentationPart> getDocumentationParts(String region, String apiId, String type, String name,
                                                         String path, String locationStatus, Integer limit,
                                                         String position) {
         getRestApi(region, apiId);
@@ -2469,32 +2592,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             modeledRequest.put("position", position);
         }
         ApiGatewayDocumentationRequestShapes.check("GetDocumentationParts", modeledRequest);
-        if (limit != null && limit < 1) {
-            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
-        }
-        int pageSize = limit == null ? 25 : Math.min(limit, 500);
         String prefix = region + "::" + apiId + "::";
         List<DocumentationPart> parts = documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
                 .filter(part -> type == null || type.equals(part.getLocation().get("type")))
                 .filter(part -> name == null || name.equals(part.getLocation().get("name")))
                 .filter(part -> path == null || path.equals(part.getLocation().get("path")))
                 .filter(part -> !"UNDOCUMENTED".equals(locationStatus))
-                .sorted(Comparator.comparing(DocumentationPart::getId))
                 .toList();
 
-        int start = 0;
-        if (position != null && !position.isBlank()) {
-            while (start < parts.size() && !position.equals(parts.get(start).getId())) {
-                start++;
-            }
-            if (start == parts.size()) {
-                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-            }
-            start++;
-        }
-        int end = Math.min(start + pageSize, parts.size());
-        String nextPosition = end < parts.size() ? parts.get(end - 1).getId() : null;
-        return new DocumentationPartPage(List.copyOf(parts.subList(start, end)), nextPosition);
+        return pageById(parts, DocumentationPart::getId, limit, position);
     }
 
     public synchronized DocumentationPart updateDocumentationPart(String region, String apiId, String partId,
@@ -5181,6 +5287,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public List<VpcLink> getVpcLinks(String region) {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
+    }
+
+    public PaginatedResult<VpcLink> getVpcLinkPage(String region, Integer limit, String position) {
+        return pageById(getVpcLinks(region), VpcLink::getId, limit, position);
     }
 
     /**

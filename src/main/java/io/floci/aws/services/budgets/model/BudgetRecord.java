@@ -12,7 +12,7 @@ import java.util.List;
 public class BudgetRecord {
     private String accountId;
     private JsonNode budget;
-    private JsonNode resourceTags;
+    private volatile JsonNode resourceTags;
     private List<BudgetNotification> notifications = new ArrayList<>();
 
     public BudgetRecord() {}

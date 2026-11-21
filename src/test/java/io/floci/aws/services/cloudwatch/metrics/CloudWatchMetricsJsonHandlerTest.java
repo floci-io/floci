@@ -12,11 +12,16 @@ import io.floci.aws.services.cloudwatch.metricstreams.CloudWatchMetricStreamsSer
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -42,6 +47,55 @@ class CloudWatchMetricsJsonHandlerTest {
 
     private CloudWatchMetricsJsonHandler handler;
     private CloudWatchMetricsService service;
+
+    static Stream<Arguments> invalidMetricValues() {
+        return Stream.of(
+                Arguments.of("\"Value\":[1,2]", "InvalidParameterValue"),
+                Arguments.of("\"Value\":1e109", "InvalidParameterValue"),
+                Arguments.of("\"Value\":-1e109", "InvalidParameterValue"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Sum\":1e109,\"Minimum\":2,\"Maximum\":4}",
+                        "InvalidParameterValue"),
+                Arguments.of("\"Value\":\"not-a-number\"", "InvalidParameterValue"),
+                Arguments.of("\"StatisticValues\":[]", "InvalidParameterValue"),
+                Arguments.of("\"StatisticValues\":{\"Sum\":6,\"Minimum\":2,\"Maximum\":4}", "MissingParameter"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Minimum\":2,\"Maximum\":4}", "MissingParameter"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Maximum\":4}", "MissingParameter"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Minimum\":2}", "MissingParameter"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Sum\":null,\"Minimum\":2,\"Maximum\":4}",
+                        "MissingParameter"),
+                Arguments.of("\"StatisticValues\":{\"SampleCount\":2,\"Sum\":\"six\",\"Minimum\":2,\"Maximum\":4}",
+                        "InvalidParameterValue"),
+                Arguments.of("\"Value\":7,\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Minimum\":2,\"Maximum\":4}",
+                        "InvalidParameterCombination"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidMetricValues")
+    void malformedValuesRejectTheWholeBatchIncludingEntityMetrics(String members, String errorCode) throws Exception {
+        for (boolean entity : List.of(false, true)) {
+            ObjectNode request = MAPPER.createObjectNode();
+            request.put("Namespace", "InvalidValues");
+            ArrayNode topLevel = request.putArray("MetricData");
+            topLevel.addObject().put("MetricName", "First").put("Value", 1);
+            ArrayNode data = entity
+                    ? request.putArray("EntityMetricData").addObject().putArray("MetricData") : topLevel;
+            data.add(MAPPER.readTree("{\"MetricName\":\"Invalid\"," + members + "}"));
+
+            AwsException error = assertThrows(AwsException.class,
+                    () -> handler.handle("PutMetricData", request, REGION));
+
+            assertEquals(errorCode, error.getErrorCode());
+            assertEquals(switch (errorCode) {
+                case "MissingParameter" -> "MissingRequiredParameterException";
+                case "InvalidParameterCombination" -> "InvalidParameterCombinationException";
+                default -> "InvalidParameterValueException";
+            }, error.jsonType());
+            assertEquals(400, error.getHttpStatus());
+            assertTrue(error.getMessage().contains(entity
+                    ? "EntityMetricData.member.1.MetricData.member.1" : "MetricData.member.2"));
+            assertEquals(0, listMetricNames("InvalidValues").size());
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -317,6 +371,38 @@ class CloudWatchMetricsJsonHandlerTest {
         Response describeResp = handler.handle("DescribeAlarms", describeReq, REGION);
         assertEquals(200, describeResp.getStatus());
         return ((ObjectNode) describeResp.getEntity()).get("MetricAlarms").get(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"60\"", "60.5", "true", "[60]", "4294967356"})
+    void putMetricAlarm_refusesAnIntervalThatIsNoIntegerOrBeyondAnInt(String interval) throws Exception {
+        ObjectNode request = alarmRequest("NoInteger");
+        request.set("EvaluationInterval", MAPPER.readTree(interval));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", request, REGION));
+
+        assertEquals("SerializationException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("NoInteger"), null, REGION).isEmpty());
+    }
+
+    @Test
+    void putMetricAlarm_takesANullIntervalAsNone() {
+        ObjectNode request = alarmRequest("NullInterval");
+        request.putNull("EvaluationInterval");
+
+        assertEquals(200, handler.handle("PutMetricAlarm", request, REGION).getStatus());
+    }
+
+    @Test
+    void putMetricAlarm_passesTheIntervalToTheService() {
+        ObjectNode request = alarmRequest("WithInterval").put("EvaluationInterval", 60);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", request, REGION));
+
+        assertEquals("InvalidParameterCombinationException", refused.jsonType());
     }
 
     private static ObjectNode alarmRequest(String name) {

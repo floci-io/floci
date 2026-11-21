@@ -53,6 +53,8 @@ import static org.mockito.Mockito.when;
 
 class VpcNetworkManagerTest {
 
+    private static final String ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "111122223333";
     private static final String REGION = "us-east-1";
 
     private DockerClient docker;
@@ -68,6 +70,7 @@ class VpcNetworkManagerTest {
         docker = mock(DockerClient.class);
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.port()).thenReturn(4650);
+        when(config.defaultAccountId()).thenReturn(ACCOUNT);
         when(config.services().ec2().mock()).thenReturn(false);
         when(config.services().ec2().vpcNetworks().enabled()).thenReturn(true);
         when(config.services().ec2().vpcNetworks().fallbackPool()).thenReturn("10.240.0.0/12");
@@ -117,9 +120,9 @@ class VpcNetworkManagerTest {
 
     @Test
     void deletingVpcRemovesANetworkWhoseCreationIsStillInFlight() throws Exception {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         when(docker.createNetworkCmd().exec()).thenAnswer(invocation -> {
@@ -130,12 +133,12 @@ class VpcNetworkManagerTest {
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<?> attaching = executor.submit(() ->
-                    manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address));
+                    manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                Future<?> deleting = executor.submit(() -> manager.deleteVpcNetwork(REGION, "vpc-1"));
+                Future<?> deleting = executor.submit(() -> manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1"));
                 await().atMost(2, TimeUnit.SECONDS)
-                        .until(() -> manager.effectiveVpcCidr(REGION, "vpc-1").isEmpty());
+                        .until(() -> manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").isEmpty());
                 release.countDown();
                 attaching.get(2, TimeUnit.SECONDS);
                 deleting.get(2, TimeUnit.SECONDS);
@@ -144,14 +147,14 @@ class VpcNetworkManagerTest {
             }
         }
 
-        assertEquals(List.of(manager.networkName(REGION, "vpc-1")), removedNetworks);
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-2", address).isEmpty());
+        assertEquals(List.of(manager.networkName(ACCOUNT, REGION, "vpc-1")), removedNetworks);
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-2", address).isEmpty());
         verify(docker.createNetworkCmd(), times(1)).exec();
     }
 
     @Test
     void anAttachThatWasPlanningWhenVpcWasDeletedCannotCreateItsNetwork() throws Exception {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         when(docker.listNetworksCmd().exec()).thenAnswer(invocation -> {
@@ -162,10 +165,10 @@ class VpcNetworkManagerTest {
 
         try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
             Future<Boolean> attaching = executor.submit(() ->
-                    manager.attachContainer(REGION, "vpc-1", "container-1"));
+                    manager.attachContainer(ACCOUNT, REGION, "vpc-1", "container-1"));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                manager.deleteVpcNetwork(REGION, "vpc-1");
+                manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
             } finally {
                 release.countDown();
             }
@@ -184,12 +187,12 @@ class VpcNetworkManagerTest {
     void deletingAVpcAfterARestartRemovesTheNetworkItsPredecessorCreated() {
         // A restarted process declares the VPC again but has not materialised it: no instance in
         // it has started since. The network from before the restart must still go with the VPC.
-        String networkName = manager.networkName(REGION, "vpc-1");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> true); // startup: the VPC is still declared
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT)); // startup: the VPC is still declared
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
         assertEquals(List.of(networkName), removedNetworks);
     }
@@ -197,14 +200,14 @@ class VpcNetworkManagerTest {
     @Test
     void thePredecessorsNetworkGoesWithItsVpcWithStartupReapingOffToo() {
         when(config.services().ec2().vpcNetworks().reconcileOnStartup()).thenReturn(false);
-        String networkName = manager.networkName(REGION, "vpc-1");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
         existingNetwork("floci-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16", ourLabels("vpc-dead", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> "vpc-1".equals(vpcId));
+        manager.reconcileOrphans((region, vpcId) -> "vpc-1".equals(vpcId) ? Set.of(ACCOUNT) : Set.of());
         assertTrue(removedNetworks.isEmpty(), "with reaping off an orphan stays");
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
         assertEquals(List.of(networkName), removedNetworks);
     }
@@ -215,10 +218,10 @@ class VpcNetworkManagerTest {
         // by that name, not by the one this version would give it.
         String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
         existingNetwork(legacyName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> true);
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
         assertEquals(List.of(legacyName), removedNetworks);
     }
@@ -228,13 +231,13 @@ class VpcNetworkManagerTest {
         // An upgrade plus another restart can leave both: the legacy bridge on a fallback CIDR and
         // the current-named one on the declared CIDR. Neither may be forgotten.
         String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
-        String currentName = manager.networkName(REGION, "vpc-1");
+        String currentName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(legacyName, "10.200.0.0/16", ourLabels("vpc-1", "4650"));
         existingNetwork(currentName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> true);
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
         assertEquals(2, removedNetworks.size(), "each removed once: " + removedNetworks);
         assertEquals(Set.of(legacyName, currentName), Set.copyOf(removedNetworks));
@@ -246,72 +249,72 @@ class VpcNetworkManagerTest {
         // the legacy-named one from before still exists. Deleting the VPC removes both.
         String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
         existingNetwork(legacyName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> true);
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
-        assertEquals(List.of(manager.networkName(REGION, "vpc-1"), legacyName), removedNetworks);
+        assertEquals(List.of(manager.networkName(ACCOUNT, REGION, "vpc-1"), legacyName), removedNetworks);
     }
 
     @Test
     void aVpcThisRunReusedItsPredecessorsNetworkForRemovesItOnce() {
-        String networkName = manager.networkName(REGION, "vpc-1");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> true);
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
 
-        manager.deleteVpcNetwork(REGION, "vpc-1");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
         assertEquals(List.of(networkName), removedNetworks);
     }
 
     @Test
     void declaringAndDeletingUnusedNetworksDoesNotContactDocker() {
-        manager.declareVpc(REGION, "vpc-private", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-private", "subnet-a", "10.0.1.0/24");
-        manager.declareVpc(REGION, "vpc-public", "42.0.0.0/16");
-        manager.forgetSubnet(REGION, "subnet-a");
-        manager.deleteVpcNetwork(REGION, "vpc-private");
-        manager.deleteVpcNetwork(REGION, "vpc-public");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-private", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-private", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-public", "42.0.0.0/16");
+        manager.forgetSubnet(ACCOUNT, REGION, "subnet-a");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-private");
+        manager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-public");
 
         verifyNoInteractions(docker);
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isEmpty());
-        assertTrue(manager.effectiveVpcCidr(REGION, "vpc-public").isEmpty());
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").isEmpty());
+        assertTrue(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-public").isEmpty());
     }
 
     @Test
     void collisionChecksSeeNetworksAddedAfterDeclaration() {
-        manager.declareVpc(REGION, "vpc-late", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-late", "subnet-late", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-late", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-late", "subnet-late", "10.0.1.0/24");
         existingNetwork("external", "10.0.0.0/16", Map.of());
 
-        String address = manager.allocatePrivateIp(REGION, "subnet-late").orElseThrow();
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-late").orElseThrow();
 
-        assertTrue(manager.isSubstituted(REGION, "vpc-late"));
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-late"));
         assertFalse(address.startsWith("10.0."));
     }
 
     @Test
     void addingASubnetAfterPlanningKeepsExistingLeases() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.10"));
-        manager.declareSubnet(REGION, "vpc-1", "subnet-b", "10.0.2.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.10"));
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-b", "10.0.2.0/24");
 
-        assertEquals("10.0.1.11", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow());
-        assertEquals("10.0.2.10", manager.allocatePrivateIp(REGION, "subnet-b").orElseThrow());
+        assertEquals("10.0.1.11", manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow());
+        assertEquals("10.0.2.10", manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-b").orElseThrow());
     }
 
     @Test
     void declaringAnotherVpcDoesNotWaitForBlockedDockerPlanning() throws Exception {
-        manager.declareVpc(REGION, "vpc-planning", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-planning", "10.0.0.0/16");
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         when(docker.listNetworksCmd().exec()).thenAnswer(invocation -> {
@@ -321,11 +324,11 @@ class VpcNetworkManagerTest {
         });
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<Optional<String>> planning = executor.submit(() ->
-                    manager.effectiveVpcCidr(REGION, "vpc-planning"));
+                    manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-planning"));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
                 Future<?> declaration = executor.submit(() ->
-                        manager.declareVpc(REGION, "vpc-new", "10.1.0.0/16"));
+                        manager.declareVpc(ACCOUNT, REGION, "vpc-new", "10.1.0.0/16"));
                 declaration.get(1, TimeUnit.SECONDS);
             } finally {
                 release.countDown();
@@ -336,9 +339,9 @@ class VpcNetworkManagerTest {
 
     @Test
     void declaringASubnetDoesNotWaitForDockerMaterialization() throws Exception {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
@@ -351,18 +354,18 @@ class VpcNetworkManagerTest {
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<Optional<String>> attaching = executor.submit(() ->
-                    manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address));
+                    manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
                 Future<?> declaration = executor.submit(() ->
-                        manager.declareSubnet(REGION, "vpc-1", "subnet-b", "10.0.2.0/24"));
+                        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-b", "10.0.2.0/24"));
                 declaration.get(1, TimeUnit.SECONDS);
             } finally {
                 release.countDown();
             }
             assertTrue(attaching.get(2, TimeUnit.SECONDS).isPresent());
         }
-        assertEquals("10.0.2.10", manager.allocatePrivateIp(REGION, "subnet-b").orElseThrow());
+        assertEquals("10.0.2.10", manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-b").orElseThrow());
     }
 
     private void existingNetwork(String name, String subnet, Map<String, String> labels,
@@ -381,16 +384,16 @@ class VpcNetworkManagerTest {
 
     @Test
     void usesTheDeclaredCidrAndAllocatesInsideTheDeclaredSubnet() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
-        assertFalse(manager.isSubstituted(REGION, "vpc-1"));
-        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
-        assertEquals("10.0.1.0/24", manager.effectiveSubnetCidr(REGION, "subnet-a").orElseThrow());
+        assertFalse(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"));
+        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").orElseThrow());
+        assertEquals("10.0.1.0/24", manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-a").orElseThrow());
 
         Cidr4 declared = Cidr4.parse("10.0.1.0/24").orElseThrow();
         for (int i = 0; i < 5; i++) {
-            String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
             long value = Cidr4.parse(address + "/32").orElseThrow().network();
             assertTrue(declared.containsAddress(value), address + " should be inside 10.0.1.0/24");
             assertNotEquals("10.0.1.0", address, "never the network address");
@@ -400,28 +403,28 @@ class VpcNetworkManagerTest {
 
     @Test
     void handsOutADistinctAddressEachTime() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String first = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-        String second = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String first = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+        String second = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
         assertNotEquals(first, second);
     }
 
     @Test
     void aReleasedAddressIsHandedOutAgainRatherThanExhaustingTheSubnet() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
 
         List<String> allocated = new ArrayList<>();
         Optional<String> next;
-        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+        while ((next = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-tiny")).isPresent()) {
             allocated.add(next.get());
         }
         assertTrue(allocated.size() >= 4, "a /28 should yield several usable addresses");
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-tiny").isEmpty(), "and then be exhausted");
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-tiny").isEmpty(), "and then be exhausted");
 
-        manager.releasePrivateIp(REGION, "subnet-tiny", allocated.get(0));
-        assertEquals(allocated.get(0), manager.allocatePrivateIp(REGION, "subnet-tiny").orElseThrow(),
+        manager.releasePrivateIp(ACCOUNT, REGION, "subnet-tiny", allocated.get(0));
+        assertEquals(allocated.get(0), manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-tiny").orElseThrow(),
                 "a terminated instance's address must come back into circulation");
     }
 
@@ -429,53 +432,53 @@ class VpcNetworkManagerTest {
 
     @Test
     void aReservedAddressIsNeverHandedOutAgain() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
         // What a restart looks like: the lease table is empty, but a live container holds .10.
-        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.10"));
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.10"));
 
         for (int i = 0; i < 20; i++) {
-            assertNotEquals("10.0.1.10", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow(),
+            assertNotEquals("10.0.1.10", manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow(),
                     "the address a restored instance still holds must not be re-allocated");
         }
     }
 
     @Test
     void reservingTheSameAddressTwiceRefusesTheSecondClaimWithoutThrowing() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
-        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.11"));
-        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.11"),
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.11"));
+        assertFalse(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.11"),
                 "two instances claiming one address is reported, not thrown");
     }
 
     @Test
     void reservingAnAddressOutsideTheSubnetRangeRefusesWithoutThrowing() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
-        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "172.31.4.9"),
+        assertFalse(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "172.31.4.9"),
                 "an address from a range this subnet no longer uses cannot be reserved");
-        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "not-an-address"));
-        assertFalse(manager.reservePrivateIp(REGION, "subnet-unknown", "10.0.1.10"),
+        assertFalse(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-a", "not-an-address"));
+        assertFalse(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-unknown", "10.0.1.10"),
                 "a subnet with no Docker-backed range has nothing to reserve in");
         // None of that poisoned the pool.
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isPresent());
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").isPresent());
     }
 
     @Test
     void aReservedAddressComesBackAfterRelease() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
 
-        assertTrue(manager.reservePrivateIp(REGION, "subnet-tiny", "10.0.9.10"));
-        manager.releasePrivateIp(REGION, "subnet-tiny", "10.0.9.10");
+        assertTrue(manager.reservePrivateIp(ACCOUNT, REGION, "subnet-tiny", "10.0.9.10"));
+        manager.releasePrivateIp(ACCOUNT, REGION, "subnet-tiny", "10.0.9.10");
 
         List<String> allocated = new ArrayList<>();
         Optional<String> next;
-        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+        while ((next = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-tiny")).isPresent()) {
             allocated.add(next.get());
         }
         assertTrue(allocated.contains("10.0.9.10"),
@@ -486,16 +489,16 @@ class VpcNetworkManagerTest {
 
     @Test
     void aClaimedAddressIsNeverHandedOutAndLeavesTheAllocationOrderAlone() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
-        assertTrue(manager.claimPrivateIp(REGION, "subnet-a", "10.0.1.250"));
+        assertTrue(manager.claimPrivateIp(ACCOUNT, REGION, "subnet-a", "10.0.1.250"));
 
-        assertEquals("10.0.1.10", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow(),
+        assertEquals("10.0.1.10", manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow(),
                 "a claimed address must not move the cursor past it");
         List<String> allocated = new ArrayList<>();
         Optional<String> next;
-        while ((next = manager.allocatePrivateIp(REGION, "subnet-a")).isPresent()) {
+        while ((next = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a")).isPresent()) {
             allocated.add(next.get());
         }
         assertFalse(allocated.contains("10.0.1.250"), "the claimed address must never be handed out");
@@ -504,43 +507,43 @@ class VpcNetworkManagerTest {
 
     @Test
     void claimingALeasedOrOutOfRangeAddressRefusesWithoutThrowing() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String leased = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String leased = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertFalse(manager.claimPrivateIp(REGION, "subnet-a", leased));
-        assertFalse(manager.claimPrivateIp(REGION, "subnet-a", "172.31.4.9"));
-        assertFalse(manager.claimPrivateIp(REGION, "subnet-unknown", "10.0.1.20"));
+        assertFalse(manager.claimPrivateIp(ACCOUNT, REGION, "subnet-a", leased));
+        assertFalse(manager.claimPrivateIp(ACCOUNT, REGION, "subnet-a", "172.31.4.9"));
+        assertFalse(manager.claimPrivateIp(ACCOUNT, REGION, "subnet-unknown", "10.0.1.20"));
     }
 
     @Test
     void subnetsInTheSameVpcGetDisjointRangesOnOneNetwork() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-b", "10.0.2.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-b", "10.0.2.0/24");
 
-        assertEquals("10.0.1.0/24", manager.effectiveSubnetCidr(REGION, "subnet-a").orElseThrow());
-        assertEquals("10.0.2.0/24", manager.effectiveSubnetCidr(REGION, "subnet-b").orElseThrow());
+        assertEquals("10.0.1.0/24", manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-a").orElseThrow());
+        assertEquals("10.0.2.0/24", manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-b").orElseThrow());
         // Same VPC, so the same Docker network: subnets inside a VPC route to each other in AWS.
-        assertEquals(manager.networkNameFor(REGION, "vpc-1"), manager.networkNameFor(REGION, "vpc-1"));
+        assertEquals(manager.networkNameFor(ACCOUNT, REGION, "vpc-1"), manager.networkNameFor(ACCOUNT, REGION, "vpc-1"));
     }
 
     // ─── The three substitution triggers ─────────────────────────────────────
 
     @Test
     void substitutesWhenTheDeclaredCidrIsOutsideRfc1918() {
-        manager.declareVpc(REGION, "vpc-public", "54.0.0.0/16");
-        assertTrue(manager.isSubstituted(REGION, "vpc-public"));
-        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-public").orElseThrow()).orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-public", "54.0.0.0/16");
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-public"));
+        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-public").orElseThrow()).orElseThrow();
         assertTrue(effective.isRfc1918());
         assertTrue(Cidr4.parse("10.240.0.0/12").orElseThrow().contains(effective));
     }
 
     @Test
     void substitutesWhenNoCidrIsDeclared() {
-        manager.declareVpc(REGION, "vpc-blank", null);
-        assertTrue(manager.isSubstituted(REGION, "vpc-blank"));
-        assertTrue(manager.effectiveVpcCidr(REGION, "vpc-blank").isPresent());
+        manager.declareVpc(ACCOUNT, REGION, "vpc-blank", null);
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-blank"));
+        assertTrue(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-blank").isPresent());
     }
 
     @Test
@@ -548,40 +551,40 @@ class VpcNetworkManagerTest {
         // OrbStack's default bridge on this machine.
         existingNetwork("orbstack", "192.168.215.0/24", Map.of());
 
-        manager.declareVpc(REGION, "vpc-clash", "192.168.215.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-clash", "192.168.215.0/24");
 
-        assertTrue(manager.isSubstituted(REGION, "vpc-clash"));
-        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-clash").orElseThrow()).orElseThrow();
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-clash"));
+        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-clash").orElseThrow()).orElseThrow();
         assertFalse(effective.overlaps(Cidr4.parse("192.168.215.0/24").orElseThrow()));
     }
 
     @Test
     void twoVpcsMayDeclareTheSameCidrAndBothKeepWorking() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-1", "10.0.1.0/24");
-        manager.declareVpc(REGION, "vpc-2", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-2", "subnet-2", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-1", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-2", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-2", "subnet-2", "10.0.1.0/24");
 
-        assertFalse(manager.isSubstituted(REGION, "vpc-1"), "the first claim keeps the declared range");
-        assertTrue(manager.isSubstituted(REGION, "vpc-2"), "the second is substituted, not rejected");
+        assertFalse(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"), "the first claim keeps the declared range");
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-2"), "the second is substituted, not rejected");
 
-        Cidr4 first = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow()).orElseThrow();
-        Cidr4 second = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-2").orElseThrow()).orElseThrow();
+        Cidr4 first = Cidr4.parse(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").orElseThrow()).orElseThrow();
+        Cidr4 second = Cidr4.parse(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-2").orElseThrow()).orElseThrow();
         assertFalse(first.overlaps(second));
 
         // Both still allocate: a duplicate CIDR must not leave a VPC unusable.
-        String a = manager.allocatePrivateIp(REGION, "subnet-1").orElseThrow();
-        String b = manager.allocatePrivateIp(REGION, "subnet-2").orElseThrow();
+        String a = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-1").orElseThrow();
+        String b = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-2").orElseThrow();
         assertTrue(first.containsAddress(Cidr4.parse(a + "/32").orElseThrow().network()));
         assertTrue(second.containsAddress(Cidr4.parse(b + "/32").orElseThrow().network()));
     }
 
     @Test
     void aSubnetOutsideItsVpcRangeIsRemappedInsideIt() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-stray", "172.16.5.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-stray", "172.16.5.0/24");
 
-        Cidr4 effective = Cidr4.parse(manager.effectiveSubnetCidr(REGION, "subnet-stray").orElseThrow()).orElseThrow();
+        Cidr4 effective = Cidr4.parse(manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-stray").orElseThrow()).orElseThrow();
         assertTrue(Cidr4.parse("10.0.0.0/16").orElseThrow().contains(effective),
                 "an address must be routable on the VPC's own network to mean anything");
     }
@@ -590,11 +593,11 @@ class VpcNetworkManagerTest {
 
     @Test
     void createsTheNetworkWithTheEffectiveCidrOnFirstAttach() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
 
         ArgumentCaptor<Network.Ipam> ipam = ArgumentCaptor.forClass(Network.Ipam.class);
         verify(docker.createNetworkCmd()).withIpam(ipam.capture());
@@ -604,23 +607,23 @@ class VpcNetworkManagerTest {
 
     @Test
     void refusesToAttachAnAddressItDidNotPlan() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
 
         // The synthesised address Ec2Service falls back to: outside the network's IPAM pool.
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", "172.31.0.11").isEmpty());
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", "172.31.0.11").isEmpty());
         verify(docker, never()).connectToNetworkCmd();
     }
 
     @Test
     void adoptsALeftoverNetworkOnlyWhenItsSubnetIsTheOneThisVpcAllocatesFrom() {
         // A Floci restart: the bridge for vpc-1 survived, on the range vpc-1 still plans from.
-        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        existingNetwork(manager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
 
         verify(docker, never()).createNetworkCmd();
         assertTrue(removedNetworks.isEmpty(), "a matching network is reused, not churned");
@@ -633,13 +636,13 @@ class VpcNetworkManagerTest {
         when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
         VpcNetworkManager dockerHostedManager =
                 new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
-        String networkName = dockerHostedManager.networkName(REGION, "vpc-1");
+        String networkName = dockerHostedManager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
-        dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+        assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
 
         ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
         verify(connect).withContainerId("floci-container");
@@ -654,14 +657,14 @@ class VpcNetworkManagerTest {
         when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
         VpcNetworkManager dockerHostedManager =
                 new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
-        String networkName = dockerHostedManager.networkName(REGION, "vpc-1");
+        String networkName = dockerHostedManager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"), Map.of(
                 "floci-container", mock(Network.ContainerNetworkConfig.class)));
-        dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+        assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
 
         ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
         verify(connect, never()).withContainerId("floci-container");
@@ -673,18 +676,18 @@ class VpcNetworkManagerTest {
         VpcNetworkManager dockerHostedManager = dockerHostedManager("floci-container");
         NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
         try {
-            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
-            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
-            dockerHostedManager.forgetSubnet(REGION, "subnet-a");
+            dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(ACCOUNT, REGION, "vpc-1", "instance-1");
+            dockerHostedManager.forgetSubnet(ACCOUNT, REGION, "subnet-a");
 
-            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
-            dockerHostedManager.declareVpc(REGION, "vpc-2", "10.0.0.0/16");
-            dockerHostedManager.declareSubnet(REGION, "vpc-2", "subnet-b", "10.0.1.0/24");
+            dockerHostedManager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
+            dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-2", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-2", "subnet-b", "10.0.1.0/24");
 
-            assertEquals(address, dockerHostedManager.allocatePrivateIp(REGION, "subnet-b").orElseThrow(),
+            assertEquals(address, dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-b").orElseThrow(),
                     "deleting the first VPC must release its Docker IPAM reservation");
             assertTrue(existingNetworks.isEmpty());
             assertTrue(network.endpoints.isEmpty());
@@ -703,13 +706,13 @@ class VpcNetworkManagerTest {
         network.endpoints.put(fullContainerId, mock(Network.ContainerNetworkConfig.class));
         existingNetwork(network.name, "10.0.0.0/16", ourLabels("vpc-1", "4650"), network.endpoints);
         try {
-            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
-            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
+            dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(ACCOUNT, REGION, "vpc-1", "instance-1");
 
-            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+            dockerHostedManager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
             assertTrue(existingNetworks.isEmpty(), "an adopted self endpoint must not keep the network alive");
             assertTrue(network.endpoints.isEmpty());
@@ -725,14 +728,14 @@ class VpcNetworkManagerTest {
         VpcNetworkManager dockerHostedManager = new VpcNetworkManager(config, docker, resolver);
         NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
         try {
-            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
             network.endpoints.put("foreign-container", mock(Network.ContainerNetworkConfig.class));
             when(resolver.resolveContainerId()).thenReturn(Optional.of("foreign-container"));
 
-            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+            dockerHostedManager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
             assertEquals(Set.of("instance-1", "foreign-container"), network.endpoints.keySet(),
                     "normal teardown detaches only Floci, leaving other endpoints to drain");
@@ -749,13 +752,13 @@ class VpcNetworkManagerTest {
                 ? dockerHostedManager(null) : new VpcNetworkManager(config, docker);
         NetworkLifecycle network = new NetworkLifecycle(hostManager, "floci-container");
         try {
-            hostManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-            hostManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-            String address = hostManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-            assertTrue(hostManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            hostManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+            hostManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = hostManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+            assertTrue(hostManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
             network.endpoints.remove("instance-1");
 
-            hostManager.deleteVpcNetwork(REGION, "vpc-1");
+            hostManager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
             assertTrue(existingNetworks.isEmpty());
             verify(docker, never()).disconnectFromNetworkCmd();
@@ -769,14 +772,14 @@ class VpcNetworkManagerTest {
         VpcNetworkManager dockerHostedManager = dockerHostedManager("floci-container");
         NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
         try {
-            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
-            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
-            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
+            dockerHostedManager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(ACCOUNT, REGION, "vpc-1", "instance-1");
             network.failNextDisconnect.set(true);
 
-            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+            dockerHostedManager.deleteVpcNetwork(ACCOUNT, REGION, "vpc-1");
 
             assertTrue(network.removed.await(5, TimeUnit.SECONDS),
                     "teardown must retry disconnecting Floci before retrying network removal");
@@ -800,7 +803,7 @@ class VpcNetworkManagerTest {
         final CountDownLatch removed = new CountDownLatch(1);
 
         NetworkLifecycle(VpcNetworkManager networkManager, String selfContainerId) {
-            name = networkManager.networkName(REGION, "vpc-1");
+            name = networkManager.networkName(ACCOUNT, REGION, "vpc-1");
             when(docker.createNetworkCmd().exec()).thenAnswer(call -> {
                 existingNetwork(name, "10.0.0.0/16", ourLabels("vpc-1", "4650"), endpoints);
                 return new CreateNetworkResponse();
@@ -866,16 +869,16 @@ class VpcNetworkManagerTest {
     void recreatesALeftoverNetworkWhoseSubnetIsNotTheRangeThisVpcAllocatesFrom() {
         // What a previous run with a different declaration leaves behind: this VPC's own network
         // name, carrying a range that has nothing to do with the addresses now being handed out.
-        String networkName = manager.networkName(REGION, "vpc-1");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "172.20.0.0/16", ourLabels("vpc-1", "4650"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
         assertTrue(Cidr4.parse("10.0.1.0/24").orElseThrow()
                 .containsAddress(Cidr4.parse(address + "/32").orElseThrow().network()));
 
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
 
         assertEquals(List.of(networkName), removedNetworks,
                 "a network routing 172.20/16 cannot carry a 10.0.1.x address, so it is not adopted");
@@ -887,15 +890,15 @@ class VpcNetworkManagerTest {
 
     @Test
     void keepsInstancesOnTheBridgeWhenAStaleNetworkCannotBeRemoved() {
-        String networkName = manager.networkName(REGION, "vpc-1");
+        String networkName = manager.networkName(ACCOUNT, REGION, "vpc-1");
         existingNetwork(networkName, "172.20.0.0/16", ourLabels("vpc-1", "4650"));
         when(docker.removeNetworkCmd(anyString())).thenThrow(new RuntimeException("has active endpoints"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isEmpty(),
+        assertTrue(manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address).isEmpty(),
                 "an unreachable private IP is a documented degradation; an address the network "
                         + "does not route is a wrong answer");
         verify(docker, never()).connectToNetworkCmd();
@@ -905,14 +908,14 @@ class VpcNetworkManagerTest {
 
     @Test
     void aSubnetTooSmallForTenAddressesOfHeadroomStillAllocates() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
         // A /29 holds eight addresses in total, so the usual .10 offset falls off the end of it.
-        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/29");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-tiny", "10.0.9.0/29");
 
-        assertEquals("10.0.9.0/29", manager.effectiveSubnetCidr(REGION, "subnet-tiny").orElseThrow());
+        assertEquals("10.0.9.0/29", manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-tiny").orElseThrow());
         List<String> allocated = new ArrayList<>();
         Optional<String> next;
-        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+        while ((next = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-tiny")).isPresent()) {
             allocated.add(next.get());
         }
         assertEquals(List.of("10.0.9.2", "10.0.9.3", "10.0.9.4", "10.0.9.5", "10.0.9.6"), allocated,
@@ -921,13 +924,13 @@ class VpcNetworkManagerTest {
 
     @Test
     void aSubnetWithNoRoomForAnyHostIsRefusedRatherThanAllocatingNothing() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-nothing", "10.0.9.0/31");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-nothing", "10.0.9.0/31");
 
-        assertTrue(manager.effectiveSubnetCidr(REGION, "subnet-nothing").isEmpty(),
+        assertTrue(manager.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-nothing").isEmpty(),
                 "a subnet that can never hand out an address must not claim a Docker-backed range: "
                         + "the caller has to fall back rather than read empty as exhaustion");
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-nothing").isEmpty());
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-nothing").isEmpty());
     }
 
     @Test
@@ -935,23 +938,23 @@ class VpcNetworkManagerTest {
         // Nothing bounds this config value, and a /30 block has no room for an instance at all.
         when(config.services().ec2().vpcNetworks().fallbackPrefixLength()).thenReturn(30);
 
-        manager.declareVpc(REGION, "vpc-public", "54.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-public", "subnet-a", "54.0.1.0/24");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-public", "54.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-public", "subnet-a", "54.0.1.0/24");
 
-        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(REGION, "vpc-public").orElseThrow()).orElseThrow();
+        Cidr4 effective = Cidr4.parse(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-public").orElseThrow()).orElseThrow();
         assertTrue(effective.prefix() <= VpcNetworkManager.MAX_ALLOCATABLE_PREFIX,
                 "a configured-but-unusable prefix must not leave every substituted VPC empty");
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isPresent(),
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").isPresent(),
                 "the substituted VPC has to be able to hand out an address");
     }
 
     @Test
     void doesNothingWhenDisabled() {
         when(config.services().ec2().vpcNetworks().enabled()).thenReturn(false);
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isEmpty());
-        assertTrue(manager.effectiveVpcCidr(REGION, "vpc-1").isEmpty());
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").isEmpty());
+        assertTrue(manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").isEmpty());
     }
 
     // ─── Startup reconciliation ──────────────────────────────────────────────
@@ -963,7 +966,7 @@ class VpcNetworkManagerTest {
         existingNetwork("floci-vpc-4620-us-east-1-vpc-other", "10.9.0.0/16", ourLabels("vpc-other", "4620"));
         existingNetwork("some-users-network", "10.10.0.0/16", Map.of());
 
-        manager.reconcileOrphans((region, vpcId) -> "vpc-live".equals(vpcId));
+        manager.reconcileOrphans((region, vpcId) -> "vpc-live".equals(vpcId) ? Set.of(ACCOUNT) : Set.of());
 
         assertEquals(List.of("floci-vpc-4650-us-east-1-vpc-dead"), removedNetworks,
                 "a live VPC keeps its network, another emulator's networks are never touched, "
@@ -977,7 +980,7 @@ class VpcNetworkManagerTest {
         existingNetwork("floci-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16",
                 ourLabels("vpc-dead", "4650"), attached);
 
-        manager.reconcileOrphans((region, vpcId) -> false);
+        manager.reconcileOrphans((region, vpcId) -> Set.of());
 
         // Without the disconnect Docker refuses removal with "has active endpoints", and the
         // stale IPAM reservation then pushes the next run's identical CIDR into the fallback pool.
@@ -989,20 +992,99 @@ class VpcNetworkManagerTest {
     void reconcileIsSkippedWhenTurnedOff() {
         when(config.services().ec2().vpcNetworks().reconcileOnStartup()).thenReturn(false);
         existingNetwork("floci-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16", ourLabels("vpc-dead", "4650"));
-        manager.reconcileOrphans((region, vpcId) -> false);
+        manager.reconcileOrphans((region, vpcId) -> Set.of());
         assertTrue(removedNetworks.isEmpty());
     }
 
     @Test
     void aSurvivingNetworkForTheSameVpcIsNotReadAsACollision() {
         // What a Floci restart sees: its own bridge for vpc-1 is still up.
-        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        existingNetwork(manager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16", ourLabels("vpc-1", "4650"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        assertFalse(manager.isSubstituted(REGION, "vpc-1"),
+        assertFalse(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"),
                 "re-planning a VPC must not collide with that VPC's own surviving network");
-        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
+        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").orElseThrow());
+    }
+
+    /**
+     * Two accounts' default VPCs share one id, but each account's VPC is its own: its own binding and its own
+     * network, the non-default account's named with the account, the second's identical CIDR moved to the fallback
+     * pool as overlapping VPCs' are, and deleting one leaves the other.
+     */
+    @Test
+    void twoAccountsVpcsOfOneIdGetANetworkEach() {
+        String vpc = "vpc-default-us-east-1";
+        String subnet = "subnet-default-us-east-1-a";
+        manager.declareVpc(ACCOUNT, REGION, vpc, "172.31.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, vpc, subnet, "172.31.0.0/20");
+        manager.declareVpc(OTHER_ACCOUNT, REGION, vpc, "172.31.0.0/16");
+        manager.declareSubnet(OTHER_ACCOUNT, REGION, vpc, subnet, "172.31.0.0/20");
+
+        assertEquals("172.31.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, vpc).orElseThrow());
+        assertTrue(manager.isSubstituted(OTHER_ACCOUNT, REGION, vpc));
+        String own = manager.networkNameFor(ACCOUNT, REGION, vpc).orElseThrow();
+        String other = manager.networkNameFor(OTHER_ACCOUNT, REGION, vpc).orElseThrow();
+        assertNotEquals(own, other);
+        assertFalse(own.contains(ACCOUNT), own);
+        assertTrue(other.contains(OTHER_ACCOUNT), other);
+        Cidr4 otherRange = Cidr4.parse(manager.effectiveSubnetCidr(OTHER_ACCOUNT, REGION, subnet).orElseThrow())
+                .orElseThrow();
+        String otherAddress = manager.allocatePrivateIp(OTHER_ACCOUNT, REGION, subnet).orElseThrow();
+        assertTrue(otherRange.containsAddress(Cidr4.parse(otherAddress + "/32").orElseThrow().network()));
+        assertTrue(manager.allocatePrivateIp(ACCOUNT, REGION, subnet).orElseThrow().startsWith("172.31."));
+
+        manager.deleteVpcNetwork(OTHER_ACCOUNT, REGION, vpc);
+        assertTrue(manager.effectiveVpcCidr(OTHER_ACCOUNT, REGION, vpc).isEmpty());
+        assertEquals("172.31.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, vpc).orElseThrow());
+    }
+
+    // Catches: another account's surviving network for a VPC of the same id read as this account's own.
+    @Test
+    void anotherAccountsNetworkForTheSameVpcIdIsStillACollision() {
+        Map<String, String> otherAccount = new LinkedHashMap<>(newLabels("vpc-default", "4650"));
+        otherAccount.put("io.floci.account", OTHER_ACCOUNT);
+        existingNetwork(manager.networkName(OTHER_ACCOUNT, REGION, "vpc-default"), "10.0.0.0/16", otherAccount);
+
+        manager.declareVpc(ACCOUNT, REGION, "vpc-default", "10.0.0.0/16");
+
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-default"));
+    }
+
+    /**
+     * A network labelled with an account that no longer declares its VPC is an orphan, even when another account
+     * declares a VPC of the same id, as two accounts' default VPCs do.
+     */
+    @Test
+    void aNetworkLabelledWithAnAccountIsKeptOnlyWhileThatAccountDeclaresItsVpc() {
+        Map<String, String> labelled = new LinkedHashMap<>(newLabels("vpc-9", "4650"));
+        labelled.put("io.floci.account", OTHER_ACCOUNT);
+        String name = manager.networkName(OTHER_ACCOUNT, REGION, "vpc-9");
+        existingNetwork(name, "10.9.0.0/16", labelled);
+
+        manager.reconcileOrphans((region, vpcId) -> Set.of(ACCOUNT));
+
+        assertEquals(List.of(name), removedNetworks);
+    }
+
+    /**
+     * An older version keyed networks by Region and id alone and labelled them with no account. On the first start
+     * after the upgrade, such a network belongs to the account declaring its VPC, the default account first, so a
+     * custom VPC of another account keeps its live network, under the name it had, rather than being reaped.
+     */
+    @Test
+    void anUnlabelledNetworkFromAnOlderVersionIsKeptForTheAccountDeclaringItsVpc() {
+        // The name an older version gave every account's network, which the default account's still has.
+        String legacy = manager.networkName(ACCOUNT, REGION, "vpc-7");
+        existingNetwork(legacy, "10.7.0.0/16", newLabels("vpc-7", "4650"));
+
+        manager.reconcileOrphans((region, vpcId) -> "vpc-7".equals(vpcId) ? Set.of(OTHER_ACCOUNT) : Set.of());
+        manager.declareVpc(OTHER_ACCOUNT, REGION, "vpc-7", "10.7.0.0/16");
+
+        assertTrue(removedNetworks.isEmpty(), "the other account's live network must not be reaped");
+        assertFalse(manager.isSubstituted(OTHER_ACCOUNT, REGION, "vpc-7"), "its own network is no collision");
+        assertEquals(legacy, manager.networkNameFor(OTHER_ACCOUNT, REGION, "vpc-7").orElseThrow());
     }
 
     // Catches: planning a VPC skipping another Region's surviving network for a VPC with the same id,
@@ -1011,13 +1093,13 @@ class VpcNetworkManagerTest {
     void anotherRegionsNetworkForTheSameVpcIdIsStillACollision() {
         Map<String, String> otherRegion = new LinkedHashMap<>(newLabels("vpc-default", "4650"));
         otherRegion.put("io.floci.region", "eu-west-1");
-        existingNetwork(manager.networkName("eu-west-1", "vpc-default"), "10.0.0.0/16", otherRegion);
+        existingNetwork(manager.networkName(ACCOUNT, "eu-west-1", "vpc-default"), "10.0.0.0/16", otherRegion);
 
-        manager.declareVpc(REGION, "vpc-default", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-default", "10.0.0.0/16");
 
-        assertTrue(manager.isSubstituted(REGION, "vpc-default"),
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-default"),
                 "eu-west-1's network for vpc-default holds 10.0.0.0/16; us-east-1's vpc-default cannot reuse it");
-        assertNotEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-default").orElseThrow());
+        assertNotEquals("10.0.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-default").orElseThrow());
     }
 
     // The same rule through the labels a network carried before the io.floci.* keys.
@@ -1027,18 +1109,18 @@ class VpcNetworkManagerTest {
         otherRegion.put("floci_vpc_region", "eu-west-1");
         existingNetwork("floci-aws-vpc-4650-eu-west-1-vpc-default", "10.0.0.0/16", otherRegion);
 
-        manager.declareVpc(REGION, "vpc-default", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-default", "10.0.0.0/16");
 
-        assertTrue(manager.isSubstituted(REGION, "vpc-default"));
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-default"));
     }
 
     @Test
     void createdNetworkCarriesTheIdentityLabelsAndTheirLegacyAliases() {
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address);
+        manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address);
 
         Map<String, String> expected = new LinkedHashMap<>();
         expected.put("floci", "true");
@@ -1046,6 +1128,7 @@ class VpcNetworkManagerTest {
         expected.put("io.floci", "aws");
         expected.put("io.floci.service", "ec2");
         expected.put("io.floci.resource-id", "vpc-1");
+        expected.put("io.floci.account", ACCOUNT);
         expected.put("io.floci.region", REGION);
         expected.put("io.floci.component", "vpc-network");
         expected.put("io.floci.owner", "4650");
@@ -1059,11 +1142,11 @@ class VpcNetworkManagerTest {
     @Test
     void aNamespacedEmulatorOwnsItsNetworksByNamespaceAndPort() {
         when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
-        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
-        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(ACCOUNT, REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(ACCOUNT, REGION, "subnet-a").orElseThrow();
 
-        manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address);
+        manager.attach(ACCOUNT, REGION, "vpc-1", "subnet-a", "container-1", address);
 
         Map<String, String> labels = createdNetworkLabels();
         assertEquals("alpha/4650", labels.get("io.floci.owner"));
@@ -1087,13 +1170,13 @@ class VpcNetworkManagerTest {
     @Test
     void aPreUpgradeNetworkOfThisNamespacedEmulatorIsNotReadAsACollision() {
         when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
-        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", preUpgradeLabels("vpc-1", "alpha"));
+        existingNetwork(manager.networkName(ACCOUNT, REGION, "vpc-1"), "10.0.0.0/16", preUpgradeLabels("vpc-1", "alpha"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        assertFalse(manager.isSubstituted(REGION, "vpc-1"),
+        assertFalse(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"),
                 "a network this namespace created before the owner label took the namespace is still its own");
-        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
+        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(ACCOUNT, REGION, "vpc-1").orElseThrow());
     }
 
     @Test
@@ -1106,7 +1189,7 @@ class VpcNetworkManagerTest {
         existingNetwork("floci-aws-vpc-4650-us-east-1-vpc-plain", "10.9.0.0/16",
                 preUpgradeLabels("vpc-plain", null));
 
-        manager.reconcileOrphans((region, vpcId) -> false);
+        manager.reconcileOrphans((region, vpcId) -> Set.of());
 
         assertEquals(List.of("floci-aws-alpha-vpc-4650-us-east-1-vpc-dead"), removedNetworks,
                 "the bare port in the legacy owner key is shared by every deployment on it, so only the "
@@ -1119,7 +1202,7 @@ class VpcNetworkManagerTest {
         existingNetwork("vpc-legacy", "10.8.0.0/16", ourLabels("vpc-legacy", "4650"));
         existingNetwork("vpc-both", "10.9.0.0/16", bothLabels("vpc-both", "4650"));
 
-        manager.reconcileOrphans((region, vpcId) -> false);
+        manager.reconcileOrphans((region, vpcId) -> Set.of());
 
         assertEquals(List.of("vpc-new", "vpc-legacy", "vpc-both"), removedNetworks,
                 "each network is removed once, however many of the queries list it");
@@ -1141,7 +1224,7 @@ class VpcNetworkManagerTest {
         vpcDisagrees.put("floci_vpc_id", "vpc-live");
         existingNetwork("vpc-disagrees", "10.8.0.0/16", vpcDisagrees);
 
-        manager.reconcileOrphans((region, vpcId) -> "vpc-live".equals(vpcId));
+        manager.reconcileOrphans((region, vpcId) -> "vpc-live".equals(vpcId) ? Set.of(ACCOUNT) : Set.of());
 
         assertTrue(removedNetworks.isEmpty());
     }
@@ -1155,7 +1238,7 @@ class VpcNetworkManagerTest {
         // longer names this deployment, so it is left alone rather than deleted.
         existingNetwork("bare-port", "10.9.0.0/16", ourLabels("vpc-c", "4650"));
 
-        manager.reconcileOrphans((region, vpcId) -> false);
+        manager.reconcileOrphans((region, vpcId) -> Set.of());
 
         assertEquals(List.of("alpha-dead"), removedNetworks);
     }
@@ -1165,9 +1248,9 @@ class VpcNetworkManagerTest {
         when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
         existingNetwork("beta-vpc-1", "10.0.0.0/16", bothLabels("vpc-1", "beta/4650"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        assertTrue(manager.isSubstituted(REGION, "vpc-1"),
+        assertTrue(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"),
                 "a sibling deployment's live network holds that range; it is not this VPC's own");
     }
 
@@ -1176,9 +1259,9 @@ class VpcNetworkManagerTest {
         when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
         existingNetwork("alpha-vpc-1", "10.0.0.0/16", newLabels("vpc-1", "alpha/4650"));
 
-        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareVpc(ACCOUNT, REGION, "vpc-1", "10.0.0.0/16");
 
-        assertFalse(manager.isSubstituted(REGION, "vpc-1"));
+        assertFalse(manager.isSubstituted(ACCOUNT, REGION, "vpc-1"));
     }
 
     private Map<String, String> createdNetworkLabels() {

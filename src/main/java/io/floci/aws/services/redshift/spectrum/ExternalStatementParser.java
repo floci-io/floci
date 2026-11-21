@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.core.common.SqlParameterParser;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
@@ -14,11 +15,17 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ExternalStatementParser {
     private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
+    private static final Pattern CREATE_KINESIS_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s+FROM\\s+KINESIS(?:\\s+REGION\\s+'((?:''|[^'])*)')?\\s+IAM_ROLE\\s+(.+?)\\s*;?\\s*$");
     private static final Pattern CREATE_EXTERNAL_TABLE = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\b.*");
     private static final Pattern CREATE_EXTERNAL = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\b.*");
     private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\(");
     private static final String NAME = "(\"(?:\"\"|[^\"])+\"|[^.;,\\s\"()]+)";
+    private static final Pattern CREATE_MSK_SCHEMA_HEAD = Pattern.compile(
+            "(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?" + NAME + "\\s+FROM\\s+MSK\\b(.*?)\\s*;?\\s*$");
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+" + NAME + "\\s*\\.\\s*" + NAME + "\\s*\\(");
+    private static final Pattern CREATE_VIEW = Pattern.compile("(?is)^\\s*CREATE\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s+(?:BACKUP\\s+(?:YES|NO)\\s+)?(?:AUTO\\s+REFRESH\\s+(YES|NO)\\s+)?AS\\s+((?:SELECT|WITH)\\b.*?)\\s*;?\\s*$");
+    private static final Pattern REFRESH_VIEW = Pattern.compile("(?is)^\\s*REFRESH\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*;?\\s*$");
+    private static final Pattern DROP_VIEW = Pattern.compile("(?is)^\\s*DROP\\s+MATERIALIZED\\s+VIEW\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?" + NAME + "\\.\\s*" + NAME + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern TABLE_PROPERTIES = Pattern.compile("(?is)(?:TBLPROPERTIES|TABLE\\s+PROPERTIES)\\s*\\(");
@@ -41,16 +48,43 @@ public class ExternalStatementParser {
         String text = stripLeadingComments(sql);
         Matcher schema = CREATE_SCHEMA.matcher(text);
         if (schema.matches()) {
-            String role = schema.group(4).trim();
-            if (role.equalsIgnoreCase("default")) {
-                throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
-            }
-            if (!QUOTED_LITERAL.matcher(role).matches()) {
-                throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
-            }
             return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(2)),
-                    schema.group(3).replace("''", "'"), unquote(role), schema.group(5) != null,
+                    schema.group(3).replace("''", "'"), roleArn(schema.group(4)), schema.group(5) != null,
                     schema.group(1) != null));
+        }
+        Matcher kinesis = CREATE_KINESIS_SCHEMA.matcher(text);
+        if (kinesis.matches()) {
+            String region = kinesis.group(3);
+            return Optional.of(new ExternalStatement.CreateKinesisSchema(identifier(kinesis.group(2)),
+                    region == null ? null : region.replace("''", "'"), roleArn(kinesis.group(4)),
+                    kinesis.group(1) != null));
+        }
+        // comments are separators here; the view's query is stored and sent again on every refresh
+        String viewText = withoutComments(text);
+        Matcher msk = CREATE_MSK_SCHEMA_HEAD.matcher(viewText);
+        if (msk.matches()) {
+            return Optional.of(parseMskSchema(identifier(msk.group(2)), msk.group(1) != null, msk.group(3)));
+        }
+        Matcher createView = CREATE_VIEW.matcher(viewText);
+        if (createView.matches()) {
+            if (hasStatementSeparator(createView.group(4))) {
+                throw new SpectrumSqlException("42601",
+                        "A materialized view query must be a single statement");
+            }
+            return Optional.of(new ExternalStatement.CreateStreamingView(qualifier(createView.group(1), createView.group(2)),
+                    objectName(createView.group(1), createView.group(2)), "YES".equalsIgnoreCase(createView.group(3)),
+                    createView.group(4).replaceFirst("[\\s;]+$", "")));
+        }
+        Matcher refreshView = REFRESH_VIEW.matcher(viewText);
+        if (refreshView.matches()) {
+            return Optional.of(new ExternalStatement.RefreshView(qualifier(refreshView.group(1), refreshView.group(2)),
+                    objectName(refreshView.group(1), refreshView.group(2))));
+        }
+        Matcher dropView = DROP_VIEW.matcher(viewText);
+        if (dropView.matches()) {
+            return Optional.of(new ExternalStatement.DropView(qualifier(dropView.group(2), dropView.group(3)),
+                    objectName(dropView.group(2), dropView.group(3)), dropView.group(1) != null,
+                    "CASCADE".equalsIgnoreCase(dropView.group(4))));
         }
         if (CREATE_EXTERNAL_TABLE.matcher(text).matches()) {
             return Optional.of(parseTable(text));
@@ -121,6 +155,163 @@ public class ExternalStatementParser {
         Map<String, String> properties = properties(tail);
         return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions,
                 format, location, delimiter, serde, properties, serdeProperties(tail));
+    }
+
+    /** The SQL with each comment outside a quoted string or identifier replaced by a space. */
+    static String withoutComments(String sql) {
+        return SqlParameterParser.stripComments(sql, SqlParameterParser.Options.REDSHIFT);
+    }
+
+    /** True when a statement follows a {@code ;} that sits outside a quoted string or identifier. */
+    static boolean hasStatementSeparator(String sql) {
+        return SqlParameterParser.isMultiStatement(sql, SqlParameterParser.Options.REDSHIFT);
+    }
+
+    /** The schema of {@code first.second}, null for a bare name. */
+    private static String qualifier(String first, String second) {
+        return second == null ? null : identifier(first);
+    }
+
+    private static String objectName(String first, String second) {
+        return identifier(second == null ? first : second);
+    }
+
+    private static String roleArn(String clause) {
+        String role = clause.trim();
+        if (role.equalsIgnoreCase("default")) {
+            throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
+        }
+        if (!QUOTED_LITERAL.matcher(role).matches()) {
+            throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
+        }
+        String arn = unquote(role);
+        if (arn.isBlank()) {
+            throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
+        }
+        return arn;
+    }
+
+    private static ExternalStatement.CreateMskSchema parseMskSchema(String schemaName, boolean ifNotExists,
+                                                                    String tail) {
+        String iamRoleArn = null;
+        String authentication = null;
+        String clusterArn = null;
+        int pos = 0;
+        int length = tail.length();
+        while (true) {
+            pos = skipWhitespace(tail, pos);
+            if (pos >= length) {
+                break;
+            }
+            int keyEnd = readKeywordEnd(tail, pos);
+            String keyword = tail.substring(pos, keyEnd).toUpperCase(Locale.ROOT);
+            pos = skipWhitespace(tail, keyEnd);
+            switch (keyword) {
+                case "IAM_ROLE" -> {
+                    if (iamRoleArn != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate IAM_ROLE clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "IAM_ROLE");
+                    pos = slice.end();
+                    iamRoleArn = roleArn(slice.text());
+                }
+                case "AUTHENTICATION" -> {
+                    if (authentication != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate AUTHENTICATION clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "AUTHENTICATION");
+                    pos = slice.end();
+                    String mode = slice.text().trim();
+                    if (mode.equalsIgnoreCase("iam")) {
+                        authentication = "IAM";
+                    } else if (mode.equalsIgnoreCase("none")) {
+                        authentication = "NONE";
+                    } else if (mode.equalsIgnoreCase("mtls")) {
+                        throw new SpectrumSqlException("0A000", "AUTHENTICATION mtls is not supported");
+                    } else {
+                        throw new SpectrumSqlException("42601", "AUTHENTICATION must be iam, none, or mtls");
+                    }
+                }
+                case "CLUSTER_ARN" -> {
+                    if (clusterArn != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate CLUSTER_ARN clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "CLUSTER_ARN");
+                    pos = slice.end();
+                    clusterArn = requireQuotedLiteral(slice.text(), "CLUSTER_ARN must be a single quoted cluster ARN");
+                }
+                case "URI", "AUTHENTICATION_ARN", "SECRET_ARN" ->
+                        throw new SpectrumSqlException("0A000", keyword + " is not supported for MSK external schemas");
+                default -> throw new SpectrumSqlException("42601",
+                        "Unexpected clause in CREATE EXTERNAL SCHEMA FROM MSK: " + keyword);
+            }
+        }
+        if (iamRoleArn == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL SCHEMA FROM MSK requires IAM_ROLE");
+        }
+        if (authentication == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL SCHEMA FROM MSK requires AUTHENTICATION");
+        }
+        if (clusterArn == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL SCHEMA FROM MSK requires CLUSTER_ARN");
+        }
+        return new ExternalStatement.CreateMskSchema(schemaName, iamRoleArn, authentication,
+                clusterArn, ifNotExists);
+    }
+
+    private record TokenSlice(String text, int end) { }
+
+    private static int skipWhitespace(String text, int pos) {
+        while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+            pos++;
+        }
+        return pos;
+    }
+
+    private static int readKeywordEnd(String text, int pos) {
+        int index = pos;
+        while (index < text.length() && !Character.isWhitespace(text.charAt(index))) {
+            index++;
+        }
+        return index;
+    }
+
+    private static TokenSlice readValueToken(String text, int pos, String clause) {
+        if (pos >= text.length()) {
+            throw new SpectrumSqlException("42601", "Missing value for " + clause);
+        }
+        if (text.charAt(pos) == '\'') {
+            int index = pos + 1;
+            while (index < text.length()) {
+                if (text.charAt(index) == '\'') {
+                    if (index + 1 < text.length() && text.charAt(index + 1) == '\'') {
+                        index += 2;
+                    } else {
+                        return new TokenSlice(text.substring(pos, index + 1), index + 1);
+                    }
+                } else {
+                    index++;
+                }
+            }
+            throw new SpectrumSqlException("42601", "Unterminated string literal for " + clause);
+        }
+        int end = pos;
+        while (end < text.length() && !Character.isWhitespace(text.charAt(end))) {
+            end++;
+        }
+        return new TokenSlice(text.substring(pos, end), end);
+    }
+
+    private static String requireQuotedLiteral(String token, String message) {
+        String trimmed = token.trim();
+        if (!QUOTED_LITERAL.matcher(trimmed).matches()) {
+            throw new SpectrumSqlException("42601", message);
+        }
+        String value = unquote(trimmed);
+        if (value.isBlank()) {
+            throw new SpectrumSqlException("42601", message);
+        }
+        return value;
     }
 
     private static String stripLeadingComments(String sql) {

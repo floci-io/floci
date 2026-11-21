@@ -33,4 +33,27 @@ public final class LambdaRuntimeEnv {
         }
         return env;
     }
+
+    /**
+     * Adds the function's own {@code Environment} and its version after the SDK baseline. Credential
+     * injection is all-or-nothing: a partial override (only {@code AWS_ACCESS_KEY_ID}, say) must never
+     * join the baseline's other two values, which would pair a user-chosen key with the baseline's
+     * secret and session token, a tuple nothing can verify. The function's credentials apply only as a
+     * complete triad, and only without an execution role session, which is then the authoritative
+     * credential source.
+     */
+    public static void addFunctionEnvironment(List<String> env, LambdaFunction fn,
+                                              boolean hasExecutionRoleCredentials) {
+        if (fn.getEnvironment() != null) {
+            boolean functionCredentialsApply = !hasExecutionRoleCredentials
+                    && ContainerLauncher.definesFullCredentialTriad(fn.getEnvironment());
+            fn.getEnvironment().forEach((key, value) -> {
+                if (!ContainerLauncher.isAwsCredentialVariable(key) || functionCredentialsApply) {
+                    env.add(key + "=" + value);
+                }
+            });
+        }
+        env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
+        env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
+    }
 }

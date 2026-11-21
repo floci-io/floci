@@ -1,11 +1,16 @@
 package io.floci.aws.services.paymentcryptography;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -15,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyMembers.members;
 
 /**
  * The Payment Cryptography control plane.
@@ -27,6 +34,15 @@ public class PaymentCryptographyJsonHandler {
 
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
+
+    /**
+     * The reader of a resource policy, which arrives as a JSON document in a string.
+     *
+     * <p>The whole string is what the key keeps, so a string that carries anything after
+     * the document is not one policy and is refused.
+     */
+    private static final ObjectMapper POLICY_READER = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final PaymentCryptographyService service;
 
@@ -52,6 +68,9 @@ public class PaymentCryptographyJsonHandler {
             case "GetKey" -> () -> getKey(request, region);
             case "ListKeys" -> () -> listKeys(request, region);
             case "DeleteKey" -> () -> deleteKey(request, region);
+            case "RestoreKey" -> () -> restoreKey(request, region);
+            case "StartKeyUsage" -> () -> startKeyUsage(request, region);
+            case "StopKeyUsage" -> () -> stopKeyUsage(request, region);
             case "CreateAlias" -> () -> createAlias(request, region);
             case "GetAlias" -> () -> getAlias(request, region);
             case "ListAliases" -> () -> listAliases(request, region);
@@ -62,9 +81,21 @@ public class PaymentCryptographyJsonHandler {
             case "GetPublicKeyCertificate" -> () -> getPublicKeyCertificate(request, region);
             case "GetParametersForImport" -> () -> getParametersForImport(request, region);
             case "GetParametersForExport" -> () -> getParametersForExport(request, region);
+            case "AddKeyReplicationRegions" -> () -> addKeyReplicationRegions(request, region);
+            case "RemoveKeyReplicationRegions" -> () -> removeKeyReplicationRegions(request, region);
+            case "GetDefaultKeyReplicationRegions" -> () -> getDefaultKeyReplicationRegions(request, region);
+            case "EnableDefaultKeyReplicationRegions" -> () -> enableDefaultKeyReplicationRegions(request, region);
+            case "DisableDefaultKeyReplicationRegions" -> () -> disableDefaultKeyReplicationRegions(request, region);
+            case "GetCertificateSigningRequest" -> () -> getCertificateSigningRequest(request, region);
             case "TagResource" -> () -> tagResource(request, region);
             case "UntagResource" -> () -> untagResource(request, region);
             case "ListTagsForResource" -> () -> listTagsForResource(request, region);
+            case "PutResourcePolicy" -> () -> putResourcePolicy(request, region);
+            case "GetResourcePolicy" -> () -> getResourcePolicy(request, region);
+            case "DeleteResourcePolicy" -> () -> deleteResourcePolicy(request, region);
+            case "AssociateMpaTeam" -> () -> associateMpaTeam(request, region);
+            case "GetMpaTeamAssociation" -> () -> getMpaTeamAssociation(request, region);
+            case "DisassociateMpaTeam" -> () -> disassociateMpaTeam(request, region);
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -117,7 +148,8 @@ public class PaymentCryptographyJsonHandler {
             declared.put("DeriveKeyUsage", request.path("DeriveKeyUsage").asText());
         }
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
-                request.path("Exportable").asBoolean(false), enabled, tagsOf(request));
+                request.path("Exportable").asBoolean(false), enabled, tagsOf(request),
+                stringsOf(request, "ReplicationRegions"));
         return Map.of("Key", keyObject(key));
     }
 
@@ -157,14 +189,38 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * Deletes a key and answers with the key, as the reference does.
+     * Schedules a key for deletion and answers with the key, as the reference does.
      *
-     * <p>The waiting period the reference offers is read, and the key is
-     * deleted at once all the same: the service deletes a key the moment it
-     * is asked to.
+     * <p>The waiting period is the one the request names, or the reference's default of
+     * seven days. The model settles the range, so a period outside it is refused before
+     * the key is touched.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        int days = request.hasNonNull("DeleteKeyInDays")
+                ? request.path("DeleteKeyInDays").asInt() : 7;
+        PaymentCryptographyKey key = service.deleteKey(
+                requiredKey(request, region, KEY_IDENTIFIER), days);
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Cancels the scheduled deletion of a key. */
+    private Map<String, Object> restoreKey(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.restoreKey(
+                requiredKey(request, region, KEY_IDENTIFIER));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Starts the use of a key. */
+    private Map<String, Object> startKeyUsage(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.startKeyUsage(
+                requiredKey(request, region, KEY_IDENTIFIER));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Stops the use of a key. */
+    private Map<String, Object> stopKeyUsage(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.stopKeyUsage(
+                requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
 
@@ -267,6 +323,214 @@ public class PaymentCryptographyJsonHandler {
         return out;
     }
 
+    // ---- resource policies ----------------------------------------------------
+
+    /**
+     * Attaches or replaces the resource-based policy of a key.
+     *
+     * <p>The policy is a JSON document in a string, and a document that does not parse is
+     * refused before it is attached. A policy that hands the key to everyone and carries no
+     * condition is refused with the reference's own error, so the key is never left open by
+     * a policy no one bounds.
+     */
+    private Map<String, Object> putResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        String policy = request.path("Policy").asText();
+        JsonNode document = readPolicy(policy);
+        List<JsonNode> statements = PolicyDocument.statementsOf(document);
+        if (grantsPublicAccess(statements)) {
+            throw new AwsException("PublicPolicyException",
+                    "The resource policy grants public access to the key", 400);
+        }
+        if (!namesTheKey(grantsOf(statements), key.getArn())) {
+            throw new AwsException("ValidationException",
+                    "The resource policy names a resource that is not the key it is attached to", 400);
+        }
+        return policyAnswer(service.putResourcePolicy(key, policy));
+    }
+
+    /**
+     * The policy document a request carries.
+     *
+     * <p>The policy is a JSON document in a string, and a document that does not parse, or
+     * that carries anything after the document, is refused before it is attached: the whole
+     * string is what the key keeps, so a string that is not one document is not a policy.
+     *
+     * @param policy the policy as it was given
+     * @return the policy document
+     */
+    private static JsonNode readPolicy(String policy) {
+        JsonNode document;
+        try {
+            document = POLICY_READER.readTree(policy);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("ValidationException",
+                    "Policy is not a valid JSON policy document: " + e.getOriginalMessage(), 400);
+        }
+        if (document == null || !document.isObject()) {
+            throw new AwsException("ValidationException",
+                    "Policy is not a valid JSON policy document", 400);
+        }
+        return document;
+    }
+
+    /** The resource-based policy of a key, which a key without one does not have. */
+    private Map<String, Object> getResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        return policyAnswer(service.resourcePolicy(key));
+    }
+
+    /** Removes the resource-based policy of a key. */
+    private Map<String, Object> deleteResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        service.deleteResourcePolicy(key);
+        return Map.of();
+    }
+
+    private static Map<String, Object> policyAnswer(PaymentCryptographyService.ResourcePolicy policy) {
+        return Map.of("ResourceArn", policy.arn(), "Policy", policy.policy());
+    }
+
+    /**
+     * Whether every statement of a policy names the key the policy is attached to.
+     *
+     * <p>The reference says the resource of a policy must be every resource or the ARN of
+     * the key the policy is on, so a policy that names another key is refused.
+     *
+     * @param statements the statements of the policy
+     * @param arn the ARN of the key the policy is attached to
+     * @return whether the policy names the key
+     */
+    private static boolean namesTheKey(List<JsonNode> statements, String arn) {
+        for (JsonNode statement : statements) {
+            if (!statementNamesTheKey(statement, arn)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The statements of a policy that grant something.
+     *
+     * <p>The grammar a resource policy follows names an effect, a principal, an action and
+     * a resource in every statement, and a document that carries no statement, or a
+     * statement that names none of them, grants nothing, so it is refused rather than
+     * stored on the key.
+     *
+     * @param statements the statements of the policy
+     * @return the statements
+     */
+    private static List<JsonNode> grantsOf(List<JsonNode> statements) {
+        if (statements.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "The resource policy carries no statement", 400);
+        }
+        for (JsonNode statement : statements) {
+            if (!carriesTheElementsOfAGrant(statement)) {
+                throw new AwsException("ValidationException",
+                        "The resource policy carries a statement that names no effect, principal, "
+                                + "action or resource", 400);
+            }
+        }
+        return statements;
+    }
+
+    /** Whether a statement names the elements a grant is made of. */
+    private static boolean carriesTheElementsOfAGrant(JsonNode statement) {
+        String effect = statement.path("Effect").asText();
+        return ("Allow".equalsIgnoreCase(effect) || "Deny".equalsIgnoreCase(effect))
+                && (statement.hasNonNull("Principal") || statement.hasNonNull("NotPrincipal"))
+                && (statement.hasNonNull("Action") || statement.hasNonNull("NotAction"))
+                && statement.hasNonNull("Resource");
+    }
+
+    /** Whether a statement names the key, either alone or in a list of resources. */
+    private static boolean statementNamesTheKey(JsonNode statement, String arn) {
+        JsonNode resource = statement.path("Resource");
+        if (resource.isTextual()) {
+            return "*".equals(resource.asText()) || arn.equals(resource.asText());
+        }
+        if (resource.isArray()) {
+            for (JsonNode entry : resource) {
+                if (!"*".equals(entry.asText()) && !arn.equals(entry.asText())) {
+                    return false;
+                }
+            }
+            return resource.size() > 0;
+        }
+        return false;
+    }
+
+    /**
+     * Whether a policy hands the key to every principal without a condition.
+     *
+     * <p>The reference refuses such a policy, so the service does too: an Allow statement
+     * whose principal is everyone, and that carries no condition, is public access.
+     *
+     * @param statements the statements of the policy
+     * @return whether the policy grants public access
+     */
+    private static boolean grantsPublicAccess(List<JsonNode> statements) {
+        for (JsonNode statement : statements) {
+            if (statementGrantsPublicAccess(statement)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean statementGrantsPublicAccess(JsonNode statement) {
+        if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText())) {
+            return false;
+        }
+        if (!PolicyDocument.grantsToEveryone(statement) || statement.has("Condition")) {
+            return false;
+        }
+        return true;
+    }
+
+    // ---- multi-party approval ------------------------------------------------
+
+    /**
+     * Associates a Multi-Party Approval team with a protected operation.
+     *
+     * <p>An operation has one team, so a second association replaces the first, as the
+     * reference replaces one.
+     */
+    private Map<String, Object> associateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam(region,
+                request.path("Action").asText(), request.path("MpaTeamArn").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The Multi-Party Approval team associated with a protected operation. */
+    private Map<String, Object> getMpaTeamAssociation(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.mpaTeamAssociation(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /**
+     * Removes the Multi-Party Approval team associated with a protected operation.
+     *
+     * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING}.
+     */
+    private Map<String, Object> disassociateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.disassociateMpaTeam(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The association, as the model names its members. */
+    private static Map<String, Object> mpaAssociation(PaymentCryptographyMpaTeamAssociation association) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Action", association.getAction());
+        out.put("MpaTeamArn", association.getMpaTeamArn());
+        out.put("AssociationState", association.getAssociationState());
+        return out;
+    }
+
     /** The tags of a request, as the name and the value of each. */
     private static Map<String, String> tagsOf(JsonNode request) {
         Map<String, String> tags = new LinkedHashMap<>();
@@ -281,6 +545,35 @@ public class PaymentCryptographyJsonHandler {
             }
         }
         return tags;
+    }
+
+    // ---- certificate signing requests ----------------------------------------
+
+    /**
+     * The certificate signing request a key pair signs.
+     *
+     * <p>The subject is the metadata the request names, and the digest is the one the request
+     * names, so the request is the one the caller asked for. The answer carries the PEM of
+     * the request, base64 encoded, as the reference's own answer carries it.
+     */
+    private Map<String, Object> getCertificateSigningRequest(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
+        String signingRequest = service.certificateSigningRequest(key,
+                request.path("SigningAlgorithm").asText(),
+                subjectOf(request.path("CertificateSubject")));
+        return Map.of("CertificateSigningRequest", signingRequest);
+    }
+
+    /** The subject of a request, as the members the model names. */
+    private static Map<String, String> subjectOf(JsonNode subject) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String member : PaymentCryptographyCertificateRequest.subjectMembers()) {
+            JsonNode value = subject.get(member);
+            if (value != null && !value.isNull()) {
+                fields.put(member, value.asText());
+            }
+        }
+        return fields;
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -360,6 +653,10 @@ public class PaymentCryptographyJsonHandler {
         out.put("KeyCheckValue", key.getKeyCheckValue());
         out.put("Enabled", key.isEnabled());
         out.put("Exportable", key.isExportable());
+        if (key.getMultiRegionKeyType() != null) {
+            out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+            out.put("PrimaryRegion", key.getPrimaryRegion());
+        }
         return out;
     }
 
@@ -379,11 +676,31 @@ public class PaymentCryptographyJsonHandler {
         out.put("Exportable", key.isExportable());
         out.put("CreateTimestamp", key.getCreateTimestamp());
         out.put("UsageStartTimestamp", key.getUsageStartTimestamp());
+        if (key.getUsageStopTimestamp() > 0) {
+            out.put("UsageStopTimestamp", key.getUsageStopTimestamp());
+        }
         if (key.getDeletePendingTimestamp() > 0) {
             out.put("DeletePendingTimestamp", key.getDeletePendingTimestamp());
         }
         if (key.getDeleteTimestamp() > 0) {
             out.put("DeleteTimestamp", key.getDeleteTimestamp());
+        }
+        if (key.getMultiRegionKeyType() != null) {
+            out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+            out.put("PrimaryRegion", key.getPrimaryRegion());
+            if ("PRIMARY".equals(key.getMultiRegionKeyType())) {
+                // The replication status and the defaults flag belong to the primary: a
+                // replica answers with the kind of the key and its primary Region alone,
+                // as the reference's own answer shows.
+                Map<String, Object> status = new LinkedHashMap<>();
+                for (String target : key.getReplicationRegions()) {
+                    // The model's replication states are IN_PROGRESS, DELETE_IN_PROGRESS, FAILED
+                    // and SYNCHRONIZED. A replica that is there is a key that is in sync.
+                    status.put(target, Map.of("Status", "SYNCHRONIZED"));
+                }
+                out.put("ReplicationStatus", status);
+                out.put("UsingDefaultReplicationRegions", key.isUsingDefaultReplicationRegions());
+            }
         }
         return out;
     }
@@ -463,7 +780,8 @@ public class PaymentCryptographyJsonHandler {
                 "imports");
         PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)),
                 request.path("KeyCheckValueAlgorithm").asText(),
-                request.path("Enabled").asBoolean(true), tagsOf(request));
+                request.path("Enabled").asBoolean(true), tagsOf(request),
+                stringsOf(request, "ReplicationRegions"));
         return Map.of("Key", keyObject(key));
     }
 
@@ -515,35 +833,66 @@ public class PaymentCryptographyJsonHandler {
         return form;
     }
 
-    /** The members of a form, as the service reads them. */
-    private static Map<String, Object> members(JsonNode node) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        if (node == null || !node.isObject()) {
-            return out;
-        }
-        node.properties().forEach(entry -> out.put(entry.getKey(), value(entry.getValue())));
-        return out;
+    /**
+     * The key with the regions the request names added to its replication.
+     */
+    private Map<String, Object> addKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.addKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
     }
 
-    /** One member of a form, as the service reads it. */
-    private static Object value(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null;
+    /**
+     * The key with the regions the request names taken away from its replication.
+     */
+    private Map<String, Object> removeKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.removeKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The regions the account replicates a new key to by default.
+     *
+     * <p>The settings are the ones of the Region the request is in, so each Region has its
+     * own.
+     */
+    private Map<String, Object> getDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions", service.defaultReplicationRegions(region));
+    }
+
+    /** Turns the default replication of the account on for the regions the request names. */
+    private Map<String, Object> enableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.enableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
+    }
+
+    /** Turns the default replication of the account off for the regions the request names. */
+    private Map<String, Object> disableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.disableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
+    }
+
+    /**
+     * The strings of a request, such as the replication regions.
+     *
+     * <p>The shape check settles that the member is a list of names, so a request that names a
+     * region that is not one is refused before this reads it.
+     *
+     * @param request the request the member is in
+     * @param member the member to read
+     */
+    private static List<String> stringsOf(JsonNode request, String member) {
+        JsonNode declared = request.get(member);
+        if (declared == null || declared.isNull()) {
+            return new ArrayList<>();
         }
-        if (node.isObject()) {
-            return members(node);
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : declared) {
+            values.add(value.asText());
         }
-        if (node.isArray()) {
-            List<Object> values = new ArrayList<>();
-            node.forEach(child -> values.add(value(child)));
-            return values;
-        }
-        if (node.isBoolean()) {
-            return node.asBoolean();
-        }
-        if (node.isNumber()) {
-            return node.asText();
-        }
-        return node.asText();
+        return values;
     }
 }

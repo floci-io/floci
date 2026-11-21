@@ -1,0 +1,958 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_emr_containers_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "CancelJobRun": "CancelJobRunRequest",
+    "CreateJobTemplate": "CreateJobTemplateRequest",
+    "CreateManagedEndpoint": "CreateManagedEndpointRequest",
+    "CreateSecurityConfiguration": "CreateSecurityConfigurationRequest",
+    "CreateVirtualCluster": "CreateVirtualClusterRequest",
+    "DeleteJobTemplate": "DeleteJobTemplateRequest",
+    "DeleteManagedEndpoint": "DeleteManagedEndpointRequest",
+    "DeleteSecurityConfiguration": "DeleteSecurityConfigurationRequest",
+    "DeleteVirtualCluster": "DeleteVirtualClusterRequest",
+    "DescribeJobRun": "DescribeJobRunRequest",
+    "DescribeJobTemplate": "DescribeJobTemplateRequest",
+    "DescribeManagedEndpoint": "DescribeManagedEndpointRequest",
+    "DescribeSecurityConfiguration": "DescribeSecurityConfigurationRequest",
+    "DescribeVirtualCluster": "DescribeVirtualClusterRequest",
+    "GetManagedEndpointSessionCredentials": "GetManagedEndpointSessionCredentialsRequest",
+    "ListJobRuns": "ListJobRunsRequest",
+    "ListJobTemplates": "ListJobTemplatesRequest",
+    "ListManagedEndpoints": "ListManagedEndpointsRequest",
+    "ListSecurityConfigurations": "ListSecurityConfigurationsRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListVirtualClusters": "ListVirtualClustersRequest",
+    "StartJobRun": "StartJobRunRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateVirtualCluster": "UpdateVirtualClusterRequest"
+  },
+  "shapes": {
+    "ACMCertArn": {
+      "type": "string",
+      "min": 44,
+      "max": 2048,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):acm:.+:(\\d{12}):certificate/.+$"
+    },
+    "AllowAWSToRetainLogs": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    },
+    "AuthenticationConfiguration": {
+      "type": "structure",
+      "members": {
+        "identityCenterConfiguration": "IdentityCenterConfiguration",
+        "iamConfiguration": "IAMConfiguration"
+      }
+    },
+    "AuthorizationConfiguration": {
+      "type": "structure",
+      "members": {
+        "lakeFormationConfiguration": "LakeFormationConfiguration",
+        "encryptionConfiguration": "EncryptionConfiguration"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "CancelJobRunRequest": {
+      "type": "structure",
+      "required": [
+        "id",
+        "virtualClusterId"
+      ],
+      "members": {
+        "id": "ResourceIdString",
+        "virtualClusterId": "ResourceIdString"
+      }
+    },
+    "CertificateProviderType": {
+      "type": "string",
+      "enum": [
+        "PEM"
+      ]
+    },
+    "ClientToken": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": ".*\\S.*"
+    },
+    "CloudWatchMonitoringConfiguration": {
+      "type": "structure",
+      "required": [
+        "logGroupName"
+      ],
+      "members": {
+        "logGroupName": "LogGroupName",
+        "logStreamNamePrefix": "String256"
+      }
+    },
+    "ClusterId": {
+      "type": "string",
+      "min": 1,
+      "max": 100,
+      "pattern": "^[0-9A-Za-z][A-Za-z0-9\\-_]*"
+    },
+    "Configuration": {
+      "type": "structure",
+      "required": [
+        "classification"
+      ],
+      "members": {
+        "classification": "String1024",
+        "properties": "SensitivePropertiesMap",
+        "configurations": "ConfigurationList"
+      }
+    },
+    "ConfigurationList": {
+      "type": "list",
+      "max": 100,
+      "member": "Configuration"
+    },
+    "ConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "applicationConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "MonitoringConfiguration"
+      }
+    },
+    "ContainerInfo": {
+      "type": "structure",
+      "members": {
+        "eksInfo": "EksInfo"
+      }
+    },
+    "ContainerLogRotationConfiguration": {
+      "type": "structure",
+      "required": [
+        "rotationSize",
+        "maxFilesToKeep"
+      ],
+      "members": {
+        "rotationSize": "RotationSize",
+        "maxFilesToKeep": "MaxFilesToKeep"
+      }
+    },
+    "ContainerProvider": {
+      "type": "structure",
+      "required": [
+        "type",
+        "id"
+      ],
+      "members": {
+        "type": "ContainerProviderType",
+        "id": "ClusterId",
+        "info": "ContainerInfo"
+      }
+    },
+    "ContainerProviderType": {
+      "type": "string",
+      "enum": [
+        "EKS"
+      ]
+    },
+    "CreateJobTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "name",
+        "clientToken",
+        "jobTemplateData"
+      ],
+      "members": {
+        "name": "ResourceNameString",
+        "clientToken": "ClientToken",
+        "jobTemplateData": "JobTemplateData",
+        "tags": "TagMap",
+        "kmsKeyArn": "KmsKeyArn"
+      }
+    },
+    "CreateManagedEndpointRequest": {
+      "type": "structure",
+      "required": [
+        "name",
+        "virtualClusterId",
+        "type",
+        "releaseLabel",
+        "executionRoleArn",
+        "clientToken"
+      ],
+      "members": {
+        "name": "ResourceNameString",
+        "virtualClusterId": "ResourceIdString",
+        "type": "EndpointType",
+        "releaseLabel": "ReleaseLabel",
+        "executionRoleArn": "IAMRoleArn",
+        "certificateArn": "ACMCertArn",
+        "configurationOverrides": "ConfigurationOverrides",
+        "clientToken": "ClientToken",
+        "tags": "TagMap",
+        "sessionIdleTimeoutInMinutes": "SessionIdleTimeoutInMinutes"
+      }
+    },
+    "CreateSecurityConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "clientToken",
+        "name",
+        "securityConfigurationData"
+      ],
+      "members": {
+        "clientToken": "ClientToken",
+        "name": "ResourceNameString",
+        "containerProvider": "ContainerProvider",
+        "securityConfigurationData": "SecurityConfigurationData",
+        "tags": "TagMap"
+      }
+    },
+    "CreateVirtualClusterRequest": {
+      "type": "structure",
+      "required": [
+        "name",
+        "containerProvider",
+        "clientToken"
+      ],
+      "members": {
+        "name": "ResourceNameString",
+        "containerProvider": "ContainerProvider",
+        "clientToken": "ClientToken",
+        "tags": "TagMap",
+        "securityConfigurationId": "ResourceIdString",
+        "sessionEnabled": "Boolean",
+        "schedulerConfiguration": "SchedulerConfiguration"
+      }
+    },
+    "CredentialType": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^.*\\S.*$"
+    },
+    "Date": {
+      "type": "timestamp"
+    },
+    "DeleteJobTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "DeleteManagedEndpointRequest": {
+      "type": "structure",
+      "required": [
+        "id",
+        "virtualClusterId"
+      ],
+      "members": {
+        "id": "ResourceIdString",
+        "virtualClusterId": "ResourceIdString"
+      }
+    },
+    "DeleteSecurityConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "DeleteVirtualClusterRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "DescribeJobRunRequest": {
+      "type": "structure",
+      "required": [
+        "id",
+        "virtualClusterId"
+      ],
+      "members": {
+        "id": "ResourceIdString",
+        "virtualClusterId": "ResourceIdString"
+      }
+    },
+    "DescribeJobTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "DescribeManagedEndpointRequest": {
+      "type": "structure",
+      "required": [
+        "id",
+        "virtualClusterId"
+      ],
+      "members": {
+        "id": "ResourceIdString",
+        "virtualClusterId": "ResourceIdString"
+      }
+    },
+    "DescribeSecurityConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "DescribeVirtualClusterRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "ResourceIdString"
+      }
+    },
+    "EksInfo": {
+      "type": "structure",
+      "members": {
+        "namespace": "KubernetesNamespace",
+        "nodeLabel": "NodeLabelString"
+      }
+    },
+    "EmrIdentityCenterApplicationARN": {
+      "type": "string",
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):sso:::application/ssoins-[0-9a-zA-Z/\\\\-_]+/apl-[0-9a-zA-Z/\\\\-_]+"
+    },
+    "EncryptionConfiguration": {
+      "type": "structure",
+      "members": {
+        "inTransitEncryptionConfiguration": "InTransitEncryptionConfiguration"
+      }
+    },
+    "EndpointState": {
+      "type": "string",
+      "enum": [
+        "CREATING",
+        "ACTIVE",
+        "TERMINATING",
+        "TERMINATED",
+        "TERMINATED_WITH_ERRORS"
+      ]
+    },
+    "EndpointStates": {
+      "type": "list",
+      "max": 10,
+      "member": "EndpointState"
+    },
+    "EndpointType": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": ".*\\S.*"
+    },
+    "EndpointTypes": {
+      "type": "list",
+      "max": 10,
+      "member": "EndpointType"
+    },
+    "EntryPointArgument": {
+      "type": "string",
+      "min": 1,
+      "max": 10280,
+      "pattern": ".*\\S.*"
+    },
+    "EntryPointArguments": {
+      "type": "list",
+      "member": "EntryPointArgument"
+    },
+    "EntryPointPath": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": ".*\\S.*"
+    },
+    "GetManagedEndpointSessionCredentialsRequest": {
+      "type": "structure",
+      "required": [
+        "executionRoleArn",
+        "credentialType",
+        "endpointIdentifier",
+        "virtualClusterIdentifier"
+      ],
+      "members": {
+        "endpointIdentifier": "String2048",
+        "virtualClusterIdentifier": "String2048",
+        "executionRoleArn": "IAMRoleArn",
+        "credentialType": "CredentialType",
+        "durationInSeconds": "JavaInteger",
+        "logContext": "LogContext",
+        "clientToken": "ClientToken"
+      }
+    },
+    "IAMConfiguration": {
+      "type": "structure",
+      "members": {
+        "systemRole": "IAMRoleArn"
+      }
+    },
+    "IAMRoleArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):iam::(\\d{12})?:(role((\\u002F)|(\\u002F[\\u0021-\\u007F]+\\u002F))[\\w+=,.@-]+)$"
+    },
+    "IdentityCenterConfiguration": {
+      "type": "structure",
+      "members": {
+        "enableIdentityCenter": "Boolean",
+        "identityCenterApplicationAssignmentRequired": "Boolean",
+        "identityCenterInstanceARN": "IdentityCenterInstanceARN",
+        "emrIdentityCenterApplicationARN": "EmrIdentityCenterApplicationARN"
+      }
+    },
+    "IdentityCenterInstanceARN": {
+      "type": "string",
+      "min": 10,
+      "max": 1224,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):sso:::instance/ssoins-[0-9a-zA-Z/\\\\-_]+"
+    },
+    "InQueueJobLimitInteger": {
+      "type": "integer",
+      "min": 100,
+      "max": 10000
+    },
+    "InTransitEncryptionConfiguration": {
+      "type": "structure",
+      "members": {
+        "tlsCertificateConfiguration": "TLSCertificateConfiguration"
+      }
+    },
+    "JavaInteger": {
+      "type": "integer"
+    },
+    "JobDriver": {
+      "type": "structure",
+      "members": {
+        "sparkSubmitJobDriver": "SparkSubmitJobDriver",
+        "sparkSqlJobDriver": "SparkSqlJobDriver"
+      }
+    },
+    "JobLimitInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "JobRunState": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "SUBMITTED",
+        "RUNNING",
+        "FAILED",
+        "CANCELLED",
+        "CANCEL_PENDING",
+        "COMPLETED"
+      ]
+    },
+    "JobRunStates": {
+      "type": "list",
+      "max": 10,
+      "member": "JobRunState"
+    },
+    "JobTemplateData": {
+      "type": "structure",
+      "required": [
+        "executionRoleArn",
+        "releaseLabel",
+        "jobDriver"
+      ],
+      "members": {
+        "executionRoleArn": "ParametricIAMRoleArn",
+        "releaseLabel": "ParametricReleaseLabel",
+        "configurationOverrides": "ParametricConfigurationOverrides",
+        "jobDriver": "JobDriver",
+        "parameterConfiguration": "TemplateParameterConfigurationMap",
+        "jobTags": "TagMap"
+      }
+    },
+    "KmsKeyArn": {
+      "type": "string",
+      "min": 3,
+      "max": 2048,
+      "pattern": "^(arn:(aws[a-zA-Z0-9-]*):kms:.+:(\\d{12})?:key\\/[(0-9a-zA-Z)-?]+|\\$\\{[a-zA-Z]\\w*\\})$"
+    },
+    "KubernetesNamespace": {
+      "type": "string",
+      "min": 1,
+      "max": 63,
+      "pattern": "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+    },
+    "LakeFormationConfiguration": {
+      "type": "structure",
+      "members": {
+        "authorizedSessionTagValue": "SessionTagValue",
+        "secureNamespaceInfo": "SecureNamespaceInfo",
+        "queryEngineRoleArn": "IAMRoleArn"
+      }
+    },
+    "ListJobRunsRequest": {
+      "type": "structure",
+      "required": [
+        "virtualClusterId"
+      ],
+      "members": {
+        "virtualClusterId": "ResourceIdString",
+        "createdBefore": "Date",
+        "createdAfter": "Date",
+        "name": "ResourceNameString",
+        "states": "JobRunStates",
+        "maxResults": "JavaInteger",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListJobTemplatesRequest": {
+      "type": "structure",
+      "members": {
+        "createdAfter": "Date",
+        "createdBefore": "Date",
+        "maxResults": "JavaInteger",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListManagedEndpointsRequest": {
+      "type": "structure",
+      "required": [
+        "virtualClusterId"
+      ],
+      "members": {
+        "virtualClusterId": "ResourceIdString",
+        "createdBefore": "Date",
+        "createdAfter": "Date",
+        "types": "EndpointTypes",
+        "states": "EndpointStates",
+        "maxResults": "JavaInteger",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListSecurityConfigurationsRequest": {
+      "type": "structure",
+      "members": {
+        "createdAfter": "Date",
+        "createdBefore": "Date",
+        "maxResults": "JavaInteger",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn"
+      ],
+      "members": {
+        "resourceArn": "RsiArn"
+      }
+    },
+    "ListVirtualClustersRequest": {
+      "type": "structure",
+      "members": {
+        "containerProviderId": "String1024",
+        "containerProviderType": "ContainerProviderType",
+        "createdAfter": "Date",
+        "createdBefore": "Date",
+        "states": "VirtualClusterStates",
+        "maxResults": "JavaInteger",
+        "nextToken": "NextToken",
+        "eksAccessEntryIntegrated": "Boolean"
+      }
+    },
+    "LogContext": {
+      "type": "string",
+      "min": 3,
+      "max": 63,
+      "pattern": "^((?!.*-s3alias)(?!xn--.*)[a-z0-9][-a-z0-9.]*)?[a-z0-9]$"
+    },
+    "LogGroupName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[\\.\\-_/#A-Za-z0-9]+"
+    },
+    "ManagedLogs": {
+      "type": "structure",
+      "members": {
+        "allowAWSToRetainLogs": "AllowAWSToRetainLogs",
+        "encryptionKeyArn": "KmsKeyArn"
+      }
+    },
+    "MaxFilesToKeep": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "managedLogs": "ManagedLogs",
+        "persistentAppUI": "PersistentAppUI",
+        "cloudWatchMonitoringConfiguration": "CloudWatchMonitoringConfiguration",
+        "s3MonitoringConfiguration": "S3MonitoringConfiguration",
+        "containerLogRotationConfiguration": "ContainerLogRotationConfiguration"
+      }
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": ".*\\S.*"
+    },
+    "NodeLabelString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "ParametricCloudWatchMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "logGroupName": "TemplateParameter",
+        "logStreamNamePrefix": "String256"
+      }
+    },
+    "ParametricConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "applicationConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "ParametricMonitoringConfiguration"
+      }
+    },
+    "ParametricIAMRoleArn": {
+      "type": "string",
+      "min": 4,
+      "max": 2048,
+      "pattern": "(^arn:(aws[a-zA-Z0-9-]*):iam::(\\d{12})?:(role((\\u002F)|(\\u002F[\\u0021-\\u007F]+\\u002F))[\\w+=,.@-]+)$)|([\\.\\-_\\#A-Za-z0-9\\$\\{\\}]+)"
+    },
+    "ParametricMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "persistentAppUI": "TemplateParameter",
+        "cloudWatchMonitoringConfiguration": "ParametricCloudWatchMonitoringConfiguration",
+        "s3MonitoringConfiguration": "ParametricS3MonitoringConfiguration"
+      }
+    },
+    "ParametricReleaseLabel": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "([\\.\\-_/A-Za-z0-9]+|\\$\\{[a-zA-Z]\\w*\\})"
+    },
+    "ParametricS3MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "logUri": "UriString"
+      }
+    },
+    "PersistentAppUI": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    },
+    "ReleaseLabel": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\.\\-_/A-Za-z0-9]+"
+    },
+    "ResourceIdString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[0-9a-z]+"
+    },
+    "ResourceNameString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\.\\-_/#A-Za-z0-9]+"
+    },
+    "RetryPolicyConfiguration": {
+      "type": "structure",
+      "required": [
+        "maxAttempts"
+      ],
+      "members": {
+        "maxAttempts": "JavaInteger"
+      }
+    },
+    "RotationSize": {
+      "type": "string",
+      "min": 3,
+      "max": 12,
+      "pattern": "^\\d+(\\.\\d+)?[KMG][Bb]?$"
+    },
+    "RsiArn": {
+      "type": "string",
+      "min": 60,
+      "max": 500,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):emr-containers:.+:(\\d{12}):/virtualclusters/.+$"
+    },
+    "S3MonitoringConfiguration": {
+      "type": "structure",
+      "required": [
+        "logUri"
+      ],
+      "members": {
+        "logUri": "UriString",
+        "encryptionKeyArn": "KmsKeyArn"
+      }
+    },
+    "SchedulerConfiguration": {
+      "type": "structure",
+      "members": {
+        "maxInQueueJobRuns": "InQueueJobLimitInteger",
+        "maxConcurrentJobRuns": "JobLimitInteger"
+      }
+    },
+    "SecretsManagerArn": {
+      "type": "string",
+      "min": 3,
+      "max": 2048,
+      "pattern": "^arn:(aws[a-zA-Z0-9-]*):secretsmanager:.+:(\\d{12}):secret:[0-9a-zA-Z/_+=.@-]+$"
+    },
+    "SecureNamespaceInfo": {
+      "type": "structure",
+      "members": {
+        "clusterId": "ClusterId",
+        "namespace": "KubernetesNamespace"
+      }
+    },
+    "SecurityConfigurationData": {
+      "type": "structure",
+      "members": {
+        "authorizationConfiguration": "AuthorizationConfiguration",
+        "authenticationConfiguration": "AuthenticationConfiguration"
+      }
+    },
+    "SensitivePropertiesMap": {
+      "type": "map",
+      "max": 100,
+      "key": "String1024",
+      "value": "String1024"
+    },
+    "SessionIdleTimeoutInMinutes": {
+      "type": "integer"
+    },
+    "SessionTagValue": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[\\.\\-_/#A-Za-z0-9 ]+"
+    },
+    "SparkSqlJobDriver": {
+      "type": "structure",
+      "members": {
+        "entryPoint": "EntryPointPath",
+        "sparkSqlParameters": "SparkSqlParameters"
+      }
+    },
+    "SparkSqlParameters": {
+      "type": "string",
+      "min": 1,
+      "max": 102400,
+      "pattern": ".*\\S.*"
+    },
+    "SparkSubmitJobDriver": {
+      "type": "structure",
+      "required": [
+        "entryPoint"
+      ],
+      "members": {
+        "entryPoint": "EntryPointPath",
+        "entryPointArguments": "EntryPointArguments",
+        "sparkSubmitParameters": "SparkSubmitParameters"
+      }
+    },
+    "SparkSubmitParameters": {
+      "type": "string",
+      "min": 1,
+      "max": 102400,
+      "pattern": ".*\\S.*"
+    },
+    "StartJobRunRequest": {
+      "type": "structure",
+      "required": [
+        "virtualClusterId",
+        "clientToken"
+      ],
+      "members": {
+        "name": "ResourceNameString",
+        "virtualClusterId": "ResourceIdString",
+        "clientToken": "ClientToken",
+        "executionRoleArn": "IAMRoleArn",
+        "releaseLabel": "ReleaseLabel",
+        "jobDriver": "JobDriver",
+        "configurationOverrides": "ConfigurationOverrides",
+        "tags": "TagMap",
+        "jobTemplateId": "ResourceIdString",
+        "jobTemplateParameters": "TemplateParameterInputMap",
+        "retryPolicyConfiguration": "RetryPolicyConfiguration"
+      }
+    },
+    "String1024": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": ".*\\S.*"
+    },
+    "String128": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": ".*\\S.*"
+    },
+    "String2048": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": ".*\\S.*"
+    },
+    "String256": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": ".*\\S.*"
+    },
+    "StringEmpty256": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": ".*\\S.*"
+    },
+    "TLSCertificateConfiguration": {
+      "type": "structure",
+      "members": {
+        "certificateProviderType": "CertificateProviderType",
+        "publicCertificateSecretArn": "SecretsManagerArn",
+        "privateCertificateSecretArn": "SecretsManagerArn"
+      }
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 0,
+      "max": 50,
+      "member": "String128"
+    },
+    "TagMap": {
+      "type": "map",
+      "min": 0,
+      "max": 50,
+      "key": "String128",
+      "value": "StringEmpty256"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn",
+        "tags"
+      ],
+      "members": {
+        "resourceArn": "RsiArn",
+        "tags": "TagMap"
+      }
+    },
+    "TemplateParameter": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[\\.\\-_/#A-Za-z0-9\\$\\{\\}]+"
+    },
+    "TemplateParameterConfiguration": {
+      "type": "structure",
+      "members": {
+        "type": "TemplateParameterDataType",
+        "defaultValue": "String1024"
+      }
+    },
+    "TemplateParameterConfigurationMap": {
+      "type": "map",
+      "max": 100,
+      "key": "TemplateParameterName",
+      "value": "TemplateParameterConfiguration"
+    },
+    "TemplateParameterDataType": {
+      "type": "string",
+      "enum": [
+        "NUMBER",
+        "STRING"
+      ]
+    },
+    "TemplateParameterInputMap": {
+      "type": "map",
+      "max": 100,
+      "key": "TemplateParameterName",
+      "value": "String1024"
+    },
+    "TemplateParameterName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[\\.\\-_\\#A-Za-z0-9]+"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn",
+        "tagKeys"
+      ],
+      "members": {
+        "resourceArn": "RsiArn",
+        "tagKeys": "TagKeyList"
+      }
+    },
+    "UpdateVirtualClusterRequest": {
+      "type": "structure",
+      "required": [
+        "id",
+        "clientToken"
+      ],
+      "members": {
+        "id": "ResourceIdString",
+        "schedulerConfiguration": "SchedulerConfiguration",
+        "clientToken": "ClientToken"
+      }
+    },
+    "UriString": {
+      "type": "string",
+      "min": 1,
+      "max": 10280,
+      "pattern": "[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDBFF-\\uDC00\\uDFFF\\r\\n\\t]*"
+    },
+    "VirtualClusterState": {
+      "type": "string",
+      "enum": [
+        "RUNNING",
+        "TERMINATING",
+        "TERMINATED",
+        "ARRESTED"
+      ]
+    },
+    "VirtualClusterStates": {
+      "type": "list",
+      "max": 10,
+      "member": "VirtualClusterState"
+    }
+  }
+}

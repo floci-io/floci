@@ -47,7 +47,7 @@ class ContainerLifecycleManagerLastLogLinesTest {
 
     @BeforeEach
     void setUp() {
-        manager = new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
+        manager = new ContainerLifecycleManager(dockerClient, dockerClient, imageCacheService, containerDetector, config);
         when(dockerClient.logContainerCmd("c1")).thenReturn(logs);
     }
 

@@ -595,6 +595,25 @@ class RedshiftEventServiceTest {
     }
 
     @Test
+    void storedTagsAreTheTagsOfTheSubscriptionInTheAccountAndRegionGivenAndTaggingPutsANewMap() {
+        service.createSubscription("watcher", TOPIC, null, List.of(), List.of(), null, null,
+                Map.of("team", "data"), ALL_SOURCES_EXIST);
+        RedshiftEventService west = new RedshiftEventService(factory, sns, authorizer,
+                new RegionResolver("us-west-2", "000000000000"), objectMapper, clock);
+        west.createSubscription("watcher", TOPIC, null, List.of(), List.of(), null, null,
+                Map.of("team", "west"), ALL_SOURCES_EXIST);
+        Map<String, String> held = service.storedTags("000000000000", "us-east-1", "watcher");
+
+        service.addSubscriptionTags("watcher", Map.of("env", "prod"));
+
+        assertEquals(Map.of("team", "data"), held);
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags("000000000000", "us-east-1", "watcher"));
+        assertEquals(Map.of("team", "west"), service.storedTags("000000000000", "us-west-2", "watcher"));
+        assertNull(service.storedTags("111111111111", "us-east-1", "watcher"));
+        assertNull(service.storedTags("000000000000", "us-east-1", "missing"));
+    }
+
+    @Test
     void eventHistoryAndSubscriptionNamesAreRegional() {
         create("watcher", null, List.of(), List.of(), null);
         service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");

@@ -12,6 +12,7 @@ import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.testing.TestImages;
+import io.floci.aws.testing.ValidateSignaturesProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -39,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and tells this run's containers from a previous run's by the run label rather than by time.
  */
 @QuarkusTest
-@TestProfile(EcsServiceDiscoveryDockerIntegrationTest.DockerEcsProfile.class)
+@TestProfile(ValidateSignaturesProfile.class)
 class EcsLeftoverContainersDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";

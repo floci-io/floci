@@ -4,13 +4,9 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
-import io.floci.aws.config.ContainerCaBundle;
-import io.floci.aws.config.FlociCertificateAuthority;
-import io.floci.aws.services.acm.CertificateGenerator;
-import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.config.SelfSignedTlsProfile;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -18,13 +14,8 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.GeneralSecurityException;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,9 +29,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * the same two calls on Corretto 8, the JVM of Lambda's oldest Java runtime: it reads the PKCS12
  * store through {@code JAVA_TOOL_OPTIONS}, and that store replaces the JDK's own. Skipped without
  * a Docker daemon, like the other {@code *DockerIntegrationTest} classes.
+ *
+ * <p>{@link SelfSignedTlsProfile} lays down what a TLS-on boot writes: the local CA, a leaf whose
+ * SANs include {@code host.docker.internal}, the name the container dials, the bundle and its Java
+ * trust store. {@code floci.tls.enabled} is what makes the lifecycle manager inject the bundle, and
+ * the test config binds every interface, so the container reaches the test port.
  */
 @QuarkusTest
-@TestProfile(ContainerCaBundleDockerIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class ContainerCaBundleDockerIntegrationTest {
 
     private static final String IMAGE = TestImages.PYTHON_ALPINE;
@@ -174,48 +170,6 @@ class ContainerCaBundleDockerIntegrationTest {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    /**
-     * Lays down what a TLS-on boot writes: the local CA, a leaf whose SANs include the name the
-     * container dials, the bundle and its Java trust store. The bootstrap config source reads
-     * system properties and the environment, which a test profile does not set, so the files are
-     * prepared here and the registry keys point at them; {@code floci.tls.enabled} is what makes
-     * the lifecycle manager inject the bundle. Quarkus binds every interface so the container
-     * reaches the test port.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        private static final Path DATA_DIR = Path.of("target", "floci-ca-bundle-docker-test").toAbsolutePath();
-        private static final Path TLS_DIR = DATA_DIR.resolve("tls");
-        private static final Path CERT_FILE = TLS_DIR.resolve("floci-server.crt");
-        private static final Path KEY_FILE = TLS_DIR.resolve("floci-server.key");
-
-        static {
-            try {
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost",
-                        List.of("localhost", "127.0.0.1", "host.docker.internal"), KeyAlgorithm.RSA_2048, null);
-                Files.writeString(CERT_FILE, leaf.certificatePem());
-                Files.writeString(KEY_FILE, leaf.privateKeyPem());
-                ContainerCaBundle.writeJavaTrustStore(ContainerCaBundle.write(TLS_DIR, ca.certificatePath()));
-            } catch (IOException | GeneralSecurityException e) {
-                throw new IllegalStateException("Failed to prepare the TLS test files", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", CERT_FILE.toString(),
-                    "quarkus.tls.key-store.pem.0.key", KEY_FILE.toString(),
-                    "quarkus.http.insecure-requests", "enabled",
-                    "quarkus.http.host", "0.0.0.0",
-                    "floci.security.allow-unsafe-network-exposure", "true");
         }
     }
 }

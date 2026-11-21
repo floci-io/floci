@@ -6,19 +6,18 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.text.MessageFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -76,7 +75,7 @@ class CloudFormationUnsupportedResourceTypeTest {
         assertEquals(STUB_REASON, resource.getStatusReason());
         assertTrue(logged.stream().anyMatch(r ->
                         r.getLevel().intValue() >= Level.WARNING.intValue()
-                                && STUB_WARNING.equals(formatted(r))),
+                                && STUB_WARNING.equals(LogCapture.formatted(r))),
                 "expected the stub to be reported at warn, got: " + rendered(logged));
     }
 
@@ -130,7 +129,7 @@ class CloudFormationUnsupportedResourceTypeTest {
 
         assertTrue(logged.stream().anyMatch(r ->
                         r.getLevel().intValue() >= Level.WARNING.intValue()
-                                && DELETE_WARNING.equals(formatted(r))),
+                                && DELETE_WARNING.equals(LogCapture.formatted(r))),
                 "expected the skipped delete to be reported at warn, got: " + rendered(logged));
     }
 
@@ -153,9 +152,9 @@ class CloudFormationUnsupportedResourceTypeTest {
         assertTrue(logged.stream().anyMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()
                         && ("Stubbing resource type AWS::ECR::Repository (Repo): its service is disabled, "
                         + "so nothing is created for it. Set floci.services.ecr.enabled=true to provision it.")
-                        .equals(formatted(r))),
+                        .equals(LogCapture.formatted(r))),
                 "expected the disabled-service warning, got: " + rendered(logged));
-        assertTrue(logged.stream().noneMatch(r -> formatted(r).contains("allow-stub-unsupported-resource-types")),
+        assertTrue(logged.stream().noneMatch(r -> LogCapture.formatted(r).contains("allow-stub-unsupported-resource-types")),
                 "the warning must not blame the unsupported-type flag: " + rendered(logged));
     }
 
@@ -201,47 +200,13 @@ class CloudFormationUnsupportedResourceTypeTest {
     /** Runs {@code action} with a handler on the provisioner's logger, collecting every record. */
     private <T> T whileCapturingProvisionerLogs(List<LogRecord> collected,
                                                 Supplier<T> action) {
-        Logger logger =
-                Logger.getLogger(CfnResourceDispatcher.class.getName());
-        Level original = logger.getLevel();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                collected.add(logRecord);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        logger.setLevel(Level.ALL);
-        try {
-            return action.get();
-        } finally {
-            logger.setLevel(original);
-            logger.removeHandler(handler);
-        }
-    }
-
-    /**
-     * The record's text. Which logging backend is in play decides whether the parameters are
-     * already substituted or still carried alongside the pattern, so substitute them here when
-     * they are still there.
-     */
-    private static String formatted(LogRecord record) {
-        Object[] parameters = record.getParameters();
-        return parameters == null || parameters.length == 0
-                ? record.getMessage()
-                : MessageFormat.format(record.getMessage(), parameters);
+        AtomicReference<T> result = new AtomicReference<>();
+        collected.addAll(LogCapture.capture(CfnResourceDispatcher.class, () -> result.set(action.get())));
+        return result.get();
     }
 
     private static List<String> rendered(List<LogRecord> records) {
-        return records.stream().map(r -> r.getLevel() + " " + formatted(r)).toList();
+        return records.stream().map(r -> r.getLevel() + " " + LogCapture.formatted(r)).toList();
     }
 
     private JsonNode props() {

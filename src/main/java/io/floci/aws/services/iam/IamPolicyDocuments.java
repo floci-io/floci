@@ -28,8 +28,9 @@ import java.util.List;
  *       required.";</li>
  *   <li>the <em>values</em> the elements declare, which an identity-based document is held to: the
  *       version it declares has to be one the language defines, a statement's {@code Effect} has to
- *       be {@code Allow} or {@code Deny} compared literally, and a resource it names has to be
- *       named by ARN or by the wildcard.</li>
+ *       be {@code Allow} or {@code Deny} compared literally, an action it names has to be prefaced
+ *       by a vendor or be the bare wildcard, and a resource it names has to be named by ARN or by
+ *       the wildcard.</li>
  * </ul>
  *
  * <p>A managed policy's document is held to its statements' own elements as well, each statement
@@ -72,8 +73,23 @@ final class IamPolicyDocuments {
 
     private static final String STATEMENT_WITHOUT_RESOURCES = "Policy statement must contain resources.";
 
-    /** What a statement declaring an effect the language does not define is refused with. */
+    /**
+     * What an INLINE write refuses a statement declaring an effect the language does not define
+     * with. The managed validator words that same clause {@link #SYNTAX_ERRORS_IN_POLICY}, which is
+     * the one clause of an identity-based document the two validators do not word alike, so each
+     * passes the sentence its own callers are owed.
+     */
     private static final String POLICY_PARSE_FAILED = "The policy failed legacy parsing";
+
+    /**
+     * What a statement naming an action that no vendor prefaces is refused with. AWS words the
+     * clause for actions and condition keys together, and only the actions are read here, a
+     * condition key being a value neither validator reads yet.
+     */
+    private static final String ACTION_WITHOUT_VENDOR =
+            "Actions/Conditions must be prefaced by a vendor, e.g., iam, sdb, ec2, etc.";
+
+    private static final String ANY_ACTION = "*";
 
     private static final String ANY_RESOURCE = "*";
 
@@ -121,7 +137,7 @@ final class IamPolicyDocuments {
             return;
         }
         checkIdentityGrammar(document, false);
-        checkIdentityValues(document);
+        checkIdentityValues(document, POLICY_PARSE_FAILED);
     }
 
     /**
@@ -134,7 +150,7 @@ final class IamPolicyDocuments {
             return;
         }
         checkIdentityGrammar(document, true);
-        checkIdentityValues(document);
+        checkIdentityValues(document, SYNTAX_ERRORS_IN_POLICY);
     }
 
     /**
@@ -168,7 +184,7 @@ final class IamPolicyDocuments {
      * document the grammar accepted, so a text that is no policy is answered as one rather than
      * through whichever value it happens to carry.
      */
-    private static void checkIdentityValues(String document) {
+    private static void checkIdentityValues(String document, String unreadableEffect) {
         JsonNode root = parse(document);
         if (root == null || !root.isObject()) {
             return;
@@ -180,9 +196,14 @@ final class IamPolicyDocuments {
         for (JsonNode statement : statements(root)) {
             JsonNode effect = statement.get("Effect");
             if (effect != null && !EFFECTS.contains(effect.asText())) {
-                throw malformed(POLICY_PARSE_FAILED);
+                throw malformed(unreadableEffect);
             }
-            for (String resource : resourceValues(statement)) {
+            for (String action : elementValues(statement, "Action", "NotAction")) {
+                if (!prefacedByVendor(action)) {
+                    throw malformed(ACTION_WITHOUT_VENDOR);
+                }
+            }
+            for (String resource : elementValues(statement, "Resource", "NotResource")) {
                 if (!resource.startsWith(ARN_PREFIX) && !ANY_RESOURCE.equals(resource)) {
                     throw malformed("Resource " + resource + " must be in ARN format or \""
                             + ANY_RESOURCE + "\".");
@@ -261,21 +282,43 @@ final class IamPolicyDocuments {
         return false;
     }
 
-    /** Every value a statement's resource elements name, in the order the document carries them. */
-    private static List<String> resourceValues(JsonNode statement) {
+    /**
+     * Every value a statement names under {@code spellings}, in the order the document carries
+     * them, which is how both pattern elements are read: the actions a statement is about and the
+     * resources they apply to. A value that is no string names the text of that value, which is
+     * how the {@code Version} and the {@code Effect} above are already read: a number or a boolean
+     * is held to naming a value of its element rather than passed over, so {@code 123} and
+     * {@code "123"} are refused alike. A null names nothing, as {@link #namesSomething} reads it,
+     * and a list or an object is no value of these elements at all.
+     */
+    private static List<String> elementValues(JsonNode statement, String... spellings) {
         List<String> values = new ArrayList<>();
-        for (String spelling : new String[] {"Resource", "NotResource"}) {
+        for (String spelling : spellings) {
             JsonNode element = statement.get(spelling);
             if (element == null) {
                 continue;
             }
             for (JsonNode value : element.isArray() ? element : List.of(element)) {
-                if (value.isTextual()) {
+                if (value.isValueNode() && !value.isNull()) {
                     values.add(value.asText());
                 }
             }
         }
         return values;
+    }
+
+    /**
+     * Whether an action value names the vendor the language asks for. The grammar writes an action
+     * as "a service namespace, a colon, and the name of an action", and an action element may name
+     * the bare wildcard instead, which stands for every action there is. So a value is prefaced
+     * when it carries a namespace before a colon, whatever the name after it spells, the wildcards
+     * the reference admits in an action name included ({@code s3:*} and {@code iam:*AccessKey*} are
+     * its own examples). The namespace is asked for rather than looked up: no sentence says AWS
+     * refuses an action whose vendor it does not publish, and refusing one here would turn a
+     * service this emulator has yet to model into a document nobody can store.
+     */
+    private static boolean prefacedByVendor(String action) {
+        return ANY_ACTION.equals(action) || action.indexOf(':') > 0;
     }
 
     private static JsonNode parse(String document) {

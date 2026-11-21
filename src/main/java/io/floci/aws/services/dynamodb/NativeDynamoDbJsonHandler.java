@@ -18,6 +18,7 @@ import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.RestoreOverride
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.TableSettings;
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.Throughput;
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
+import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.WarmThroughput;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
 import io.floci.aws.services.dynamodb.model.ContributorInsights;
@@ -52,6 +53,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -82,9 +84,6 @@ public class NativeDynamoDbJsonHandler {
             List.of("OLD_IMAGE", "KEYS_ONLY", "NEW_AND_OLD_IMAGES", "NEW_IMAGE");
     private static final List<String> ATTRIBUTE_TYPES = List.of("B", "N", "S");
     private static final List<String> PROJECTION_TYPES = List.of("ALL", "INCLUDE", "KEYS_ONLY");
-    // The warm throughput a new on-demand table or index starts with.
-    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
-    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -150,6 +149,7 @@ public class NativeDynamoDbJsonHandler {
             case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
             case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
+            case "UpdateKinesisStreamingDestination" -> handleUpdateKinesisStreamingDestination(request, region);
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
             case "ExportTableToPointInTime" -> handleExportTable(request, region);
@@ -198,7 +198,14 @@ public class NativeDynamoDbJsonHandler {
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
         ObjectNode tableNode = tableToNode(table);
-        tableNode.remove("WarmThroughput");
+        reportRequestedWarmThroughput(tableNode, request);
+        JsonNode requestedGsis = request.path("GlobalSecondaryIndexes");
+        if (tableNode.has("GlobalSecondaryIndexes")) {
+            int position = 0;
+            for (JsonNode gsiNode : tableNode.get("GlobalSecondaryIndexes")) {
+                reportRequestedWarmThroughput((ObjectNode) gsiNode, requestedGsis.path(position++));
+            }
+        }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableNode);
         return Response.ok(response).build();
@@ -270,6 +277,9 @@ public class NativeDynamoDbJsonHandler {
                         gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
                     }
                 }
+                if (memberPrefix.isEmpty()) {
+                    setWarmThroughput(gsi, parseWarmThroughput(gsiNode.path("WarmThroughput")));
+                }
                 gsis.add(gsi);
             }
         }
@@ -320,7 +330,9 @@ public class NativeDynamoDbJsonHandler {
         }
 
         return tableService.createTable(new CreateTableRequest(tableName, keySchema, attrDefs,
-                throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request)), initialStatus, region);
+                throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request),
+                memberPrefix.isEmpty() ? parseWarmThroughput(request.path("WarmThroughput")) : null),
+                initialStatus, region);
     }
 
     /**
@@ -572,23 +584,22 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleListTables(JsonNode request, String region) {
         Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
-        String exclusiveStart = request.has("ExclusiveStartTableName")
+        String exclusiveStart = request.hasNonNull("ExclusiveStartTableName")
                 ? request.get("ExclusiveStartTableName").asText() : null;
 
+        List<String> violations = new ArrayList<>();
         if (limit != null) {
-            if (limit < 1) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1");
-            }
-            if (limit > 100) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value less than or equal to 100");
+            addIfPresent(violations, SmithyValidationErrors.outOfRange("limit", limit, 1, 100));
+        }
+        if (exclusiveStart != null) {
+            addIfPresent(violations,
+                    SmithyValidationErrors.lengthOutOfRange("exclusiveStartTableName", exclusiveStart, 3, 255));
+            if (!INDEX_NAME_CHARS.matcher(exclusiveStart).matches()) {
+                violations.add(SmithyValidationErrors.pattern("exclusiveStartTableName", exclusiveStart,
+                        "[a-zA-Z0-9_.-]+"));
             }
         }
+        throwValidationErrors(violations);
 
         DynamoDbService.ListTablesResult result = dynamoDbService.listTables(region, limit, exclusiveStart);
 
@@ -680,7 +691,7 @@ public class NativeDynamoDbJsonHandler {
             List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
     private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
 
-    // The older validator lists the members in this order and leaves out a missing table name.
+    // The older validator lists the members in this order.
     private void requireValidOlderItemWrite(JsonNode request, String target) {
         String tableName = textOrNull(request, "TableName");
         String returnValues = textOrNull(request, "ReturnValues");
@@ -697,7 +708,9 @@ public class NativeDynamoDbJsonHandler {
         if ("Key".equals(target) && !request.hasNonNull(target)) {
             validationErrors.add(SmithyValidationErrors.notNull("key"));
         }
-        if ("".equals(tableName)) {
+        if (tableName == null) {
+            validationErrors.add(SmithyValidationErrors.notNull("tableName"));
+        } else if (tableName.isEmpty()) {
             validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
         }
         throwValidationErrors(validationErrors);
@@ -845,14 +858,14 @@ public class NativeDynamoDbJsonHandler {
             rejectMixedParameters(request, List.of("Expected", "ConditionalOperator"), List.of("ConditionExpression"));
             requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
             requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
             requireReadableValues(exprAttrValues, "");
             if (conditionExpression == null) {
                 requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
                 requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
             }
             requireNonEmptyExpression(conditionExpression, "ConditionExpression");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(request.get("Expected")), false);
             DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
@@ -909,6 +922,7 @@ public class NativeDynamoDbJsonHandler {
             ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         }
 
+        DynamoDbTableNames.resolveForItemCall(tableName);
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
         int itemBytes = item != null
                 ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
@@ -976,7 +990,11 @@ public class NativeDynamoDbJsonHandler {
             requireValidOlderUpdate(request);
         }
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        // UpdateItem lists every problem of a short name, the pattern first.
+        if (DynamoDbTableNames.isShortName(tableName)) {
+            throwValidationErrors(nameViolations(tableName, "tableName"));
+        }
+        DynamoDbTableNames.resolve(tableName);
         JsonNode key = request.path("Key");
         JsonNode attributeUpdates = request.path("AttributeUpdates");
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -1002,11 +1020,11 @@ public class NativeDynamoDbJsonHandler {
         requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, true);
         ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(
-                legacyValues(request.has("Expected") ? request.get("Expected") : null));
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(
+                legacyValues(request.has("Expected") ? request.get("Expected") : null), true);
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -1322,7 +1340,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleQuery(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        DynamoDbTableNames.resolveForItemCall(tableName); // validate tableName first
         JsonNode keyConditions = request.has("KeyConditions") ? request.get("KeyConditions") : null;
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
@@ -1383,9 +1401,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(keyConditionExpr, "KeyConditionExpression");
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(keyConditions), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors first, then key-condition errors, then projection errors.
@@ -1446,8 +1464,10 @@ public class NativeDynamoDbJsonHandler {
             queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpression, exprAttrNames);
             queryItems = queryItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpression, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGet != null) {
             Set<String> keep = new HashSet<>();
@@ -1531,7 +1551,7 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
-        DynamoDbTableNames.resolve(tableName);
+        DynamoDbTableNames.resolveForItemCall(tableName);
         requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
@@ -1539,7 +1559,8 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(scanFilter), false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -1596,8 +1617,10 @@ public class NativeDynamoDbJsonHandler {
             scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
         if (projectionExpressionScan != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpressionScan, exprAttrNames);
             scanItems = scanItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpressionScan, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGetScan != null) {
             Set<String> keep = new HashSet<>();
@@ -1622,7 +1645,7 @@ public class NativeDynamoDbJsonHandler {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
+                readCapacityUnits(result.readBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
         return Response.ok(response).build();
     }
 
@@ -1883,10 +1906,12 @@ public class NativeDynamoDbJsonHandler {
             JsonNode attrToGet = tableRequest != null && tableRequest.has("AttributesToGet")
                     ? tableRequest.get("AttributesToGet") : null;
             ArrayNode tableItems = objectMapper.createArrayNode();
+            Function<JsonNode, ObjectNode> projection = projExpr != null
+                    ? ProjectionEvaluator.projector(projExpr, exprNames) : null;
             for (JsonNode item : entry.getValue()) {
                 JsonNode projected;
-                if (projExpr != null) {
-                    projected = ProjectionEvaluator.project(item, projExpr, exprNames);
+                if (projection != null) {
+                    projected = projection.apply(item);
                 } else if (attrToGet != null) {
                     Set<String> keep = new HashSet<>();
                     attrToGet.forEach(n -> keep.add(n.asText()));
@@ -2006,6 +2031,7 @@ public class NativeDynamoDbJsonHandler {
                             newGsi.setOnDemandMaxWriteRequestUnits(newGsiOnDemand.get("MaxWriteRequestUnits").asInt());
                         }
                     }
+                    setWarmThroughput(newGsi, parseWarmThroughput(createNode.path("WarmThroughput")));
                     gsiCreates.add(newGsi);
                 }
                 JsonNode deleteNode = update.path("Delete");
@@ -2020,7 +2046,8 @@ public class NativeDynamoDbJsonHandler {
                             requireIndexName(updateNode,
                                     "globalSecondaryIndexUpdates." + updatePosition + ".member.update"),
                             gsiPt.isObject() ? parseThroughput(gsiPt) : null,
-                            parseOnDemandThroughput(updateNode.path("OnDemandThroughput"))));
+                            parseOnDemandThroughput(updateNode.path("OnDemandThroughput")),
+                            parseWarmThroughput(updateNode.path("WarmThroughput"))));
                 }
             }
         }
@@ -2051,6 +2078,11 @@ public class NativeDynamoDbJsonHandler {
                             "Cannot delete and update the same index: " + indexName, 400);
                 }
                 if (currentTable.findGsi(indexName).isEmpty()) {
+                    if (gsiUpdate.warmThroughput() != null && gsiUpdate.provisionedThroughput() == null
+                            && gsiUpdate.onDemandThroughput() == null) {
+                        // AWS answers a warm-only update of a missing index with InternalFailure.
+                        throw new AwsException("InternalFailure", null, 500);
+                    }
                     throw DynamoDbService.missingGsi(indexName, currentTable.getTableName());
                 }
             }
@@ -2090,10 +2122,13 @@ public class NativeDynamoDbJsonHandler {
 
         TableDefinition table = tableService.updateTable(new UpdateTableRequest(tableName,
                 throughput, newAttrDefs, gsiCreates, gsiDeletes, gsiThroughputUpdates, vectorCreates, vectorDeletes,
-                addRegions, removeRegions, updateRegions, parseTableSettings(request)), region);
+                addRegions, removeRegions, updateRegions, parseTableSettings(request),
+                parseWarmThroughput(request.path("WarmThroughput"))), region);
 
+        ObjectNode tableNode = tableToNode(table);
+        markWarmThroughputUpdating(tableNode, request);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", tableToNode(table));
+        response.set("TableDescription", tableNode);
         return Response.ok(response).build();
     }
 
@@ -3084,7 +3119,7 @@ public class NativeDynamoDbJsonHandler {
             addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
             throwValidationErrors(onFailureErrors);
             // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
             requireValidTransactExpressions(op, false);
         }
         if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
@@ -3481,13 +3516,8 @@ public class NativeDynamoDbJsonHandler {
                 .path("ApproximateCreationDateTimePrecision");
         String precision = precisionNode.isMissingNode() || precisionNode.isNull()
                 ? KinesisStreamingDestination.PRECISION_MILLISECOND : precisionNode.asText();
-        if (!KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
-                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + precision
-                            + "' at 'enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [MILLISECOND, MICROSECOND]");
-        }
+        validateKinesisPrecision(precision,
+                "enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
 
         return Response.ok(kinesisDestinationResponse(
                 tableService.enableKinesisStreamingDestination(tableName, streamArn, precision, region))).build();
@@ -3499,6 +3529,51 @@ public class NativeDynamoDbJsonHandler {
 
         return Response.ok(kinesisDestinationResponse(
                 tableService.disableKinesisStreamingDestination(tableName, streamArn, region))).build();
+    }
+
+    private Response handleUpdateKinesisStreamingDestination(JsonNode request, String region) {
+        String tableName = kinesisUpdateString(request, "TableName", "tableName", 1);
+        String streamArn = kinesisUpdateString(request, "StreamArn", "streamArn", 37);
+        String precision = kinesisUpdatePrecision(request);
+        KinesisDestination result = tableService.updateKinesisStreamingDestination(
+                tableName, streamArn, precision, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("TableName", result.tableName());
+        response.put("StreamArn", result.streamArn());
+        response.put("DestinationStatus", result.destinationStatus());
+        response.putObject("UpdateKinesisStreamingConfiguration")
+                .put("ApproximateCreationDateTimePrecision", result.approximateCreationDateTimePrecision());
+        return Response.ok(response).build();
+    }
+
+    private static String kinesisUpdatePrecision(JsonNode request) {
+        JsonNode precisionNode = request.path("UpdateKinesisStreamingConfiguration")
+                .path("ApproximateCreationDateTimePrecision");
+        String precision = precisionNode.isMissingNode() || precisionNode.isNull() ? null : precisionNode.asText();
+        validateKinesisPrecision(precision,
+                "updateKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
+        return precision;
+    }
+
+    private static void validateKinesisPrecision(String precision, String member) {
+        if (precision != null && !KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
+                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(precision, member,
+                    List.of(KinesisStreamingDestination.PRECISION_MILLISECOND,
+                            KinesisStreamingDestination.PRECISION_MICROSECOND)));
+        }
+    }
+
+    private static String kinesisUpdateString(JsonNode request, String member, String path, int minimumLength) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
+        }
+        String violation = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), minimumLength, 1024);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+        return value.asText();
     }
 
     /**
@@ -3713,6 +3788,11 @@ public class NativeDynamoDbJsonHandler {
     static double readCapacityUnits(long bytes, boolean consistentRead) {
         double units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
         return consistentRead ? units * 2 : units;
+    }
+
+    /** Each read DynamoDB charges on its own, such as each partition a scan page reads. */
+    static double readCapacityUnits(List<Long> reads, boolean consistentRead) {
+        return reads.stream().mapToDouble(bytes -> readCapacityUnits(bytes, consistentRead)).sum();
     }
 
     /**
@@ -4067,16 +4147,71 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
+     * CreateTable describes a table or index's warm throughput only when the request gave one, and
+     * then only the members it gave, still UPDATING.
+     */
+    private void reportRequestedWarmThroughput(ObjectNode described, JsonNode requested) {
+        described.remove("WarmThroughput");
+        WarmThroughput warm = parseWarmThroughput(requested.path("WarmThroughput"));
+        if (warm == null || warm.isEmpty()) {
+            return;
+        }
+        ObjectNode reported = described.putObject("WarmThroughput");
+        if (warm.readUnitsPerSecond() != null) {
+            reported.put("ReadUnitsPerSecond", warm.readUnitsPerSecond());
+        }
+        if (warm.writeUnitsPerSecond() != null) {
+            reported.put("WriteUnitsPerSecond", warm.writeUnitsPerSecond());
+        }
+        reported.put("Status", "UPDATING");
+    }
+
+    /** UpdateTable reports UPDATING only for the table and indexes whose request carried a WarmThroughput. */
+    private static void markWarmThroughputUpdating(ObjectNode described, JsonNode request) {
+        if (request.path("WarmThroughput").isObject()) {
+            ((ObjectNode) described.get("WarmThroughput")).put("Status", "UPDATING");
+        }
+        Set<String> updatedIndexes = new HashSet<>();
+        for (JsonNode indexUpdate : request.path("GlobalSecondaryIndexUpdates")) {
+            for (String action : List.of("Create", "Update")) {
+                JsonNode node = indexUpdate.path(action);
+                WarmThroughput warm = parseWarmThroughput(node.path("WarmThroughput"));
+                if (warm != null && !warm.isEmpty()) {
+                    updatedIndexes.add(node.path("IndexName").asText());
+                }
+            }
+        }
+        for (JsonNode gsiNode : described.path("GlobalSecondaryIndexes")) {
+            if (updatedIndexes.contains(gsiNode.path("IndexName").asText())) {
+                ((ObjectNode) gsiNode.get("WarmThroughput")).put("Status", "UPDATING");
+            }
+        }
+    }
+
+    private static WarmThroughput parseWarmThroughput(JsonNode warm) {
+        if (!warm.isObject()) {
+            return null;
+        }
+        return new WarmThroughput(
+                warm.hasNonNull("ReadUnitsPerSecond") ? warm.get("ReadUnitsPerSecond").asLong() : null,
+                warm.hasNonNull("WriteUnitsPerSecond") ? warm.get("WriteUnitsPerSecond").asLong() : null);
+    }
+
+    private static void setWarmThroughput(GlobalSecondaryIndex gsi, WarmThroughput warm) {
+        if (warm != null) {
+            gsi.setWarmReadUnitsPerSecond(warm.readUnitsPerSecond());
+            gsi.setWarmWriteUnitsPerSecond(warm.writeUnitsPerSecond());
+        }
+    }
+
+    /**
      * AWS reports a provisioned index's warm throughput as its provisioned capacity, and an on-demand
      * one's as the values a new on-demand index starts with. An index is ACTIVE as soon as it exists here.
      */
     private ObjectNode gsiWarmThroughput(TableDefinition table, GlobalSecondaryIndex gsi) {
-        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
         ObjectNode warmThroughput = objectMapper.createObjectNode();
-        warmThroughput.put("ReadUnitsPerSecond",
-                onDemand ? ON_DEMAND_WARM_READ_UNITS : gsi.getProvisionedThroughput().getReadCapacityUnits());
-        warmThroughput.put("WriteUnitsPerSecond",
-                onDemand ? ON_DEMAND_WARM_WRITE_UNITS : gsi.getProvisionedThroughput().getWriteCapacityUnits());
+        warmThroughput.put("ReadUnitsPerSecond", table.gsiWarmReadUnits(gsi));
+        warmThroughput.put("WriteUnitsPerSecond", table.gsiWarmWriteUnits(gsi));
         warmThroughput.put("Status", "ACTIVE");
         return warmThroughput;
     }
@@ -4270,10 +4405,15 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
-    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+    // DynamoDB drops the fraction of Limit and holds it to the int range.
+    private static Integer partiQLLimit(JsonNode request) {
         JsonNode limit = request.get("Limit");
-        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
-            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        return limit == null || limit.isNull() ? null : (int) limit.doubleValue();
+    }
+
+    private static void addLimitError(Integer limit, List<String> validationErrors) {
+        if (limit != null && limit < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", String.valueOf(limit), 1));
         }
     }
 
@@ -4319,7 +4459,8 @@ public class NativeDynamoDbJsonHandler {
         List<String> validationErrors = new ArrayList<>();
         addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
         addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
-        addLimitError(request, validationErrors);
+        Integer limit = partiQLLimit(request);
+        addLimitError(limit, validationErrors);
         addStatementError(request, "statement", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
         addParametersError(request, "parameters", validationErrors);
@@ -4328,7 +4469,7 @@ public class NativeDynamoDbJsonHandler {
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, parameters, region);
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
-                .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
+                .limit(limit)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
                 .returnValuesOnConditionCheckFailure(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE"))

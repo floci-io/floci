@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -44,7 +45,7 @@ import java.util.regex.Pattern;
  * S3. Both are documented on the service page and asserted by the service tests.
  */
 @ApplicationScoped
-public class SignerService implements Resettable, TagHandler {
+public class SignerService implements Resettable, TagHandler, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SignerService.class);
     private static final String SERVICE = "signer";
@@ -142,10 +143,11 @@ public class SignerService implements Resettable, TagHandler {
                 new LinkedHashMap<>(), requestedTags, region);
     }
 
-    private SigningProfile applyProfile(String profileName, SignerPlatforms.Platform platform,
-                                        String certificateArn, String[] validity, JsonNode overrides,
-                                        Map<String, String> signingParameters,
-                                        Map<String, String> requestedTags, String region) {
+    /** Sets the tags too, so it runs one at a time with the other tag writes ({@link #tagResource}). */
+    private synchronized SigningProfile applyProfile(String profileName, SignerPlatforms.Platform platform,
+                                                     String certificateArn, String[] validity, JsonNode overrides,
+                                                     Map<String, String> signingParameters,
+                                                     Map<String, String> requestedTags, String region) {
         SigningProfile profile = profiles.get(storageKey(region, profileName)).orElse(null);
         boolean created = profile == null;
         if (created) {
@@ -233,11 +235,12 @@ public class SignerService implements Resettable, TagHandler {
     /**
      * Writes a profile record for a CloudFormation resource that was provisioned before this
      * service existed, keeping the identifiers that stack already handed out instead of minting a
-     * version: the adoption a later tags-only update needs.
+     * version: the adoption a later tags-only update needs. It replaces the record, tags included, so
+     * it runs one at a time with the tag writes.
      */
-    public SigningProfile adoptSigningProfile(String profileName, String platformId, String version,
-                                              String validityType, Integer validityValue,
-                                              String region) {
+    public synchronized SigningProfile adoptSigningProfile(String profileName, String platformId, String version,
+                                                           String validityType, Integer validityValue,
+                                                           String region) {
         validateProfileName(profileName);
         SignerPlatforms.Platform platform = platformOf(platformId);
         String arn = AwsArnUtils.Arn.of(SERVICE, region, profiles.accountId(),
@@ -529,7 +532,7 @@ public class SignerService implements Resettable, TagHandler {
      * {@code Tags} property on an update that changed nothing else. Unlike {@link #tagResource}, it
      * removes the tags the caller left out.
      */
-    public void replaceTags(String profileName, Map<String, String> tags, String region) {
+    public synchronized void replaceTags(String profileName, Map<String, String> tags, String region) {
         validateProfileName(profileName);
         SigningProfile profile = requireProfile(profileName, region);
         Map<String, String> resolved = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
@@ -548,8 +551,12 @@ public class SignerService implements Resettable, TagHandler {
         return new LinkedHashMap<>(requireProfileFromArn(region, arn).getTags());
     }
 
+    /**
+     * Gives the profile a new map. Every write of a profile's tags runs one at a time, so none loses another's, and a
+     * reader holds one whole set.
+     */
     @Override
-    public void tagResource(String region, String arn, Map<String, String> tags) {
+    public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
         validateTags(tags);
         SigningProfile profile = requireProfileFromArn(region, arn);
         Map<String, String> merged = new LinkedHashMap<>(profile.getTags());
@@ -562,7 +569,7 @@ public class SignerService implements Resettable, TagHandler {
     }
 
     @Override
-    public void untagResource(String region, String arn, List<String> tagKeys) {
+    public synchronized void untagResource(String region, String arn, List<String> tagKeys) {
         SigningProfile profile = requireProfileFromArn(region, arn);
         Map<String, String> remaining = new LinkedHashMap<>(profile.getTags());
         tagKeys.forEach(remaining::remove);
@@ -574,6 +581,40 @@ public class SignerService implements Resettable, TagHandler {
     public void clear() {
         profiles.clear();
         jobs.clear();
+    }
+
+    @Override
+    public String namespace() {
+        return SERVICE;
+    }
+
+    /** A request names a signing profile by its name, which its ARN carries whole, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the signing profile whose ARN is {@code arn}, in the request's account, where the tag handlers read:
+     * an ARN of another account names none. Read in place under the Region the ARN names and the profile's name, a
+     * profile stored before storage was account-aware included, and matched on the whole ARN. Tag writes give the
+     * profile a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(profiles.accountId()) || !parsed.resource().startsWith(PROFILE_RESOURCE)) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(profiles, parsed.accountId(),
+                        storageKey(parsed.region(), parsed.resource().substring(PROFILE_RESOURCE.length())))
+                .filter(profile -> arn.equals(profile.getArn()))
+                .map(SigningProfile::getTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     // ---------------------------------------------------------------- helpers

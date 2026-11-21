@@ -38,6 +38,7 @@ public class EmulatorInfoController {
     private static final Logger LOG = Logger.getLogger(EmulatorInfoController.class);
     static final int MANIFEST_VERSION = 1;
     static final int CONSOLE_CONTRACT = 2;
+    private static final String PEM_FILE = "application/x-pem-file";
 
     private final ServiceRegistry serviceRegistry;
     private final InitLifecycleState initLifecycleState;
@@ -73,11 +74,7 @@ public class EmulatorInfoController {
     @GET
     @Path("/health")
     public Response health() {
-        return Response.ok(Map.of(
-                "services", serviceRegistry.getServices(),
-                "edition", "community",
-                "original_edition", "floci-always-free",
-                "version", version)).build();
+        return Response.ok(HealthController.body(serviceRegistry.getServices(), version)).build();
     }
 
     @GET
@@ -113,7 +110,7 @@ public class EmulatorInfoController {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("manifest_version", MANIFEST_VERSION);
         body.put("console_contract", CONSOLE_CONTRACT);
-        body.put("cloud", "aws");
+        body.put("cloud", HealthController.CLOUD);
         body.put("emulator", "floci");
         body.put("version", version);
         body.put("edition", "community");
@@ -171,6 +168,43 @@ public class EmulatorInfoController {
     @Path("/ca.pem")
     @Produces(MediaType.TEXT_PLAIN)
     public String caPem() throws IOException, GeneralSecurityException {
+        return trustBundle();
+    }
+
+    /**
+     * The certificate a client must trust for this emulator's HTTPS endpoint, at the path every Floci
+     * emulator serves it under: the same PEM as {@code ca.pem}, as {@code application/x-pem-file}. With
+     * TLS off there is no HTTPS endpoint to trust, so it answers the 404 the other emulators answer;
+     * {@code ca.pem} keeps serving the local CA, which still signs the certificates Floci issues.
+     */
+    @GET
+    @Path("/tls-cert")
+    @Produces({PEM_FILE, MediaType.APPLICATION_JSON})
+    public Response tlsCert() {
+        if (!config.tls().enabled()) {
+            return tlsCertUnavailable(false, "TLS is not enabled",
+                    "Floci is serving plain HTTP only. Set FLOCI_TLS_ENABLED=true and restart to serve HTTPS "
+                            + "on the same port. GET /_floci/ca.pem serves the local CA either way.");
+        }
+        try {
+            return Response.ok(trustBundle()).type(PEM_FILE).build();
+        } catch (IOException | GeneralSecurityException e) {
+            LOG.warnv(e, "Cannot read the TLS certificate served at /_floci/tls-cert");
+            return tlsCertUnavailable(true, "TLS certificate not available",
+                    "TLS is enabled but the certificate cannot be read. Check floci.tls.cert-path and the "
+                            + "startup logs.");
+        }
+    }
+
+    private static Response tlsCertUnavailable(boolean tlsEnabled, String error, String message) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("tlsEnabled", tlsEnabled);
+        body.put("error", error);
+        body.put("message", message);
+        return Response.status(Response.Status.NOT_FOUND).type(MediaType.APPLICATION_JSON).entity(body).build();
+    }
+
+    private String trustBundle() throws IOException, GeneralSecurityException {
         String localCa = certificateAuthority.caPem();
         Optional<String> userCertificate = userCertificatePath();
         if (userCertificate.isEmpty()) {

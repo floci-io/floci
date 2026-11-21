@@ -113,6 +113,24 @@ class DelegationRequestServiceTest {
                 null, null, null, null)).request();
     }
 
+    @Test
+    void theOwnerIsAnsweredOnlyOnceARequestIsClaimedAndOnlyToItsOwner() {
+        String unclaimed = created("workflow-1", null).getDelegationRequestId();
+
+        // Nothing owns a request until it is claimed, so there is no value for the condition key to
+        // match and the caller is told so rather than given a stand-in.
+        assertTrue(service.ownerArnOf(CUSTOMER, unclaimed).isEmpty());
+        assertTrue(service.ownerArnOf(CUSTOMER, "delegation-request-that-is-not-held").isEmpty());
+
+        String claimed = assigned("workflow-2").getDelegationRequestId();
+
+        // The claim is a write, so an answer read before it must not survive it.
+        assertEquals(CUSTOMER_ARN, service.ownerArnOf(CUSTOMER, claimed).orElse(null));
+        // And it is the owner's own account that is answered, never another reading the same id.
+        assertTrue(service.ownerArnOf(PARTNER, claimed).isEmpty());
+        assertTrue(service.ownerArnOf(CUSTOMER, unclaimed).isEmpty());
+    }
+
     private DelegationRequest created(String workflowId, String ownerAccountId) {
         return createdIn(REGION, workflowId, ownerAccountId).request();
     }

@@ -42,6 +42,11 @@ public class EcsTaskHandle {
     private final Map<String, Integer> exitCodes = new LinkedHashMap<>();
     /** Container names confirmed removed, including those whose exit code was unavailable. */
     private final Set<String> removedContainers = new HashSet<>();
+    /**
+     * Whether Docker kept the helper holding the task's network namespace when it was removed, so its
+     * removal still has to be retried while it holds the task's host ports and link-local address.
+     */
+    private boolean namespaceHelperPending;
 
     public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
                          Map<String, Closeable> logStreamsByContainerId) {
@@ -143,5 +148,13 @@ public class EcsTaskHandle {
 
     public boolean hasOpenLogStreams() {
         return !logStreamsByContainerId.isEmpty();
+    }
+
+    public boolean isNamespaceHelperPending() {
+        return namespaceHelperPending;
+    }
+
+    public void recordNamespaceHelperPending(boolean pending) {
+        namespaceHelperPending = pending;
     }
 }

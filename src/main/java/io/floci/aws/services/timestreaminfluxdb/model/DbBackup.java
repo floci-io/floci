@@ -38,7 +38,7 @@ public class DbBackup {
     private String influxAuthParametersSecretArn;
     private JsonNode maintenanceSchedule;
     private JsonNode dbBackupConfigurations;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private String accountId;
     private String region;
     private boolean dataCaptured;

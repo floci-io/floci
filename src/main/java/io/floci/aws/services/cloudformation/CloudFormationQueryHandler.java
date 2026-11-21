@@ -2,6 +2,8 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsQueryResponse;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.cloudformation.model.ChangeSet;
 import io.floci.aws.services.cloudformation.model.Stack;
@@ -12,6 +14,7 @@ import io.floci.aws.services.cloudformation.model.StackSet;
 import io.floci.aws.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.floci.aws.services.cloudformation.model.StackSetOperation;
 import io.floci.aws.services.cloudformation.model.TemplateSummary;
+import io.floci.aws.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -36,12 +39,37 @@ public class CloudFormationQueryHandler {
     private static final String CF_NS = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
 
     private final CloudFormationService cfnService;
+    /** Reads the delegation a caller holds, for the cap a stack's roles have to carry. */
+    private final IamService iamService;
+    /** The caller this request signed as, which says whether a delegation caps what it creates. */
+    private final RequestContext requestContext;
     private final StackSetService stackSetService;
 
     @Inject
-    public CloudFormationQueryHandler(CloudFormationService cfnService, StackSetService stackSetService) {
+    public CloudFormationQueryHandler(CloudFormationService cfnService, StackSetService stackSetService,
+                                      IamService iamService, RequestContext requestContext) {
         this.cfnService = cfnService;
         this.stackSetService = stackSetService;
+        this.iamService = iamService;
+        this.requestContext = requestContext;
+    }
+
+    /**
+     * The permissions boundary a delegation registered for this caller, or null for any other
+     * caller. Read here because provisioning runs after the request returns: the stack remembers
+     * it so a role the deployment creates carries the cap, which the partner guide puts on roles
+     * "created or managed through temporary access".
+     */
+    private String delegatedRoleBoundary() {
+        return iamService.delegatedRoleBoundaryArn(requestContext.getAccessKeyId()).orElse(null);
+    }
+
+    /**
+     * What IAM asks CloudFormation of the resources a request names, the stack or the stack set a name names, reading
+     * only: for a state machine's task, which has no HTTP request of its own.
+     */
+    public StoredResourceArns storedResourceArns() {
+        return new CloudFormationStoredResourceArns(cfnService, stackSetService);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -71,7 +99,7 @@ public class CloudFormationQueryHandler {
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
             case "CreateStackSet" -> createStackSet(params);
-            case "DescribeStackSet" -> describeStackSet(params);
+            case "DescribeStackSet" -> describeStackSet(params, region);
             case "ListStackSets" -> listStackSets();
             case "UpdateStackSet" -> updateStackSet(params);
             case "DeleteStackSet" -> deleteStackSet(params);
@@ -124,6 +152,7 @@ public class CloudFormationQueryHandler {
         ChangeSet initial = cfnService.createChangeSetForCreateStack(stackName, "initial-create",
                 templateBody, templateUrl, parameters, capabilities, tags, region,
                 terminationProtection, stackPolicy);
+        cfnService.recordDelegatedRoleBoundary(initial.getStackId(), region, delegatedRoleBoundary());
         try {
             cfnService.executeChangeSetWithToken(initial.getStackId(), initial.getChangeSetId(), region,
                     params.getFirst("ClientRequestToken"));
@@ -172,6 +201,9 @@ public class CloudFormationQueryHandler {
             cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
             return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
+        // An update is managing the stack's roles, which the guide caps the same way as creating
+        // them, so the cap this caller's delegation registers travels with the stack from here too.
+        cfnService.recordDelegatedRoleBoundary(cs.getStackId(), region, delegatedRoleBoundary());
         cfnService.executeChangeSetWithToken(cs.getStackId(), cs.getChangeSetId(), region,
                 params.getFirst("ClientRequestToken"));
 
@@ -345,7 +377,7 @@ public class CloudFormationQueryHandler {
                    .elem("PhysicalResourceId", change.physicalResourceId())
                    .elem("ResourceType", change.resourceType())
                    .elem("Replacement", change.replacement())
-                   .raw("<Scope/><Details/>")
+                   .raw(scopeAndDetails(change))
                    .end("ResourceChange")
                    .end("member");
             }
@@ -358,6 +390,34 @@ public class CloudFormationQueryHandler {
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
+    }
+
+    private static String scopeAndDetails(CloudFormationService.ResourceChange change) {
+        XmlBuilder xml = new XmlBuilder();
+        if (change.scope().isEmpty()) {
+            xml.raw("<Scope/>");
+        } else {
+            xml.start("Scope");
+            change.scope().forEach(attribute -> xml.elem("member", attribute));
+            xml.end("Scope");
+        }
+        if (change.details().isEmpty()) {
+            return xml.raw("<Details/>").build();
+        }
+        xml.start("Details");
+        for (CloudFormationService.ChangeDetail detail : change.details()) {
+            xml.start("member")
+               .start("Target")
+               .elem("Attribute", detail.attribute())
+               .elem("Name", detail.name())
+               .elem("RequiresRecreation", detail.requiresRecreation())
+               .end("Target")
+               .elem("Evaluation", detail.evaluation())
+               .elem("ChangeSource", detail.changeSource())
+               .elem("CausingEntity", detail.causingEntity())
+               .end("member");
+        }
+        return xml.end("Details").build();
     }
 
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
@@ -901,7 +961,7 @@ public class CloudFormationQueryHandler {
         }
     }
 
-    private Response describeStackSet(MultivaluedMap<String, String> params) {
+    private Response describeStackSet(MultivaluedMap<String, String> params, String region) {
         try {
             StackSet ss = stackSetService.describeStackSet(params.getFirst("StackSetName"));
             XmlBuilder xml = new XmlBuilder()
@@ -910,6 +970,7 @@ public class CloudFormationQueryHandler {
                     .start("StackSet")
                     .elem("StackSetName", ss.getStackSetName())
                     .elem("StackSetId", ss.getStackSetId())
+                    .elem("StackSetARN", stackSetService.stackSetArn(ss, region))
                     .elem("Status", ss.getStatus())
                     .elem("Description", ss.getDescription())
                     .elem("TemplateBody", ss.getTemplateBody())

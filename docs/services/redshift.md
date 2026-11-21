@@ -134,6 +134,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-region `SnapshotArn`. `OwnerAccount`, or a `SnapshotArn` of another account, restores a snapshot that account has authorized the caller to restore, and is refused with `AccessToSnapshotDenied` otherwise; the dump is read from the owner's directory and the cluster is created in the caller's account |
+| `RestoreTableFromClusterSnapshot` | Create one table of a cluster snapshot in the cluster it was taken from, under `NewTableName` and in `TargetSchemaName` (default: the source schema, which defaults to `public`). See [Table restore](#table-restore) |
+| `DescribeTableRestoreStatus` | List the table restore requests of a cluster in the order they were made, or one by `TableRestoreRequestId`; `MaxRecords` (20 to 100) and `Marker` page the list |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -165,6 +167,10 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. A background sweep then copies the cluster's snapshots to that Region, see [Cross-region snapshot copy](#cross-region-snapshot-copy) |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
+| `CreateScheduledAction` | Create a scheduled action that runs `PauseCluster` or `ResumeCluster` on a cluster at an `at(...)` time or on a six-field `cron(...)` schedule, in UTC, with an optional `StartTime`/`EndTime` window, `Enable` and description. A `ResizeCluster` target is refused with `ScheduledActionTypeUnsupported` |
+| `ModifyScheduledAction` | Change the role, schedule, target, window, description or `Enable` of an action; a new schedule, or enabling a disabled action, restarts the count from now |
+| `DeleteScheduledAction` | Remove an action |
+| `DescribeScheduledActions` | List actions filtered by `ScheduledActionName`, `TargetActionType`, `Active`, `StartTime`, `EndTime` and the `cluster-identifier` and `iam-role` filters, paged with `MaxRecords` (20 to 100) and `Marker`, with `State` and `NextInvocations` |
 | `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
 | `ModifySnapshotSchedule` | Replace a schedule's definitions |
 | `DescribeSnapshotSchedules` | List schedules filtered by `ScheduleIdentifier`, `ClusterIdentifier`, `TagKeys` and `TagValues`, paged with `MaxRecords` and `Marker`, with their associated clusters |
@@ -369,6 +375,39 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
 
+## SUPER and VARBYTE
+
+A cluster's database has the `SUPER` and `VARBYTE` types and the functions that make and read them. `VARBYTE(n)`, `VARBINARY(n)`
+and `BINARY VARYING(n)` in `CREATE TABLE` and `ALTER TABLE` are the same type.
+
+| Function | Result |
+|---|---|
+| `JSON_PARSE(varchar or varbyte)` | The `SUPER` value of a JSON document; an error when it is not JSON. NULL for NULL. |
+| `CAN_JSON_PARSE(varchar or varbyte)` | `true` when `JSON_PARSE` takes it, `false` otherwise and for an empty string, NULL for NULL. |
+| `JSON_SERIALIZE(super)` | The JSON text of a `SUPER` value, the string `null` for NULL. |
+| `JSON_TYPEOF(super)` | `object`, `array`, `string`, `number`, `boolean` or `null`. |
+| `FROM_VARBYTE(varbyte, format)` | The string of a binary value in `hex`, `binary`, `utf8` (also `utf-8` and `utf_8`) or `base64`. |
+| `TO_VARBYTE(string, format)` | The binary value of a string in one of those formats; an odd number of hexadecimal digits gets a leading `0`. |
+
+```sql
+CREATE TABLE events (id INT, doc SUPER, raw VARBYTE(64));
+INSERT INTO events VALUES (1, JSON_PARSE('{"a":[1,2]}'), TO_VARBYTE('6162', 'hex'));
+SELECT JSON_SERIALIZE(doc), FROM_VARBYTE(raw, 'utf8') FROM events;
+```
+
+Floci keeps both as PostgreSQL domains, `varbyte` over `bytea` and `super` over `jsonb`, so some things differ from Amazon Redshift:
+
+- The length of `VARBYTE(n)` is not enforced.
+- A `SUPER` object's keys are in `jsonb` order, shorter keys first and then by bytes, not in the order the JSON gave them.
+- A `VARBYTE` column read as it is comes back in PostgreSQL's `bytea` form (`\x6162`), not as `6162`. Read it with `FROM_VARBYTE(value, 'hex')`.
+- A `VARCHAR` or an integer does not cast to `VARBYTE`: use `TO_VARBYTE`.
+- PartiQL navigation into a `SUPER` value (`doc.a[0]`), `JSON_SIZE`, `IS_OBJECT`, `IS_ARRAY` and the other `SUPER` functions are not supported.
+- `JSON_TYPEOF` of an untyped literal is ambiguous with PostgreSQL's own `json_typeof`: give it a `JSON_PARSE` result or a `::super` cast.
+
+See AWS's [SUPER type](https://docs.aws.amazon.com/redshift/latest/dg/r_SUPER_type.html),
+[VARBYTE type](https://docs.aws.amazon.com/redshift/latest/dg/r_VARBYTE_type.html) and
+[JSON_PARSE](https://docs.aws.amazon.com/redshift/latest/dg/JSON_PARSE.html).
+
 ## Cross-region snapshot copy
 
 `EnableSnapshotCopy` makes a background sweep (`FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS`, 60 by default) copy the cluster's snapshots to the destination Region.
@@ -380,6 +419,10 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
 - **Hybrid storage can lose a copy after a crash.** The copy is written before the source is marked, but hybrid storage flushes in the background and does not report a failed write. If the copy's write fails and the source's succeeds, a crash before the next flush leaves the source marked as copied without a copy, and later sweeps skip it. Persistent and WAL storage report the failed write before the source is marked, so a crash there leaves the snapshot to be copied again.
 - **Retention.** Copied automated snapshots follow the cluster's current `RetentionPeriod`, so `ModifySnapshotCopyRetentionPeriod` changes existing ones. Copied manual snapshots keep the `ManualSnapshotRetentionPeriod` they were copied with; `-1` keeps them until deleted. Retention counts from the source snapshot's creation time.
 - **The cluster store has no Region.** A cluster restored from a copy is created in the same store as every other cluster, as before.
+
+## Scheduled actions
+
+A scheduled action pauses or resumes a provisioned cluster on a schedule. A background sweep runs the latest invocation that came due since it last looked, once, so a long downtime does not replay missed invocations and nothing before an action was created, rescheduled or enabled again runs. With IAM enforcement on, the action's role has to trust `scheduler.redshift.amazonaws.com` and allow `redshift:PauseCluster` or `redshift:ResumeCluster` on the cluster. A failing invocation, such as pausing a cluster that is already paused, is logged and the sweep goes on. Actions are removed with their cluster. Only `PauseCluster` and `ResumeCluster` targets are supported. A cron schedule whose invocations are less than one hour apart is refused with `InvalidSchedule`, as in AWS. Memory storage forgets actions on restart.
 
 ## Automated snapshots
 
@@ -652,6 +695,16 @@ Warehouse:
 
 For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyClusterParameterGroup` on both create and update. `Description` and `ParameterGroupFamily` are replacement properties, matching AWS: changing either creates a new parameter group instead of reusing the prior one.
 
+### Table restore
+
+`RestoreTableFromClusterSnapshot` lifts the table's `CREATE TABLE` statement and its rows out of the snapshot's dump and replays them, renamed, in one transaction. The cluster must be `available` and the snapshot must be an available snapshot of it. Floci differs from AWS in these ways:
+
+- The restore runs inside the request. The response shows `PENDING`, and `DescribeTableRestoreStatus` already reports `SUCCEEDED` or `FAILED`, with the reason in `Message`. `InProgressTableRestoreQuotaExceededFault` is never returned.
+- A snapshot covers one database, `dev`. A `SourceDatabaseName` or table the snapshot does not hold is refused with `InvalidTableRestoreArgument`. A target table that already exists, or a target schema or database that does not, ends the request in `FAILED` and leaves nothing behind.
+- Only the definition and the rows are restored. Constraints, defaults that read a sequence and ownership are not. A partitioned table is refused with `InvalidTableRestoreArgument`, because its rows live in its partitions.
+- Names are matched ignoring case unless `EnableCaseSensitiveIdentifier` is `true`, and folded to lower case in the target otherwise.
+- The status of a deleted cluster's requests is dropped when they are next listed, so a cluster recreated under its name can inherit a request made against its predecessor if nothing listed them in between.
+
 ### Gaps and Limitations
 
 - `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
@@ -687,6 +740,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED` | `true` | Run the background sweep that copies snapshots of copy-enabled clusters to their destination Region |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS` | `60` | Delay between snapshot copy sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTIONS_ENABLED` | `true` | Run the background sweep that pauses and resumes clusters through scheduled actions |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS` | `60` | Delay between scheduled action sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
@@ -918,9 +973,26 @@ is authorized ahead of the role's policies directly for the minted transfer sess
 verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
 normal policy evaluation.
 
+With `floci.services.redshift.spectrum-lake-formation-enforcement=true`
+(`FLOCI_SERVICES_REDSHIFT_SPECTRUM_LAKE_FORMATION_ENFORCEMENT`, default `false`), a query on an external
+table also needs a Lake Formation `SELECT` grant for the IAM role bound to its external schema. The grant can
+be on the table, on every table of its database (`TableWildcard`), or on the whole table through a column
+wildcard without exclusions; `ALL` also counts. A grant to `IAM_ALLOWED_PRINCIPALS` leaves the table to IAM
+alone, so only the S3 checks above apply to it, as in AWS's IAM-only and hybrid modes. Floci's Glue never
+stores that grant, so a catalog that keeps AWS's initial settings leaves every table to IAM: that is the case
+when no data lake settings are stored, or when `CreateTableDefaultPermissions` names `IAM_ALLOWED_PRINCIPALS`.
+Call `PutDataLakeSettings` with `CreateTableDefaultPermissions` empty to hand tables to Lake Formation.
+Without a grant the query then fails with SQLSTATE `42501`. A schema created without a Glue database reads
+through the legacy catalog, where no grant can name its tables, so the flag refuses those queries as well.
+The check runs on every query, ahead of the cache, so a
+`RevokePermissions` stops the next query even for a table already loaded. Column grants, LF-Tags and data
+cells filters are not evaluated: a table reachable only through them is refused.
+The check runs where Floci reads the external table, which is a query that names it: a local view over an
+external table is not followed, so a query on such a view is not checked until the table is next named.
+
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
-schema-qualified external table names. Full Glue IAM enforcement, Lake Formation, role chaining
+schema-qualified external table names. Full Glue IAM enforcement, Lake Formation column and tag permissions, role chaining
 and `IAM_ROLE SESSION` are outside this implementation. Metadata is exposed through
 `svv_external_schemas`, `svv_external_tables`, `svv_external_columns` and `svv_external_partitions`.
 
@@ -967,6 +1039,98 @@ with a PostgreSQL transaction. The schema transaction restriction is an emulator
 Glue and PostgreSQL updates do not form a distributed transaction: an infrastructure failure after
 one store changes can require retrying the command. The legacy Phase 1 catalog does not gain these
 lifecycle operations.
+
+### External schemas over Kinesis Data Streams
+
+Streaming ingestion from Kinesis Data Streams starts with an external schema that maps to the streaming
+source. A streaming materialized view over a stream of that schema, and `REFRESH`, read it; see
+[Streaming materialized views](#streaming-materialized-views).
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] kds
+FROM KINESIS
+[REGION 'us-west-2']
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role and the optional Region, and
+lists the schema in `svv_external_schemas` with `eskind` 9 and the role in `esoptions`. Without `REGION` the
+schema uses the cluster's own Region. `DROP SCHEMA [IF EXISTS] kds [CASCADE | RESTRICT]` removes the local
+schema, its metadata row and its registration; `RESTRICT` is the default, so a schema that holds objects is
+kept, as in Redshift.
+
+- `IAM_ROLE DEFAULT` is not supported. Name the role ARN in a single-quoted literal.
+- The role is not checked when the schema is created. It is checked when a view over the schema is refreshed.
+- A statement that names a relation of the schema as a source (`SELECT * FROM kds.my_stream`,
+  `INSERT INTO kds.t`, `UPDATE kds.t`) is refused with SQLSTATE `0A000`. Redshift reads a stream through a
+  streaming materialized view, and keeps no user tables in such a schema.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
+  with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
+- `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### External schemas over Amazon MSK
+
+An external schema over an Amazon MSK cluster maps a local schema to the cluster for streaming ingestion.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
+FROM MSK
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
+AUTHENTICATION iam
+CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+
+- `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
+- The role and cluster ARN are not checked when the schema is created.
+- A statement that names a relation of the schema (`SELECT * FROM msk.my_topic`, `INSERT INTO msk.t`, `UPDATE msk.t`, `CREATE TABLE msk.t (...)`) is refused with SQLSTATE `0A000`. Streaming materialized views over MSK topics are not yet wired.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA` with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
+
+### Streaming materialized views
+
+A streaming materialized view reads one stream of a Kinesis external schema, and `REFRESH` loads what the
+stream holds since the last refresh.
+
+```sql
+CREATE MATERIALIZED VIEW my_view [AUTO REFRESH NO] AS
+SELECT approximate_arrival_timestamp, partition_key, shard_id, sequence_number, refresh_time,
+       JSON_PARSE(FROM_VARBYTE(kinesis_data, 'utf-8')) AS doc
+FROM kds.my_stream;
+
+REFRESH MATERIALIZED VIEW my_view;
+DROP MATERIALIZED VIEW [IF EXISTS] my_view [CASCADE | RESTRICT];
+```
+
+The stream's relation has the columns Redshift documents: `approximate_arrival_timestamp`, `partition_key`,
+`shard_id`, `sequence_number`, `refresh_time` and `kinesis_data` (`varbyte`). The view is a PostgreSQL table
+that `SELECT` fills; an unqualified name is created in `public`. Records are read through Floci's own Kinesis
+service, never through Firehose or S3.
+
+- **Refresh:** the first refresh reads each shard from its trim horizon. Every later one starts after the
+  last record of the shard that a refresh loaded. A batch is loaded, run through the view's `SELECT` and
+  committed as one statement, and the shard's position is saved only after that commit, so it never runs ahead
+  of the data. A crash between the commit and the save re-reads that last batch. `TRUNCATE` or `DELETE` on the
+  view does not move the position, as on Redshift.
+- **Errors:** a failure in the view's own expressions (a cast, a calculation) fails the refresh and leaves the
+  position where it was, as on Redshift.
+- **IAM:** each refresh checks the schema's role against `kinesis:DescribeStreamSummary`,
+  `GetShardIterator`, `GetRecords`, `ListShards` and `DescribeStream` on the stream and `kinesis:ListStreams`,
+  with trust for `redshift.amazonaws.com`, when IAM enforcement is on. `CREATE MATERIALIZED VIEW` fails with
+  `42P01` when the stream does not exist.
+- **Not supported:** `AUTO REFRESH YES` is refused with `0A000`; refresh the view yourself. Shard splits and
+  merges, `ALTER MATERIALIZED VIEW`, and PartiQL navigation into `SUPER` values are not implemented.
+  A `JOIN` in the view is refused with `0A000`, as on Redshift; a comma join (`FROM a, b`) is not detected.
+  Grouping and aggregation (`GROUP BY`, `HAVING`, `DISTINCT`, and aggregate functions such as `COUNT` or `MAX`)
+  are refused with `0A000` too, because each refresh batch is inserted on its own and would leave a partial row
+  per batch. Aggregate over the view with a query instead.
+- `CREATE MATERIALIZED VIEW` over a stream fails with `0A000` inside a transaction block, and `DROP MATERIALIZED VIEW`
+  and `REFRESH MATERIALIZED VIEW` of a streaming view with `25001`.
+- Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with
+  the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
+- Refreshes of the views over one stream run one at a time.
 
 ### COPY from S3
 

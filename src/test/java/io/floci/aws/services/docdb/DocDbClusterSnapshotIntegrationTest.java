@@ -1,6 +1,6 @@
 package io.floci.aws.services.docdb;
 
-import io.floci.aws.testing.DocDbMockProfile;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -17,9 +17,12 @@ import static org.hamcrest.Matchers.not;
  * Cluster snapshots and the two restores. Requests are signed for {@code rds}, as the AWS CLI and
  * SDKs sign DocumentDB calls, so they reach DocumentDB only through the routing that recognizes a
  * DocumentDB cluster or snapshot named in the request.
+ *
+ * <p>{@link IamEnforcementProfile} mocks the DocumentDB container layer and leaves RDS unmocked,
+ * so the shared RDS paths run as they are.
  */
 @QuarkusTest
-@TestProfile(DocDbMockProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class DocDbClusterSnapshotIntegrationTest {
 

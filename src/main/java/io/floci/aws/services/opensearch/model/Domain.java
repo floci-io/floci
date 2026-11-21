@@ -81,7 +81,7 @@ public class Domain {
     private String endpoint = "";
 
     @JsonProperty("Tags")
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     @JsonProperty("ContainerId")
     private String containerId;

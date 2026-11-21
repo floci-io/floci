@@ -15,6 +15,11 @@ public final class AwsSdkErrors {
     /** Asserts that {@code call} fails with the AWS error {@code code} at HTTP {@code status}, and returns it. */
     public static AwsServiceException assertAwsError(String code, int status, Executable call) {
         AwsServiceException error = assertThrows(AwsServiceException.class, call);
+        return assertAwsError(code, status, error);
+    }
+
+    /** Checks an already caught SDK error, including errors tolerated during resource cleanup. */
+    public static AwsServiceException assertAwsError(String code, int status, AwsServiceException error) {
         assertEquals(code, error.awsErrorDetails().errorCode());
         assertEquals(status, error.statusCode());
         return error;

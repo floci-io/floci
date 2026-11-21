@@ -70,17 +70,19 @@ public class Ec2IpamService {
     // org-wide settings, e.g. the delegated admin account
     private final StorageBackend<String, String> settings;
     private final StorageBackend<String, AsnAssociation> asnAssociations;
+    // Pool and allocation tags live in EC2's tag store, so CreateTags, DeleteTags and DescribeTags see them.
+    private final Ec2Service ec2;
     private final Instance<RequestContext> requestContextInstance;
 
     @Inject
-    public Ec2IpamService(EmulatorConfig config, StorageFactory storageFactory,
+    public Ec2IpamService(EmulatorConfig config, StorageFactory storageFactory, Ec2Service ec2,
                           Instance<RequestContext> requestContextInstance) {
         this(config,
                 storageFactory.create("ec2", "ec2-ipams.json", new TypeReference<Map<String, Ipam>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-pools.json", new TypeReference<Map<String, IpamPool>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-settings.json", new TypeReference<Map<String, String>>() {}),
                 storageFactory.create("ec2", "ec2-ipam-asn-associations.json", new TypeReference<Map<String, AsnAssociation>>() {}),
-                requestContextInstance);
+                ec2, requestContextInstance);
     }
 
     // Package-private for hermetic tests (pass in-memory StorageBackends directly).
@@ -88,8 +90,9 @@ public class Ec2IpamService {
                    StorageBackend<String, Ipam> ipams,
                    StorageBackend<String, IpamPool> pools,
                    StorageBackend<String, String> settings,
-                   StorageBackend<String, AsnAssociation> asnAssociations) {
-        this(config, ipams, pools, settings, asnAssociations, null);
+                   StorageBackend<String, AsnAssociation> asnAssociations,
+                   Ec2Service ec2) {
+        this(config, ipams, pools, settings, asnAssociations, ec2, null);
     }
 
     Ec2IpamService(EmulatorConfig config,
@@ -97,12 +100,14 @@ public class Ec2IpamService {
                    StorageBackend<String, IpamPool> pools,
                    StorageBackend<String, String> settings,
                    StorageBackend<String, AsnAssociation> asnAssociations,
+                   Ec2Service ec2,
                    Instance<RequestContext> requestContextInstance) {
         this.config = config;
         this.ipams = ipams;
         this.pools = pools;
         this.settings = settings;
         this.asnAssociations = asnAssociations;
+        this.ec2 = ec2;
         this.requestContextInstance = requestContextInstance;
     }
 
@@ -411,6 +416,7 @@ public class Ec2IpamService {
         for (IpamPool pool : pools.scan(k -> true)) {
             if (ipamId.equals(pool.getIpamId())) {
                 pools.delete(key(pool.getRegion(), pool.getIpamPoolId()));
+                deletePoolTags(ownedIpam.accountId(), pool);
             }
         }
         ipam.setState("delete-complete");
@@ -472,7 +478,7 @@ public class Ec2IpamService {
                                    String sourceIpamPoolId, String addressFamily, String description,
                                    String ownerId) {
         return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
-                description, ownerId, null);
+                description, ownerId, null, List.of());
     }
 
     /**
@@ -482,7 +488,7 @@ public class Ec2IpamService {
      */
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description,
-                                   String requestedOwnerId, String clientToken) {
+                                   String requestedOwnerId, String clientToken, List<Tag> tags) {
         // Same null-means-caller resolution as createIpam.
         String ownerId = requestedOwnerId != null ? requestedOwnerId : callerAccountId();
         if (ipamScopeId == null || ipamScopeId.isBlank()) {
@@ -516,6 +522,9 @@ public class Ec2IpamService {
         pool.setState("create-complete");
         pool.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pools.put(key(region, pool.getIpamPoolId()), pool);
+        if (!tags.isEmpty()) {
+            ec2.createTags(region, List.of(pool.getIpamPoolId()), tags);
+        }
         LOG.infov("Created IPAM pool {0} (scope {1}, source {2})",
                 pool.getIpamPoolId(), ipamScopeId, sourceIpamPoolId);
         return pool;
@@ -607,7 +616,8 @@ public class Ec2IpamService {
     private boolean matchesPoolFilter(IpamPool pool, String name, List<String> values,
                                       Supplier<Optional<ScopeOfIpam>> scopeLookup) {
         if (name.startsWith("tag:") || "tag-key".equals(name)) {
-            return Ec2Service.matchesTagFilter(pool.getTags(), name, values, Ec2Service::matchesFilterValue);
+            return Ec2Service.matchesTagFilter(ec2.resourceTags(pool.getRegion(), pool.getIpamPoolId()), name, values,
+                    Ec2Service::matchesFilterValue);
         }
         String value = switch (name) {
             case "address-family" -> pool.getAddressFamily();
@@ -656,8 +666,27 @@ public class Ec2IpamService {
         OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         deletePool(ownedPool);
+        deletePoolTags(ownedPool.accountId(), pool);
         pool.setState("delete-complete");
         return pool;
+    }
+
+    /** A pool's tags go with it, and so do those of the allocations it still held. */
+    private void deletePoolTags(String ownerAccountId, IpamPool pool) {
+        ec2.removeTags(ownerAccountId, pool.getRegion(), pool.getIpamPoolId());
+        for (IpamPoolAllocation allocation : pool.getAllocations()) {
+            deleteAllocationTags(ownerAccountId, pool.getRegion(), allocation);
+        }
+    }
+
+    /** The pool's owner and the account that made the allocation each keep their own tags on it; both go. */
+    private void deleteAllocationTags(String ownerAccountId, String region, IpamPoolAllocation allocation) {
+        String id = allocation.getIpamPoolAllocationId();
+        ec2.removeTags(ownerAccountId, region, id);
+        String maker = allocation.getResourceOwner();
+        if (maker != null && !maker.equals(ownerAccountId)) {
+            ec2.removeTags(maker, region, id);
+        }
     }
 
     public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr) {
@@ -708,7 +737,7 @@ public class Ec2IpamService {
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
                                                    String description) {
-        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null);
+        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null, List.of());
     }
 
     /**
@@ -718,7 +747,7 @@ public class Ec2IpamService {
      */
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
-                                                   String description, String clientToken) {
+                                                   String description, String clientToken, List<Tag> tags) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         Optional<IpamPoolAllocation> replay = Ec2ClientTokens.replay(clientToken, () -> pool.getAllocations().stream(),
@@ -759,10 +788,13 @@ public class Ec2IpamService {
         allocation.setCidr(chosen);
         allocation.setDescription(description);
         allocation.setResourceType("custom");
-        allocation.setResourceOwner(config.defaultAccountId());
+        allocation.setResourceOwner(callerAccountId());
         allocation.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pool.getAllocations().add(allocation);
         savePool(ownedPool);
+        if (!tags.isEmpty()) {
+            ec2.createTags(pool.getRegion(), List.of(allocation.getIpamPoolAllocationId()), tags);
+        }
         LOG.infov("Allocated {0} from IPAM pool {1}", chosen, ipamPoolId);
         return allocation;
     }
@@ -771,22 +803,32 @@ public class Ec2IpamService {
                                              String ipamPoolAllocationId, String cidr) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
-        boolean removed = pool.getAllocations().removeIf(a ->
-                (ipamPoolAllocationId != null && ipamPoolAllocationId.equals(a.getIpamPoolAllocationId()))
-                        || (ipamPoolAllocationId == null && cidr != null && cidr.equals(a.getCidr())));
-        if (!removed) {
+        List<IpamPoolAllocation> released = pool.getAllocations().stream()
+                .filter(a -> (ipamPoolAllocationId != null && ipamPoolAllocationId.equals(a.getIpamPoolAllocationId()))
+                        || (ipamPoolAllocationId == null && cidr != null && cidr.equals(a.getCidr())))
+                .toList();
+        if (released.isEmpty()) {
             String identifier = ipamPoolAllocationId != null
                     ? ipamPoolAllocationId
                     : "for CIDR " + cidr;
             throw new AwsException("InvalidIpamPoolAllocationId.NotFound",
                     "Allocation " + identifier + " not found in pool " + ipamPoolId + ".", 400);
         }
+        pool.getAllocations().removeAll(released);
         savePool(ownedPool);
+        for (IpamPoolAllocation allocation : released) {
+            deleteAllocationTags(ownedPool.accountId(), pool.getRegion(), allocation);
+        }
         return true;
     }
 
     public List<IpamPoolAllocation> getIpamPoolAllocations(String region, String ipamPoolId) {
         return requirePool(region, ipamPoolId).getAllocations();
+    }
+
+    /** The pool's own region, where its tags and its allocations' tags live, whichever region the caller is in. */
+    public String poolRegion(String region, String ipamPoolId) {
+        return requirePool(region, ipamPoolId).getRegion();
     }
 
     /**
