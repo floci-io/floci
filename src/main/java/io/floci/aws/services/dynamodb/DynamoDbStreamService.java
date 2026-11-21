@@ -25,10 +25,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -455,12 +453,12 @@ public class DynamoDbStreamService {
         if (shard.trimmedThrough != null && requested.compareTo(new BigInteger(shard.trimmedThrough)) <= 0) {
             throw trimmed();
         }
-        for (DynamoDbStreamRecord record : shard.records) {
-            if (requested.compareTo(new BigInteger(record.getSequenceNumber())) == 0) {
-                return;
-            }
+        int index = shard.records.firstIndexWhere(
+                record -> new BigInteger(record.getSequenceNumber()).compareTo(requested) >= 0);
+        if (index == shard.records.size()
+                || new BigInteger(shard.records.get(index).getSequenceNumber()).compareTo(requested) != 0) {
+            throw invalidSequenceNumber();
         }
-        throw invalidSequenceNumber();
     }
 
     GetRecordsResult getRecords(String shardIterator, Integer limit) {
@@ -502,42 +500,18 @@ public class DynamoDbStreamService {
     }
 
     /**
-     * Up to {@code limit} of {@code records}, oldest first, from where {@code cursor} reads. Records are in sequence
-     * order, so the search walks in from both ends at once and stops at whichever side finds the cursor first: a
-     * reader keeping up finds its place near the tail, one far behind near the head, and the shard is never copied.
+     * Up to {@code limit} of {@code records}, oldest first, from where {@code cursor} reads. Records are kept in
+     * sequence order, so a binary search finds the first one without walking or copying the shard.
      */
-    private static List<DynamoDbStreamRecord> readFrom(ArrayDeque<DynamoDbStreamRecord> records, Cursor cursor,
+    private static List<DynamoDbStreamRecord> readFrom(RingBuffer<DynamoDbStreamRecord> records, Cursor cursor,
                                                        int limit) {
-        Iterator<DynamoDbStreamRecord> fromHead = records.iterator();
-        Iterator<DynamoDbStreamRecord> fromTail = records.descendingIterator();
-        // What the tail side has passed that the cursor reads, nearest the cursor first and at most a page of it.
-        ArrayDeque<DynamoDbStreamRecord> passed = new ArrayDeque<>();
-        int unvisited = records.size();
-        while (unvisited > 0) {
-            DynamoDbStreamRecord head = fromHead.next();
-            unvisited--;
-            if (reads(cursor, head)) {
-                List<DynamoDbStreamRecord> page = new ArrayList<>();
-                page.add(head);
-                while (page.size() < limit && fromHead.hasNext()) {
-                    page.add(fromHead.next());
-                }
-                return page;
-            }
-            if (unvisited == 0) {
-                break;
-            }
-            DynamoDbStreamRecord tail = fromTail.next();
-            unvisited--;
-            if (!reads(cursor, tail)) {
-                break;
-            }
-            passed.addFirst(tail);
-            if (passed.size() > limit) {
-                passed.removeLast();
-            }
+        int from = records.firstIndexWhere(record -> reads(cursor, record));
+        int to = from + Math.min(limit, records.size() - from);
+        List<DynamoDbStreamRecord> page = new ArrayList<>(to - from);
+        for (int i = from; i < to; i++) {
+            page.add(records.get(i));
         }
-        return new ArrayList<>(passed);
+        return page;
     }
 
     /** Whether {@code record} is at or past where {@code cursor} reads from. */
@@ -731,7 +705,7 @@ public class DynamoDbStreamService {
         final int slot;
         final String startingSequenceNumber;
         final Instant openedAt;
-        final ArrayDeque<DynamoDbStreamRecord> records = new ArrayDeque<>();
+        final RingBuffer<DynamoDbStreamRecord> records = new RingBuffer<>();
         /** The sequence number of the newest record ever added, or null. */
         String lastSequence;
         /** The sequence number of the newest record trimmed away, or null: a cursor at or before it lost records. */
