@@ -5306,7 +5306,7 @@ class EksClusterManagerTest {
             assertEquals("10.0.1.25", deserialized.getNodePrivateIp());
 
             EksService eksService = Mockito.mock(EksService.class);
-            when(eksService.createCluster(any())).thenReturn(cluster);
+            when(eksService.createCluster(any(), any())).thenReturn(cluster);
             when(eksService.requireClusterInRequestRegion("wire-cluster")).thenReturn(cluster);
             when(eksService.deleteClusterInRequestRegion("wire-cluster")).thenReturn(cluster);
 

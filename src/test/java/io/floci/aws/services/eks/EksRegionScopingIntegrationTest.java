@@ -1,6 +1,7 @@
 package io.floci.aws.services.eks;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -13,6 +14,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -25,6 +27,59 @@ class EksRegionScopingIntegrationTest {
 
     private static final String ACCOUNT = "135792468024";
     private static final String CLUSTER = "region-scoped";
+
+    @Test
+    void createClusterRetryReturnsTheOriginalResponse() {
+        String name = "http-token-retry";
+        String token = "http-retry-token";
+        String otherAccount = "135792468025";
+        Map<String, Object> request = clusterBody(name, ACCOUNT, "cluster", token);
+        try {
+            Response created = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
+            Response retried = eks(ACCOUNT, "eu-west-1").body(request).post("/clusters");
+
+            created.then().statusCode(200).body("cluster.clientRequestToken", equalTo(token))
+                    .body("cluster", not(hasKey("createRequest")));
+            retried.then().statusCode(200).body("cluster.clientRequestToken", equalTo(token))
+                    .body("cluster", not(hasKey("createRequest")));
+            assertEquals(created.jsonPath().getString("cluster.arn"),
+                    retried.jsonPath().getString("cluster.arn"));
+            assertEquals(created.jsonPath().getString("cluster.createdAt"),
+                    retried.jsonPath().getString("cluster.createdAt"));
+
+            eks(ACCOUNT, "eu-west-1")
+                    .body(clusterBody(name, ACCOUNT, "other", token))
+                    .post("/clusters").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+
+            Map<String, Object> changedProtection = new HashMap<>(request);
+            changedProtection.put("deletionProtection", true);
+            eks(ACCOUNT, "eu-west-1").body(changedProtection).post("/clusters").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+
+            Map<String, Object> changedEgress = new HashMap<>(request);
+            changedEgress.put("resourcesVpcConfig", Map.of("controlPlaneEgressMode", "CUSTOMER_ROUTED"));
+            eks(ACCOUNT, "eu-west-1").body(changedEgress).post("/clusters").then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+
+            eks(ACCOUNT, "eu-central-1").body(request).post("/clusters").then().statusCode(200)
+                    .body("cluster.arn", equalTo("arn:aws:eks:eu-central-1:" + ACCOUNT + ":cluster/" + name));
+            eks(otherAccount, "eu-west-1")
+                    .body(clusterBody(name, otherAccount, "cluster", token))
+                    .post("/clusters").then().statusCode(200)
+                    .body("cluster.arn", equalTo("arn:aws:eks:eu-west-1:" + otherAccount + ":cluster/" + name));
+        } finally {
+            eks(ACCOUNT, "eu-west-1").delete("/clusters/" + name);
+            eks(ACCOUNT, "eu-central-1").delete("/clusters/" + name);
+            eks(otherAccount, "eu-west-1").delete("/clusters/" + name);
+        }
+    }
+
+    private static Map<String, Object> clusterBody(String name, String account, String role, String token) {
+        return Map.of("name", name, "roleArn", "arn:aws:iam::" + account + ":role/" + role,
+                "clientRequestToken", token, "deletionProtection", false,
+                "resourcesVpcConfig", Map.of("controlPlaneEgressMode", "AWS_MANAGED"));
+    }
 
     @Test
     void clusterIsOnlyVisibleInTheRegionItWasCreatedIn() {

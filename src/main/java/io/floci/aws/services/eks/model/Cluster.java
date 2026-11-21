@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -22,6 +23,14 @@ public class Cluster {
 
     @JsonProperty("arn")
     private String arn;
+
+    @JsonProperty("clientRequestToken")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String clientRequestToken;
+
+    @JsonProperty("createRequest")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private JsonNode createRequest;
 
     @JsonProperty("createdAt")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
@@ -193,6 +202,12 @@ public class Cluster {
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
 
+    public String getClientRequestToken() { return clientRequestToken; }
+    public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
+
+    public JsonNode getCreateRequest() { return createRequest; }
+    public void setCreateRequest(JsonNode createRequest) { this.createRequest = createRequest; }
+
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
@@ -275,6 +290,8 @@ public class Cluster {
         Cluster c = new Cluster();
         c.name = this.name;
         c.arn = this.arn;
+        c.clientRequestToken = this.clientRequestToken;
+        c.createRequest = this.createRequest;
         c.createdAt = this.createdAt;
         c.version = this.version;
         c.endpoint = this.endpoint;

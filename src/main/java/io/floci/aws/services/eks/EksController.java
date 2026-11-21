@@ -101,7 +101,7 @@ public class EksController {
                 throw new AwsException("SerializationException", e.getOriginalMessage(), 400);
             }
         }
-        Cluster cluster = eksService.createCluster(request);
+        Cluster cluster = eksService.createCluster(request, body);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
@@ -139,7 +139,8 @@ public class EksController {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
                 && cluster.getNodePrivateIp() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
-                && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
+                && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null
+                && cluster.getCreateRequest() == null)) {
             return cluster;
         }
         Cluster response = cluster.copy();
@@ -150,6 +151,7 @@ public class EksController {
         response.setClusterArgs(null);
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
+        response.setCreateRequest(null);
         return response;
     }
 

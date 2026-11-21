@@ -2,7 +2,9 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -78,6 +80,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -97,6 +100,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
+    private record ClusterCreateClaim(JsonNode request, CompletableFuture<Cluster> result) {}
 
     public static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
@@ -136,6 +140,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
     /** {@code <account>/<cluster key>} of each cluster a CreateCluster call is building. */
     private final Set<String> clustersBeingCreated = ConcurrentHashMap.newKeySet();
+    private final Map<String, ClusterCreateClaim> pendingClusterCreates = new ConcurrentHashMap<>();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -736,6 +741,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public Cluster createCluster(CreateClusterRequest request) {
+        return createCluster(request, null);
+    }
+
+    Cluster createCluster(CreateClusterRequest request, JsonNode rawRequest) {
         String name = request.getName();
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "Cluster name is required", 400);
@@ -750,6 +759,73 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             + "satisfy regular expression pattern: ^" + CLUSTER_NAME_REGEX + "$",
                     400);
         }
+        String token = request.getClientRequestToken();
+        if (token == null) {
+            return createClusterWithNameReservation(request, name, null);
+        }
+        JsonNode requestSnapshot = MAPPER.valueToTree(request);
+        if (rawRequest != null) {
+            includeUnmodeledRequestFields(requestSnapshot, rawRequest);
+        }
+        String tokenKey = regionResolver.getAccountId() + "/" + regionResolver.getRegion() + "/" + token;
+        ClusterCreateClaim claim = new ClusterCreateClaim(requestSnapshot, new CompletableFuture<>());
+        ClusterCreateClaim pending = pendingClusterCreates.putIfAbsent(tokenKey, claim);
+        if (pending != null) {
+            requireMatchingClusterRequest(pending.request(), requestSnapshot);
+            try {
+                return pending.result().join();
+            } catch (CompletionException e) {
+                if (e.getCause() instanceof RuntimeException cause) {
+                    throw cause;
+                }
+                if (e.getCause() instanceof Error cause) {
+                    throw cause;
+                }
+                throw e;
+            }
+        }
+        try {
+            Optional<Cluster> existing = storage.scan(key -> key.startsWith(regionResolver.getRegion() + KEY_SEPARATOR))
+                    .stream().filter(cluster -> token.equals(cluster.getClientRequestToken())).findFirst();
+            Cluster cluster;
+            if (existing.isPresent()) {
+                cluster = existing.get();
+                requireMatchingClusterRequest(cluster.getCreateRequest(), requestSnapshot);
+            } else {
+                cluster = createClusterWithNameReservation(request, name, requestSnapshot);
+            }
+            claim.result().complete(cluster);
+            return cluster;
+        } catch (RuntimeException | Error e) {
+            claim.result().completeExceptionally(e);
+            throw e;
+        } finally {
+            pendingClusterCreates.remove(tokenKey, claim);
+        }
+    }
+
+    private static void includeUnmodeledRequestFields(JsonNode bound, JsonNode raw) {
+        if (!(bound instanceof ObjectNode object) || !raw.isObject()) {
+            return;
+        }
+        raw.fields().forEachRemaining(field -> {
+            JsonNode value = object.get(field.getKey());
+            if (value == null || (value.isNull() && !field.getValue().isNull())) {
+                object.set(field.getKey(), field.getValue().deepCopy());
+            } else {
+                includeUnmodeledRequestFields(value, field.getValue());
+            }
+        });
+    }
+
+    private static void requireMatchingClusterRequest(JsonNode original, JsonNode retry) {
+        if (!retry.equals(original)) {
+            throw new AwsException("InvalidParameterException",
+                    EksAddonService.TOKEN_REUSED, 400);
+        }
+    }
+
+    private Cluster createClusterWithNameReservation(CreateClusterRequest request, String name, JsonNode requestSnapshot) {
         // Cluster names are unique only within a Region of an account (#7966). The key stays reserved
         // until the cluster is stored, so a concurrent create of the same name is refused, not let
         // through to overwrite this one.
@@ -762,7 +838,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 throw new AwsException("ResourceInUseException",
                         "Cluster already exists: " + name, 409);
             }
-            return createReservedCluster(request, name);
+            return createReservedCluster(request, name, requestSnapshot);
         } finally {
             clustersBeingCreated.remove(reservation);
         }
@@ -800,7 +876,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    private Cluster createReservedCluster(CreateClusterRequest request, String name) {
+    private Cluster createReservedCluster(CreateClusterRequest request, String name, JsonNode requestSnapshot) {
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
                 ? "CONFIG_MAP" : requestedAccess.authenticationMode();
@@ -818,6 +894,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
         Cluster cluster = new Cluster();
         cluster.setName(name);
+        cluster.setClientRequestToken(request.getClientRequestToken());
+        cluster.setCreateRequest(requestSnapshot);
         cluster.setAccessConfig(accessConfig);
         cluster.setComputeConfig(request.getComputeConfig());
         cluster.setStorageConfig(request.getStorageConfig());
