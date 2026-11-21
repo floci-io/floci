@@ -239,6 +239,35 @@ class FirehoseServiceTest {
                 "legacy entries from another region must not be adopted");
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the delivery stream whose ARN it is given, as tag calls leave them, and those
+     * of one stored under the account's key from before the key named the Region, in place, without migrating it;
+     * nothing for an ARN of another account or Region, or of no stream.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void storedTagsAreTheTagsOfTheDeliveryStreamTheArnNames() {
+        String arn = firehoseService.createDeliveryStream("tagged", null);
+        firehoseService.tagDeliveryStream("tagged", List.of(new DeliveryStreamDescription.Tag("team", "data"),
+                new DeliveryStreamDescription.Tag("env", "test")));
+        firehoseService.untagDeliveryStream("tagged", List.of("env"));
+        String legacyArn = "arn:aws:firehose:us-east-1:000000000000:deliverystream/legacy";
+        DeliveryStreamDescription legacy = new DeliveryStreamDescription("legacy", legacyArn, null, null);
+        legacy.setAccountId("000000000000");
+        legacy.setTags(List.of(new DeliveryStreamDescription.Tag("tier", "web")));
+        AccountAwareStorageBackend<DeliveryStreamDescription> streams =
+                (AccountAwareStorageBackend<DeliveryStreamDescription>) backends.get("firehose/streams.json");
+        streams.putForAccount("000000000000", "legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), firehoseService.storedTags(arn));
+        assertEquals(Map.of("tier", "web"), firehoseService.storedTags(legacyArn));
+        assertTrue(streams.getForAccount("000000000000", "legacy").isPresent());
+        assertEquals(Map.of(), firehoseService.storedTags(arn.replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), firehoseService.storedTags(arn.replace(":us-east-1:", ":eu-west-1:")));
+        assertEquals(Map.of(), firehoseService.storedTags(arn + "0"));
+        assertEquals(Map.of(), firehoseService.storedTags("arn:aws:s3:::tagged"));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void aPersistedRedshiftBackupGetsTheDefaultsOnDescribe() {

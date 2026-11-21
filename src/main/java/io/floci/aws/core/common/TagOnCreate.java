@@ -42,12 +42,6 @@ final class TagOnCreate {
     private static final Set<String> LOWER_CASE_TAGS = Set.of("cloudwatch:PutMetricAlarm", "cloudwatch:PutCompositeAlarm");
 
     /**
-     * CodeDeploy's handler reads a tag as {@code Key} and {@code Value}, or as {@code key} and {@code value} when it
-     * has no {@code Key}.
-     */
-    private static final Set<String> EITHER_CASE_TAGS = Set.of("codedeploy");
-
-    /**
      * The tags one resource gets, and the type of that resource where a tag specification names it, else null.
      */
     record TagSet(String resourceType, Map<String, String> tags) {
@@ -94,7 +88,20 @@ final class TagOnCreate {
             return Optional.empty();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
+        return of(operation, entry, form, form.isEmpty() ? PassedRoles.jsonBody(ctx) : null);
+    }
+
+    /**
+     * As {@link #of(String, ContainerRequestContext)}, for a JSON request that is not an HTTP request of its own (a
+     * state machine's task to its integrated service).
+     */
+    static Optional<Tagging> ofBody(String operation, JsonNode body) {
+        TagOnCreateMembers.Entry entry = TagOnCreateMembers.of(operation);
+        return entry == null ? Optional.empty() : of(operation, entry, Map.of(), body);
+    }
+
+    private static Optional<Tagging> of(String operation, TagOnCreateMembers.Entry entry, Map<String, String> form,
+                                        JsonNode body) {
         Set<TagSet> sets = new LinkedHashSet<>();
         Set<TagSet> otherSpellings = new LinkedHashSet<>();
         for (TagOnCreateMembers.Member member : entry.members()) {
@@ -105,8 +112,7 @@ final class TagOnCreate {
                 otherSpellings.addAll(anySpellingInForm(form, member));
             } else if (body != null && body.isObject()) {
                 Map<String, Map<String, String>> byType = new LinkedHashMap<>();
-                collect(topLevel(body, operation, member.steps().getFirst().name()), member,
-                        EITHER_CASE_TAGS.contains(operation.substring(0, operation.indexOf(':'))), 0, null, byType);
+                collect(topLevel(body, operation, member.steps().getFirst().name()), member, 0, null, byType);
                 byType.forEach((type, tags) -> add(sets, type, tags));
                 otherSpellings.addAll(anySpellingInBody(body, member));
             }
@@ -430,23 +436,14 @@ final class TagOnCreate {
      * The tags a body carries at the member, by the resource type of the tag specification they are in, null
      * outside one.
      */
-    private static void collect(JsonNode value, TagOnCreateMembers.Member member, boolean eitherCase, int index,
+    private static void collect(JsonNode value, TagOnCreateMembers.Member member, int index,
                                 String type, Map<String, Map<String, String>> byType) {
         List<PassedRoleMembers.Step> steps = member.steps();
         PassedRoleMembers.Step step = steps.get(index);
         if (index == steps.size() - 1) {
             Map<String, String> tags = byType.computeIfAbsent(type, ignored -> new LinkedHashMap<>());
-            // CodeDeployJsonHandler iterates the member whatever it holds, which for an object is its values.
-            if (step.into() == PassedRoleMembers.Into.LIST && value != null
-                    && (value.isArray() || eitherCase && value.isObject())) {
+            if (step.into() == PassedRoleMembers.Into.LIST && value != null && value.isArray()) {
                 for (JsonNode tag : value) {
-                    if (eitherCase) {
-                        // As CodeDeployJsonHandler reads it: as text whatever it holds, a missing key an empty one.
-                        boolean lower = !tag.has(member.key());
-                        tags.put(tag.path(lower ? member.key().toLowerCase(Locale.ROOT) : member.key()).asText(),
-                                tag.path(lower ? member.value().toLowerCase(Locale.ROOT) : member.value()).asText());
-                        continue;
-                    }
                     JsonNode key = tag.get(member.key());
                     if (key != null && key.isValueNode() && !key.isNull()) {
                         tags.put(key.asText(), text(tag.get(member.value())));
@@ -463,13 +460,13 @@ final class TagOnCreate {
         }
         String next = steps.get(index + 1).name();
         switch (step.into()) {
-            case NONE -> collect(value.get(next), member, eitherCase, index + 1, type, byType);
-            case KEY -> collect(value.path(step.key()).get(next), member, eitherCase, index + 1, type, byType);
+            case NONE -> collect(value.get(next), member, index + 1, type, byType);
+            case KEY -> collect(value.path(step.key()).get(next), member, index + 1, type, byType);
             case LIST, MAP -> {
                 if (step.into() == PassedRoleMembers.Into.LIST ? value.isArray() : value.isObject()) {
                     for (JsonNode element : value) {
                         JsonNode kind = member.resourceType() == null ? null : element.get(member.resourceType());
-                        collect(element.get(next), member, eitherCase, index + 1,
+                        collect(element.get(next), member, index + 1,
                                 kind != null && kind.isTextual() ? kind.asText() : type, byType);
                     }
                 }

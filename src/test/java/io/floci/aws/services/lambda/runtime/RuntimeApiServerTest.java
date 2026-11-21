@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda.runtime;
 
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.PendingInvocation;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
@@ -15,19 +16,26 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -154,6 +162,31 @@ class RuntimeApiServerTest {
                 new CompletableFuture<>()));
         HttpResponse<String> second = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
         assertTrue(second.headers().firstValue("Lambda-Runtime-Client-Context").isEmpty());
+    }
+
+    @Test
+    @Timeout(10)
+    void nextEndpoint_emitsTraceIdHeaderOnlyWhenPresent() throws Exception {
+        String traceId = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        PendingInvocation withTrace = new PendingInvocation(
+                "req-trace", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        withTrace.setTraceId(traceId);
+        server.enqueue(withTrace);
+
+        HttpRequest next = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        HttpResponse<String> first = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertEquals(traceId, first.headers().firstValue("Lambda-Runtime-Trace-Id").orElse(null));
+
+        server.enqueue(new PendingInvocation(
+                "req-notrace", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>()));
+        HttpResponse<String> second = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertTrue(second.headers().firstValue("Lambda-Runtime-Trace-Id").isEmpty());
     }
 
     @Test
@@ -301,6 +334,216 @@ class RuntimeApiServerTest {
         assertEquals("application/json",
                 response.headers().firstValue("Content-Type").orElse(""));
         assertEquals("OK", new JsonObject(response.body()).getString("status"));
+    }
+
+    @Test
+    @Timeout(10)
+    void streamedResponseReachesTheListenerChunkByChunkAndCompletesAtTheEnd() throws Exception {
+        List<String> chunks = new CopyOnWriteArrayList<>();
+        AtomicReference<String> contentType = new AtomicReference<>();
+        PendingInvocation invocation = streamingInvocation("req-stream", contentType, chunks);
+        server.enqueue(invocation);
+        pollNext();
+
+        try (Socket socket = new Socket("localhost", port)) {
+            OutputStream out = socket.getOutputStream();
+            out.write(("POST /2018-06-01/runtime/invocation/req-stream/response HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Lambda-Runtime-Function-Response-Mode: streaming\r\n"
+                    + "Content-Type: text/event-stream\r\n"
+                    + "Transfer-Encoding: chunked\r\n\r\n"
+                    + chunk("data: 1\n\n")).getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            await().atMost(Duration.ofSeconds(5)).until(() -> chunks.size() == 1);
+            assertEquals("text/event-stream", contentType.get());
+            assertEquals("data: 1\n\n", chunks.get(0));
+            assertFalse(invocation.getResultFuture().isDone());
+
+            out.write((chunk("data: 2\n\n") + "0\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+            assertNull(result.getFunctionError());
+            assertEquals("data: 1\n\ndata: 2\n\n", String.join("", chunks));
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void bufferedResponseOfAnInvocationWithAListenerStaysInTheResult() throws Exception {
+        List<String> chunks = new CopyOnWriteArrayList<>();
+        PendingInvocation invocation = streamingInvocation("req-buffered", new AtomicReference<>(), chunks);
+        server.enqueue(invocation);
+        pollNext();
+
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port
+                                + "/2018-06-01/runtime/invocation/req-buffered/response"))
+                        .POST(HttpRequest.BodyPublishers.ofString("\"result\""))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertEquals("\"result\"", new String(result.getPayload(), StandardCharsets.UTF_8));
+        assertTrue(chunks.isEmpty());
+    }
+
+    @Test
+    @Timeout(10)
+    void errorTrailersOfAStreamedResponseReachTheListener() throws Exception {
+        List<String> failures = new CopyOnWriteArrayList<>();
+        PendingInvocation invocation = failureRecordingInvocation("req-trailers", failures);
+        server.enqueue(invocation);
+        pollNext();
+
+        try (Socket socket = new Socket("localhost", port)) {
+            sendStreamedResponse(socket, "req-trailers", chunk("partial")
+                    + "0\r\nLambda-Runtime-Function-Error-Type: RangeError\r\n"
+                    + "Lambda-Runtime-Function-Error-Body: " + base64("{\"errorType\":\"RangeError\"}")
+                    + "\r\n\r\n");
+
+            InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+            assertNull(result.getFunctionError());
+            assertEquals(List.of("RangeError|{\"errorType\":\"RangeError\"}"), failures);
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void streamedResponseWithoutTrailersIsNotAFailure() throws Exception {
+        List<String> failures = new CopyOnWriteArrayList<>();
+        PendingInvocation invocation = failureRecordingInvocation("req-no-trailers", failures);
+        server.enqueue(invocation);
+        pollNext();
+
+        try (Socket socket = new Socket("localhost", port)) {
+            sendStreamedResponse(socket, "req-no-trailers", chunk("data") + "0\r\n\r\n");
+
+            invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+            assertTrue(failures.isEmpty());
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void trailersOfOneRequestAreNotSeenByTheNextOnTheSameConnection() throws Exception {
+        List<String> firstFailures = new CopyOnWriteArrayList<>();
+        List<String> secondFailures = new CopyOnWriteArrayList<>();
+        PendingInvocation first = failureRecordingInvocation("req-first", firstFailures);
+        server.enqueue(first);
+        pollNext();
+
+        try (Socket socket = new Socket("localhost", port)) {
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            sendStreamedResponse(socket, "req-first", chunk("a")
+                    + "0\r\nLambda-Runtime-Function-Error-Type: Error\r\n\r\n");
+            first.getResultFuture().get(5, TimeUnit.SECONDS);
+            readResponse(in);
+
+            PendingInvocation second = failureRecordingInvocation("req-second", secondFailures);
+            server.enqueue(second);
+            pollNext();
+            sendStreamedResponse(socket, "req-second", chunk("b") + "0\r\n\r\n");
+            second.getResultFuture().get(5, TimeUnit.SECONDS);
+            readResponse(in);
+        }
+        assertEquals(List.of("Error|null"), firstFailures);
+        assertTrue(secondFailures.isEmpty());
+    }
+
+    @Test
+    @Timeout(10)
+    void connectionClosedInTheMiddleOfAStreamedResponseIsATruncatedResponse() throws Exception {
+        List<String> failures = new CopyOnWriteArrayList<>();
+        PendingInvocation invocation = failureRecordingInvocation("req-cut", failures);
+        server.enqueue(invocation);
+        pollNext();
+
+        try (Socket socket = new Socket("localhost", port)) {
+            sendStreamedResponse(socket, "req-cut", chunk("partial"));
+        }
+
+        invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("Runtime.TruncatedResponse|null"), failures);
+    }
+
+    private void sendStreamedResponse(Socket socket, String requestId, String body) throws IOException {
+        OutputStream out = socket.getOutputStream();
+        out.write(("POST /2018-06-01/runtime/invocation/" + requestId + "/response HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Lambda-Runtime-Function-Response-Mode: streaming\r\n"
+                + "Trailer: Lambda-Runtime-Function-Error-Type, Lambda-Runtime-Function-Error-Body\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n"
+                + body).getBytes(StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    private static void readResponse(BufferedReader in) throws IOException {
+        int length = 0;
+        for (String line = in.readLine(); line != null && !line.isEmpty(); line = in.readLine()) {
+            if (line.toLowerCase().startsWith("content-length:")) {
+                length = Integer.parseInt(line.substring("content-length:".length()).trim());
+            }
+        }
+        in.skip(length);
+    }
+
+    private static String base64(String text) {
+        return Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private PendingInvocation failureRecordingInvocation(String requestId, List<String> failures) {
+        PendingInvocation invocation = streamingInvocation(requestId, new AtomicReference<>(), new ArrayList<>());
+        ResponseStreamListener delegate = invocation.getResponseStreamListener();
+        invocation.setResponseStreamListener(new ResponseStreamListener() {
+            @Override
+            public void onStart(String type) {
+                delegate.onStart(type);
+            }
+
+            @Override
+            public void onChunk(byte[] chunk) {
+                delegate.onChunk(chunk);
+            }
+
+            @Override
+            public void onFailure(String errorType, String errorBody) {
+                failures.add(errorType + "|" + errorBody);
+            }
+        });
+        return invocation;
+    }
+
+    private PendingInvocation streamingInvocation(String requestId, AtomicReference<String> contentType,
+                                                  List<String> chunks) {
+        PendingInvocation invocation = new PendingInvocation(
+                requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        invocation.setResponseStreamListener(new ResponseStreamListener() {
+            @Override
+            public void onStart(String type) {
+                contentType.set(type);
+            }
+
+            @Override
+            public void onChunk(byte[] chunk) {
+                chunks.add(new String(chunk, StandardCharsets.UTF_8));
+            }
+        });
+        return invocation;
+    }
+
+    private void pollNext() throws Exception {
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static String chunk(String data) {
+        return Integer.toHexString(data.getBytes(StandardCharsets.UTF_8).length) + "\r\n" + data + "\r\n";
     }
 
     /**

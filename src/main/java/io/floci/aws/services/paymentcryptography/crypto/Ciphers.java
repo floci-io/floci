@@ -1,10 +1,17 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
 import org.bouncycastle.crypto.BlockCipher;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.StreamBlockCipher;
+import org.bouncycastle.crypto.digests.SHA224Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA384Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
 import org.bouncycastle.crypto.engines.AESEngine;
 import org.bouncycastle.crypto.engines.DESEngine;
 import org.bouncycastle.crypto.engines.DESedeEngine;
 import org.bouncycastle.crypto.macs.CBCBlockCipherMac;
+import org.bouncycastle.crypto.macs.HMac;
 import org.bouncycastle.crypto.macs.ISO9797Alg3Mac;
 import org.bouncycastle.crypto.modes.CBCBlockCipher;
 import org.bouncycastle.crypto.params.KeyParameter;
@@ -82,6 +89,34 @@ public final class Ciphers {
      */
     public static byte[] aesEcbDecrypt(byte[] block16, byte[] key) {
         return block(AESEngine.newInstance(), false, block16, key);
+    }
+
+    /**
+     * Widen a two-key (sixteen-byte) Triple DES key to the three-key form, K1||K2 to
+     * K1||K2||K1.
+     *
+     * <p>The cipher takes the three keys K1||K2||K1, which is what the two-key form means,
+     * and TR-31 derives a type B block's keys from the widened form, so the derivation and
+     * the cipher have to be on the same key. A three-key key is returned as it is.
+     *
+     * @param key the sixteen- or twenty-four-byte key
+     * @return the twenty-four-byte key
+     */
+    public static byte[] widenTdesKey(byte[] key) {
+        if (key == null) {
+            throw new IllegalArgumentException("key is required");
+        }
+        if (key.length == 24) {
+            return key;
+        }
+        if (key.length != 16) {
+            throw new IllegalArgumentException(
+                    "TDES key must be 16 or 24 bytes, got " + key.length);
+        }
+        byte[] out = new byte[24];
+        System.arraycopy(key, 0, out, 0, 16);
+        System.arraycopy(key, 0, out, 16, 8);
+        return out;
     }
 
     /**
@@ -177,6 +212,134 @@ public final class Ciphers {
     }
 
     /**
+     * The AES encryption of data under a key, in the mode the request names.
+     *
+     * <p>The cipher pads no data, so the caller supplies whole blocks.
+     *
+     * @param data the bytes to encrypt
+     * @param key the sixteen-, twenty-four- or thirty-two-byte key
+     * @param iv the initialization vector, or null for the mode that takes none
+     * @param mode the block cipher mode
+     * @return the encrypted bytes
+     */
+    public static byte[] aesEncrypt(byte[] data, byte[] key, byte[] iv, BlockMode mode) {
+        return crypt(AESEngine.newInstance(), true, data, key, iv, mode);
+    }
+
+    /**
+     * The AES decryption of data under a key, in the mode the request names.
+     *
+     * @param data the bytes to decrypt
+     * @param key the sixteen-, twenty-four- or thirty-two-byte key
+     * @param iv the initialization vector, or null for the mode that takes none
+     * @param mode the block cipher mode
+     * @return the decrypted bytes
+     */
+    public static byte[] aesDecrypt(byte[] data, byte[] key, byte[] iv, BlockMode mode) {
+        return crypt(AESEngine.newInstance(), false, data, key, iv, mode);
+    }
+
+    /**
+     * The Triple DES encryption of data under a key, in the mode the request names.
+     *
+     * <p>The two-key form is K1||K2, and the cipher takes three keys, so it is widened to
+     * K1||K2||K1, which is what the two-key form means. A three-key key is taken as it is.
+     *
+     * @param data the bytes to encrypt
+     * @param key the sixteen- or twenty-four-byte key
+     * @param iv the initialization vector, or null for the mode that takes none
+     * @param mode the block cipher mode
+     * @return the encrypted bytes
+     */
+    public static byte[] tdesEncrypt(byte[] data, byte[] key, byte[] iv, BlockMode mode) {
+        return crypt(new DESedeEngine(), true, data, key, iv, mode);
+    }
+
+    /**
+     * The Triple DES decryption of data under a key, in the mode the request names.
+     *
+     * @param data the bytes to decrypt
+     * @param key the sixteen- or twenty-four-byte key
+     * @param iv the initialization vector, or null for the mode that takes none
+     * @param mode the block cipher mode
+     * @return the decrypted bytes
+     */
+    public static byte[] tdesDecrypt(byte[] data, byte[] key, byte[] iv, BlockMode mode) {
+        return crypt(new DESedeEngine(), false, data, key, iv, mode);
+    }
+
+    /**
+     * The keyed hash of a message, as RFC 2104 computes it.
+     *
+     * <p>The hash of the key and the hash of the message are combined twice, so the result
+     * is as long as the hash's own output.
+     *
+     * @param key the key of the hash
+     * @param data the message to authenticate
+     * @param digest the hash the message is authenticated with
+     * @return the hash of the message
+     */
+    public static byte[] hmac(byte[] key, byte[] data, Digest digest) {
+        HMac mac = new HMac(digest);
+        mac.init(new KeyParameter(key));
+        mac.update(data, 0, data.length);
+        byte[] out = new byte[mac.getMacSize()];
+        mac.doFinal(out, 0);
+        return out;
+    }
+
+    /** The hash of a name the reference gives a hash by. */
+    public static Digest digestOf(String name) {
+        return switch (name) {
+            case "SHA-224" -> new SHA224Digest();
+            case "SHA-256" -> new SHA256Digest();
+            case "SHA-384" -> new SHA384Digest();
+            case "SHA-512" -> new SHA512Digest();
+            default -> throw new IllegalArgumentException("the hash " + name + " is not one "
+                    + "this service makes");
+        };
+    }
+
+    /**
+     * The encryption or decryption of data under a key, in the mode the request names.
+     *
+     * <p>The mode that chains the blocks and the mode that feeds a block back are the block
+     * ciphers, and the modes that run as a stream take the data as it comes.
+     */
+    private static byte[] crypt(BlockCipher engine, boolean encrypt, byte[] data, byte[] key,
+                                byte[] iv, BlockMode mode) {
+        int size = engine.getBlockSize();
+        if (data == null) {
+            throw new IllegalArgumentException("the data is missing");
+        }
+        if (key == null) {
+            throw new IllegalArgumentException("key is required");
+        }
+        if (mode.takesVector() && (iv == null || iv.length != size)) {
+            throw new IllegalArgumentException("the initialization vector is "
+                    + (iv == null ? "missing" : iv.length + " bytes") + "; it is " + size);
+        }
+        int feedback = mode.feedbackBits(size * 8);
+        if (feedback > size * 8) {
+            throw new IllegalArgumentException(mode.name() + " is not a mode a " + size
+                    + "-byte block cipher takes");
+        }
+        BlockCipher cipher = mode.cipher(engine);
+        cipher.init(encrypt, mode.takesVector()
+                ? new ParametersWithIV(new KeyParameter(key), iv)
+                : new KeyParameter(key));
+        byte[] out = new byte[data.length];
+        if (cipher instanceof StreamBlockCipher stream) {
+            stream.processBytes(data, 0, data.length, out, 0);
+            return out;
+        }
+        for (int offset = 0; offset < data.length; offset += size) {
+            cipher.processBlock(data, offset, out, offset);
+        }
+        return out;
+    }
+
+    /**
      * The exclusive-or of two byte arrays of the same length.
      *
      * @param a the first bytes
@@ -263,27 +426,18 @@ public final class Ciphers {
 
     /**
      * The encryption or decryption of whole blocks under a key, in CBC mode.
+     *
+     * <p>The cipher pads no data, so the data has to fill whole blocks, and that is the
+     * one thing this method adds to the mode it hands the work to.
      */
-    private static byte[] blocks(BlockCipher cipher, boolean encrypt, byte[] data, byte[] key, byte[] iv) {
+    private static byte[] blocks(BlockCipher cipher, boolean encrypt, byte[] data, byte[] key,
+                                 byte[] iv) {
         int size = cipher.getBlockSize();
         if (data == null || data.length % size != 0) {
             throw new IllegalArgumentException("the data is "
                     + (data == null ? "missing" : data.length + " bytes")
                     + "; it is a whole number of " + size + "-byte blocks");
         }
-        if (key == null) {
-            throw new IllegalArgumentException("key is required");
-        }
-        if (iv == null || iv.length != size) {
-            throw new IllegalArgumentException("the initialization vector is "
-                    + (iv == null ? "missing" : iv.length + " bytes") + "; it is " + size);
-        }
-        BlockCipher cbc = CBCBlockCipher.newInstance(cipher);
-        cbc.init(encrypt, new ParametersWithIV(new KeyParameter(key), iv));
-        byte[] out = new byte[data.length];
-        for (int offset = 0; offset < data.length; offset += size) {
-            cbc.processBlock(data, offset, out, offset);
-        }
-        return out;
+        return crypt(cipher, encrypt, data, key, iv, BlockMode.CBC);
     }
 }

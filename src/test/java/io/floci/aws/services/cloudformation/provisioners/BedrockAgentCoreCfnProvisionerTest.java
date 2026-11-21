@@ -32,9 +32,11 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,9 +48,10 @@ class BedrockAgentCoreCfnProvisionerTest {
 
     private static final String REGION = "us-east-1";
     private static final String RUNTIME_ID = "agent-abcdefghij";
-    private static final String RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/uuid:1";
+    private static final String RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/" + RUNTIME_ID;
     private static final String MEMORY_ID = "mem-abcdefghij";
     private static final String MEMORY_ARN = "arn:aws:bedrock-agentcore:us-east-1:000000000000:memory/" + MEMORY_ID;
+    private static final String ENDPOINT_ARN = RUNTIME_ARN + "/runtime-endpoint/prod";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/agent";
 
     private final BedrockAgentCoreControlService runtimes = mock(BedrockAgentCoreControlService.class);
@@ -110,6 +113,48 @@ class BedrockAgentCoreCfnProvisionerTest {
         return memory;
     }
 
+    private static AgentRuntimeEndpoint endpoint(String description) {
+        AgentRuntimeEndpoint endpoint = new AgentRuntimeEndpoint();
+        endpoint.setName("prod");
+        endpoint.setUuid("ep-uuid");
+        endpoint.setTargetVersion("1");
+        endpoint.setLiveVersion("1");
+        endpoint.setStatus("READY");
+        endpoint.setDescription(description);
+        endpoint.setCreatedAt(Instant.EPOCH);
+        endpoint.setLastUpdatedAt(Instant.EPOCH);
+        return endpoint;
+    }
+
+    private ObjectNode endpointProps(String description, Map<String, String> tags) {
+        ObjectNode props = mapper.createObjectNode();
+        props.put("AgentRuntimeId", RUNTIME_ID);
+        props.put("Name", "prod");
+        if (description != null) {
+            props.put("Description", description);
+        }
+        if (tags != null) {
+            ObjectNode tagNode = props.putObject("Tags");
+            tags.forEach(tagNode::put);
+        }
+        return props;
+    }
+
+    /** An endpoint the stack already owns at {@code arn:ep}, carrying the given tags. */
+    private StackResource existingEndpoint(AgentRuntimeEndpoint existing, Map<String, String> tags) {
+        AgentRuntime runtime = runtime(null, Map.of());
+        when(runtimes.findEndpointByArn(REGION, ENDPOINT_ARN))
+                .thenReturn(Optional.of(new BedrockAgentCoreControlService.EndpointLocation(runtime, existing)));
+        when(runtimes.endpointArn(RUNTIME_ID, existing, REGION)).thenReturn(ENDPOINT_ARN);
+        when(runtimes.getEndpoint(RUNTIME_ID, "prod", REGION)).thenReturn(existing);
+        when(runtimes.getAgentRuntime(RUNTIME_ID, REGION)).thenReturn(runtime);
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.getEndpointTagsByArn(REGION, ENDPOINT_ARN)).thenAnswer(invocation -> new HashMap<>(tags));
+        StackResource r = resource("AWS::BedrockAgentCore::RuntimeEndpoint");
+        r.setPhysicalId(ENDPOINT_ARN);
+        return r;
+    }
+
     private static ObjectNode runtimeProps(ObjectMapper mapper, String description, String tag) {
         ObjectNode props = mapper.createObjectNode();
         props.put("AgentRuntimeName", "agent");
@@ -127,7 +172,7 @@ class BedrockAgentCoreCfnProvisionerTest {
     void aFnIfSelectingNoValueInsideNetworkConfigurationIsOmitted() {
         when(runtimes.createAgentRuntime(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(runtime(null, Map.of()));
-        when(runtimes.arn(any(), any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
         ObjectNode props = runtimeProps(mapper, null, "agents");
         // No condition is defined, so Fn::If takes its else branch, as an undefined condition does.
         props.set("NetworkConfiguration", json("""
@@ -148,7 +193,7 @@ class BedrockAgentCoreCfnProvisionerTest {
     void aFailedTaggingAfterCreateDeletesTheRuntimeBeforePropagating() {
         when(runtimes.createAgentRuntime(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(runtime(null, Map.of()));
-        when(runtimes.arn(any(), any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
         doThrow(new AwsException("ThrottlingException", "slow down", 429))
                 .when(runtimes).tagByArn(eq(REGION), eq(RUNTIME_ARN), anyMap());
         StackResource r = resource("AWS::BedrockAgentCore::Runtime");
@@ -164,16 +209,9 @@ class BedrockAgentCoreCfnProvisionerTest {
 
     @Test
     void aFailedRuntimeLookupAfterCreateDeletesTheEndpoint() {
-        AgentRuntimeEndpoint endpoint = new AgentRuntimeEndpoint();
-        endpoint.setName("prod");
-        endpoint.setUuid("ep-uuid");
-        endpoint.setTargetVersion("1");
-        endpoint.setLiveVersion("1");
-        endpoint.setStatus("READY");
-        endpoint.setCreatedAt(Instant.EPOCH);
-        endpoint.setLastUpdatedAt(Instant.EPOCH);
-        when(runtimes.createEndpoint(RUNTIME_ID, "prod", null, null, null, REGION)).thenReturn(endpoint);
-        when(runtimes.endpointArn(endpoint, REGION)).thenReturn("arn:ep");
+        AgentRuntimeEndpoint endpoint = endpoint(null);
+        when(runtimes.createEndpoint(RUNTIME_ID, "prod", null, null, Map.of(), null, REGION)).thenReturn(endpoint);
+        when(runtimes.endpointArn(RUNTIME_ID, endpoint, REGION)).thenReturn("arn:ep");
         when(runtimes.getAgentRuntime(RUNTIME_ID, REGION))
                 .thenThrow(new AwsException("InternalServerException", "boom", 500));
         ObjectNode props = mapper.createObjectNode();
@@ -190,7 +228,7 @@ class BedrockAgentCoreCfnProvisionerTest {
     void rollbackUpdateRestoresAnInPlaceRuntimeChangeAsANewVersion() {
         AgentRuntime prior = runtime("one", Map.of("K", "v"));
         when(runtimes.getAgentRuntime(RUNTIME_ID, REGION)).thenReturn(prior);
-        when(runtimes.arn(any(), any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
         when(runtimes.getTagsByArn(REGION, RUNTIME_ARN)).thenReturn(new HashMap<>(Map.of("team", "agents")));
         when(runtimes.updateAgentRuntime(eq(RUNTIME_ID), any(), any(), any(), any(), any(), any(), any(), eq(REGION)))
                 .thenReturn(prior);
@@ -216,7 +254,7 @@ class BedrockAgentCoreCfnProvisionerTest {
     void anUnchangedRuntimeIsNeitherUpdatedNorSnapshotted() {
         AgentRuntime prior = runtime("one", Map.of());
         when(runtimes.getAgentRuntime(RUNTIME_ID, REGION)).thenReturn(prior);
-        when(runtimes.arn(any(), any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
         when(runtimes.getTagsByArn(REGION, RUNTIME_ARN)).thenReturn(new HashMap<>(Map.of("team", "agents")));
         StackResource r = resource("AWS::BedrockAgentCore::Runtime");
         r.setPhysicalId(RUNTIME_ID);
@@ -258,21 +296,13 @@ class BedrockAgentCoreCfnProvisionerTest {
     @Test
     void anOmittedEndpointDescriptionIsClearedThroughTheReplacingUpdate() {
         AgentRuntime runtime = runtime(null, Map.of());
-        AgentRuntimeEndpoint existing = new AgentRuntimeEndpoint();
-        existing.setName("prod");
-        existing.setUuid("ep-uuid");
-        existing.setTargetVersion("1");
-        existing.setLiveVersion("1");
-        existing.setStatus("READY");
-        existing.setDescription("old");
-        existing.setCreatedAt(Instant.EPOCH);
-        existing.setLastUpdatedAt(Instant.EPOCH);
+        AgentRuntimeEndpoint existing = endpoint("old");
         when(runtimes.findEndpointByArn(REGION, "arn:ep"))
                 .thenReturn(Optional.of(new BedrockAgentCoreControlService.EndpointLocation(runtime, existing)));
         when(runtimes.updateEndpoint(eq(RUNTIME_ID), eq("prod"), any(), any(), anyBoolean(), eq(REGION)))
                 .thenReturn(existing);
-        when(runtimes.endpointArn(existing, REGION)).thenReturn("arn:ep");
-        when(runtimes.arn(any(), anyString(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        when(runtimes.endpointArn(RUNTIME_ID, existing, REGION)).thenReturn("arn:ep");
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
         ObjectNode props = mapper.createObjectNode();
         props.put("AgentRuntimeId", RUNTIME_ID);
         props.put("Name", "prod");
@@ -283,5 +313,124 @@ class BedrockAgentCoreCfnProvisionerTest {
 
         verify(runtimes).updateEndpoint(RUNTIME_ID, "prod", null, null, true, REGION);
         assertEquals("arn:ep", r.getPhysicalId());
+    }
+
+    @Test
+    void endpointTagsAreStoredWithTheCreatedEndpoint() {
+        AgentRuntimeEndpoint created = endpoint(null);
+        when(runtimes.createEndpoint(any(), any(), any(), any(), anyMap(), any(), any())).thenReturn(created);
+        when(runtimes.endpointArn(RUNTIME_ID, created, REGION)).thenReturn(ENDPOINT_ARN);
+        when(runtimes.getAgentRuntime(RUNTIME_ID, REGION)).thenReturn(runtime(null, Map.of()));
+        when(runtimes.arn(any(), eq(REGION))).thenReturn(RUNTIME_ARN);
+        StackResource r = resource("AWS::BedrockAgentCore::RuntimeEndpoint");
+
+        provisioner.provision(r, endpointProps(null, Map.of("team", "agents")), ctx(null));
+
+        verify(runtimes).createEndpoint(RUNTIME_ID, "prod", null, null, Map.of("team", "agents"), null, REGION);
+        assertEquals(ENDPOINT_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void aTagOnlyEndpointChangeIsReconciledWithoutUpdatingTheEndpoint() {
+        StackResource r = existingEndpoint(endpoint("same"), Map.of("team", "agents", "stage", "beta"));
+
+        provisioner.provision(r, endpointProps("same", Map.of("team", "ml")), ctx(ENDPOINT_ARN));
+
+        verify(runtimes, never()).updateEndpoint(any(), any(), any(), any(), anyBoolean(), any());
+        verify(runtimes).untagEndpointByArn(REGION, ENDPOINT_ARN, List.of("stage"));
+        verify(runtimes).tagEndpointByArn(REGION, ENDPOINT_ARN, Map.of("team", "ml"));
+        assertTrue(r.getAttributes().containsKey(BedrockAgentCoreCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void omittingEndpointTagsRemovesTheStoredOnes() {
+        StackResource r = existingEndpoint(endpoint("same"), Map.of("team", "agents"));
+
+        provisioner.provision(r, endpointProps("same", null), ctx(ENDPOINT_ARN));
+
+        verify(runtimes).untagEndpointByArn(REGION, ENDPOINT_ARN, List.of("team"));
+        verify(runtimes, never()).tagEndpointByArn(any(), any(), anyMap());
+    }
+
+    @Test
+    void anEndpointWithUnchangedTagsIsNeitherRetaggedNorSnapshotted() {
+        StackResource r = existingEndpoint(endpoint("same"), Map.of("team", "agents"));
+
+        provisioner.provision(r, endpointProps("same", Map.of("team", "agents")), ctx(ENDPOINT_ARN));
+
+        verify(runtimes, never()).tagEndpointByArn(any(), any(), anyMap());
+        verify(runtimes, never()).untagEndpointByArn(any(), any(), any());
+        assertFalse(r.getAttributes().containsKey(BedrockAgentCoreCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void rollbackUpdateRestoresTheEndpointsPriorTags() {
+        AgentRuntimeEndpoint existing = endpoint("same");
+        Map<String, String> stored = new HashMap<>(Map.of("team", "agents"));
+        StackResource r = existingEndpoint(existing, stored);
+        provisioner.provision(r, endpointProps("same", Map.of("owner", "ml")), ctx(ENDPOINT_ARN));
+        stored.clear();
+        stored.put("owner", "ml");
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(runtimes).untagEndpointByArn(REGION, ENDPOINT_ARN, List.of("owner"));
+        verify(runtimes).tagEndpointByArn(REGION, ENDPOINT_ARN, Map.of("team", "agents"));
+        verify(runtimes, never()).updateEndpoint(any(), any(), any(), any(), anyBoolean(), any());
+        assertNull(r.getAttributes().get(BedrockAgentCoreCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aFailedEndpointTagWriteRestoresTheKeysRemovedBeforeIt() {
+        AgentRuntimeEndpoint existing = endpoint("old");
+        Map<String, String> stored = new HashMap<>(Map.of("team", "agents"));
+        StackResource r = existingEndpoint(existing, stored);
+        when(runtimes.updateEndpoint(eq(RUNTIME_ID), eq("prod"), any(), any(), anyBoolean(), eq(REGION)))
+                .thenReturn(existing);
+        doThrow(new AwsException("ThrottlingException", "slow down", 429))
+                .when(runtimes).tagEndpointByArn(REGION, ENDPOINT_ARN, Map.of("owner", "ml"));
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(r, endpointProps("new", Map.of("owner", "ml")), ctx(ENDPOINT_ARN)));
+
+        verify(runtimes).untagEndpointByArn(REGION, ENDPOINT_ARN, List.of("team"));
+        verify(runtimes).updateEndpoint(RUNTIME_ID, "prod", null, "new", true, REGION);
+        verify(runtimes).updateEndpoint(RUNTIME_ID, "prod", "1", "old", true, REGION);
+        verify(runtimes).tagEndpointByArn(REGION, ENDPOINT_ARN, Map.of("team", "agents"));
+        assertFalse(r.getAttributes().containsKey(BedrockAgentCoreCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aTagRestoreThatFailedIsRetriedFromTheSnapshotCarriedOntoThePreviousResource() {
+        Map<String, String> stored = new HashMap<>(Map.of("team", "agents"));
+        StackResource attempt = existingEndpoint(endpoint("same"), stored);
+        StackResource committed = resource("AWS::BedrockAgentCore::RuntimeEndpoint");
+        committed.setPhysicalId(ENDPOINT_ARN);
+        doThrow(new AwsException("ThrottlingException", "slow down", 429))
+                .when(runtimes).tagEndpointByArn(eq(REGION), eq(ENDPOINT_ARN), anyMap());
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(attempt, endpointProps("same", Map.of("owner", "ml")), ctx(ENDPOINT_ARN)));
+        assertTrue(attempt.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        stored.clear();
+
+        provisioner.mergeFailedUpdateResourceTracking(committed, attempt);
+        doNothing().when(runtimes).tagEndpointByArn(eq(REGION), eq(ENDPOINT_ARN), anyMap());
+        assertTrue(provisioner.rollbackUpdate(committed));
+
+        verify(runtimes, times(2)).tagEndpointByArn(REGION, ENDPOINT_ARN, Map.of("team", "agents"));
+        assertNull(committed.getAttributes().get(BedrockAgentCoreCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void anEndpointUndoThatCompletedLeavesThePreviousResourceAlone() {
+        StackResource attempt = existingEndpoint(endpoint("same"), Map.of("team", "agents"));
+        StackResource committed = resource("AWS::BedrockAgentCore::RuntimeEndpoint");
+        provisioner.provision(attempt, endpointProps("same", Map.of("team", "ml")), ctx(ENDPOINT_ARN));
+
+        provisioner.mergeFailedUpdateResourceTracking(committed, attempt);
+
+        assertTrue(committed.getAttributes().isEmpty());
     }
 }

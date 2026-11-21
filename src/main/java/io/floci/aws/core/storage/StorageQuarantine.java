@@ -22,11 +22,11 @@ final class StorageQuarantine {
         try {
             Files.move(filePath, quarantine, StandardCopyOption.REPLACE_EXISTING);
             log.errorv(cause, "Failed to load persisted data from {0}; moved the unreadable file to "
-                    + "{1} and started with an empty store. This store's state was lost.",
+                    + "{1} and started with an empty store. This store''s state was lost.",
                     filePath, quarantine);
         } catch (IOException moveError) {
             log.errorv(cause, "Failed to load persisted data from {0}; could not quarantine it ({1}). "
-                    + "Starting with an empty store. This store's state was lost.",
+                    + "Starting with an empty store. This store''s state was lost.",
                     filePath, moveError.getMessage());
         }
     }

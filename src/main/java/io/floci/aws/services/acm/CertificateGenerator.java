@@ -365,7 +365,7 @@ public class CertificateGenerator {
                 // character, which the JDK rejects outright rather than resolving. Emitting it as a DNS
                 // name keeps the name covered; dropping it would silently stop the server
                 // serving that host, which fails a handshake with nothing to point at.
-                LOG.debugv("Could not parse '{0}' as IP address, treating as DNS name", san);
+                LOG.debugv("Could not parse ''{0}'' as IP address, treating as DNS name", san);
                 return new GeneralName(GeneralName.dNSName, san);
             }
         }

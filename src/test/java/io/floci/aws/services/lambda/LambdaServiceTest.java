@@ -18,8 +18,11 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
+import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -29,10 +32,13 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.AbstractMap;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +50,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -109,6 +116,100 @@ class LambdaServiceTest {
         assertNotNull(fn.getFunctionArn());
         assertTrue(fn.getFunctionArn().contains("my-function"));
         assertNotNull(fn.getRevisionId());
+    }
+
+    @Test
+    void createFunctionRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-create");
+        request.put("Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getFunction(REGION, "oversized-environment-create"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void oversizedEnvironmentStopsSerializationBeforeTraversingTheWholeMap() {
+        AtomicInteger visited = new AtomicInteger();
+        Map<String, String> variables = new AbstractMap<>() {
+            @Override
+            public Set<Entry<String, String>> entrySet() {
+                return new AbstractSet<>() {
+                    @Override
+                    public Iterator<Entry<String, String>> iterator() {
+                        return Stream.generate(() -> {
+                            int index = visited.incrementAndGet();
+                            if (index > 64) {
+                                throw new AssertionError("Quota validation traversed too much of the environment");
+                            }
+                            return Map.entry("KEY_" + index, "x".repeat(512));
+                        }).limit(10_000).iterator();
+                    }
+
+                    @Override
+                    public int size() {
+                        return 10_000;
+                    }
+                };
+            }
+        };
+        Map<String, Object> request = baseRequest("bounded-environment-create");
+        request.put("Environment", Map.of("Variables", variables));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertTrue(visited.get() < 64);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"é", "😀"})
+    void measuredEnvironmentPreviewIsBoundedWithoutSplittingUtf8(String character) {
+        Map<String, Object> request = baseRequest("bounded-unicode-diagnostic");
+        request.put("Environment", Map.of("Variables", Map.of(
+                "BIG", "x".repeat(5110) + character.repeat(10_000))));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        String marker = " String measured: ";
+        assertTrue(error.getMessage().contains(marker));
+        String measured = error.getMessage().substring(error.getMessage().indexOf(marker) + marker.length());
+        String expected = "{\"BIG\":\"" + "x".repeat(5110) + ("é".equals(character) ? "é" : "") + "...";
+        assertEquals(expected, measured);
+        assertTrue(measured.getBytes(StandardCharsets.UTF_8).length <= 5123);
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-update");
+        request.put("Environment", Map.of("Variables", Map.of("MARKER", "original")));
+        LambdaFunction original = service.createFunction(REGION, request);
+        String description = original.getDescription();
+        String revisionId = original.getRevisionId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "oversized-environment-update", Map.of(
+                        "Description", "rejected update",
+                        "Timeout", 60,
+                        "MemorySize", 512,
+                        "Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))))));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        LambdaFunction unchanged = service.getFunction(REGION, "oversized-environment-update");
+        assertEquals(Map.of("MARKER", "original"), unchanged.getEnvironment());
+        assertEquals(description, unchanged.getDescription());
+        assertEquals(10, unchanged.getTimeout());
+        assertEquals(256, unchanged.getMemorySize());
+        assertEquals(revisionId, unchanged.getRevisionId());
     }
 
     @Test
@@ -545,6 +646,22 @@ class LambdaServiceTest {
         service.createFunction(REGION, baseRequest("del-fn"));
         service.deleteFunction(REGION, "del-fn");
         assertThrows(AwsException.class, () -> service.getFunction(REGION, "del-fn"));
+    }
+
+    @Test
+    void deleteFunctionReportsWhetherADurableFunctionOrItsVersionWasDeleted() {
+        Map<String, Object> durable = baseRequest("del-durable-fn");
+        durable.put("DurableConfig", Map.of("ExecutionTimeout", 3600));
+        service.createFunction(REGION, durable);
+        service.publishVersion(REGION, "del-durable-fn", null);
+        service.createFunction(REGION, baseRequest("del-plain-fn"));
+        service.publishVersion(REGION, "del-plain-fn", null);
+
+        assertFalse(service.deleteFunction(REGION, "del-durable-fn", "5"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", "1"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", null));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", "1"));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", null));
     }
 
     @Test
@@ -1057,14 +1174,26 @@ class LambdaServiceTest {
     @Test
     void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
         Map<String, Object> request = baseRequest("oversized-zip");
-        byte[] oversized = new byte[(int) ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES + 1];
-        request.put("Code", Map.of("ZipFile", Base64.getEncoder().encodeToString(oversized)));
+        // Zero bytes, one more than the limit allows, as Base64: refused from its length, before it is decoded.
+        long chunks = ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES / 3 + 1;
+        request.put("Code", Map.of("ZipFile", "A".repeat((int) (chunks * 4))));
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunction(REGION, request));
 
         assertEquals("RequestEntityTooLargeException", error.getErrorCode());
         assertEquals(413, error.getHttpStatus());
+    }
+
+    @Test
+    void anUploadsDecodedLengthIsReadFromItsBase64LengthPaddedOrNot() {
+        assertEquals(0, LambdaService.decodedLength(""));
+        assertEquals(3, LambdaService.decodedLength("AAAA"));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA=="));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA"));
+        assertEquals(5, LambdaService.decodedLength("AAAAAAA="));
+        byte[] limit = new byte[1024];
+        assertEquals(limit.length, LambdaService.decodedLength(Base64.getEncoder().encodeToString(limit)));
     }
 
     @Test
@@ -2379,6 +2508,37 @@ class LambdaServiceTest {
                 + size, e.getMessage());
     }
 
+    @Test
+    void lambdaPackagesStayReadableWithoutLeavingCustomerBuckets(@TempDir Path directory) throws Exception {
+        StorageFactory s3Storage = new InMemoryStorageFactory("000000000000");
+        EmulatorConfig s3Config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(s3Config.storage().persistentPath()).thenReturn(directory.toString());
+        when(s3Config.storage().services().s3().mode()).thenReturn(Optional.of("memory"));
+        S3Service s3 = new S3Service(s3Storage, s3Config, null, null, null, null, null,
+                new RegionResolver(REGION, "000000000000"), new ObjectMapper(), null);
+        s3.createBucket("customer-code", REGION);
+        LambdaService backed = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor());
+        String zip = createZipBase64("index.js");
+        Map<String, Object> firstRequest = baseRequest("tasks-first-" + UUID.randomUUID());
+        firstRequest.put("Code", Map.of("ZipFile", zip));
+        Map<String, Object> secondRequest = baseRequest("tasks-second-" + UUID.randomUUID());
+        secondRequest.put("Code", Map.of("ZipFile", zip));
+
+        LambdaFunction first = backed.createFunction(REGION, firstRequest);
+        LambdaFunction second = backed.createFunction(REGION, secondRequest);
+        String bucket = LambdaService.tasksBucketName(REGION);
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(first)).getData());
+
+        backed.deleteFunction(REGION, first.getFunctionName());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(second)).getData());
+        backed.deleteFunction(REGION, second.getFunctionName());
+        assertTrue(s3.listObjects(bucket, "", null, 100).isEmpty());
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
+    }
+
     private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor) {
         return s3BackedService(s3, warmPool, extractor, null);
     }
@@ -2749,14 +2909,8 @@ class LambdaServiceTest {
                 .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
     }
 
-    private static String zipWithBody(String body) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    private static String zipWithBody(String body) {
+        return LambdaCodeFixtures.nodeJsZipBase64(body + "\n");
     }
 
     @Test
@@ -3392,5 +3546,107 @@ class LambdaServiceTest {
 
         assertEquals(new LambdaService.LoggingSettings("Text", null, null, "/shared/app"),
                 LambdaService.loggingSettings(fn));
+    }
+
+    private LambdaAlias aliasWithDescription(String functionName, String description) {
+        service.createFunction(REGION, baseRequest(functionName));
+        return service.createAlias(REGION, functionName, "live", "1", description, Map.of("2", 0.1));
+    }
+
+    // --- replaceAliasDescription: service methods that do not exist on main ---
+
+    @Test
+    void replaceAliasDescriptionStoresTheGivenValueAndReturnsTheUpdatedAlias() {
+        aliasWithDescription("alias-replace-set-fn", "old");
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-set-fn", "live", "new");
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.getAlias(REGION, "alias-replace-set-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionWithNullClearsTheStoredValue() {
+        aliasWithDescription("alias-replace-null-fn", "old");
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-null-fn", "live", null);
+
+        assertNull(returned.getDescription());
+        assertNull(service.getAlias(REGION, "alias-replace-null-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionStoresTheEmptyStringAsGiven() {
+        aliasWithDescription("alias-replace-empty-fn", "old");
+
+        service.replaceAliasDescription(REGION, "alias-replace-empty-fn", "live", "");
+
+        assertEquals("", service.getAlias(REGION, "alias-replace-empty-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionLeavesVersionAndRoutingUntouched() {
+        aliasWithDescription("alias-replace-others-fn", "old");
+
+        service.replaceAliasDescription(REGION, "alias-replace-others-fn", "live", null);
+
+        LambdaAlias stored = service.getAlias(REGION, "alias-replace-others-fn", "live");
+        assertEquals("1", stored.getFunctionVersion());
+        assertEquals(Map.of("2", 0.1), stored.getRoutingConfig());
+    }
+
+    @Test
+    void replaceAliasDescriptionOnAnUnknownAliasThrowsWhatUpdateAliasThrows() {
+        service.createFunction(REGION, baseRequest("alias-replace-missing-fn"));
+        AwsException fromUpdate = assertThrows(AwsException.class, () -> service.updateAlias(REGION,
+                "alias-replace-missing-fn", "absent", null, "x", null));
+
+        AwsException fromReplace = assertThrows(AwsException.class, () -> service.replaceAliasDescription(REGION,
+                "alias-replace-missing-fn", "absent", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceAliasDescriptionOnAnUnknownFunctionThrowsWhatUpdateAliasThrows() {
+        AwsException fromUpdate = assertThrows(AwsException.class, () -> service.updateAlias(REGION,
+                "alias-replace-no-such-fn", "live", null, "x", null));
+
+        AwsException fromReplace = assertThrows(AwsException.class, () -> service.replaceAliasDescription(REGION,
+                "alias-replace-no-such-fn", "live", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceAliasDescriptionKeepsTheBookkeepingOfUpdateAlias() {
+        aliasWithDescription("alias-replace-books-fn", "old");
+        LambdaAlias stored = service.getAlias(REGION, "alias-replace-books-fn", "live");
+        long longAgo = 1_000L;
+        stored.setLastModifiedDate(longAgo);
+        assertEquals(longAgo, service.getAlias(REGION, "alias-replace-books-fn", "live").getLastModifiedDate());
+        String revisionBefore = stored.getRevisionId();
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-books-fn", "live", null);
+
+        assertNotEquals(revisionBefore, returned.getRevisionId());
+        assertTrue(returned.getLastModifiedDate() > longAgo);
+        assertTrue(service.getAlias(REGION, "alias-replace-books-fn", "live").getLastModifiedDate() > longAgo);
+        assertNotEquals(revisionBefore, service.getAlias(REGION, "alias-replace-books-fn", "live").getRevisionId());
+    }
+
+    // --- direct UpdateAlias without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateAliasWithoutADescriptionKeepsTheStoredDescription() {
+        aliasWithDescription("alias-update-keeps-fn", "kept");
+
+        service.updateAlias(REGION, "alias-update-keeps-fn", "live", "3", null, null);
+
+        LambdaAlias stored = service.getAlias(REGION, "alias-update-keeps-fn", "live");
+        assertEquals("kept", stored.getDescription());
+        assertEquals("3", stored.getFunctionVersion());
     }
 }

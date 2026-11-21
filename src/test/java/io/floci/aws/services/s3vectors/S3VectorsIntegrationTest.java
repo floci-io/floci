@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -41,6 +43,21 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("vectorBucketArn", containsString("arn:aws:s3vectors:"));
+
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s"
+                }
+                """.formatted(BUCKET_NAME))
+        .when()
+            .post("/CreateVectorBucket")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("A vector bucket with the specified name already exists"));
     }
 
     @Test
@@ -94,6 +111,25 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200)
             .body("indexArn", containsString("arn:aws:s3vectors:"));
+
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                {
+                    "vectorBucketName": "%s",
+                    "indexName": "%s",
+                    "dimension": 3,
+                    "distanceMetric": "cosine",
+                    "dataType": "float32"
+                }
+                """.formatted(BUCKET_NAME, INDEX_NAME))
+        .when()
+            .post("/CreateIndex")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("An index with the specified name already exists"));
     }
 
     @Test
@@ -450,7 +486,7 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify index is gone
+        // Verify index is gone, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""
@@ -462,7 +498,9 @@ class S3VectorsIntegrationTest {
         .when()
             .post("/GetIndex")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo("The specified index could not be found"));
     }
 
     @Test
@@ -480,7 +518,7 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify bucket is gone
+        // Verify bucket is gone, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""
@@ -491,7 +529,9 @@ class S3VectorsIntegrationTest {
         .when()
             .post("/GetVectorBucket")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo("The specified vector bucket could not be found"));
     }
 
     // Self-contained: each test below creates its own bucket/index so it doesn't depend on the
@@ -651,7 +691,7 @@ class S3VectorsIntegrationTest {
 
     @Test
     @Order(18)
-    void listVectorsByIndexArnResolvesTheArnsOwnRegionNotTheRequestRegion() {
+    void listVectorsByIndexArnIsRefusedOutsideTheRequestsRegion() {
         String bucketName = "cross-region-vector-bucket";
         String indexName = "cross-region-idx";
         String otherRegionAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
@@ -703,11 +743,24 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // No Authorization header here, so this request resolves to the default region — not
-        // us-west-2. The lookup must still succeed because it honors the region encoded in the
-        // ARN itself, not the region the ListVectors request happens to be signed for.
+        // No Authorization header here, so this request resolves to the default region, not us-west-2. S3 Vectors
+        // refuses an ARN of another Region than the request's (measured on AWS).
         given()
             .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unexpected value for ARN region component"));
+
+        // Signed for the ARN's Region, it lists the index's vectors.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
             .body("""
                 { "indexArn": "%s" }
                 """.formatted(indexArn))
@@ -717,5 +770,73 @@ class S3VectorsIntegrationTest {
             .statusCode(200)
             .body("vectors", hasSize(1))
             .body("vectors[0].key", equalTo("only"));
+    }
+
+    @Test
+    @Order(19)
+    void vectorBucketPolicyLifecycleByNameAndArn() {
+        String bucketName = "policy-vector-bucket";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3vectors:*\",\"Resource\":\"*\"}]}";
+
+        String bucketArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    { "vectorBucketName": "%s" }
+                    """.formatted(bucketName))
+            .when()
+                .post("/CreateVectorBucket")
+            .then()
+                .statusCode(200)
+            .extract().path("vectorBucketArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName, "policy", policy))
+        .when()
+            .post("/PutVectorBucketPolicy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketArn", bucketArn))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(200)
+            .body("policy", equalTo(policy));
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketArn", bucketArn))
+        .when()
+            .post("/DeleteVectorBucketPolicy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/DeleteVectorBucket")
+        .then()
+            .statusCode(200);
     }
 }

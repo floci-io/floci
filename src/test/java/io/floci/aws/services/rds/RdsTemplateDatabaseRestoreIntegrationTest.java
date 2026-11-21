@@ -1,13 +1,11 @@
 package io.floci.aws.services.rds;
 
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
@@ -17,19 +15,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A snapshot restores on an image that creates a template database at startup, such as PostGIS's
- * {@code template_postgis}, which the snapshot's dump creates again.
+ * {@code template_postgis}, which the snapshot's dump creates again. The PostGIS image is the
+ * default PostgreSQL image {@link CloudFormationSettingsProfile} sets.
  */
 @QuarkusTest
 @Tag("docker")
-@TestProfile(RdsTemplateDatabaseRestoreIntegrationTest.PostgisImageProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class RdsTemplateDatabaseRestoreIntegrationTest {
-
-    public static class PostgisImageProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.default-postgres-image", "postgis/postgis:17-3.5-alpine");
-        }
-    }
 
     @BeforeEach
     void checkDocker() throws InterruptedException {

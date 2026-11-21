@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -15,6 +17,7 @@ import java.util.function.Predicate;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -66,7 +69,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         // Unstubbed by default: the claim succeeds, matching the common case of a first or
         // same-connection retry. Tests for a conflicting claim override this per call.
         when(service.claimMavenRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(), any(),
-                anyString(), anyString(), anyString(), anyLong()))
+                anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong()))
                 .thenReturn(new CodeArtifactService.MavenClaimOutcome(true, EPISODE_ID));
         // Unstubbed by default: a constant snapshot, so a version-fence mismatch only ever
         // happens where a test deliberately stubs deployMavenAssetUnderVersionFence to report
@@ -81,25 +84,45 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         // this per call via stubDeploy.
         when(service.deployMavenAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(), anyString(),
-                anyString(), any())).thenReturn(new CodeArtifactService.MavenDeployAttemptResult(true,
+                anyString(), any(), anyLong())).thenReturn(new CodeArtifactService.MavenDeployAttemptResult(true,
                         new ReposiliteSidecarClient.DeployOutcome(201, true)));
     }
 
     /**
      * Stubs the single candidate named by {@code gav}/{@code content}; every other candidate
-     * keeps the default stub from {@link #setUp}.
+     * keeps the default stub from {@link #setUp}. {@code content}'s own bytes are matched by
+     * length alone, not identity: the real staged {@link Path} the importer passes is a fresh
+     * temp file created fresh for every real call, so a test fixture can't name it in advance the
+     * way it could the old {@code byte[]}-returning method; {@code gav} alone already picks out
+     * the one candidate this stub is for.
      */
     private void stubDeploy(String gav, byte[] content, CodeArtifactService.MavenDeployAttemptResult result) {
         when(service.deployMavenAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), eq(reposilite), eq(REPO_ID),
-                eq(gav), eq(content))).thenReturn(result);
+                eq(gav), any(Path.class), eq((long) content.length))).thenReturn(result);
     }
 
     /** Verifies the call for {@code gav}/{@code content} also passed the package fence through. */
     private void verifyDeployPassedPackageFence(String gav, byte[] content, long packageFenceSnapshot) {
         verify(service).deployMavenAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 anyString(), anyString(), anyString(), anyLong(), eq(packageFenceSnapshot), anyLong(), eq(reposilite),
-                eq(REPO_ID), eq(gav), eq(content));
+                eq(REPO_ID), eq(gav), any(Path.class), eq((long) content.length));
+    }
+
+    /**
+     * {@code fetchAsset}'s real, streamed signature takes the destination {@link Path} to write
+     * to, generated fresh by the importer itself for every real call, so a test fixture can't
+     * name it in advance the way it could the old {@code byte[]}-returning method: this answers
+     * whatever path the importer actually passes by writing {@code content} straight to it, the
+     * same real effect the real method has.
+     */
+    private void stubFetchAsset(String gav, byte[] content) {
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"), eq(gav), any(Path.class))).thenAnswer(
+                invocation -> {
+                    Path destination = invocation.getArgument(2);
+                    Files.write(destination, content);
+                    return Optional.of(new MavenExternalConnectionClient.FetchedFile(content.length));
+                });
     }
 
     @Test
@@ -108,7 +131,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
@@ -132,7 +155,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
@@ -140,7 +163,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertTrue(imported);
         verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any());
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false));
     }
 
     /**
@@ -159,7 +182,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
         doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
                 .when(service).requireContainerBackedVersionDownloadable(OWNER, REGION, DOMAIN, REPOSITORY, "maven",
@@ -170,7 +193,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         ArgumentCaptor<Predicate<String>> captor = ArgumentCaptor.forClass(Predicate.class);
         verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes),
-                captor.capture());
+                captor.capture(), eq(false));
         Predicate<String> versionAllowed = captor.getValue();
         assertFalse(versionAllowed.test("1.0-disposed"));
         assertTrue(versionAllowed.test("1.0"));
@@ -186,7 +209,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).mergeMavenMetadataUnderPackageFence(any(), any(), any(), any(), any(), any(),
-                anyLong(), any(), any(), any(), any());
+                anyLong(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -212,7 +235,8 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void doesNothingForMavenMetadataWhenUpstreamRetentionIsBlocked() {
         when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
-                "widget")).thenReturn(true);
+                "widget",
+                "EXTERNAL_UPSTREAM")).thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/maven-metadata.xml");
@@ -227,7 +251,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
                 "com/example/widget/1.0-SNAPSHOT/widget-1.0-20231001.123456-1.jar");
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString(), any());
     }
 
     @Test
@@ -238,19 +262,20 @@ class CodeArtifactMavenExternalConnectionImporterTest {
                 "com/example/widget/1.0/widget-1.0.jar");
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString(), any());
     }
 
     @Test
     void doesNothingWhenUpstreamRetentionIsBlocked() {
         when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
-                "widget")).thenReturn(true);
+                "widget",
+                "EXTERNAL_UPSTREAM")).thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString(), any());
     }
 
     @Test
@@ -258,28 +283,26 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         // The real service refuses the claim outright when a different connection already holds
         // it (see claimMavenRetainedVersionOrigin's own javadoc); the mock stands in for that here.
         when(service.claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L))
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L))
                 .thenReturn(new CodeArtifactService.MavenClaimOutcome(false, 0L));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString(), any());
     }
 
     @Test
     void aStandardAssetNameImportsAllFourStandardAssetsBestEffort() {
         byte[] pomBytes = "pom-content".getBytes();
         byte[] jarBytes = "jar".getBytes();
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.pom"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(pomBytes)));
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(jarBytes)));
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-javadoc.jar")).thenReturn(Optional.empty());
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-sources.jar")).thenReturn(Optional.empty());
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.pom", pomBytes);
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", jarBytes);
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any(Path.class))).thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-sources.jar"), any(Path.class))).thenReturn(Optional.empty());
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
@@ -292,9 +315,9 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         verifyDeployPassedPackageFence("com/example/widget/1.0/widget-1.0.jar", jarBytes, 42L);
         verify(service, never()).deployMavenAssetUnderVersionFence(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(),
-                anyString(), eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any());
+                anyString(), eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any(), anyLong());
         verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L);
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
         verify(service).ensureRetainedPackageOriginDefault(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
                 "widget", 42L);
         verify(service).finishMavenRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
@@ -312,8 +335,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
      */
     @Test
     void takesTheVersionFenceSnapshotBeforeClaimingNotAfter() {
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset("jar".getBytes())));
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", "jar".getBytes());
 
         importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "com/example/widget/1.0/widget-1.0.jar");
 
@@ -321,14 +343,13 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         order.verify(service).currentContainerBackedVersionFence(REGION, DOMAIN, OWNER, REPOSITORY, "maven",
                 "com.example", "widget", "1.0");
         order.verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
-                "widget", "1.0", "public:maven-central", 42L);
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
     }
 
     @Test
     void anIdempotentMatchCountsAsImportedButIsNotDoubleCountedInByteAccounting() {
         byte[] jarBytes = "jar".getBytes();
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(jarBytes)));
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", jarBytes);
         // deployArtifact's own idempotent-match short-circuit: status 200, wroteNewContent false,
         // because the exact same bytes were already there (e.g. a sibling asset imported it moments
         // earlier in a race with another request for the same version).
@@ -341,7 +362,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertTrue(imported);
         verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L);
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
         // Something was genuinely retained (the idempotent match is still a real asset present
         // either way), so the claim is finished as confirmed, not released. Whether the
         // idempotent match itself double-counts bytes is deployMavenAssetUnderVersionFence's own
@@ -353,8 +374,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void aRealDeployConflictOnTheRequestedAssetCountsAsNotImported() {
         byte[] jarBytes = "jar".getBytes();
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(jarBytes)));
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", jarBytes);
         stubDeploy("com/example/widget/1.0/widget-1.0.jar", jarBytes,
                 new CodeArtifactService.MavenDeployAttemptResult(true,
                         new ReposiliteSidecarClient.DeployOutcome(409, false)));
@@ -375,14 +395,12 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void aLaterCandidateThatThrowsStillFinalizesWhatAnEarlierCandidateGenuinelyWrote() {
         byte[] pomBytes = "pom-content".getBytes();
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.pom"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(pomBytes)));
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset("jar".getBytes())));
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-javadoc.jar")).thenReturn(Optional.empty());
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-sources.jar")).thenReturn(Optional.empty());
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.pom", pomBytes);
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", "jar".getBytes());
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any(Path.class))).thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-sources.jar"), any(Path.class))).thenReturn(Optional.empty());
         // The POM deploy succeeds, but the JAR deploy (the requested asset) fails inside the
         // sidecar call itself, e.g. it going unreachable mid-import: deployMavenAssetUnderVersionFence
         // catches that on the real path and reports a matched fence with no outcome, exactly as
@@ -405,14 +423,14 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
     @Test
     void aCandidateFetchThatThrowsIsTreatedLikeAMissingCandidateRatherThanAbortingTheWholeAttempt() {
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.pom"))
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0.pom"), any(Path.class)))
                 .thenThrow(new IllegalStateException("public repository unreachable"));
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.jar"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset("jar".getBytes())));
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-javadoc.jar")).thenReturn(Optional.empty());
-        when(externalConnectionClient.fetchAsset("public:maven-central",
-                "com/example/widget/1.0/widget-1.0-sources.jar")).thenReturn(Optional.empty());
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.jar", "jar".getBytes());
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any(Path.class))).thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchAsset(eq("public:maven-central"),
+                eq("com/example/widget/1.0/widget-1.0-sources.jar"), any(Path.class))).thenReturn(Optional.empty());
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
@@ -420,17 +438,16 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service, never()).deployMavenAssetUnderVersionFence(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(),
-                anyString(), eq("com/example/widget/1.0/widget-1.0.pom"), any());
+                anyString(), eq("com/example/widget/1.0/widget-1.0.pom"), any(), anyLong());
         verify(service).deployMavenAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), eq(reposilite), eq(REPO_ID),
-                eq("com/example/widget/1.0/widget-1.0.jar"), eq("jar".getBytes()));
+                eq("com/example/widget/1.0/widget-1.0.jar"), any(Path.class), eq(3L));
     }
 
     @Test
     void aDisposalLandingWhileAFetchIsInFlightStopsEveryLaterWriteForThisAttempt() {
         byte[] pomBytes = "pom-content".getBytes();
-        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/1.0/widget-1.0.pom"))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(pomBytes)));
+        stubFetchAsset("com/example/widget/1.0/widget-1.0.pom", pomBytes);
         // A DisposePackageVersions landed on this exact version while the first candidate's
         // (the pom's) fetch was in flight: deployMavenAssetUnderVersionFence detects the fence
         // mismatch itself (inside its own lock) and reports it rather than writing anything, so
@@ -444,7 +461,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         assertFalse(imported);
         verify(service, never()).deployMavenAssetUnderVersionFence(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(),
-                anyString(), eq("com/example/widget/1.0/widget-1.0.jar"), any());
+                anyString(), eq("com/example/widget/1.0/widget-1.0.jar"), any(), anyLong());
         verify(service).finishMavenRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
                 "widget", "1.0", EPISODE_ID, false);
     }
@@ -452,22 +469,21 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void aNonStandardAssetNameOnlyImportsTheExactRequestedAsset() {
         String nonStandardGav = "com/example/widget/1.0/widget-1.0-windows.jar";
-        when(externalConnectionClient.fetchAsset("public:maven-central", nonStandardGav))
-                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset("windows-jar".getBytes())));
+        stubFetchAsset(nonStandardGav, "windows-jar".getBytes());
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, nonStandardGav);
 
         assertTrue(imported);
         verify(service).deployMavenAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), eq(reposilite), eq(REPO_ID),
-                eq(nonStandardGav), eq("windows-jar".getBytes()));
+                eq(nonStandardGav), any(Path.class), eq((long) "windows-jar".getBytes().length));
         verify(externalConnectionClient, never()).fetchAsset(eq("public:maven-central"),
-                eq("com/example/widget/1.0/widget-1.0.pom"));
+                eq("com/example/widget/1.0/widget-1.0.pom"), any());
     }
 
     @Test
     void returnsFalseWhenTheRequestedAssetItselfIsNotFoundEvenIfItWouldHaveBeenAStandardImport() {
-        when(externalConnectionClient.fetchAsset(anyString(), anyString())).thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchAsset(anyString(), anyString(), any())).thenReturn(Optional.empty());
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
@@ -475,7 +491,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         assertFalse(imported);
         verify(service, never()).deployMavenAssetUnderVersionFence(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(),
-                anyString(), anyString(), any());
+                anyString(), anyString(), any(), anyLong());
         verify(service).finishMavenRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
                 "widget", "1.0", EPISODE_ID, false);
     }
@@ -506,5 +522,15 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         assertFalse(importer.existsInExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY,
                 "com/example/widget/1.0-SNAPSHOT/widget-1.0-20231001.123456-1.jar"));
         verify(externalConnectionClient, never()).exists(anyString(), anyString());
+    }
+
+    /** An upstream deleted since a search order named it has no connection to fetch through. */
+    @Test
+    void aDeletedRepositoryHasNoExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, "deleted"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Repository 'deleted' not found.", 404));
+
+        assertFalse(importer.hasExternalConnection(REGION, DOMAIN, OWNER, "deleted"));
+        assertTrue(importer.hasExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY));
     }
 }

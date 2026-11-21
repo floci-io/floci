@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.CompactJws;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.iam.model.WebIdentityTokenKey;
@@ -18,9 +19,12 @@ import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -141,11 +145,43 @@ public class WebIdentityTokenIssuer {
         return claims;
     }
 
-    private synchronized WebIdentityTokenKey ensureKey(Algorithm algorithm) {
-        return keyStore.get(algorithm.name()).orElseGet(() -> generateKey(algorithm));
+    /** One verification key the account publishes: its {@code kid}, algorithm and public half. */
+    public record PublishedKey(String keyId, Algorithm algorithm, PublicKey publicKey) {
     }
 
-    private WebIdentityTokenKey generateKey(Algorithm algorithm) {
+    /**
+     * The public half of {@code accountId}'s key for each algorithm, for the key set a relying party
+     * verifies against. A key that has not signed anything yet is minted here, so the set names
+     * both algorithms from the first read, as the sample key set in the IAM User Guide does, and a
+     * verifier that cached it before the first token was asked for already holds that token's key.
+     *
+     * <p>The account is named rather than read off the request, because the request asking for it
+     * carries no AWS credential: a relying party fetching the key set is not an AWS caller.
+     */
+    public List<PublishedKey> publishedKeys(String accountId) {
+        List<PublishedKey> keys = new ArrayList<>();
+        for (Algorithm algorithm : Algorithm.values()) {
+            WebIdentityTokenKey key = ensureKey(accountId, algorithm);
+            keys.add(new PublishedKey(key.getKeyId(), algorithm, publicKey(key, algorithm)));
+        }
+        return keys;
+    }
+
+    private WebIdentityTokenKey ensureKey(Algorithm algorithm) {
+        return ensureKey(null, algorithm);
+    }
+
+    /**
+     * The key for {@code algorithm} in {@code accountId}, or in the request's account when it is
+     * null, minted on first use. One lock covers both callers, so a token and a key set read at the
+     * same moment cannot each mint a key and leave the token signed by the one that lost.
+     */
+    private synchronized WebIdentityTokenKey ensureKey(String accountId, Algorithm algorithm) {
+        return AccountAwareStorageBackend.getInAccount(keyStore, accountId, algorithm.name())
+                .orElseGet(() -> generateKey(accountId, algorithm));
+    }
+
+    private WebIdentityTokenKey generateKey(String accountId, Algorithm algorithm) {
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(algorithm.keyAlgorithm);
             switch (algorithm) {
@@ -157,8 +193,8 @@ public class WebIdentityTokenIssuer {
             key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
             key.setPublicKey(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
             key.setPrivateKey(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-            keyStore.put(algorithm.name(), key);
-            LOG.debugv("Generated the account's {0} web identity token signing key", algorithm);
+            AccountAwareStorageBackend.putInAccount(keyStore, accountId, algorithm.name(), key);
+            LOG.debugv("Generated the account''s {0} web identity token signing key", algorithm);
             return key;
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException(
@@ -174,6 +210,17 @@ public class WebIdentityTokenIssuer {
         } catch (GeneralSecurityException | IllegalArgumentException e) {
             throw new IllegalStateException(
                     "Failed to load the " + algorithm + " web identity token signing key", e);
+        }
+    }
+
+    private static PublicKey publicKey(WebIdentityTokenKey key, Algorithm algorithm) {
+        try {
+            X509EncodedKeySpec spec =
+                    new X509EncodedKeySpec(Base64.getDecoder().decode(key.getPublicKey()));
+            return KeyFactory.getInstance(algorithm.keyAlgorithm).generatePublic(spec);
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            throw new IllegalStateException(
+                    "Failed to load the " + algorithm + " web identity token verification key", e);
         }
     }
 

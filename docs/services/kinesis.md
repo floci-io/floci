@@ -21,6 +21,9 @@
 | `AddTagsToStream` | Tag a stream |
 | `RemoveTagsFromStream` | Remove tags |
 | `ListTagsForStream` | List tags |
+| `TagResource` | Add or update tags on a stream or consumer |
+| `UntagResource` | Remove tags from a stream or consumer |
+| `ListTagsForResource` | List tags on a stream or consumer |
 | `StartStreamEncryption` | Enable KMS encryption |
 | `StopStreamEncryption` | Disable encryption |
 | `SplitShard` | Split a shard into two |
@@ -104,15 +107,28 @@ A stream's retention period (default 24 hours, `IncreaseStreamRetentionPeriod`/`
 value must be a decimal integer in the Kinesis hash-key space, and records are
 written to the open shard whose `HashKeyRange` contains that value.
 
-Without `ExplicitHashKey`, Floci uses the partition key's Java hash modulo the
-number of stored shards, including closed shards. If this selects a closed
-shard, it follows split and merge lineage through any closed intermediate shards
-to the first open descendant in breadth-first, stored-shard order. Writes never
-append to a closed shard or fall back to an unrelated open shard. A lineage with
-no reachable open shard fails the write. This simplified ordinary-key placement
-differs from AWS's MD5 hash-range routing.
+Without `ExplicitHashKey`, Kinesis takes the MD5 digest of the partition key's
+UTF-8 bytes as an unsigned 128-bit integer. Floci writes to the open shard whose
+`HashKeyRange` contains that value, including after a split or merge. Closed
+historical shards are never selected. Untouched legacy streams whose open root
+shards all persisted the full hash span are repartitioned before selection.
+Other overlapping stored ranges are rejected rather than rewriting existing
+child ranges or records.
 
 ## Shard Scaling (UpdateShardCount)
+
+Stream creation and control-plane updates normally report `ACTIVE` immediately. Set
+`FLOCI_SERVICES_KINESIS_CREATING_DELAY_MILLIS` or
+`FLOCI_SERVICES_KINESIS_UPDATING_DELAY_MILLIS` to test clients that wait for a stream
+to become active or retry a conflicting update. During a `CREATING` window,
+`PutRecord` and `PutRecords` reject writes until the stream becomes active. During an
+`UPDATING` window, reads and record writes remain available, but another split,
+merge, scaling, mode, size, encryption, retention, or stream-tag change returns
+`ResourceInUseException`. Tag and retention changes also reject a `CREATING` stream.
+The window is evaluated on
+read from a stored deadline set when the change begins, so a slow synchronous write
+can consume some or all of a very small window before the call returns. Resharding
+does not defer the shard change.
 
 `UpdateShardCount` enforces the documented default limits: at most double the current
 open shard count per call, at most ten calls per rolling 24-hour period per stream, a
@@ -135,6 +151,8 @@ action, so that limit is intentionally unenforced here.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_KINESIS_CREATING_DELAY_MILLIS` | `0` | Optional `CREATING` status window after `CreateStream` |
+| `FLOCI_SERVICES_KINESIS_UPDATING_DELAY_MILLIS` | `0` | Optional `UPDATING` status window after a stream change |
 | `FLOCI_SERVICES_KINESIS_LIST_SHARDS_NEXT_TOKEN_TTL_MILLIS` | `300000` | Lifetime of `ListShards` and `ListStreams` `NextToken` values in milliseconds. Lower it to exercise `ExpiredNextTokenException` without waiting |
 
 ## Enhanced Fan-Out (EFO)

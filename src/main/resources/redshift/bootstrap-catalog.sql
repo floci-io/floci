@@ -103,8 +103,20 @@ FROM pg_catalog.pg_class c
 CROSS JOIN (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) d
 WHERE c.relkind = 'r';
 
--- 6. stl_load_errors: load error log table for COPY commands
-CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
+-- 6. stl_load_errors: private autonomous writer, with per-session catalog visibility.
+-- Keep raw input outside the public catalog and expose only the filtered view.
+CREATE SCHEMA IF NOT EXISTS floci_internal;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_class
+               WHERE oid = to_regclass('pg_catalog.stl_load_errors') AND relkind = 'r') THEN
+        ALTER TABLE pg_catalog.stl_load_errors SET SCHEMA floci_internal;
+        ALTER TABLE floci_internal.stl_load_errors RENAME TO copy_load_errors;
+        REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+    END IF;
+END;
+$$;
+CREATE TABLE IF NOT EXISTS floci_internal.copy_load_errors (
     userid integer DEFAULT 1,
     slice integer DEFAULT 0,
     tbl integer DEFAULT 0,
@@ -125,6 +137,13 @@ CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
     start_offset bigint DEFAULT 0,
     copy_job_id bigint DEFAULT 0
 );
+REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+CREATE OR REPLACE VIEW pg_catalog.stl_load_errors WITH (security_barrier = true) AS
+SELECT * FROM floci_internal.copy_load_errors
+WHERE userid = (SELECT oid::integer FROM pg_catalog.pg_roles WHERE rolname = session_user)
+   OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user);
+REVOKE ALL ON TABLE pg_catalog.stl_load_errors FROM PUBLIC;
+GRANT SELECT ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 
 -- 7. svl_qlog: dynamic query execution log view
 DROP VIEW IF EXISTS pg_catalog.svl_qlog CASCADE;
@@ -377,7 +396,7 @@ RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp
 $$;
 
 CREATE OR REPLACE VIEW pg_catalog.svv_external_schemas AS
-SELECT n.oid AS esoid, 1::smallint AS eskind, n.nspname AS schemaname,
+SELECT n.oid AS esoid, COALESCE((c.payload->>'eskind')::smallint, 1::smallint) AS eskind, n.nspname AS schemaname,
        n.nspowner::integer AS esowner, c.payload->>'databasename' AS databasename,
        c.payload->>'esoptions' AS esoptions
 FROM floci_internal.external_catalog c
@@ -432,6 +451,94 @@ CREATE OR REPLACE PROCEDURE floci_internal.reject_copy_job(sqlstate text, messag
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     RAISE EXCEPTION '%', message USING ERRCODE = sqlstate;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS floci_internal.copy_job_detail (
+    job_id bigint NOT NULL REFERENCES floci_internal.copy_job(job_id) ON DELETE CASCADE,
+    bucket text NOT NULL,
+    key text NOT NULL,
+    etag text,
+    version_id text,
+    file_size bigint NOT NULL DEFAULT 0,
+    modification_time timestamptz NOT NULL DEFAULT clock_timestamp(),
+    status character(1) NOT NULL DEFAULT 'I',
+    loaded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (job_id, bucket, key)
+);
+
+CREATE OR REPLACE FUNCTION floci_internal.copy_job_for_run(name text)
+RETURNS SETOF floci_internal.copy_job
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN QUERY SELECT j.* FROM floci_internal.copy_job j
+      WHERE j.job_name = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.copy_job_loaded_keys(id bigint)
+RETURNS TABLE(key text, status character(1), etag text, version_id text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN QUERY SELECT d.key, d.status, d.etag, d.version_id FROM floci_internal.copy_job_detail d
+      JOIN floci_internal.copy_job j ON j.job_id = d.job_id
+      WHERE d.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.reserve_copy_job_file(
+    id bigint, key text, etag text, version_id text, file_size bigint DEFAULT 0, modification_time timestamptz DEFAULT NULL)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    source_bucket text;
+BEGIN
+    SELECT j.bucket INTO source_bucket FROM floci_internal.copy_job j
+      WHERE j.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job does not exist' USING ERRCODE = '42704';
+    END IF;
+    INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
+      VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'I', clock_timestamp())
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
+        SET etag = EXCLUDED.etag,
+            version_id = EXCLUDED.version_id,
+            file_size = EXCLUDED.file_size,
+            modification_time = EXCLUDED.modification_time,
+            status = 'I',
+            loaded_at = clock_timestamp()
+        WHERE floci_internal.copy_job_detail.status = 'E'
+          AND (floci_internal.copy_job_detail.etag IS DISTINCT FROM EXCLUDED.etag
+               OR floci_internal.copy_job_detail.version_id IS DISTINCT FROM EXCLUDED.version_id);
+    RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.record_copy_job_file_error(
+    id bigint, key text, etag text, version_id text, file_size bigint DEFAULT 0, modification_time timestamptz DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    source_bucket text;
+BEGIN
+    SELECT j.bucket INTO source_bucket FROM floci_internal.copy_job j
+      WHERE j.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job does not exist' USING ERRCODE = '42704';
+    END IF;
+    INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
+      VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'E', clock_timestamp())
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
+        SET etag = EXCLUDED.etag,
+            version_id = EXCLUDED.version_id,
+            file_size = EXCLUDED.file_size,
+            modification_time = EXCLUDED.modification_time,
+            status = 'E',
+            loaded_at = clock_timestamp()
+        WHERE floci_internal.copy_job_detail.status <> 'I';
 END;
 $$;
 
@@ -503,10 +610,150 @@ SELECT j.job_id::bigint AS job_id,
 FROM floci_internal.copy_job j
 WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
 
+CREATE OR REPLACE VIEW pg_catalog.sys_copy_job_detail AS
+SELECT COALESCE((SELECT u.usesysid::integer FROM pg_catalog.pg_user u WHERE u.usename = j.owner), 0) AS user_id,
+       current_database()::text AS database_name,
+       j.job_id::bigint AS job_id,
+       j.job_name::text AS job_name,
+       ('s3://' || j.bucket || '/' || j.prefix)::text AS file_location,
+       d.key::text AS file_name,
+       d.file_size::bigint AS file_size,
+       COALESCE(d.etag, '')::text AS file_etag,
+       left(j.job_text, 256)::character(256) AS job_text,
+       (d.modification_time AT TIME ZONE 'UTC')::timestamp without time zone AS modification_time,
+       (d.loaded_at AT TIME ZONE 'UTC')::timestamp without time zone AS enqueue_time,
+       d.status::character(1) AS status
+FROM floci_internal.copy_job_detail d
+JOIN floci_internal.copy_job j ON j.job_id = d.job_id
+WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
+
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
 GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
 -- Schema access for COPY JOB must not expose the unrelated privileged catalog writers.
 REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
-GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;
+
+-- 18. VARBYTE and SUPER: Redshift's binary and semi-structured types, as domains over bytea and jsonb,
+-- with the functions that read and write them. A SUPER value keeps the jsonb order of an object's keys,
+-- not the order they were written in.
+DO $floci$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'pg_catalog' AND t.typname = 'varbyte') THEN
+        CREATE DOMAIN pg_catalog.varbyte AS bytea;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'pg_catalog' AND t.typname = 'super') THEN
+        CREATE DOMAIN pg_catalog.super AS jsonb;
+    END IF;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.from_varbyte(value pg_catalog.varbyte, format text)
+RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    CASE lower(format)
+        WHEN 'hex' THEN
+            RETURN encode(value, 'hex');
+        WHEN 'binary' THEN
+            RETURN COALESCE((SELECT string_agg((('x' || lpad(to_hex(get_byte(value, i)), 2, '0'))::bit(8))::text, '' ORDER BY i)
+                             FROM generate_series(0, length(value) - 1) AS i), '');
+        WHEN 'utf8', 'utf-8', 'utf_8' THEN
+            RETURN convert_from(value, 'UTF8');
+        WHEN 'base64' THEN
+            RETURN replace(encode(value, 'base64'), E'\n', '');
+        ELSE
+            RAISE EXCEPTION 'invalid format "%" for FROM_VARBYTE', format USING ERRCODE = '22023';
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.to_varbyte(value text, format text)
+RETURNS pg_catalog.varbyte LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+DECLARE
+    padded text;
+    result bytea := ''::bytea;
+    i integer;
+BEGIN
+    CASE lower(format)
+        WHEN 'hex' THEN
+            -- An odd number of digits gets a leading 0.
+            RETURN decode(CASE WHEN length(value) % 2 = 1 THEN '0' || value ELSE value END, 'hex');
+        WHEN 'binary' THEN
+            IF value !~ '^[01]*$' THEN
+                RAISE EXCEPTION 'invalid binary digit in "%"', value USING ERRCODE = '22023';
+            END IF;
+            padded := lpad(value, ((length(value) + 7) / 8) * 8, '0');
+            FOR i IN 0 .. length(padded) / 8 - 1 LOOP
+                result := result || set_byte('\x00'::bytea, 0, (('b' || substr(padded, i * 8 + 1, 8))::bit(8))::integer);
+            END LOOP;
+            RETURN result;
+        WHEN 'utf8', 'utf-8', 'utf_8' THEN
+            RETURN convert_to(value, 'UTF8');
+        WHEN 'base64' THEN
+            RETURN decode(value, 'base64');
+        ELSE
+            RAISE EXCEPTION 'invalid format "%" for TO_VARBYTE', format USING ERRCODE = '22023';
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_parse(value text)
+RETURNS pg_catalog.super LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT value::jsonb::pg_catalog.super
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_parse(value pg_catalog.varbyte)
+RETURNS pg_catalog.super LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT convert_from(value, 'UTF8')::jsonb::pg_catalog.super
+$floci$;
+
+-- False, not an error, for what JSON_PARSE would refuse, an empty string among it.
+CREATE OR REPLACE FUNCTION pg_catalog.can_json_parse(value text)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    PERFORM value::jsonb;
+    RETURN true;
+EXCEPTION WHEN OTHERS THEN
+    RETURN false;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.can_json_parse(value pg_catalog.varbyte)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    PERFORM convert_from(value, 'UTF8')::jsonb;
+    RETURN true;
+EXCEPTION WHEN OTHERS THEN
+    RETURN false;
+END
+$floci$;
+
+-- Compact text, as RFC 8259 allows and Redshift writes it; a null is the JSON string 'null'.
+CREATE OR REPLACE FUNCTION pg_catalog.json_serialize(value pg_catalog.super)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $floci$
+DECLARE
+    doc jsonb := value;
+BEGIN
+    IF doc IS NULL THEN
+        RETURN 'null';
+    END IF;
+    CASE jsonb_typeof(doc)
+        WHEN 'object' THEN
+            RETURN '{' || COALESCE((SELECT string_agg(to_jsonb(e.key)::text || ':'
+                                                       || pg_catalog.json_serialize(e.value::pg_catalog.super), ',')
+                                    FROM jsonb_each(doc) AS e), '') || '}';
+        WHEN 'array' THEN
+            RETURN '[' || COALESCE((SELECT string_agg(pg_catalog.json_serialize(e.value::pg_catalog.super), ',' ORDER BY e.ord)
+                                    FROM jsonb_array_elements(doc) WITH ORDINALITY AS e(value, ord)), '') || ']';
+        ELSE
+            RETURN doc::text;
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_typeof(value pg_catalog.super)
+RETURNS text LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT jsonb_typeof(value)
+$floci$;

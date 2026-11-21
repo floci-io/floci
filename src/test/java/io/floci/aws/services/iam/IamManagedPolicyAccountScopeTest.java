@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -338,7 +339,7 @@ class IamManagedPolicyAccountScopeTest {
 
         service.createUser("auth-user", "/");
         service.createGroup("auth-group", "/");
-        IamRole role = service.createRole("auth-role", "/", "{}", null, 0, null);
+        IamRole role = service.createRole("auth-role", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         service.addUserToGroup("auth-group", "auth-user");
         service.attachUserPolicy("auth-user", managedArn);
         service.attachGroupPolicy("auth-group", boundaryArn);
@@ -384,7 +385,7 @@ class IamManagedPolicyAccountScopeTest {
 
         service.createUser("account-a-user", "/");
         service.createGroup("account-a-group", "/");
-        service.createRole("account-a-role", "/", "{}", null, 0, null);
+        service.createRole("account-a-role", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         service.attachUserPolicy("account-a-user", managedArn);
         service.attachGroupPolicy("account-a-group", managedArn);
         service.attachRolePolicy("account-a-role", managedArn);

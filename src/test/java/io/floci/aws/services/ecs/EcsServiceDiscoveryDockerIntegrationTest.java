@@ -5,6 +5,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.services.cloudmap.CloudMapService;
 import io.floci.aws.services.cloudmap.model.Operation;
 import io.floci.aws.services.cloudmap.model.Service;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.CreateServiceRequest;
@@ -14,8 +15,8 @@ import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
 import io.floci.aws.testing.TestImages;
+import io.floci.aws.testing.ValidateSignaturesProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -38,31 +39,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Nothing here touches the registrar. A service that declares {@code serviceRegistries} has a
  * real container launched for it, and the assertions are that the Cloud Map name resolves to the
  * task's address while it runs and stops resolving once the task does.
+ *
+ * <p>ECS runs unmocked here, and security-group enforcement goes back to its shipped default of
+ * off, both from {@link ValidateSignaturesProfile}: the suite turns enforcement on, and its helper
+ * needs rootful Docker, a requirement of security groups rather than of service discovery.
  */
 @QuarkusTest
-@TestProfile(EcsServiceDiscoveryDockerIntegrationTest.DockerEcsProfile.class)
+@TestProfile(ValidateSignaturesProfile.class)
 class EcsServiceDiscoveryDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = "subnet-default-us-east-1-a";
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
     private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
     private static final String CONTAINER_NAME = "app";
     private static final String CLOUD_MAP_SERVICE_NAME = "cache";
     private static final String ECS_SERVICE_NAME = "cache-svc";
-
-    /**
-     * The registration hooks only run for a task with a container behind it, so ECS runs
-     * unmocked. Security-group enforcement goes back to its shipped default of off: the test
-     * suite turns it on, and its helper needs rootful Docker, which is a requirement of security
-     * groups rather than of service discovery.
-     */
-    public static final class DockerEcsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.mock", "false",
-                    "floci.network.security-group-enforcement.enabled", "false");
-        }
-    }
 
     @Inject
     EcsService ecsService;

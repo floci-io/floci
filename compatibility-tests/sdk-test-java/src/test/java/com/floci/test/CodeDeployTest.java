@@ -165,6 +165,7 @@ class CodeDeployTest {
                 .deploymentGroupName("sdk-lambda-dg")
                 .deploymentConfigName("CodeDeployDefault.LambdaAllAtOnce")
                 .serviceRoleArn(TestFixtures.globalArn("iam", "000000000000", "role/codedeploy-role"))
+                .tags(Tag.builder().key("team").value("release").build())
                 .deploymentStyle(DeploymentStyle.builder()
                         .deploymentType(DeploymentType.BLUE_GREEN)
                         .deploymentOption(DeploymentOption.WITH_TRAFFIC_CONTROL)
@@ -172,6 +173,9 @@ class CodeDeployTest {
 
         assertThat(resp.deploymentGroupId()).isNotBlank();
         dgId = resp.deploymentGroupId();
+        String arn = TestFixtures.arn("codedeploy", "000000000000", "deploymentgroup:sdk-lambda-app/sdk-lambda-dg");
+        ListTagsForResourceResponse tags = codedeploy.listTagsForResource(r -> r.resourceArn(arn));
+        assertThat(tags.tags()).contains(Tag.builder().key("team").value("release").build());
     }
 
     @Test

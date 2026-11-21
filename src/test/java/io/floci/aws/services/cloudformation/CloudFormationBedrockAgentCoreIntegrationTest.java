@@ -169,7 +169,8 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
                       "Type": "AWS::BedrockAgentCore::RuntimeEndpoint",
                       "Properties": {
                         "AgentRuntimeId": {"Fn::GetAtt": ["Runtime", "AgentRuntimeId"]},
-                        "Name": "prod"%s
+                        "Name": "prod"%s,
+                        "Tags": {"team": "%s"}
                       }
                     }%s
                   },
@@ -177,12 +178,13 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
                     "MemoryId": {"Value": {"Fn::GetAtt": ["Memory", "MemoryId"]}},
                     "MemoryArn": {"Value": {"Fn::GetAtt": ["Memory", "MemoryArn"]}},
                     "RuntimeId": {"Value": {"Fn::GetAtt": ["Runtime", "AgentRuntimeId"]}},
-                    "RuntimeArn": {"Value": {"Fn::GetAtt": ["Runtime", "AgentRuntimeArn"]}}
+                    "RuntimeArn": {"Value": {"Fn::GetAtt": ["Runtime", "AgentRuntimeArn"]}},
+                    "EndpointArn": {"Value": {"Fn::GetAtt": ["Endpoint", "AgentRuntimeEndpointArn"]}}
                   }
                 }
                 """.formatted(descriptionProperty(memoryDescription), tagValue, CONTAINER_URI,
                 descriptionProperty(runtimeDescription), tagValue, descriptionProperty(endpointDescription),
-                failingResource);
+                tagValue, failingResource);
     }
 
     private static String descriptionProperty(String description) {
@@ -210,7 +212,7 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
         String runtimeArn = outputs.get("RuntimeArn");
         assertEquals(runtimeId, outputs.get("RuntimeRef"));
         assertTrue(runtimeId.startsWith("cfn_agent_runtime-"), runtimeId);
-        assertTrue(runtimeArn.matches("arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/[0-9a-f-]{36}:1"),
+        assertTrue(runtimeArn.matches("arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/[a-zA-Z][a-zA-Z0-9_]{0,47}-[a-zA-Z0-9]{10}"),
                 runtimeArn);
         assertEquals("1", outputs.get("RuntimeVersion"));
         assertEquals("READY", outputs.get("RuntimeStatus"));
@@ -219,7 +221,7 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
 
         String endpointArn = outputs.get("EndpointArn");
         assertEquals(endpointArn, outputs.get("EndpointRef"));
-        assertTrue(endpointArn.startsWith("arn:aws:bedrock-agentcore:us-east-1:000000000000:agentEndpoint/"), endpointArn);
+        assertEquals(runtimeArn + "/runtime-endpoint/prod", endpointArn);
         assertEquals(runtimeArn, outputs.get("EndpointRuntimeArn"));
         assertEquals("1", outputs.get("EndpointTargetVersion"));
         assertEquals("READY", outputs.get("EndpointStatus"));
@@ -303,10 +305,12 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
         String memoryArn = outputs.get("MemoryArn");
         String runtimeId = outputs.get("RuntimeId");
         String runtimeArn = outputs.get("RuntimeArn");
+        String endpointArn = outputs.get("EndpointArn");
+        given().when().get("/tags/" + endpointArn).then().statusCode(200).body("tags.team", equalTo("agents"));
 
         // Every mutable property changes in place, then a sibling fails the update: the runtime
         // is restored as a further version (as an UpdateAgentRuntime rollback is on AWS), and the
-        // memory, the endpoint and both tag sets carry what the stack last committed.
+        // memory, the endpoint and all three tag sets carry what the stack last committed.
         cloudFormation(ROLLBACK_STACK, "UpdateStack",
                 rollbackTemplate("memory two", "runtime two", "endpoint two", "ml", true));
         Map<String, String> rolledBack = outputs(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE");
@@ -319,6 +323,13 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
         describeMemory(memoryId).statusCode(200).body("memory.description", equalTo("memory one"));
         given().when().get("/tags/" + memoryArn).then().statusCode(200).body("tags.team", equalTo("agents"));
         describeEndpoint(runtimeId, "prod").statusCode(200).body("description", equalTo("endpoint one"));
+        given().when().get("/tags/" + endpointArn).then().statusCode(200).body("tags.team", equalTo("agents"));
+
+        // A tag-only change reaches the endpoint in place.
+        cloudFormation(ROLLBACK_STACK, "UpdateStack",
+                rollbackTemplate("memory one", "runtime one", "endpoint one", "ml", false));
+        assertEquals(endpointArn, outputs(ROLLBACK_STACK, "UPDATE_COMPLETE").get("EndpointArn"));
+        given().when().get("/tags/" + endpointArn).then().statusCode(200).body("tags.team", equalTo("ml"));
 
         // Dropping the descriptions from the template clears them: the template is the whole
         // declared configuration, so an omitted property is not left over from the last update.

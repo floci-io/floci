@@ -1,8 +1,18 @@
 package io.floci.aws.services.cloudformation;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -10,10 +20,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CfnCreateOnlyPropertiesTest {
 
+    private static final Path INVENTORY =
+            Path.of("src/test/resources/cloudformation/supported-resource-types.tsv");
+
+    /** Inventory types with no registry schema; they are the only ones allowed to have no entry. */
+    private static final Set<String> TYPES_WITHOUT_SCHEMA =
+            Set.of("AWS::CDK::Metadata", "Custom::DynamoDBReplica");
+
     @Test
     void s3VectorsCreateOnlyPropertiesMatchTheRegistrySchemas() {
         assertEquals(Set.of("DataType", "Dimension", "DistanceMetric", "EncryptionConfiguration", "IndexName",
-                        "MetadataConfiguration", "VectorBucketArn", "VectorBucketName"),
+                        "MetadataConfiguration/NonFilterableMetadataKeys", "VectorBucketArn", "VectorBucketName"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::Index"));
         assertEquals(Set.of("VectorBucketName", "EncryptionConfiguration"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::VectorBucket"));
@@ -107,8 +124,11 @@ class CfnCreateOnlyPropertiesTest {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Application", "Name"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "ApplicationId"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "Name"));
-        assertEquals(Set.of("ApplicationId", "LocationUri", "Type"),
+        assertEquals(Set.of("ApplicationId", "LocationUri"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::ConfigurationProfile"));
+        // Type is not create-only: the registry schema lists only ApplicationId and LocationUri, and the
+        // AWS resource page gives Type "Update requires: No interruption".
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::ConfigurationProfile", "Type"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::ConfigurationProfile", "Name"));
         assertEquals(Set.of("Name", "ReplicateTo"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::DeploymentStrategy"));
@@ -153,5 +173,80 @@ class CfnCreateOnlyPropertiesTest {
 
         Set<String> unknownProps = CfnCreateOnlyProperties.getCreateOnlyProperties("Unknown::Type");
         assertTrue(unknownProps.isEmpty());
+    }
+
+    @Test
+    void sesEventDestinationNameUsesConditionalReplacementMetadata() throws IOException {
+        String type = "AWS::SES::ConfigurationSetEventDestination";
+        assertEquals(Set.of("ConfigurationSetName"), CfnCreateOnlyProperties.getCreateOnlyProperties(type));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "EventDestination"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Name"));
+        assertEquals(Set.of("ConfigurationSetName", "EventDestination/Name"),
+                CfnCreateOnlyProperties.replacementPointers(type));
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode previous = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"old","Enabled":true}}
+                """);
+        JsonNode renamed = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"new","Enabled":true}}
+                """);
+        JsonNode updated = mapper.readTree("""
+                {"ConfigurationSetName":"set","EventDestination":{"Name":"old","Enabled":false}}
+                """);
+        assertTrue(CfnCreateOnlyProperties.createOnlyValueChanged(type, previous, renamed));
+        assertFalse(CfnCreateOnlyProperties.createOnlyValueChanged(type, previous, updated));
+        assertEquals(Set.of(previous.path("ConfigurationSetName"), previous.path("EventDestination").path("Name")),
+                Set.copyOf(CfnCreateOnlyProperties.createOnlySubtrees(type, previous)));
+
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("cloudformation/conditional-create-only-properties.json")) {
+            assertEquals(Map.of(type, Set.of("EventDestination/Name")),
+                    mapper.readValue(in, new TypeReference<Map<String, Set<String>>>() {}));
+        }
+    }
+
+    /**
+     * Every type floci provisions has an entry in create-only-properties.json, taken from its
+     * registry schema, so the name heuristic in {@code isCreateOnly} is never what answers for a
+     * supported type. A type with no schema is listed above with its reason and has no entry.
+     */
+    @Test
+    void everyInventoryTypeHasAnEntryExceptTheSchemalessOnes() throws IOException {
+        Map<String, Set<String>> entries;
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("cloudformation/create-only-properties.json")) {
+            entries = new ObjectMapper().readValue(in, new TypeReference<Map<String, Set<String>>>() {});
+        }
+        Set<String> missing = new TreeSet<>();
+        for (String line : Files.readAllLines(INVENTORY)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String type = line.split("\t", 2)[0];
+            if (!entries.containsKey(type) && !TYPES_WITHOUT_SCHEMA.contains(type)) {
+                missing.add(type);
+            }
+        }
+        List<String> listedWithEntry = TYPES_WITHOUT_SCHEMA.stream().filter(entries::containsKey).sorted().toList();
+
+        assertEquals(Set.of(), missing,
+                "Inventory types with no entry in create-only-properties.json: run make cfn-create-only-sync.");
+        assertEquals(List.of(), listedWithEntry,
+                "Types listed as schemaless that do have an entry: remove them from the list.");
+    }
+
+    /**
+     * Registry schemas (CloudformationSchema.zip, us-east-1): aws-events-archive.json lists
+     * createOnlyProperties ArchiveName and SourceArn only, so KmsKeyIdentifier is updatable
+     * (the name heuristic answered true for any name ending in Identifier), and SourceArn is
+     * create-only although no heuristic rule matches it.
+     */
+    @Test
+    void isCreateOnly_eventsArchiveFollowsTheRegistrySchema() {
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Events::Archive", "KmsKeyIdentifier"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Events::Archive", "SourceArn"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Events::Archive", "ArchiveName"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Events::Archive", "RetentionDays"));
     }
 }

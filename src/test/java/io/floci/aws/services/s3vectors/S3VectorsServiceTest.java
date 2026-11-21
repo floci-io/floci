@@ -5,18 +5,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3vectors.model.VectorBucket;
 import io.floci.aws.services.s3vectors.model.VectorIndex;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -28,15 +35,174 @@ class S3VectorsServiceTest {
 
     @BeforeEach
     void setUp() {
-        StorageFactory factory = new StorageFactory(null, null) {
+        StorageFactory factory = inMemoryFactory();
+        service = new S3VectorsService(factory, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+    }
+
+    private static StorageFactory inMemoryFactory() {
+        return new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                             TypeReference<Map<String, V>> typeReference) {
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
-        service = new S3VectorsService(factory, new RegionResolver(REGION, "000000000000"),
-                Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void invalidTagsAreRejectedBeforeCreatingOrReplacingResources(boolean index) {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, Map.of("original", "value"), REGION);
+        VectorIndex vectorIndex = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(),
+                null, Map.of("original", "value"), REGION);
+        String arn = index ? vectorIndex.getIndexArn() : bucket.getVectorBucketArn();
+        for (Map<String, String> tags : List.of(
+                Map.of("", "value"), Map.of("invalid!", "value"), Map.of("aws:reserved", "value"),
+                Map.of("x".repeat(129), "value"), Map.of("key", "x".repeat(257)),
+                Map.of("key", "invalid!"), numberedTags(51))) {
+            AwsException createError = assertThrows(AwsException.class, () -> {
+                if (index) {
+                    service.createIndex("bucket", "new-index", 2, "float32", "euclidean", List.of(), null, tags, REGION);
+                } else {
+                    service.createVectorBucket("new-bucket", null, tags, REGION);
+                }
+            });
+            assertEquals("ValidationException", createError.getErrorCode());
+            assertEquals(1, service.listVectorBuckets(REGION).size());
+            assertEquals(1, service.listIndexes("bucket", REGION).size());
+            AwsException replaceError = assertThrows(AwsException.class, () -> {
+                if (index) {
+                    service.replaceIndexTags("bucket", "index", tags, REGION);
+                } else {
+                    service.replaceBucketTags("bucket", tags, REGION);
+                }
+            });
+            assertEquals("ValidationException", replaceError.getErrorCode());
+            assertEquals(Map.of("original", "value"), service.listTagsForResource(arn, REGION));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void legacyOverLimitTagsCanBeRemovedBeforeFurtherUpdates(boolean index) {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
+        VectorIndex vectorIndex = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(), REGION);
+        // Seed an old stored record that predates tag validation.
+        if (index) {
+            vectorIndex.setTags(numberedTags(52));
+        } else {
+            bucket.setTags(numberedTags(52));
+        }
+        String arn = index ? vectorIndex.getIndexArn() : bucket.getVectorBucketArn();
+        assertEquals(52, service.listTagsForResource(arn, REGION).size());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.tagResource(arn, Map.of("key0", "changed"), REGION)).getErrorCode());
+        assertEquals("value", service.listTagsForResource(arn, REGION).get("key0"));
+        service.untagResource(arn, List.of("key51"), REGION);
+        assertEquals(51, service.listTagsForResource(arn, REGION).size());
+        service.untagResource(arn, List.of("key50"), REGION);
+        service.tagResource(arn, Map.of("key0", "changed"), REGION);
+        assertEquals(50, service.listTagsForResource(arn, REGION).size());
+        assertEquals("changed", service.listTagsForResource(arn, REGION).get("key0"));
+    }
+
+    private static Map<String, String> numberedTags(int count) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 0; i < count; i++) {
+            tags.put("key" + i, "value");
+        }
+        return tags;
+    }
+
+    /**
+     * IAM's lookup reads the tags of the vector bucket or the index the ARN names, an index's own and not its bucket's,
+     * as a replace leaves them, and nothing for another account's, another Region's or an unknown one.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheBucketOrTheIndexTheArnNames() {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, Map.of("team", "data"), REGION);
+        VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of(), null,
+                Map.of("team", "web"), REGION);
+        service.replaceIndexTags("bucket", "index", Map.of("team", "ops"), REGION);
+        String bucketArn = bucket.getVectorBucketArn();
+        String indexArn = index.getIndexArn();
+
+        assertEquals("s3vectors", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(bucketArn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(indexArn));
+        assertTrue(service.storedTags(bucketArn.replace("000000000000", "111122223333")).isEmpty());
+        assertTrue(service.storedTags(indexArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(bucketArn + "/index/missing").isEmpty());
+        assertTrue(service.storedTags(bucketArn.replace("bucket/bucket", "bucket/missing")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:s3:::bucket").isEmpty());
+    }
+
+    /** A bucket stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareBucketInPlace() {
+        InMemoryStorage<String, VectorBucket> raw = new InMemoryStorage<>();
+        S3VectorsService legacyState = new S3VectorsService(
+                new InMemoryStorageFactory("000000000000").withStore("s3vectors.json", raw),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+        VectorBucket legacy = new VectorBucket("legacy", "arn:aws:s3vectors:us-east-1:000000000000:bucket/legacy",
+                Map.of("sseType", "AES256"));
+        legacy.setTags(Map.of("team", "data"));
+        raw.put(REGION + "::legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getVectorBucketArn()));
+        assertEquals(Set.of(REGION + "::legacy"), raw.keys());
+    }
+
+    /**
+     * A bucket and an index an older Floci stored under names S3 Vectors' rules refuse, which the create calls now
+     * refuse too, stay reachable by those names and by their ARNs in the calls that read a name as given.
+     */
+    @Test
+    void aBucketAndAnIndexStoredUnderNamesTheRulesRefuseStayReachable() {
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/Legacy_Bucket";
+        VectorBucket legacy = new VectorBucket("Legacy_Bucket", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        legacy.getIndexes().put("My_Index",
+                new VectorIndex("My_Index", bucketArn + "/index/My_Index", "Legacy_Bucket", 2, "float32", "cosine"));
+        S3VectorsService upgraded = storing(legacy);
+
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, null),
+                upgraded.bucketTarget("Legacy_Bucket", null, REGION));
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, "000000000000"),
+                upgraded.bucketTarget(null, bucketArn, REGION));
+        assertEquals(new S3VectorsService.ResolvedIndex("Legacy_Bucket", "My_Index", REGION),
+                upgraded.resolveIndexTarget(null, null, bucketArn + "/index/My_Index", REGION));
+        assertEquals("My_Index", upgraded.getIndex("Legacy_Bucket", "My_Index", REGION).getIndexName());
+        assertEquals(List.of("My_Index"), upgraded.listIndexes("Legacy_Bucket", REGION).stream()
+                .map(VectorIndex::getIndexName).toList());
+    }
+
+    /**
+     * A bucket an older Floci took under a name the create rules now reserve keeps its policy calls, by name and by
+     * ARN: they check only that the bucket's name is one of dot-joined labels, as before.
+     */
+    @Test
+    void aBucketStoredUnderAReservedNameKeepsItsPolicyCalls() {
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/sthree-logs";
+        VectorBucket legacy = new VectorBucket("sthree-logs", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        S3VectorsService upgraded = storing(legacy);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Read\",\"Effect\":\"Allow\"}]}";
+
+        upgraded.putVectorBucketPolicy("sthree-logs", null, policy, REGION);
+        assertEquals(policy, upgraded.getVectorBucketPolicy(null, bucketArn, REGION));
+        upgraded.deleteVectorBucketPolicy(null, bucketArn, REGION);
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> upgraded.getVectorBucketPolicy("sthree-logs", null, REGION)).getErrorCode());
+    }
+
+    /** A service over a store holding {@code bucket}, as an older Floci stored it. */
+    private static S3VectorsService storing(VectorBucket bucket) {
+        AccountAwareStorageBackend<VectorBucket> stored = AccountAwareStorageBackend.inMemory("000000000000");
+        stored.put(REGION + "::" + bucket.getVectorBucketName(), bucket);
+        return new S3VectorsService(new InMemoryStorageFactory("000000000000").withStore("s3vectors.json", stored),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
     }
 
     @Test
@@ -130,5 +296,142 @@ class S3VectorsServiceTest {
         List<String> keys = List.of("a".repeat(63), "b", "c", "d", "e", "f", "g", "h", "i", "j");
         VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "euclidean", keys, REGION);
         assertEquals(keys, index.getNonFilterableMetadataKeys());
+    }
+
+    @Test
+    void vectorBucketPolicyLifecycleAndPersistenceByNameAndArn() throws Exception {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
+        String policyV1 = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String policyV2 = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        AwsException missingInitial = assertThrows(AwsException.class,
+                () -> service.getVectorBucketPolicy("bucket", null, REGION));
+        assertEquals("NotFoundException", missingInitial.getErrorCode());
+
+        service.putVectorBucketPolicy("bucket", null, policyV1, REGION);
+        assertEquals(policyV1, service.getVectorBucketPolicy("bucket", null, REGION));
+        assertEquals(policyV1, service.getVectorBucketPolicy(null, bucket.getVectorBucketArn(), REGION));
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        VectorBucket restored = mapper.readValue(mapper.writeValueAsString(bucket), VectorBucket.class);
+        assertEquals(policyV1, restored.getPolicy());
+
+        service.putVectorBucketPolicy(null, bucket.getVectorBucketArn(), policyV2, REGION);
+        assertEquals(policyV2, service.getVectorBucketPolicy("bucket", null, REGION));
+
+        service.deleteVectorBucketPolicy(null, bucket.getVectorBucketArn(), REGION);
+        AwsException afterDelete = assertThrows(AwsException.class,
+                () -> service.getVectorBucketPolicy("bucket", null, REGION));
+        assertEquals("NotFoundException", afterDelete.getErrorCode());
+
+        // Deleting again when no policy is attached remains idempotent on an existing bucket.
+        service.deleteVectorBucketPolicy("bucket", null, REGION);
+    }
+
+    /**
+     * The policy calls take a bucket ARN of the request's Region and refuse one of another Region or partition, as S3
+     * Vectors does (measured on AWS), leaving that bucket's policy alone.
+     */
+    @Test
+    void vectorBucketPolicyByArnIsTakenOnlyInTheRequestsRegion() {
+        VectorBucket westBucket = service.createVectorBucket("west-bucket", null, "us-west-2");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String westArn = westBucket.getVectorBucketArn();
+
+        for (Runnable call : List.<Runnable>of(() -> service.putVectorBucketPolicy(null, westArn, policy, REGION),
+                () -> service.getVectorBucketPolicy(null, westArn, REGION),
+                () -> service.deleteVectorBucketPolicy(null, westArn, REGION))) {
+            AwsException refused = assertThrows(AwsException.class, call::run);
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals("Unexpected value for ARN region component", refused.getMessage());
+        }
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getVectorBucketPolicy("west-bucket", null, "us-west-2")).getErrorCode());
+
+        service.putVectorBucketPolicy(null, westArn, policy, "us-west-2");
+        assertEquals(policy, service.getVectorBucketPolicy(null, westArn, "us-west-2"));
+
+        // A custom Region of a non-commercial deployment is in the deployment's partition: its ARN is taken in that
+        // Region, and a commercial Region's ARN is of another partition.
+        S3VectorsService chinaService = new S3VectorsService(inMemoryFactory(),
+                new RegionResolver("cn-north-1", "000000000000"),
+                Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+        VectorBucket customRegionBucket = chinaService.createVectorBucket("custom-bucket", null, "custom-region-1");
+        assertTrue(customRegionBucket.getVectorBucketArn().startsWith("arn:aws-cn:s3vectors:custom-region-1:"));
+        chinaService.putVectorBucketPolicy(null, customRegionBucket.getVectorBucketArn(), policy, "custom-region-1");
+        assertEquals(policy, chinaService.getVectorBucketPolicy("custom-bucket", null, "custom-region-1"));
+        assertEquals("Unexpected value for ARN partition component", assertThrows(AwsException.class,
+                () -> chinaService.getVectorBucketPolicy(null, westArn, "cn-north-1")).getMessage());
+    }
+
+    @Test
+    void vectorBucketPolicyRejectsInvalidInputsAndMissingBuckets() {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
+        VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of(), REGION);
+        String validPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        service.putVectorBucketPolicy("bucket", null, validPolicy, REGION);
+
+        // A missing bucket returns NotFoundException (404), and another account's ARN AccessDeniedException (403), as
+        // S3 Vectors answers it (measured on AWS); either leaves the local bucket untouched.
+        for (Runnable action : List.<Runnable>of(
+                () -> service.putVectorBucketPolicy("missing", null, validPolicy, REGION),
+                () -> service.getVectorBucketPolicy("missing", null, REGION),
+                () -> service.deleteVectorBucketPolicy("missing", null, REGION))) {
+            assertRejected("NotFoundException", 404, validPolicy, action);
+        }
+        String foreignAccountArn = "arn:aws:s3vectors:us-east-1:111122223333:bucket/bucket";
+        for (Runnable action : List.<Runnable>of(
+                () -> service.putVectorBucketPolicy(null, foreignAccountArn, "{\"Statement\":[]}", REGION),
+                () -> service.getVectorBucketPolicy(null, foreignAccountArn, REGION),
+                () -> service.deleteVectorBucketPolicy(null, foreignAccountArn, REGION))) {
+            assertRejected("AccessDeniedException", 403, validPolicy, action);
+        }
+
+        // Neither, both, or invalid bucket names return ValidationException (400).
+        String overlongName = "a".repeat(64);
+        for (Runnable action : List.<Runnable>of(
+                () -> service.putVectorBucketPolicy(null, null, validPolicy, REGION),
+                () -> service.putVectorBucketPolicy(" ", "", validPolicy, REGION),
+                () -> service.putVectorBucketPolicy("ab", null, validPolicy, REGION),
+                () -> service.putVectorBucketPolicy("Upper", null, validPolicy, REGION),
+                () -> service.putVectorBucketPolicy(overlongName, null, validPolicy, REGION),
+                () -> service.putVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), validPolicy, REGION),
+                () -> service.getVectorBucketPolicy(null, null, REGION),
+                () -> service.getVectorBucketPolicy("ab", null, REGION),
+                () -> service.getVectorBucketPolicy(overlongName, null, REGION),
+                () -> service.getVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), REGION),
+                () -> service.deleteVectorBucketPolicy(null, null, REGION),
+                () -> service.deleteVectorBucketPolicy("ab", null, REGION),
+                () -> service.deleteVectorBucketPolicy(overlongName, null, REGION),
+                () -> service.deleteVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), REGION))) {
+            assertRejected("ValidationException", 400, validPolicy, action);
+        }
+
+        // Malformed, regionless, wrong-resource, or partition-mismatched ARNs return ValidationException (400).
+        for (String invalidArn : List.of(
+                "not-an-arn",
+                "arn:aws:s3:::bucket",
+                "arn:aws:s3vectors:us-east-1:000000000000:bucket/",
+                "arn:aws:s3vectors:us-east-1:000000000000:bucket/ab",
+                "arn:aws:s3vectors::000000000000:bucket/bucket",
+                "arn:aws:s3vectors:us-east-1::bucket/bucket",
+                "arn:aws-cn:s3vectors:us-east-1:000000000000:bucket/bucket",
+                index.getIndexArn())) {
+            assertRejected("ValidationException", 400, validPolicy,
+                    () -> service.putVectorBucketPolicy(null, invalidArn, validPolicy, REGION));
+        }
+
+        // Non-JSON or non-object policy documents return ValidationException (400) without mutating stored policy.
+        for (String invalidPolicy : Arrays.asList(null, "", "   ", "not-json", "[]", "\"string\"", "{} trailing")) {
+            assertRejected("ValidationException", 400, validPolicy,
+                    () -> service.putVectorBucketPolicy("bucket", null, invalidPolicy, REGION));
+        }
+    }
+
+    private void assertRejected(String errorCode, int status, String expectedPolicy, Runnable action) {
+        AwsException error = assertThrows(AwsException.class, action::run);
+        assertEquals(errorCode, error.getErrorCode());
+        assertEquals(status, error.getHttpStatus());
+        assertEquals(expectedPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
     }
 }

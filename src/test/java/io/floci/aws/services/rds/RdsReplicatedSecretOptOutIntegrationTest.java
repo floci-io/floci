@@ -6,21 +6,16 @@ import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
+import static io.floci.aws.testing.RdsRequests.rdsClient;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -38,11 +33,7 @@ class RdsReplicatedSecretOptOutIntegrationTest {
         String account = "000000000000";
         String region = "us-east-1";
         String id = "optout-" + UUID.randomUUID().toString().substring(0, 8);
-        try (RdsClient rds = RdsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build()) {
+        try (RdsClient rds = rdsClient(region, account)) {
             DBCluster created = rds.createDBCluster(r -> r.dbClusterIdentifier(id).engine(engine)
                     .engineVersion(version).masterUsername("admin").manageMasterUserPassword(true)).dbCluster();
             String arn = created.masterUserSecret().secretArn();

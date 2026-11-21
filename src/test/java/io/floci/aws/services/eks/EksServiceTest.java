@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -12,24 +13,30 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.ec2.AmiImageResolver;
 import io.floci.aws.services.ec2.Ec2ContainerManager;
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplate;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.services.eks.model.AccessConfig;
+import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.CreateFargateProfileRequest;
 import io.floci.aws.services.eks.model.CreateNodeGroupRequest;
+import io.floci.aws.services.eks.model.ElasticLoadBalancing;
 import io.floci.aws.services.eks.model.EncryptionConfig;
 import io.floci.aws.services.eks.model.FargateProfile;
 import io.floci.aws.services.eks.model.FargateProfileStatus;
@@ -42,21 +49,29 @@ import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -64,6 +79,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -71,11 +87,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class EksServiceTest {
@@ -211,6 +230,13 @@ class EksServiceTest {
         eksService.createCluster(clusterRequest);
     }
 
+    /** A service whose requests are in {@code region}, sharing the EC2 service of {@link #eksService}. */
+    private EksService serviceInRegion(String region) {
+        return new EksService(storageFactory, testConfig(), new RegionResolver(region, "000000000000"), null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+    }
+
     private CreateNodeGroupRequest nodeGroupRequest(String name) {
         CreateNodeGroupRequest request = new CreateNodeGroupRequest();
         request.setNodegroupName(name);
@@ -308,7 +334,9 @@ class EksServiceTest {
                 mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
         restarted.init();
 
-        String issuer = clusterStore.get("eu-legacy-cluster").orElseThrow().getIdentity().getOidc().getIssuer();
+        // Migrated onto the key of the Region its ARN names.
+        String issuer = restarted.findAuthenticationCluster("000000000000", "eu-west-1", "eu-legacy-cluster")
+                .orElseThrow().getIdentity().getOidc().getIssuer();
         assertTrue(issuer.startsWith("https://oidc.eks.eu-west-1.amazonaws.com/id/"), issuer);
     }
 
@@ -359,15 +387,16 @@ class EksServiceTest {
         new EksService(fixedStorageFactory(clusterStore), testConfig(),
                 new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class)).init();
 
-        Cluster migrated = clusterStore.getForAccount(otherAccount, "legacy-cluster").orElseThrow();
+        Cluster migrated = clusterStore.getForAccount(otherAccount, "us-east-1::legacy-cluster").orElseThrow();
         String issuer = migrated.getIdentity().getOidc().getIssuer();
         assertNotNull(issuer);
         // The owner rehydrated from the storage key sticks to the record for later puts.
         assertEquals(otherAccount, migrated.getAccountId());
         // No duplicate stranded under the default account.
-        assertTrue(clusterStore.getForAccount("000000000000", "legacy-cluster").isEmpty());
+        assertTrue(clusterStore.getForAccount("000000000000", "us-east-1::legacy-cluster").isEmpty());
+        assertTrue(clusterStore.getForAccount(otherAccount, "legacy-cluster").isEmpty());
         // The signing key is stored under the owner too, and is still resolvable by issuer.
-        assertTrue(keyStore.getForAccount(otherAccount, "legacy-cluster").isPresent());
+        assertTrue(keyStore.getForAccount(otherAccount, "us-east-1::legacy-cluster").isPresent());
         assertTrue(oidcService.findVerificationKey(issuer).isPresent());
     }
 
@@ -436,13 +465,13 @@ class EksServiceTest {
             restarted.init();
 
             verify(clusterManager).restoreCluster(persisted);
-            Cluster restored = clusterStore.getForAccount(otherAccount, "persisted-cluster").orElseThrow();
+            Cluster restored = clusterStore.getForAccount(otherAccount, "us-east-1::persisted-cluster").orElseThrow();
             assertEquals(ClusterStatus.CREATING, restored.getStatus());
             // Rehydrated from the storage key, so the readiness poller's later put also lands
             // under the owner.
             assertEquals(otherAccount, restored.getAccountId());
             // No duplicate stranded under the default account.
-            assertTrue(clusterStore.getForAccount("000000000000", "persisted-cluster").isEmpty());
+            assertTrue(clusterStore.getForAccount("000000000000", "us-east-1::persisted-cluster").isEmpty());
         } finally {
             restarted.shutdown();
         }
@@ -616,7 +645,8 @@ class EksServiceTest {
             boolean keepRunningOnShutdown) {
         AccountAwareStorageBackend<Cluster> clusterStore =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
-        clusterStore.putForAccount("000000000000", cluster.getName(), cluster);
+        clusterStore.putForAccount("000000000000", EksService.clusterKey(
+                AwsArnUtils.regionOrDefault(cluster.getArn(), "us-east-1"), cluster.getName()), cluster);
         return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
@@ -892,6 +922,69 @@ class EksServiceTest {
     }
 
     @Test
+    void updateClusterConfigRefusesBadPublicAccessCidrsOnAnIpv4ClusterAndChangesNothing() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "EndpointAccessUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("cidr-cluster");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(create);
+        for (String cidr : List.of("10.0.0.0/33", "::/0")) {
+            ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+            vpc.setEndpointPublicAccess(false);
+            vpc.setPublicAccessCidrs(List.of(cidr));
+            AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig(
+                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null)), cidr);
+            assertEquals("InvalidParameterException", e.getErrorCode(), cidr);
+            ResourcesVpcConfig stored = service.describeCluster("cidr-cluster").getResourcesVpcConfig();
+            assertEquals(Boolean.TRUE, stored.getEndpointPublicAccess(), cidr);
+            assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs(), cidr);
+        }
+        verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void updateClusterConfigMovesTheAuthenticationModeOneStepForwardOnly() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "AuthenticationModeUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        List<String> modes = List.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API");
+        for (int from = 0; from < modes.size(); from++) {
+            for (int to = 0; to < modes.size(); to++) {
+                String pair = modes.get(from) + " to " + modes.get(to);
+                String name = "mode-" + from + "-" + to;
+                CreateClusterRequest create = new CreateClusterRequest();
+                create.setName(name);
+                create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+                create.setAccessConfig(new AccessConfig(modes.get(from), null));
+                service.createCluster(create);
+                UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(
+                        null, null, new AccessConfig(modes.get(to), null), null);
+                if (to == from + 1) {
+                    service.updateClusterConfig(name, request);
+                    assertEquals(modes.get(to), service.describeCluster(name).getAccessConfig()
+                            .authenticationMode(), pair);
+                } else {
+                    AwsException e = assertThrows(AwsException.class,
+                            () -> service.updateClusterConfig(name, request), pair);
+                    assertEquals("InvalidParameterException", e.getErrorCode(), pair);
+                    assertEquals("Unsupported authentication mode update from " + pair,
+                            e.getMessage(), pair);
+                    assertEquals(modes.get(from), service.describeCluster(name).getAccessConfig()
+                            .authenticationMode(), pair);
+                }
+            }
+        }
+    }
+
+    @Test
     void deleteClusterDeletesAddons() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
@@ -1159,9 +1252,9 @@ class EksServiceTest {
         Nodegroup group = service.createNodeGroup("kept-during-swap", nodeGroupRequest("first"));
 
         assertEquals(NodegroupStatus.ACTIVE, group.getStatus());
-        Cluster stored = (Cluster) createdStorage("eks-clusters.json").get("kept-during-swap").orElseThrow();
+        Cluster stored = (Cluster) createdStorage("eks-clusters.json").get("us-east-1::kept-during-swap").orElseThrow();
         assertTrue(stored.isFinalizePending());
-        assertTrue(createdStorage("eks-nodegroups.json").get("kept-during-swap/first").isPresent());
+        assertTrue(createdStorage("eks-nodegroups.json").get("us-east-1::kept-during-swap/first").isPresent());
     }
 
     private static Cluster activeClusterWithRunningNode(EksService service, String name) {
@@ -1242,6 +1335,192 @@ class EksServiceTest {
         assertEquals(NodegroupStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeNodeGroup("my-eks-cluster", "nodegroup-a"));
         assertEquals(List.of("nodegroup-b"), eksService.listNodeGroups("my-eks-cluster"));
+    }
+
+    @Test
+    void aNodeGroupGetsTheAutoScalingGroupItReportsHoldingTheClusterNode() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(clusterManager, autoScaling);
+        service.createCluster(createTestClusterRequest("asg-cluster"));
+        Instance node = clusterNode("i-0123456789abcdef0", "asg-cluster");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+        NodegroupScalingConfig scalingConfig = new NodegroupScalingConfig();
+        scalingConfig.setMinSize(1);
+        scalingConfig.setMaxSize(3);
+        scalingConfig.setDesiredSize(2);
+        CreateNodeGroupRequest request = nodeGroupRequest("workers");
+        request.setScalingConfig(scalingConfig);
+
+        String groupName = reportedAutoScalingGroup(service.createNodeGroup("asg-cluster", request));
+
+        InOrder order = inOrder(autoScaling);
+        order.verify(autoScaling).createEksManagedGroup("us-east-1", groupName, 1, 3, 2,
+                List.of("subnet-0e2907431c9988b72", "subnet-04ad87f71c6e5ab4d"),
+                nodeGroupAutoScalingTags("asg-cluster", "workers"));
+        order.verify(autoScaling).addEksManagedInstance("us-east-1", groupName, node);
+        verifyNoMoreInteractions(autoScaling);
+    }
+
+    @Test
+    void aNodeRegisteringAfterItsNodeGroupsJoinsEachOfTheirAutoScalingGroups() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(clusterManager, autoScaling);
+        service.init();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<Instance>> listener = ArgumentCaptor.forClass(Consumer.class);
+        verify(clusterManager).addNodeRegistrationListener(listener.capture());
+        service.createCluster(createTestClusterRequest("late-node"));
+        String first = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("second")));
+        Instance node = clusterNode("i-0123456789abcdef0", "late-node");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+
+        // An EC2 instance joining the cluster is in no managed node group, even tagged with the cluster's name.
+        listener.getValue().accept(clusterNode("i-0fedcba9876543210", "late-node"));
+        // Only the cluster the node names, in the node's Region, is read.
+        listener.getValue().accept(clusterNode("i-0123456789abcdef0", "other-cluster"));
+        Instance inAnotherRegion = clusterNode("i-0123456789abcdef0", "late-node");
+        inAnotherRegion.setRegion("eu-west-1");
+        listener.getValue().accept(inAnotherRegion);
+        verify(autoScaling, never()).addEksManagedInstance(any(), any(), any());
+
+        // A group that fails to take the node does not keep it from the other node groups' groups.
+        doThrow(new IllegalStateException("group storage write failed"))
+                .when(autoScaling).addEksManagedInstance("us-east-1", first, node);
+        listener.getValue().accept(node);
+
+        verify(autoScaling).addEksManagedInstance("us-east-1", first, node);
+        verify(autoScaling).addEksManagedInstance("us-east-1", second, node);
+        verify(autoScaling, times(2)).addEksManagedInstance(any(), any(), any());
+    }
+
+    @Test
+    void deletingANodeGroupOrItsClusterDeletesTheirAutoScalingGroups() {
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(mock(EksClusterManager.class), autoScaling);
+        service.createCluster(createTestClusterRequest("asg-delete"));
+        String first = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("second")));
+        String third = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("third")));
+
+        service.deleteNodeGroup("asg-delete", "first");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", first);
+        verify(autoScaling, times(1)).deleteEksManagedGroup(any(), any());
+
+        service.deleteCluster("asg-delete");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", second);
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", third);
+        verify(autoScaling, times(3)).deleteEksManagedGroup(any(), any());
+    }
+
+    @Test
+    void anAutoScalingGroupThatFailsToDeleteLeavesTheNodeGroupAndClusterDeletionsToFinish() {
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(mock(EksClusterManager.class), autoScaling);
+        service.createCluster(createTestClusterRequest("asg-delete-failure"));
+        String first = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("second")));
+        String third = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("third")));
+        RuntimeException failure = new IllegalStateException("target group storage write failed");
+        doThrow(failure).when(autoScaling).deleteEksManagedGroup("us-east-1", first);
+        doThrow(failure).when(autoScaling).deleteEksManagedGroup("us-east-1", second);
+
+        service.deleteNodeGroup("asg-delete-failure", "first");
+
+        assertEquals(List.of("second", "third"), service.listNodeGroups("asg-delete-failure").stream().sorted().toList());
+
+        service.deleteCluster("asg-delete-failure");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", second);
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", third);
+        assertThrows(AwsException.class, () -> service.describeCluster("asg-delete-failure"));
+    }
+
+    @Test
+    void aNodeGroupStoredBeforeTheseGroupsGetsItsGroupAtOneStartOnly(@TempDir Path directory) {
+        // A node group stored by a Floci that did not keep these groups.
+        EksService legacy = persistentEksService(directory);
+        legacy.init();
+        legacy.createCluster(createTestClusterRequest("backfill-once"));
+        String legacyGroup = reportedAutoScalingGroup(
+                legacy.createNodeGroup("backfill-once", nodeGroupRequest("legacy")));
+        AutoScalingService firstStart = mock(AutoScalingService.class);
+
+        EksService upgraded = persistentEksService(directory, ec2Service, null, firstStart);
+        upgraded.init();
+        String createdGroup = reportedAutoScalingGroup(
+                upgraded.createNodeGroup("backfill-once", nodeGroupRequest("created")));
+
+        List<String> subnets = List.of("subnet-0e2907431c9988b72", "subnet-04ad87f71c6e5ab4d");
+        verify(firstStart).createEksManagedGroup("us-east-1", legacyGroup, 1, 1, 1, subnets,
+                nodeGroupAutoScalingTags("backfill-once", "legacy"));
+        verify(firstStart).createEksManagedGroup("us-east-1", createdGroup, 1, 1, 1, subnets,
+                nodeGroupAutoScalingTags("backfill-once", "created"));
+
+        // Both groups were created, so a group deleted through Auto Scaling since is not created again.
+        AutoScalingService secondStart = mock(AutoScalingService.class);
+        persistentEksService(directory, ec2Service, null, secondStart).init();
+
+        verifyNoInteractions(secondStart);
+    }
+
+    @Test
+    void aRestartedNodeJoinsTheGroupItsNodeGroupAlreadyHas(@TempDir Path directory) {
+        EksService before = persistentEksService(directory, ec2Service, null, mock(AutoScalingService.class));
+        before.init();
+        before.createCluster(createTestClusterRequest("restarted-node"));
+        String groupName = reportedAutoScalingGroup(
+                before.createNodeGroup("restarted-node", nodeGroupRequest("workers")));
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService after = persistentEksService(directory, null, clusterManager, autoScaling);
+
+        after.init();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<Instance>> listener = ArgumentCaptor.forClass(Consumer.class);
+        verify(clusterManager).addNodeRegistrationListener(listener.capture());
+        Instance node = clusterNode("i-0123456789abcdef0", "restarted-node");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+        listener.getValue().accept(node);
+
+        verify(autoScaling).addEksManagedInstance("us-east-1", groupName, node);
+        verifyNoMoreInteractions(autoScaling);
+    }
+
+    private EksService serviceWithAutoScaling(EksClusterManager clusterManager, AutoScalingService autoScaling) {
+        return new EksService(storageFactory, testConfig(true), regionResolver, clusterManager, null,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), null, autoScaling);
+    }
+
+    /** The tags EKS puts on a node group's Auto Scaling group. */
+    private static Map<String, String> nodeGroupAutoScalingTags(String clusterName, String nodegroupName) {
+        return Map.of(
+                "eks:cluster-name", clusterName,
+                "eks:nodegroup-name", nodegroupName,
+                "k8s.io/cluster-autoscaler/enabled", "true",
+                "k8s.io/cluster-autoscaler/" + clusterName, "owned");
+    }
+
+    private static String reportedAutoScalingGroup(Nodegroup nodeGroup) {
+        List<?> autoScalingGroups = (List<?>) ((Map<?, ?>) nodeGroup.getResources()).get("autoScalingGroups");
+        return (String) ((Map<?, ?>) autoScalingGroups.getFirst()).get("name");
+    }
+
+    /** An instance in us-east-1 tagged, as a cluster's node is, with its cluster's name. */
+    private static Instance clusterNode(String instanceId, String clusterName) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        instance.setRegion("us-east-1");
+        instance.setTags(List.of(new Tag("eks:cluster-name", clusterName)));
+        return instance;
     }
 
     @Test
@@ -1370,6 +1649,17 @@ class EksServiceTest {
         assertEquals(FargateProfileStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeFargateProfile("my-eks-cluster", "profile-a"));
         assertEquals(List.of("profile-b"), eksService.listFargateProfiles("my-eks-cluster"));
+        assertEquals(Optional.of(deleted.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        FargateProfile replacement = eksService.createFargateProfile("my-eks-cluster", fargateProfileRequest("profile-a"));
+        assertNotEquals(deleted.getFargateProfileArn(), replacement.getFargateProfileArn());
+        assertEquals(Optional.of(replacement.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-a");
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-b");
+        eksService.deleteCluster("my-eks-cluster");
+        createTestCluster("my-eks-cluster");
+        assertTrue(eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a").isEmpty());
     }
 
     @Test
@@ -1575,6 +1865,58 @@ class EksServiceTest {
                 .anyMatch(p -> "-1".equals(p.getIpProtocol())
                         && p.getUserIdGroupPairs().stream().anyMatch(u -> sgId.equals(u.getGroupId())));
         assertTrue(hasSelfEgress, "Security group should have self-referencing outbound egress rule for EFA");
+
+        String otherVpc = ec2Service.createVpc("us-east-1", "10.50.0.0/16", false).getVpcId();
+        String otherSubnet = ec2Service.createSubnet("us-east-1", otherVpc, "10.50.1.0/24", "us-east-1b").getSubnetId();
+        Map<String, Consumer<CreateClusterRequest>> rejected = new LinkedHashMap<>();
+        rejected.put("ipFamily ipv5", r -> r.setKubernetesNetworkConfig(network("ipv5", null)));
+        rejected.put("service CIDR 8.8.8.0/24", r -> r.setKubernetesNetworkConfig(network("ipv4", "8.8.8.0/24")));
+        rejected.put("unknown log type", r -> r.setLogging(new Logging(List.of(new LogSetup(List.of("bogus"), true)))));
+        rejected.put("subnets in two VPCs", r -> vpcConfig.setSubnetIds(List.of(subnetId, otherSubnet)));
+        rejected.put("public CIDR /33", r -> vpcConfig.setPublicAccessCidrs(List.of("10.0.0.0/33")));
+        rejected.put("IPv6 public CIDR on ipv4", r -> vpcConfig.setPublicAccessCidrs(List.of("::/0")));
+        int row = 0;
+        List<String> failed = new ArrayList<>();
+        for (Map.Entry<String, Consumer<CreateClusterRequest>> entry : rejected.entrySet()) {
+            vpcConfig.setSubnetIds(List.of(subnetId));
+            vpcConfig.setPublicAccessCidrs(null);
+            CreateClusterRequest bad = new CreateClusterRequest();
+            bad.setName("cluster-sg-bad-" + row++);
+            bad.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+            bad.setResourcesVpcConfig(vpcConfig);
+            entry.getValue().accept(bad);
+            int groupsBefore = ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size();
+            try {
+                service.createCluster(bad);
+                failed.add(entry.getKey() + ": accepted");
+            } catch (AwsException e) {
+                boolean clean = groupsBefore
+                        == ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size();
+                if (!"InvalidParameterException".equals(e.getErrorCode()) || !clean) {
+                    failed.add(entry.getKey() + ": " + e.getErrorCode() + (clean ? "" : ", security group left"));
+                }
+            }
+        }
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        vpcConfig.setPublicAccessCidrs(List.of("::/0"));
+        CreateClusterRequest v6 = new CreateClusterRequest();
+        v6.setName("cluster-sg-ipv6");
+        v6.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        v6.setResourcesVpcConfig(vpcConfig);
+        v6.setKubernetesNetworkConfig(network("ipv6", null));
+        try {
+            service.createCluster(v6);
+        } catch (AwsException e) {
+            failed.add("ipv6 with ::/0: " + e.getErrorCode());
+        }
+        assertEquals(List.of(), failed);
+    }
+
+    private static KubernetesNetworkConfig network(String family, String serviceCidr) {
+        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+        network.setIpFamily(family);
+        network.setServiceIpv4Cidr(serviceCidr);
+        return network;
     }
 
     @Test
@@ -1674,7 +2016,7 @@ class EksServiceTest {
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setClusterSecurityGroupId("sg-12345678");
         cluster.setResourcesVpcConfig(vpcConfig);
-        clusterStore.putForAccount("000000000000", "failing-delete-cluster", cluster);
+        clusterStore.putForAccount("000000000000", "us-east-1::failing-delete-cluster", cluster);
 
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         StorageFactory storageFactory = fixedStorageFactory(clusterStore);
@@ -1931,7 +2273,7 @@ class EksServiceTest {
 
         assertDoesNotThrow(service::init);
 
-        Cluster described = clusterStore.getForAccount(nonDefaultAccount, "non-default-eks")
+        Cluster described = clusterStore.getForAccount(nonDefaultAccount, "us-east-1::non-default-eks")
                 .orElseThrow();
         String sgId = described.getResourcesVpcConfig().getClusterSecurityGroupId();
         assertNotNull(sgId);
@@ -1973,6 +2315,84 @@ class EksServiceTest {
         req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
         req.setVersion("1.29");
         return req;
+    }
+
+    private static final String AUTO_MODE_NODE_ROLE = "arn:aws:iam::000000000000:role/eks-auto-node";
+    private static final String AUTO_MODE_PARTIAL = "For EKS Auto Mode, please ensure that all required configs, "
+            + "including computeConfig, kubernetesNetworkConfig, and blockStorage are all either fully enabled or "
+            + "fully disabled.";
+
+    /** A cluster request with EKS Auto Mode's three capabilities; a null one is left out of the request. */
+    private CreateClusterRequest autoModeRequest(String name, ComputeConfig compute, Boolean blockStorage,
+                                                 Boolean loadBalancing) {
+        CreateClusterRequest req = createTestClusterRequest(name);
+        req.setComputeConfig(compute);
+        if (blockStorage != null) {
+            req.setStorageConfig(new StorageConfig(new BlockStorage(blockStorage)));
+        }
+        if (loadBalancing != null) {
+            KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+            network.setElasticLoadBalancing(new ElasticLoadBalancing(loadBalancing));
+            req.setKubernetesNetworkConfig(network);
+        }
+        return req;
+    }
+
+    private void assertCreateClusterRefused(CreateClusterRequest req, String message) {
+        AwsException refused = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertEquals(message, refused.getMessage());
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> eksService.describeCluster(req.getName())).getErrorCode());
+    }
+
+    @Test
+    void aClusterCreatedWithAutoModeDescribesItsComputeStorageAndLoadBalancing() {
+        ComputeConfig compute = new ComputeConfig(true, List.of("general-purpose", "system"), AUTO_MODE_NODE_ROLE);
+
+        eksService.createCluster(autoModeRequest("auto-mode-cluster", compute, true, true));
+        Cluster described = eksService.describeCluster("auto-mode-cluster");
+
+        assertEquals(compute, described.getComputeConfig());
+        assertEquals(new StorageConfig(new BlockStorage(true)), described.getStorageConfig());
+        assertEquals(new ElasticLoadBalancing(true), described.getKubernetesNetworkConfig().getElasticLoadBalancing());
+    }
+
+    @Test
+    void autoModeIsRefusedUnlessComputeBlockStorageAndLoadBalancingAreEnabledTogether() {
+        ComputeConfig on = new ComputeConfig(true, List.of("general-purpose"), AUTO_MODE_NODE_ROLE);
+        ComputeConfig off = new ComputeConfig(false, null, null);
+        assertCreateClusterRefused(autoModeRequest("auto-compute", on, false, false), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-storage", off, true, false), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-load-balancing", off, false, true), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-no-load-balancing", on, true, false), AUTO_MODE_PARTIAL);
+        // A capability the request leaves out is not enabled.
+        assertCreateClusterRefused(autoModeRequest("auto-compute-alone", on, null, null), AUTO_MODE_PARTIAL);
+        assertCreateClusterRefused(autoModeRequest("auto-storage-alone", null, true, null), AUTO_MODE_PARTIAL);
+    }
+
+    @Test
+    void autoModeNodePoolsAreRefusedWithoutANodeRole() {
+        String message = "When Compute Config nodeRoleArn is null or empty, nodePool list cannot be populated";
+        assertCreateClusterRefused(autoModeRequest("auto-null-node-role",
+                new ComputeConfig(true, List.of("general-purpose", "system"), null), true, true), message);
+        assertCreateClusterRefused(autoModeRequest("auto-empty-node-role",
+                new ComputeConfig(true, List.of("general-purpose", "system"), ""), true, true), message);
+    }
+
+    @Test
+    void autoModeNodeRoleIsRefusedWithoutNodePools() {
+        String message = "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.";
+        assertCreateClusterRefused(autoModeRequest("auto-null-node-pools",
+                new ComputeConfig(true, null, AUTO_MODE_NODE_ROLE), true, true), message);
+        assertCreateClusterRefused(autoModeRequest("auto-empty-node-pools",
+                new ComputeConfig(true, List.of(), AUTO_MODE_NODE_ROLE), true, true), message);
+
+        // Without built-in node pools, Auto Mode takes no node role either.
+        eksService.createCluster(autoModeRequest("auto-without-node-pools", new ComputeConfig(true, List.of(), null),
+                true, true));
+        assertEquals(new ComputeConfig(true, List.of(), null),
+                eksService.describeCluster("auto-without-node-pools").getComputeConfig());
     }
 
     @Test
@@ -2683,7 +3103,8 @@ class EksServiceTest {
         cluster.setName("regional-cluster");
         cluster.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/regional-cluster");
         cluster.setStatus(ClusterStatus.ACTIVE);
-        eksService.putClusterForAccount("000000000000", cluster);
+        EksService euService = serviceInRegion("eu-west-1");
+        euService.putClusterForAccount("000000000000", cluster);
 
         LaunchTemplate lt = ec2Service.createLaunchTemplate("eu-west-1", "eu-lt",
                 new LaunchTemplateData(), null, null);
@@ -2691,7 +3112,7 @@ class EksServiceTest {
         CreateNodeGroupRequest request = nodeGroupRequest("regional-ng");
         request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "1"));
 
-        Nodegroup created = eksService.createNodeGroup("regional-cluster", request);
+        Nodegroup created = euService.createNodeGroup("regional-cluster", request);
         assertNotNull(created);
         assertTrue(created.getNodegroupArn().startsWith(
                 "arn:aws:eks:eu-west-1:000000000000:nodegroup/regional-cluster/regional-ng/"));
@@ -2703,7 +3124,8 @@ class EksServiceTest {
         cluster.setName("eu-cluster");
         cluster.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/eu-cluster");
         cluster.setStatus(ClusterStatus.ACTIVE);
-        eksService.putClusterForAccount("000000000000", cluster);
+        EksService euService = serviceInRegion("eu-west-1");
+        euService.putClusterForAccount("000000000000", cluster);
 
         LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "us-only-lt",
                 new LaunchTemplateData(), null, null);
@@ -2712,7 +3134,7 @@ class EksServiceTest {
         request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "1"));
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> eksService.createNodeGroup("eu-cluster", request));
+                () -> euService.createNodeGroup("eu-cluster", request));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
         assertTrue(ex.getMessage().contains("Launch template could not be found"));
@@ -2772,6 +3194,11 @@ class EksServiceTest {
     }
 
     private EksService persistentEksService(Path directory, Ec2Service ec2) {
+        return persistentEksService(directory, ec2, null, null);
+    }
+
+    private EksService persistentEksService(Path directory, Ec2Service ec2, EksClusterManager clusterManager,
+                                            AutoScalingService autoScaling) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
@@ -2783,9 +3210,9 @@ class EksServiceTest {
             }
         };
         return new EksService(storageFactory, testConfig(true),
-                new RegionResolver("us-east-1", "000000000000"), null, ec2,
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
-                mock(EksPodIdentityAssociationService.class));
+                mock(EksPodIdentityAssociationService.class), null, autoScaling);
     }
 
     @Test
@@ -2876,5 +3303,219 @@ class EksServiceTest {
         Cluster described = after.describeCluster("restart-args-cluster");
         assertEquals(List.of("--kubelet-arg=max-pods=250"), described.getClusterArgs());
         assertEquals(Map.of("owner", "ops"), described.getTags());
+    }
+
+    // ─── Regional cluster names (#7966) ───────────────────────────────────────
+
+    /**
+     * Services whose requests are in each of {@code regions}, over one set of stores keyed by file
+     * name, as the handlers of one Floci are. Stores already in {@code stores} are used as they are.
+     */
+    private List<EksService> servicesSharingStores(Map<String, AccountAwareStorageBackend<?>> stores,
+                                                   String... regions) {
+        StorageFactory shared = new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
+                        ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
+            }
+        };
+        EksOidcService oidc = new EksOidcService(shared, new ObjectMapper());
+        List<EksService> services = new ArrayList<>();
+        for (String region : regions) {
+            services.add(new EksService(shared, testConfig(), new RegionResolver(region, "000000000000"), null,
+                    null, oidc, mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class)));
+        }
+        return services;
+    }
+
+    private static CreateClusterRequest clusterRequest(String name) {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName(name);
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        return request;
+    }
+
+    @Test
+    void aClusterNameCanBeReusedInAnotherRegionOfTheAccount() {
+        List<EksService> services = servicesSharingStores(new HashMap<>(), "us-east-1", "eu-west-1");
+        EksService east = services.get(0);
+        EksService west = services.get(1);
+
+        Cluster eastDemo = east.createCluster(clusterRequest("demo"));
+        Cluster westDemo = west.createCluster(clusterRequest("demo"));
+
+        assertEquals("arn:aws:eks:us-east-1:000000000000:cluster/demo", eastDemo.getArn());
+        assertEquals("arn:aws:eks:eu-west-1:000000000000:cluster/demo", westDemo.getArn());
+        assertNotEquals(eastDemo.getIdentity().getOidc().getIssuer(), westDemo.getIdentity().getOidc().getIssuer());
+        AwsException duplicate = assertThrows(AwsException.class, () -> west.createCluster(clusterRequest("demo")));
+        assertEquals("ResourceInUseException", duplicate.getErrorCode());
+
+        // Children, tags and deletion each reach only their own Region's cluster.
+        west.createNodeGroup("demo", nodeGroupRequest("workers"));
+        west.createFargateProfile("demo", fargateProfileRequest("pods"));
+        assertEquals(List.of("workers"), west.listNodeGroups("demo"));
+        assertEquals(List.of(), east.listNodeGroups("demo"));
+        assertEquals(List.of(), east.listFargateProfiles("demo"));
+        east.createNodeGroup("demo", nodeGroupRequest("workers"));
+
+        west.tagResource(westDemo.getArn(), Map.of("env", "west"));
+        assertEquals(Map.of("env", "west"), west.listTagsForResource(westDemo.getArn()));
+        assertEquals(Map.of(), east.listTagsForResource(eastDemo.getArn()));
+
+        west.deleteCluster("demo");
+        assertThrows(AwsException.class, () -> west.describeCluster("demo"));
+        assertSame(eastDemo, east.describeCluster("demo"));
+        assertEquals(List.of("workers"), east.listNodeGroups("demo"));
+    }
+
+    @Test
+    void onlyClustersOutsideTheDefaultRegionOrSharingANameAreRegionQualifiedInDocker() {
+        List<EksService> services = servicesSharingStores(new HashMap<>(), "us-east-1", "eu-west-1");
+        EksService east = services.get(0);
+        EksService west = services.get(1);
+
+        // The default Region keeps the historical name, so existing containers and DNS names hold.
+        assertNull(east.createCluster(clusterRequest("solo")).getDockerNameRegion());
+        assertEquals("eu-west-1", west.createCluster(clusterRequest("shared")).getDockerNameRegion());
+        // A same-named cluster in another Region may hold the unqualified name.
+        assertEquals("us-east-1", east.createCluster(clusterRequest("shared")).getDockerNameRegion());
+    }
+
+    @Test
+    void initMovesRecordsPersistedUnderTheBareClusterNameOntoRegionalKeys() {
+        String account = "000000000000";
+        String issuer = "https://oidc.eks.eu-west-1.amazonaws.com/id/ABCDEF0123456789ABCDEF0123456789";
+        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+        AccountAwareStorageBackend<Cluster> clusters = AccountAwareStorageBackend.inMemory(account);
+        AccountAwareStorageBackend<Nodegroup> nodeGroups = AccountAwareStorageBackend.inMemory(account);
+        AccountAwareStorageBackend<FargateProfile> profiles = AccountAwareStorageBackend.inMemory(account);
+        AccountAwareStorageBackend<ClusterOidcKey> keys = AccountAwareStorageBackend.inMemory(account);
+        stores.put("eks-clusters.json", clusters);
+        stores.put("eks-nodegroups.json", nodeGroups);
+        stores.put("eks-fargate-profiles.json", profiles);
+        stores.put("eks-oidc-keys.json", keys);
+
+        Cluster legacy = new Cluster();
+        legacy.setName("legacy");
+        legacy.setArn("arn:aws:eks:eu-west-1:" + account + ":cluster/legacy");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        legacy.setLogging(EksService.defaultLogging());
+        legacy.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        clusters.putForAccount(account, "legacy", legacy);
+        Nodegroup group = new Nodegroup();
+        group.setNodegroupName("workers");
+        group.setClusterName("legacy");
+        group.setNodegroupArn("arn:aws:eks:eu-west-1:" + account + ":nodegroup/legacy/workers/id");
+        group.setStatus(NodegroupStatus.ACTIVE);
+        nodeGroups.putForAccount(account, "legacy/workers", group);
+        FargateProfile profile = new FargateProfile();
+        profile.setFargateProfileName("pods");
+        profile.setClusterName("legacy");
+        profile.setFargateProfileArn("arn:aws:eks:eu-west-1:" + account + ":fargateprofile/legacy/pods/id");
+        profiles.putForAccount(account, "legacy/pods", profile);
+        String keyId = new EksOidcService(fixedStorageFactory(keys), new ObjectMapper())
+                .ensureKeyForAccount(account, "legacy", issuer).getKeyId();
+
+        List<EksService> services = servicesSharingStores(stores, "us-east-1", "eu-west-1");
+        EksService east = services.get(0);
+        EksService west = services.get(1);
+        west.init();
+
+        assertSame(legacy, west.describeCluster("legacy"));
+        assertThrows(AwsException.class, () -> east.describeCluster("legacy"));
+        assertEquals(List.of("workers"), west.listNodeGroups("legacy"));
+        assertEquals("pods", west.describeFargateProfile("legacy", "pods").getFargateProfileName());
+        assertTrue(clusters.getForAccount(account, "legacy").isEmpty());
+        assertTrue(nodeGroups.getForAccount(account, "legacy/workers").isEmpty());
+        assertTrue(profiles.getForAccount(account, "legacy/pods").isEmpty());
+        // The signing key moves rather than being re-minted, so tokens it signed still verify.
+        assertTrue(keys.getForAccount(account, "legacy").isEmpty());
+        assertEquals(keyId, keys.getForAccount(account, "eu-west-1::legacy").orElseThrow().getKeyId());
+        // It keeps the unqualified Docker name its container and volume already have.
+        assertNull(legacy.getDockerNameRegion());
+
+        // The name is now free in every other Region, under a Docker name of its own.
+        assertEquals("us-east-1", east.createCluster(clusterRequest("legacy")).getDockerNameRegion());
+    }
+
+    @Test
+    void aRegionlessWebhookRouteResolvesTheClusterThatPredatesRegionalNames() {
+        String account = "000000000000";
+        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+        AccountAwareStorageBackend<Cluster> clusters = AccountAwareStorageBackend.inMemory(account);
+        stores.put("eks-clusters.json", clusters);
+        Cluster legacy = new Cluster();
+        legacy.setName("demo");
+        legacy.setArn("arn:aws:eks:eu-west-1:" + account + ":cluster/demo");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        legacy.setLogging(EksService.defaultLogging());
+        clusters.putForAccount(account, "demo", legacy);
+        EksService east = servicesSharingStores(stores, "us-east-1").getFirst();
+        east.init();
+
+        Cluster newer = east.createCluster(clusterRequest("demo"));
+
+        // The request's Region would pick the newer default-Region cluster; the route was
+        // registered by the pre-upgrade cluster, the only one without a Region in its Docker name.
+        assertSame(newer, east.findAuthenticationCluster(account, "demo").orElseThrow());
+        assertSame(legacy, east.findPreRegionalCluster(account, "demo").orElseThrow());
+    }
+
+    @Test
+    void initMovesASigningKeyStoredBeforeAccountPrefixes() {
+        // Data from before multi-account storage has neither the account prefix nor the Region.
+        String issuer = "https://oidc.eks.eu-west-1.amazonaws.com/id/0123456789ABCDEF0123456789ABCDEF";
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> rawKeys = new InMemoryStorage<>();
+        Cluster legacy = new Cluster();
+        legacy.setName("gen0");
+        legacy.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/gen0");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        legacy.setLogging(EksService.defaultLogging());
+        legacy.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        rawClusters.put("gen0", legacy);
+        ClusterOidcKey key = new ClusterOidcKey(issuer, "gen0-kid", "public", "private");
+        rawKeys.put("gen0", key);
+
+        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+        stores.put("eks-clusters.json", new AccountAwareStorageBackend<>(rawClusters, null, "000000000000"));
+        stores.put("eks-oidc-keys.json", new AccountAwareStorageBackend<>(rawKeys, null, "000000000000"));
+        EksService west = servicesSharingStores(stores, "eu-west-1").getFirst();
+        west.init();
+
+        assertSame(legacy, west.describeCluster("gen0"));
+        assertTrue(rawKeys.get("gen0").isEmpty());
+        assertEquals("gen0-kid", rawKeys.get("000000000000/eu-west-1::gen0").orElseThrow().getKeyId());
+    }
+
+    @Test
+    void aConcurrentCreateOfTheSameNameInTheSameRegionIsRefused() throws Exception {
+        EksOidcService oidc = mock(EksOidcService.class);
+        CountDownLatch building = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(oidc.newIssuerUrl(anyString())).thenAnswer(invocation -> {
+            building.countDown();
+            release.await();
+            return "https://oidc.eks.us-east-1.amazonaws.com/id/0123456789ABCDEF0123456789ABCDEF";
+        });
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, null, oidc,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+
+        CompletableFuture<Cluster> first = CompletableFuture
+                .supplyAsync(() -> service.createCluster(clusterRequest("racing")));
+        assertTrue(building.await(5, TimeUnit.SECONDS));
+        try {
+            AwsException second = assertThrows(AwsException.class, () -> service.createCluster(clusterRequest("racing")));
+            assertEquals("ResourceInUseException", second.getErrorCode());
+        } finally {
+            release.countDown();
+        }
+
+        assertEquals("racing", first.get(5, TimeUnit.SECONDS).getName());
+        AwsException after = assertThrows(AwsException.class, () -> service.createCluster(clusterRequest("racing")));
+        assertEquals("ResourceInUseException", after.getErrorCode());
     }
 }

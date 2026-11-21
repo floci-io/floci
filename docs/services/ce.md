@@ -10,6 +10,13 @@ multiplied by the bundled AWS Pricing snapshot served by the
 so any test that mutates resources (e.g. creates a bucket, runs an instance)
 sees those changes in the next `GetCostAndUsage` call.
 
+Floci answers the costs of the account as a whole, which AWS gives as the
+caller's primary billing view. AWS does not document that view's ARN, so Floci
+takes it as `arn:aws:billing::<account>:billingview/primary`. `GetCostAndUsage`, `GetCostAndUsageWithResources`, `GetDimensionValues`, `GetTags`
+and `GetCostCategories` accept that view or none in `BillingViewArn`, and refuse
+any other with `ResourceNotFoundException`, as AWS does for a view it does not
+hold. With IAM enforcement on, they are checked on the view they name.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->

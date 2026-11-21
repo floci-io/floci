@@ -2,12 +2,13 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackEvent;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,14 +20,66 @@ import java.util.function.Consumer;
  * intrinsic functions in properties) plus the region/account/stack it is being created in. The
  * helpers were lifted verbatim from the former CloudFormation monolith's private methods
  * so extracted provisioners produce byte-identical physical ids and resolved values.
+ *
+ * <p>{@code priorEngine} resolves {@code priorProperties} with the previous deployment's parameters,
+ * conditions and mappings, and the physical ids and attributes the update started from. A value the
+ * previous template took from a parameter, or from a resource this update replaces, reads as it was
+ * then. A dynamic reference, an export or another stack's output still reads its current value. A
+ * context built without one uses {@code engine} there, which reads such a value as this update
+ * resolves it.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
-                               Consumer<StackEvent> progress, JsonNode priorProperties) {
+                               Consumer<StackEvent> progress, JsonNode priorProperties,
+                               PropertyChanges changes, String delegatedRoleBoundaryArn,
+                               CloudFormationTemplateEngine priorEngine) {
+
+    public ProvisionContext {
+        if (priorEngine == null) {
+            priorEngine = engine;
+        }
+    }
+
+    /** The context without the previous deployment's engine; see the record's description. */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties,
+                            PropertyChanges changes, String delegatedRoleBoundaryArn) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, changes,
+                delegatedRoleBoundaryArn, null);
+    }
+
+    /**
+     * The context as every provisioner but the IAM role one needs it: no delegation cap, which is
+     * what a stack created by any ordinary caller carries.
+     */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties,
+                            PropertyChanges changes) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, changes, null);
+    }
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, null);
+    }
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId) {
-        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null);
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null, null);
+    }
+
+    /**
+     * A copy of this context that differs only in the prior physical id. The engine's change list,
+     * the previous properties and the progress callback travel with it, so a provisioner that
+     * re-bases its context (after restoring a rollback snapshot, or for a cleanup record) does not
+     * drop the engine's statement of the update, and a component added later is kept too.
+     */
+    public ProvisionContext withPriorPhysicalId(String priorPhysicalId) {
+        return new ProvisionContext(engine, region, accountId, stackName, priorPhysicalId, progress,
+                priorProperties, changes, delegatedRoleBoundaryArn, priorEngine);
     }
 
     /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
@@ -58,6 +111,15 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * this as "reuse the existing entity" must still reject or replace on createOnly properties.
      */
     public boolean isUpdate() {
+        return isUpdate(priorPhysicalId);
+    }
+
+    /**
+     * The one definition of "this call is an update": a non-blank prior physical id. The engine
+     * uses it to build the property changes it hands a provisioner, so the statement and
+     * {@link #isUpdate()} cannot disagree.
+     */
+    public static boolean isUpdate(String priorPhysicalId) {
         return priorPhysicalId != null && !priorPhysicalId.isBlank();
     }
 
@@ -88,16 +150,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * (a create-only property is a replacement question, not a clear).
      */
     public Set<String> droppedProperties(JsonNode props) {
-        Set<String> dropped = new LinkedHashSet<>();
-        if (!isUpdate() || priorProperties == null) {
-            return dropped;
+        return PropertyChanges.between(null, isUpdate(), priorProperties, props).dropped();
+    }
+
+    /**
+     * What this update did to each top-level property of the resource: the engine's own statement
+     * when it made one, which decides changed against unchanged by the forms CloudFormation
+     * compares, otherwise one derived from this context's previous properties and {@code props}.
+     * {@code resourceType} only tells which properties are create-only on the derived form.
+     */
+    public PropertyChanges changes(String resourceType, JsonNode props) {
+        if (changes != null) {
+            return changes;
         }
-        priorProperties.fieldNames().forEachRemaining(name -> {
-            if (previouslyDeclared(name) && (props == null || !props.has(name))) {
-                dropped.add(name);
-            }
-        });
-        return dropped;
+        return PropertyChanges.between(resourceType, isUpdate(), priorProperties, props);
     }
 
     /**
@@ -155,23 +221,70 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     }
 
     /**
-     * Resolves an optional integer property, or null when it is absent or explicitly null. One an
-     * intrinsic resolves to nothing stays null too: the engine resolves {@code AWS::NoValue} to blank,
-     * which is how the common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value
+     * Resolves an optional property, or null when it is absent, explicitly null, or an intrinsic
+     * resolves it to nothing: the engine resolves {@code AWS::NoValue} to blank, which is how the
+     * common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A blank written into the
+     * template is kept, for the caller to reject as AWS would. A {@code Ref} to a parameter whose
+     * value is blank cannot be told apart from {@code AWS::NoValue} here, so it is null as well.
+     */
+    public String resolveOptionalWritten(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
+    }
+
+    /**
+     * Resolves an optional integer property, or null where {@link #resolveOptionalWritten} is. A value
      * written into the template has to be an integer, a literal blank included, as CloudFormation's
-     * schema type check requires. A {@code Ref} to a parameter whose value is blank cannot be told
-     * apart from {@code AWS::NoValue} here, so it stays null as well.
+     * schema type check requires.
      */
     public Integer resolveOptionalInt(JsonNode props, String name) {
-        String value = resolveOptional(props, name);
-        if (value == null || (value.isBlank() && !props.get(name).isTextual())) {
+        String value = resolveOptionalWritten(props, name);
+        if (value == null) {
             return null;
         }
         try {
             return Integer.valueOf(value.trim());
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
+            throw notAnInteger(name);
         }
+    }
+
+    /**
+     * Like {@link #resolveOptionalInt}, for an integer of any size: a value beyond an {@code int} is
+     * the service's to answer, not the reader's. What counts as absent and the refusal of a value that
+     * is no integer are the same.
+     */
+    public BigInteger resolveOptionalBigInteger(JsonNode props, String name) {
+        String value = resolveOptionalWritten(props, name);
+        if (value == null) {
+            return null;
+        }
+        if (!QueryConstraintCheck.isInteger(value)) {
+            throw notAnInteger(name);
+        }
+        return new BigInteger(value.trim());
+    }
+
+    private static AwsException notAnInteger(String name) {
+        return new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
+    }
+
+    /**
+     * Resolves an optional boolean property, or null when it is absent or explicitly null. An intrinsic
+     * that resolves to empty ({@code AWS::NoValue}) stays null too. Any other value has to be true or
+     * false in any case, the string forms CloudFormation also accepts included; anything else, a
+     * whitespace-only intrinsic result included, is refused rather than read as false.
+     */
+    public Boolean resolveOptionalBoolean(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        if (value == null || (value.isEmpty() && !props.get(name).isTextual())) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (!"true".equalsIgnoreCase(trimmed) && !"false".equalsIgnoreCase(trimmed)) {
+            throw new AwsException("ValidationError", "Value of property " + name + " must be a boolean.", 400);
+        }
+        return Boolean.parseBoolean(trimmed);
     }
 
     /**

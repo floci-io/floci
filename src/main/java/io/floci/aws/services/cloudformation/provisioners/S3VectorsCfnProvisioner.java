@@ -73,7 +73,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
             snapshotTags(resource, bucket.getTags());
             service.replaceBucketTags(name, tags, ctx.region());
         } else {
-            String name = physicalName(props, "VectorBucketName", resource, ctx, false);
+            String name = physicalName(props, "VectorBucketName", resource, ctx);
             rejectSameNameReplacement(ctx, updatesEntity, "bucket/" + name);
             bucket = service.createVectorBucket(name, encryption(props, ctx, "AES256"), tags, ctx.region());
         }
@@ -100,7 +100,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
             snapshotTags(resource, index.getTags());
             service.replaceIndexTags(bucketName, name, tags, ctx.region());
         } else {
-            String name = physicalName(props, "IndexName", resource, ctx, true);
+            String name = physicalName(props, "IndexName", resource, ctx);
             rejectSameNameReplacement(ctx, updatesEntity, "bucket/" + bucketName + "/index/" + name);
             JsonNode metadataKeys = props.path("MetadataConfiguration").path("NonFilterableMetadataKeys");
             List<String> keys = new ArrayList<>();
@@ -121,20 +121,16 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static String physicalName(JsonNode props, String property, StackResource resource,
-                                       ProvisionContext ctx, boolean index) {
+                                       ProvisionContext ctx) {
         String name = ctx.resolveOptional(props, property);
         if (name == null) {
             return ctx.generatePhysicalName(resource.getLogicalId(), 63, true);
         }
-        return validateName(name, property, index);
+        return validateName(name, property);
     }
 
-    private static String validateName(String name, String property, boolean index) {
-        String pattern = index ? "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]" : "[a-z0-9][a-z0-9-]{1,61}[a-z0-9]";
-        if (!name.matches(pattern)) {
-            throw validation(property + " must be a valid lowercase name of 3 to 63 characters.");
-        }
-        return name;
+    private static String validateName(String name, String property) {
+        return S3VectorsService.validateName(name, property, "ValidationError");
     }
 
     private static void rejectSameNameReplacement(ProvisionContext ctx, boolean updatesEntity, String resourcePath) {
@@ -144,36 +140,19 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static String bucketName(JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "VectorBucketName");
-        String arn = ctx.resolveOptional(props, "VectorBucketArn");
-        if ((name == null) == (arn == null)) {
-            throw validation("Specify exactly one of VectorBucketName or VectorBucketArn.");
-        }
-        if (arn == null) {
-            return validateName(name, "VectorBucketName", false);
-        }
-        String[] parts = arnParts(arn, false);
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        if (!ctx.region().equals(parsed.region()) || !ctx.accountId().equals(parsed.accountId())
-                || !AwsRegions.partitionFor(ctx.region()).equals(parsed.partition())) {
+        S3VectorsService.ResolvedBucket resolved = S3VectorsService.resolveBucket(
+                ctx.resolveOptional(props, "VectorBucketName"),
+                ctx.resolveOptional(props, "VectorBucketArn"),
+                ctx.region(), AwsRegions::partitionFor, "ValidationError");
+        if (resolved.accountId() != null
+                && (!ctx.region().equals(resolved.region()) || !ctx.accountId().equals(resolved.accountId()))) {
             throw validation("VectorBucketArn must belong to the stack's region and account.");
         }
-        return validateName(parts[1], "VectorBucketArn bucket name", false);
+        return resolved.bucketName();
     }
 
     private static String[] arnParts(String arn, boolean index) {
-        try {
-            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            String[] parts = parsed.resource().split("/", -1);
-            if (!"s3vectors".equals(parsed.service()) || parts.length != (index ? 4 : 2)
-                    || !"bucket".equals(parts[0]) || parts[1].isBlank()
-                    || (index && (!"index".equals(parts[2]) || parts[3].isBlank()))) {
-                throw validation("Invalid S3 Vectors ARN: " + arn);
-            }
-            return parts;
-        } catch (IllegalArgumentException e) {
-            throw validation("Invalid S3 Vectors ARN: " + arn);
-        }
+        return S3VectorsService.arnParts(arn, index, "ValidationError");
     }
 
     private static Object encryption(JsonNode props, ProvisionContext ctx, String defaultType) {

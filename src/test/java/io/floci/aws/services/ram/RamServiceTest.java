@@ -70,6 +70,27 @@ class RamServiceTest {
         service.initializeStorage();
     }
 
+    /**
+     * IAM's tag lookup reads the tags held on the share the whole ARN names, in the owning account the ARN names, as
+     * tagging leaves them, when the caller may see the share: the caller's own share gives its tags, another account's
+     * share not shared with it gives none, as RAM hides it; nothing for another share's ARN or one that is not a
+     * share's.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheShareTheArnNamesWhenTheCallerMaySeeIt() {
+        String caller = "000000000000";
+        ResourceShare own = service.createResourceShare("tagged", List.of(), List.of(), false, "us-east-1", caller);
+        service.tagResource(own.getResourceShareArn(), Map.of("team", "data"), caller, "us-east-1");
+        service.tagResource(own.getResourceShareArn(), Map.of("env", "prod"), caller, "us-east-1");
+        ResourceShare hidden = service.createResourceShare("hidden", List.of(), List.of(), false, "us-east-1", OWNER);
+        service.tagResource(hidden.getResourceShareArn(), Map.of("team", "data"), OWNER, "us-east-1");
+
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(own.getResourceShareArn()));
+        assertEquals(Map.of(), service.storedTags(hidden.getResourceShareArn()));
+        assertEquals(Map.of(), service.storedTags(own.getResourceShareArn() + "0"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+    }
+
     @Test
     void deletedShareStopsExposingItsResourcesAndPrincipals() {
         // Real RAM keeps a deleted share visible (status DELETED) for a retention
@@ -280,6 +301,28 @@ class RamServiceTest {
         assertEquals("ACTIVE", unchanged.getStatus());
         assertEquals(List.of(TGW_ARN), unchanged.getResourceArns());
         assertEquals("ACCEPTED", service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "eu-west-1").status());
+    }
+
+    /**
+     * An invitation the owner sent the caller, and a share the owner holds, are acted on in the owner's account, so a
+     * request naming them is checked on their own ARNs; an invitation sent to another account, a deleted share, or no
+     * such resource, is not.
+     */
+    @Test
+    void anInvitationOrAShareOfAnotherAccountIsReachedThereByTheAccountItIsFor() {
+        ResourceShare share = service.createResourceShare(
+                "reached", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitation = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
+                .get(0).resourceShareInvitationArn();
+
+        assertEquals("ram", service.namespace());
+        assertTrue(service.reachedInItsAccount(invitation, ACCEPTER));
+        assertFalse(service.reachedInItsAccount(invitation, "333333333333"));
+        assertTrue(service.reachedInItsAccount(share.getResourceShareArn(), ACCEPTER));
+        assertFalse(service.reachedInItsAccount("arn:aws:ram:us-east-1:" + OWNER + ":resource-share/absent", ACCEPTER));
+        assertFalse(service.reachedInItsAccount("not-an-arn", ACCEPTER));
+        service.deleteResourceShare(share.getResourceShareArn(), OWNER, "us-east-1");
+        assertFalse(service.reachedInItsAccount(share.getResourceShareArn(), ACCEPTER));
     }
 
     /** A resource share is regional: the listing operations answer for the request's region only. */

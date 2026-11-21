@@ -10,7 +10,12 @@ public interface DurableFunctionInvoker {
     /** The function a durable execution runs on, or an AwsException when the name does not resolve. */
     ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier);
 
-    DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId);
+    DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId, String traceId);
+
+    default DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                           String traceId, boolean logTail) {
+        return invoke(target, payload, requestId, traceId);
+    }
 
     record ResolvedDurableTarget(String accountId,
                                  String region,
@@ -19,9 +24,13 @@ public interface DurableFunctionInvoker {
                                  String version,
                                  boolean durable,
                                  int executionTimeoutSeconds,
-                                 int retentionPeriodInDays) {
+                                 int retentionPeriodInDays,
+                                 boolean activeTracing) {
     }
 
-    record DurableInvocationResult(String requestId, byte[] payload, String functionError) {
+    record DurableInvocationResult(String requestId, byte[] payload, String functionError, String logResult) {
+        public DurableInvocationResult(String requestId, byte[] payload, String functionError) {
+            this(requestId, payload, functionError, null);
+        }
     }
 }

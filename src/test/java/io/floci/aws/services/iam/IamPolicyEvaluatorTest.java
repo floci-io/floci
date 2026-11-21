@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsServiceNamespaces;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulationDecision;
 import io.floci.aws.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -81,6 +82,31 @@ class IamPolicyEvaluatorTest {
 
         assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "s3:ListBucket", "*", within));
         assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "s3:ListBucket", "*", over));
+    }
+
+    @Test
+    void openTunnelConditionKeysScopeAnAllowToPortAddressAndDuration() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"ec2-instance-connect:OpenTunnel","Resource":"*","Condition":{
+                  "NumericEquals":{"ec2-instance-connect:remotePort":22},
+                  "IpAddress":{"ec2-instance-connect:privateIpAddress":"10.0.0.0/24"},
+                  "NumericLessThanEquals":{"ec2-instance-connect:maxTunnelDuration":600}}}]}""";
+        String action = "ec2-instance-connect:OpenTunnel";
+        String port = "ec2-instance-connect:remotePort";
+        String ip = "ec2-instance-connect:privateIpAddress";
+        String max = "ec2-instance-connect:maxTunnelDuration";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("3389"), ip, List.of("10.0.0.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.1.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"), max, List.of("900"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"))), "a key the caller never supplies");
     }
 
     @Test
@@ -1038,6 +1064,55 @@ class IamPolicyEvaluatorTest {
         assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(allButAlice, RequestPrincipal.anonymous()));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "\"NotPrincipal\":[]",
+        "\"NotPrincipal\":[123]",
+        "\"NotPrincipal\":{}",
+        "\"NotPrincipal\":{\"AWS\":[]}",
+        "\"NotPrincipal\":{\"AWS\":123}",
+    })
+    void aNotPrincipalThatNamesNobodyCoversNobody(String notPrincipal) {
+        // A principal is written as a string, so an element whose entries are no strings names
+        // nobody, as a NotAction or NotResource naming nothing excludes nothing and so matches
+        // nothing. An Allow sparing nobody would otherwise cover every caller there is.
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", notPrincipal), alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", notPrincipal), RequestPrincipal.anonymous()));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Deny", notPrincipal), alice));
+    }
+
+    @Test
+    void aPrincipalThatNamesNobodyDecidesTheStatementItIsWrittenIn() {
+        // A statement carrying both elements is a shape the grammar does not describe, and the
+        // Principal decides it either way, so one naming nobody leaves the statement matching
+        // nobody rather than handing the decision to the NotPrincipal beside it.
+        String both = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":[],"
+                + "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:user/alice\"},"
+                + "\"Action\":\"*\",\"Resource\":\"*\"}]}";
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(both, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(both, RequestPrincipal.iam("arn:aws:iam::123456789012:user/bob")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(both, RequestPrincipal.anonymous()));
+    }
+
+    @Test
+    void thePrincipalsNamedBesideAnEntryThatIsNoStringAreStillNamed() {
+        String allButAlice = resourcePolicy("Allow",
+                "\"NotPrincipal\":{\"AWS\":[123,\"arn:aws:iam::123456789012:user/alice\"]}");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.ALLOW,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/bob")));
+    }
+
     @Test
     void evaluatesResourcePolicyConditionsAndIdentityParity() {
         String condPolicy = """
@@ -1433,6 +1508,44 @@ class IamPolicyEvaluatorTest {
         // denies: it is one that has nothing to say.
         assertEquals(List.of("s3"), evaluator.servicesAllowedByScpLevels(
                 List.of(List.of(), List.of(ALLOW_S3_ONLY))));
+    }
+
+    /**
+     * What a request supplies has to read as a policy document: an object carrying the element the
+     * grammar requires of every policy, {@code Statement}, "the main element for a policy. This
+     * element is required." A text that does not parse, JSON that is no object, and an object
+     * without that element are alike no policy, which is why one sentence refuses all three.
+     */
+    @Test
+    void aSuppliedDocumentReadsAsAPolicyOnlyWithTheElementTheGrammarRequires() {
+        assertTrue(evaluator.readsAsPolicyDocument(ALLOW_ALL));
+        assertTrue(evaluator.readsAsPolicyDocument("{\"Statement\":{\"Effect\":\"Allow\","
+                + "\"Action\":\"*\",\"Resource\":\"*\"}}"));
+        assertTrue(evaluator.readsAsPolicyDocument("{\"Version\":\"2012-10-17\",\"Statement\":[]}"));
+
+        assertFalse(evaluator.readsAsPolicyDocument(MALFORMED));
+        assertFalse(evaluator.readsAsPolicyDocument("{not json"));
+        assertFalse(evaluator.readsAsPolicyDocument("[]"));
+        assertFalse(evaluator.readsAsPolicyDocument("7"));
+        assertFalse(evaluator.readsAsPolicyDocument("{}"));
+        assertFalse(evaluator.readsAsPolicyDocument("{\"Version\":\"2012-10-17\"}"));
+        assertFalse(evaluator.readsAsPolicyDocument(" "));
+        assertFalse(evaluator.readsAsPolicyDocument(null));
+    }
+
+    /**
+     * The reading above answers an input and nothing else. A document already stored stays as it
+     * was read: it contributes no statements and the decision is made on the rest, because a
+     * policy the account accepted once must not make every later call fail.
+     */
+    @Test
+    void aStoredDocumentThatIsNoPolicyStillLeavesTheDecisionToTheRest() {
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(List.of(MALFORMED, ALLOW_S3_ONLY), "s3:GetObject", "*"));
+        assertEquals(SimulationDecision.IMPLICIT_DENY, evaluator.simulatePrincipalPolicy(
+                CallerContext.of(List.of(MALFORMED)), "s3:GetObject", "*", Map.of()));
+        assertEquals(SimulationDecision.ALLOWED, evaluator.simulatePrincipalPolicy(
+                CallerContext.of(List.of(MALFORMED, ALLOW_S3_ONLY)), "s3:GetObject", "*", Map.of()));
     }
 
     private static String allowOnlyAction(String action) {

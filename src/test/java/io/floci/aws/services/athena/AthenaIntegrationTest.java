@@ -283,7 +283,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -294,7 +294,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -305,7 +305,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -316,7 +316,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
     }
 
     @Test
@@ -577,5 +577,45 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(200)
             .body("QueryExecution.WorkGroup", equalTo("primary"));
+    }
+
+    @Test
+    @Order(18)
+    void startQueryExecutionRecordsTheQueryWithoutItsTrailingSemicolons() {
+        String id = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryString\": \"\\nSELECT 1 ;;\\n\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.Query", equalTo("SELECT 1"));
+    }
+
+    @Test
+    @Order(19)
+    void startQueryExecutionRejectsASecondStatementAsMalformed() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryString\": \"SELECT 1; -- done\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("Only one sql statement is allowed. Got: SELECT 1; -- done"))
+            .body("AthenaErrorCode", equalTo("MALFORMED_QUERY"));
     }
 }

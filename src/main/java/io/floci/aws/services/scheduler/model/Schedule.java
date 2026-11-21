@@ -23,6 +23,12 @@ public class Schedule {
     private String kmsKeyArn;
     private Instant creationDate;
     private Instant lastModificationDate;
+    /**
+     * When the dispatcher last fired the schedule, Floci's own record and never part of an API
+     * response. Stored with the schedule so a restart neither fires a one-time schedule again nor
+     * catches a recurring one up.
+     */
+    private Instant lastFiredAt;
 
     public Schedule() {}
 
@@ -73,4 +79,7 @@ public class Schedule {
 
     public Instant getLastModificationDate() { return lastModificationDate; }
     public void setLastModificationDate(Instant lastModificationDate) { this.lastModificationDate = lastModificationDate; }
+
+    public Instant getLastFiredAt() { return lastFiredAt; }
+    public void setLastFiredAt(Instant lastFiredAt) { this.lastFiredAt = lastFiredAt; }
 }

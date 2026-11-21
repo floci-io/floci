@@ -2,9 +2,9 @@
 
 CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
 cache policies, origin request policies, response headers policies, origin access controls, origin
-access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
-viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
-PUT, PATCH and DELETE).
+access identities, public keys, trusted key groups, CloudFront Functions, key value stores, invalidations,
+tagging, and viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD,
+OPTIONS, POST, PUT, PATCH and DELETE).
 
 **Protocol:** REST XML
 **API version:** `2020-05-31`
@@ -75,9 +75,12 @@ PUT, PATCH and DELETE).
 | `CreateOriginAccessControl` | POST | `/2020-05-31/origin-access-control` |
 | `GetOriginAccessControl` | GET | `/2020-05-31/origin-access-control/{Id}` |
 | `GetOriginAccessControlConfig` | GET | `/2020-05-31/origin-access-control/{Id}/config` |
-| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}` |
+| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}/config` |
 | `DeleteOriginAccessControl` | DELETE | `/2020-05-31/origin-access-control/{Id}` |
 | `ListOriginAccessControls` | GET | `/2020-05-31/origin-access-control` |
+
+`UpdateOriginAccessControl` accepts the current `If-Match` ETag and a complete configuration.
+With IAM enforcement enabled, its permission can be scoped to the selected origin access control ARN.
 
 ### Origin Access Identity (OAI — legacy)
 
@@ -102,6 +105,31 @@ PUT, PATCH and DELETE).
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |
 | `ListFunctions` | GET | `/2020-05-31/function` |
 
+### Key Value Stores
+
+Control plane, served with the rest of CloudFront:
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateKeyValueStore` | POST | `/2020-05-31/key-value-store` |
+| `DescribeKeyValueStore` | GET | `/2020-05-31/key-value-store/{Name}` |
+| `ListKeyValueStores` | GET | `/2020-05-31/key-value-store` |
+| `UpdateKeyValueStore` | PUT | `/2020-05-31/key-value-store/{Name}` |
+| `DeleteKeyValueStore` | DELETE | `/2020-05-31/key-value-store/{Name}` |
+
+The keys of a store are read and written through the separate `cloudfront-keyvaluestore` data plane
+(REST JSON, signing name `cloudfront-keyvaluestore`). It names the store by its ARN, percent-encoded in
+the path:
+
+| Operation | Method | Path |
+|---|---|---|
+| `DescribeKeyValueStore` | GET | `/key-value-stores/{KvsARN}` |
+| `ListKeys` | GET | `/key-value-stores/{KvsARN}/keys` |
+| `UpdateKeys` | POST | `/key-value-stores/{KvsARN}/keys` |
+| `GetKey` | GET | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `PutKey` | PUT | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `DeleteKey` | DELETE | `/key-value-stores/{KvsARN}/keys/{Key}` |
+
 ### Public Keys and Key Groups
 
 | Operation | Method | Path |
@@ -118,6 +146,64 @@ PUT, PATCH and DELETE).
 | `UpdateKeyGroup` | PUT | `/2020-05-31/key-group/{Id}` |
 | `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
 | `ListKeyGroups` | GET | `/2020-05-31/key-group` |
+
+### Stored configurations
+
+These operations store what they are given and return it, so code that manages these resources works, but Floci does not act on them: a continuous deployment policy never diverts a primary distribution's requests to its staging distribution, no real-time log or monitoring-subscription metric is delivered, no field is encrypted, and a streaming distribution serves no RTMP. A staging distribution made by `CopyDistribution` still answers on its own domain name, as any enabled distribution does.
+
+#### Staging distributions and continuous deployment
+
+| Operation | Method | Path |
+|---|---|---|
+| `CopyDistribution` | POST | `/2020-05-31/distribution/{PrimaryDistributionId}/copy` |
+| `CreateContinuousDeploymentPolicy` | POST | `/2020-05-31/continuous-deployment-policy` |
+| `GetContinuousDeploymentPolicy` | GET | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `UpdateContinuousDeploymentPolicy` | PUT | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `DeleteContinuousDeploymentPolicy` | DELETE | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `ListContinuousDeploymentPolicies` | GET | `/2020-05-31/continuous-deployment-policy` |
+
+#### Real-time log configs
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateRealtimeLogConfig` | POST | `/2020-05-31/realtime-log-config` |
+| `GetRealtimeLogConfig` | POST | `/2020-05-31/get-realtime-log-config` |
+| `UpdateRealtimeLogConfig` | PUT | `/2020-05-31/realtime-log-config` |
+| `DeleteRealtimeLogConfig` | POST | `/2020-05-31/delete-realtime-log-config` |
+| `ListRealtimeLogConfigs` | GET | `/2020-05-31/realtime-log-config` |
+
+#### Field-level encryption
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateFieldLevelEncryptionConfig` | POST | `/2020-05-31/field-level-encryption` |
+| `GetFieldLevelEncryptionConfig` | GET | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `UpdateFieldLevelEncryptionConfig` | PUT | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `DeleteFieldLevelEncryptionConfig` | DELETE | `/2020-05-31/field-level-encryption/{Id}` |
+| `ListFieldLevelEncryptionConfigs` | GET | `/2020-05-31/field-level-encryption` |
+| `CreateFieldLevelEncryptionProfile` | POST | `/2020-05-31/field-level-encryption-profile` |
+| `GetFieldLevelEncryptionProfile` | GET | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `UpdateFieldLevelEncryptionProfile` | PUT | `/2020-05-31/field-level-encryption-profile/{Id}/config` |
+| `DeleteFieldLevelEncryptionProfile` | DELETE | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `ListFieldLevelEncryptionProfiles` | GET | `/2020-05-31/field-level-encryption-profile` |
+
+#### Monitoring subscriptions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateMonitoringSubscription` | POST | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `GetMonitoringSubscription` | GET | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `DeleteMonitoringSubscription` | DELETE | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+
+#### Streaming distributions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateStreamingDistribution` | POST | `/2020-05-31/streaming-distribution` |
+| `GetStreamingDistribution` | GET | `/2020-05-31/streaming-distribution/{Id}` |
+| `GetStreamingDistributionConfig` | GET | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `UpdateStreamingDistribution` | PUT | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `DeleteStreamingDistribution` | DELETE | `/2020-05-31/streaming-distribution/{Id}` |
 
 ### Tagging
 
@@ -141,8 +227,10 @@ PUT, PATCH and DELETE).
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
   `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
-  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
-  resources currently return `InvalidIfMatchVersion` (400) for either case.
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Key-value-store
+  control-plane updates and deletes also return `PreconditionFailed` (412) for stale UUID versions
+  issued by Floci; missing or malformed versions return `InvalidIfMatchVersion` (400). Other
+  CloudFront resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - List operations emit the payload root declared by the CloudFront REST XML model (for example,
   `ListDistributions` returns `<DistributionList>`), with list contents represented by
@@ -327,11 +415,104 @@ PUT, PATCH and DELETE).
 - `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
   update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
   `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
+- A `ViewerCertificate` that names a certificate is held to the two rules its own entry states.
+  The location is `ACMCertificateArn` or `IAMCertificateId` and "not both", and a certificate named
+  in either one "must also specify values for MinimumProtocolVersion and SSLSupportMethod". Both
+  refusals are `InvalidViewerCertificate` 400, which is Floci's reading rather than a published
+  answer: `InvalidArgument` and `InvalidMinimumProtocolVersion` are modelled on the distribution
+  writes as well, and no sentence says which one a caller gets, so both cases read as the
+  certificate the request carries not being valid. The Developer Guide page that enumerates what
+  `InvalidViewerCertificate` answers reaches neither case either: it names the certificate's own
+  trust, its chain, its format and the names it covers. A member carried blank counts as no value, the
+  way a blank location member names no certificate, and a distribution on the CloudFront domain
+  name needs neither member. The rules are read before the certificate is looked up, so a request
+  that breaks one is refused for the rule and not for a certificate nothing matches.
+- The viewer certificate's two protocol members are held to the values they admit and to the one
+  pair they cannot carry together. A `MinimumProtocolVersion` outside `SSLv3`, `TLSv1`,
+  `TLSv1_2016`, `TLSv1.1_2016`, `TLSv1.2_2018`, `TLSv1.2_2019`, `TLSv1.2_2021`, `TLSv1.2_2025` and
+  `TLSv1.3_2025` is `InvalidMinimumProtocolVersion` 400, which is published rather than read: that
+  code's own sentence names this case. An `SSLSupportMethod` outside `sni-only`, `vip` and
+  `static-ip` has no code of its own and is `InvalidArgument` 400, what this service already
+  answers a member outside its shape with. `SSLv3` alongside `sni-only` is
+  `InvalidProtocolSettings` 400 on `CreateDistribution`, `CreateDistributionWithTags` and
+  `CopyDistribution`, whose sentence names that pair and nothing else and which is the same rule as
+  the floor the member states for SNI, "you must specify TLSv1 or higher". `UpdateDistribution` has
+  never declared that code and has declared `InvalidMinimumProtocolVersion` since 2015, so the
+  update answers the pair with the code it declares, which is the one a caller's SDK can map, and
+  keeps the pair's published sentence, so the two causes the update answers under one code stay
+  apart. The pair is
+  read for a distribution on a certificate of its own alone, since on the CloudFront certificate
+  the policy is replaced and the value that would make the pair is discarded. Both enumerations are
+  read either way.
+- A distribution on the CloudFront domain name sets `CloudFrontDefaultCertificate` and is told to
+  "leave all other fields empty". The member is declared `boolean`, so it is held to the four forms
+  XML gives a boolean, `true`, `false`, `1` and `0`, and anything else is `InvalidArgument` 400.
+  That refusal is Floci's reading: CloudFront models no error for a malformed document, and reading
+  the member for the word `true` alone would let a request saying `yes` dodge every rule below. A
+  certificate named beside it, in `ACMCertificateArn` or `IAMCertificateId`, contradicts the
+  request's own claim and is `InvalidViewerCertificate` 400, Floci's reading again. A
+  `MinimumProtocolVersion` beside it is not refused: the member's entry says CloudFront
+  "automatically sets the security policy to TLSv1 regardless of the value that you set here", so
+  the policy a request asks for there is replaced and the config reads back `TLSv1`. A distribution
+  created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
+  The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
+  resolved from whatever region its ARN names, as long as it exists.
+- `AWS::CloudFront::Distribution` passes `ViewerCertificate` through, on create and on update, so the
+  certificate and protocol rules above apply to a stack the same way they do to the API.
+- `ConnectionMode` is stored and returned by `GetDistribution`, `GetDistributionConfig`,
+  `ListDistributions` and the create and update responses, and `AWS::CloudFront::Distribution`
+  passes it through. It is held to `direct` and `tenant-only`; anything else is `InvalidArgument`
+  400, the code this service answers a member outside its shape with. An omitted mode is reported
+  as omitted: no published sentence says which mode such a distribution reads back as. A
+  `tenant-only` distribution is otherwise treated like a standard one. The restrictions the
+  Developer Guide lists for multi-tenant distributions (only `sni-only`, no `SSLv3`, no IAM
+  certificate, no `Aliases` or `PriceClass`) are not enforced, because no error code is published
+  for them, and an omitted `ViewerCertificate` on a `tenant-only` distribution reads as the default
+  certificate, the same as on a standard one. AWS documents no default for that case.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with
   `ListResponseHeadersPolicies?Type=managed`; `Type` uses the AWS lowercase `managed` or `custom`
   values.
+
+## Key Value Stores
+
+A key value store holds the key value pairs a CloudFront Function reads at the edge. The store is created
+and described through the CloudFront control plane, and its keys are managed through the
+`cloudfront-keyvaluestore` data plane, which Floci serves on the same port.
+
+- A store has a name (1 to 64 letters, digits, hyphens and underscores) and an ARN,
+  `arn:aws:cloudfront::<account>:key-value-store/<uuid>`. Stores are `READY` as soon as they are created.
+- The data plane takes the store's ARN in the request path, percent-encoded. The AWS SDKs prepend the
+  account id of that ARN to the endpoint host (`000000000000.localhost.floci.io`), which the embedded DNS
+  and the generated TLS certificate already cover. The requests are signed with SigV4A; Floci reads the
+  `cloudfront-keyvaluestore` signing name from its credential scope and does not verify the signature.
+  With `floci.auth.validate-signatures` on, these requests are refused: signature validation does not accept
+  SigV4A outside S3 yet, so leave it off when using the data plane.
+- With IAM enforcement on, the data plane is authorized as `cloudfront-keyvaluestore:<Operation>` on the store's ARN,
+  and the control plane as `cloudfront:<Operation>`.
+- Keys are listed in key order, 10 per page by default and up to 50 (`MaxResults`).
+- Quotas: a key is at most 512 bytes, a value at most 1,024 bytes and a store at most 5 MiB, counting the
+  UTF-8 bytes of every key and value. Exceeding the first two is a `ValidationException`, and exceeding the
+  store size is a `ServiceQuotaExceededException`. `ItemCount` and `TotalSizeInBytes` follow the same count.
+- Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
+  applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
+  entry is invalid, including a put without a `Value`. A stale or missing ETag on the
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"). Control-plane
+  update and delete return `PreconditionFailed` (412) for stale UUID versions issued by Floci, and
+  `InvalidIfMatchVersion` (400) for missing or malformed versions. Rejected requests preserve the store.
+  ETags retain Floci's existing UUID representation; this does not define an AWS version format.
+- The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
+  ETag, and a key write only the data plane ETag.
+- An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
+  functions (`TooManyFunctionsAssociatedToKeyValueStore`). Deleting a store also drops its tags.
+- Deleting a key that is not in the store is a `ResourceNotFoundException`. In `UpdateKeys` the delete of an
+  absent key is skipped.
+- A function can name at most one store in `FunctionConfig.KeyValueStoreAssociations`, and only with the
+  `cloudfront-js-2.0` runtime. The store has to exist (`EntityNotFound`), and a store that a function
+  uses cannot be deleted (`CannotDeleteEntityWhileInUse`).
+- Floci does not run CloudFront Functions. A function that reads the store with `cf.kvs()` is stored and
+  associated, but nothing executes it, so the store is useful for testing the code that writes it.
 
 ## Configuration
 
@@ -513,14 +694,22 @@ signatures must still return 403. Verify those cases through the proxy after con
 
 ## Not Supported (Phase 2)
 
-- Continuous deployment policies (`CreateContinuousDeploymentPolicy`, etc.)
-- `CopyDistribution` (staging distributions)
-- Real-time log configs (`CreateRealtimeLogConfig`, etc.)
-- Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
+- Continuous deployment: a policy never diverts a primary distribution's requests to its staging
+  distribution (see [Stored configurations](#stored-configurations))
+- Delivering real-time logs, and encrypting fields with field-level encryption
 - `TestFunction` execution (function is stored, not executed)
-- Streaming distributions (RTMP — deprecated by AWS)
-- VPC origins, Anycast IP lists, key value stores
-- Monitoring subscriptions
+- Serving RTMP for a streaming distribution (deprecated by AWS)
+- VPC origins, Anycast IP lists
+- Connection groups and distribution tenants (`CreateConnectionGroup`, `CreateDistributionTenant`,
+  etc.), their CloudFormation types, `ListDistributionsByConnectionMode`, and serving a
+  `tenant-only` distribution by a tenant's domain
+- Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
+  `InvalidArgument`
+- Running CloudFront Functions, so the key value store can only be read and written through its API, not
+  from a function with `cf.kvs()`
+- CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
+  `AWS::CloudFront::Function`
+- Publishing the additional metrics a monitoring subscription turns on
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)
 - Persistent edge caching and global CDN propagation

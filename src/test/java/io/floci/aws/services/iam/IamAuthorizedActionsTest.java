@@ -48,10 +48,48 @@ class IamAuthorizedActionsTest {
     void entriesAreKeyedByNamespaceAndOperation() throws IOException {
         IamAuthorizedActions.Table parsed = IamAuthorizedActions.parse(json("""
                 {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
-                 "actionsWithoutResourceTypes": {"es": ["ListDomainNames"], "dsql": []}}
+                 "actionsWithoutResourceTypes": {"es": ["ListDomainNames"], "dsql": []},
+                 "authorizedByMethod": {"apigateway": ["GetStage", "TagResource"]}}
                 """));
         assertEquals(Map.of("sqs:SendMessageBatch", "sqs:SendMessage"), parsed.actions());
         assertEquals(Set.of("es:listdomainnames"), parsed.withoutResourceTypes());
+        assertEquals(Set.of("apigateway:GetStage", "apigateway:TagResource"), parsed.byMethod());
+    }
+
+    /**
+     * A request on the route of an operation the file authorizes by method is checked as the action its method
+     * names: API Gateway's {@code TagResource} is a PUT in v1 and a POST in v2. An operation the file renames keeps
+     * that action, and one it names nowhere its own name, whatever the method.
+     */
+    @Test
+    void anOperationAuthorizedByMethodIsTheActionItsRequestsMethodNames() {
+        assertEquals("apigateway:PUT", IamAuthorizedActions.actionFor("apigateway", "TagResource", "PUT"));
+        assertEquals("apigateway:POST", IamAuthorizedActions.actionFor("apigateway", "TagResource", "post"));
+        assertEquals("apigateway:DELETE", IamAuthorizedActions.actionFor("apigateway", "DeleteStage", "DELETE"));
+        assertEquals("apigateway:GET", IamAuthorizedActions.actionFor("apigateway", "GetRestApis", "GET"));
+        assertEquals("apigateway:RejectAccessAssociation",
+                IamAuthorizedActions.actionFor("apigateway", "RejectDomainNameAccessAssociation", "POST"));
+        assertEquals("apigateway:CreateRoutingRule",
+                IamAuthorizedActions.actionFor("apigateway", "CreateRoutingRule", "POST"));
+        assertEquals("lambda:InvokeFunction", IamAuthorizedActions.actionFor("lambda", "Invoke", "POST"));
+        // An operation named in a request rather than reached by its route keeps the two-argument answer.
+        assertEquals("apigateway:TagResource", IamAuthorizedActions.actionFor("apigateway", "TagResource"));
+    }
+
+    @Test
+    void aFileWithoutTheOperationsAuthorizedByMethodIsRefused() {
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {}}
+                """)));
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {}, "authorizedByMethod": {"apigateway": "TagResource"}}
+                """)));
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {}, "authorizedByMethod": {"apigateway": [""]}}
+                """)));
     }
 
     /**

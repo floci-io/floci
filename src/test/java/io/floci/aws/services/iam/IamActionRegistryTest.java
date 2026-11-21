@@ -3,9 +3,7 @@ package io.floci.aws.services.iam;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.WireProtocol;
-import io.floci.aws.services.route53.Route53Controller;
 import jakarta.ws.rs.container.ContainerRequestContext;
-import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -23,7 +21,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -116,6 +113,44 @@ class IamActionRegistryTest {
     }
 
     /**
+     * API Gateway's management routes, v1 and v2, are checked as the Service Reference gives their operations: the
+     * action their HTTP method names, {@code TagResource} a PUT in v1 and a POST in v2 and the shared tags
+     * controller's bare POST, with an ARN sent encoded or not; and the operations AWS authorizes by an action of
+     * their own name as that action, Floci serving none of them. A path no route of either model has, such as a
+     * deployed API's execute path, is no management call.
+     */
+    @ParameterizedTest
+    @CsvSource({"GET,/restapis,apigateway:GET",
+            "PATCH,/restapis/abc,apigateway:PATCH",
+            "DELETE,/v2/apis/abc/stages/prod,apigateway:DELETE",
+            "GET,/v2/apis/abc/stages/prod,apigateway:GET",
+            "PUT,/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc,apigateway:PUT",
+            "PUT,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:PUT",
+            "DELETE,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:DELETE",
+            "POST,/tags,apigateway:POST",
+            "POST,/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc,apigateway:POST",
+            "GET,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:GET",
+            "POST,/rejectdomainnameaccessassociations,apigateway:RejectAccessAssociation",
+            "PUT,/v2/domainnames/example.com/routingrules/r1,apigateway:UpdateRoutingRule",
+            "POST,/v2/domainnames/example.com/routingrules,apigateway:CreateRoutingRule",
+            "POST,/v2/portals,apigateway:CreatePortal",
+            "PATCH,/v2/portals/p1,apigateway:UpdatePortal"})
+    void anApiGatewayRouteIsCheckedAsTheServiceReferenceGivesItsOperation(String method, String path, String action) {
+        assertEquals(action, apiGatewayAction(method, path));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GET,/execute-api/abc/prod/pets", "POST,/restapis/abc/prod/_user_request_/pets"})
+    void anApiGatewayPathNoModelRoutesIsNoManagementCall(String method, String path) {
+        assertNull(apiGatewayAction(method, path));
+    }
+
+    private String apiGatewayAction(String method, String path) {
+        return registry.resolveRoute("apigateway",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    /**
      * Access Analyzer's analyzer routes are checked as their operations, the vendored request resources reading the
      * analyzer from the path or the body, and so are those of its archive rules, findings and access previews, which
      * Floci does not serve.
@@ -147,6 +182,25 @@ class IamActionRegistryTest {
             "POST,/2015-01-01/es/domain/logs/config,es:UpdateElasticsearchDomainConfig"})
     void anOpenSearchDomainRouteIsCheckedAsItsOperation(String method, String path, String action) {
         assertEquals(action, registry.resolveRoute("es", mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
+    void aRequestIsOnAPathOfAServicesModelOnlyAsTheModelGivesIt() {
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        String encoded = "/tags/arn%3Aaws%3Ascheduler%3Aus-east-1%3A000000000000%3Aschedule-group%2Freports";
+        // Scheduler's /tags/{ResourceArn} takes the ARN as one segment, encoded as an SDK sends it, whatever method
+        // a request sends there.
+        assertTrue(IamActionRegistry.modelRoutes("scheduler", mockCtx("POST", encoded, none, null, "").getUriInfo()));
+        assertTrue(IamActionRegistry.modelRoutes("scheduler", mockCtx("PUT", encoded, none, null, "").getUriInfo()));
+        assertFalse(IamActionRegistry.modelRoutes("scheduler",
+                mockCtx("POST", "/tags/arn:aws:scheduler:us-east-1:000000000000:schedule-group/reports", none, null, "")
+                        .getUriInfo()));
+        assertFalse(IamActionRegistry.modelRoutes("scheduler", mockCtx("POST", "/tags", none, null, "").getUriInfo()));
+        // Control Tower's generated routes give the bare path the shared tags controller also serves it on.
+        assertTrue(IamActionRegistry.modelRoutes("controltower",
+                mockCtx("POST", "/tags", none, null, "").getUriInfo()));
+        // A scope whose routes are not vendored is not one the model can answer for.
+        assertTrue(IamActionRegistry.modelRoutes("sqs", mockCtx("POST", "/tags", none, null, "").getUriInfo()));
     }
 
     @Test
@@ -186,18 +240,16 @@ class IamActionRegistryTest {
         assertNull(registry.resolveRoute("access-analyzer", ctx));
     }
 
+    /** Route 53's delegation set calls resolve from their vendored routes, an id given with its type's path too. */
     @ParameterizedTest
-    @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",
-            "getReusableDelegationSet,GetReusableDelegationSet",
-            "listReusableDelegationSets,ListReusableDelegationSets",
-            "deleteReusableDelegationSet,DeleteReusableDelegationSet"})
-    void matchedDelegationSetMethodsResolveTheirOwnActions(String method, String operation) {
-        ResourceInfo info = Mockito.mock(ResourceInfo.class);
-        Mockito.doReturn(Route53Controller.class).when(info).getResourceClass();
-        when(info.getResourceMethod()).thenReturn(Arrays.stream(Route53Controller.class.getMethods())
-                .filter(candidate -> candidate.getName().equals(method)).findFirst().orElseThrow());
-        assertEquals("route53:" + operation, registry.resolveMatchedRoute("route53", info));
-        assertNull(registry.resolveMatchedRoute("s3", info));
+    @CsvSource({"POST,/2013-04-01/delegationset,CreateReusableDelegationSet",
+            "GET,/2013-04-01/delegationset,ListReusableDelegationSets",
+            "GET,/2013-04-01/delegationset/N1,GetReusableDelegationSet",
+            "GET,/2013-04-01/delegationset/%2Fdelegationset%2FN1,GetReusableDelegationSet",
+            "DELETE,/2013-04-01/delegationset/N1,DeleteReusableDelegationSet"})
+    void delegationSetRoutesResolveTheirOwnActions(String method, String path, String operation) {
+        assertEquals("route53:" + operation, registry.resolveRoute("route53",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_XML_TYPE, "")));
     }
 
     @ParameterizedTest
@@ -474,6 +526,24 @@ class IamActionRegistryTest {
         assertEquals("lambda:ListLayers", registry.resolveRoute("lambda",
                 mockCtx("GET", "/2018-10-31/layers", other, MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("lambda:ListLayers", lambdaAction("GET", "/2018-10-31/layers"));
+    }
+
+    @Test
+    void aRestOperationRetainsItsModeledNameWhenItsAuthorizedActionDiffers() {
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("find", "LayerVersion");
+        ContainerRequestContext byArn = mockCtx("GET", "/2018-10-31/layers",
+                query, MediaType.APPLICATION_JSON_TYPE, "{}");
+        String action = registry.resolveRoute("lambda", byArn);
+        assertEquals("lambda:GetLayerVersion", action);
+        assertEquals("lambda:GetLayerVersionByArn", registry.operationForRoute("lambda", action, byArn));
+
+        ContainerRequestContext named = mockCtx("GET", "/2018-10-31/layers/shared/versions/1",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("lambda:GetLayerVersion",
+                registry.operationForRoute("lambda", registry.resolveRoute("lambda", named), named));
+        assertEquals("lambda:ListLayers", registry.operationForRoute("lambda", "lambda:ListLayers", byArn));
+        assertNull(registry.operationForRoute("lambda", null, byArn));
     }
 
     @Test
@@ -1032,6 +1102,29 @@ class IamActionRegistryTest {
         // A plain DELETE with no sub-resource still deletes the bucket.
         assertEquals("s3:DeleteBucket",
                 registry.resolve("s3", mockCtx("DELETE", "/bucket", new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
+    void s3BucketSubResourcesFlociDoesNotServeAreCheckedAsTheOperationsTheyName() {
+        // S3Controller answers them NotImplemented instead of listing, creating or deleting the bucket, so they are
+        // checked as AWS checks the operation the AWS model gives the sub-resource and method.
+        assertEquals("s3:GetBucketMetadataTableConfiguration", bucketAction("GET", "metadataConfiguration"));
+        assertEquals("s3:DeleteBucketMetadataTableConfiguration", bucketAction("DELETE", "metadataConfiguration"));
+        assertEquals("s3:GetBucketMetadataTableConfiguration", bucketAction("GET", "metadataTable"));
+        assertEquals("s3:DeleteBucketMetadataTableConfiguration", bucketAction("DELETE", "metadataTable"));
+        assertEquals("s3:UpdateBucketMetadataJournalTableConfiguration", bucketAction("PUT", "metadataJournalTable"));
+        assertEquals("s3:GetBucketAbac", bucketAction("GET", "abac"));
+        assertEquals("s3:PutBucketAbac", bucketAction("PUT", "abac"));
+        assertEquals("s3:CreateBucketMetadataTableConfiguration", bucketAction("POST", "metadataTable"));
+        // A sub-resource sent with a method AWS defines none for is refused as not allowed, checked as before.
+        assertEquals("s3:DeleteBucket", bucketAction("DELETE", "versioning"));
+        assertEquals("s3:CreateBucket", bucketAction("PUT", "location"));
+        assertNull(bucketAction("POST", "versioning"));
+        // A browser-form PostObject runs ahead of any sub-resource and is checked per key, as DeleteObjects is.
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("metadataTable", "");
+        assertNull(registry.resolve("s3", mockCtx("POST", "/bucket", params, MediaType.MULTIPART_FORM_DATA_TYPE, "")));
+        assertNull(bucketAction("POST", "delete"));
     }
 
     @Test

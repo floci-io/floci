@@ -33,6 +33,8 @@ class RedshiftSnapshotCopyServiceTest {
     private static final String ACCOUNT = "111111111111";
     private static final String SOURCE = "us-east-1";
     private static final String DESTINATION = "us-west-2";
+    /** The key the copy of snapshot {@code nightly} is stored under in {@link #DESTINATION}. */
+    private static final String NIGHTLY_COPY = RedshiftService.regionalKey(DESTINATION, "nightly");
 
     @TempDir
     Path directory;
@@ -48,7 +50,7 @@ class RedshiftSnapshotCopyServiceTest {
 
         Snapshot source = fixture.snapshots().getForAccount(ACCOUNT, "nightly").orElseThrow();
         assertTrue(source.getCopiedToRegions().contains(DESTINATION));
-        Snapshot copy = fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").orElseThrow();
+        Snapshot copy = fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).orElseThrow();
         assertEquals("arn:aws:redshift:" + DESTINATION + ":" + ACCOUNT + ":snapshot:warehouse/nightly",
                 copy.getSnapshotArn());
         assertEquals(SOURCE, copy.getSourceRegion());
@@ -92,7 +94,7 @@ class RedshiftSnapshotCopyServiceTest {
         seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
-        Path copiedDump = Path.of(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly")
+        Path copiedDump = Path.of(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY)
                 .orElseThrow().getSqlDump());
 
         fixture.service(DESTINATION).deleteSnapshot("nightly");
@@ -112,7 +114,7 @@ class RedshiftSnapshotCopyServiceTest {
 
         fixture.service(SOURCE).deleteSnapshot("nightly");
 
-        assertTrue(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").isPresent());
+        assertTrue(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).isPresent());
         assertEquals("nightly", fixture.service(DESTINATION).describeSnapshots("nightly", null)
                 .getFirst().getSnapshotIdentifier());
         assertThrows(AwsException.class, () -> fixture.service(SOURCE).describeSnapshots("nightly", null));
@@ -126,14 +128,14 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
-        Path copiedDump = Path.of(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly")
+        Path copiedDump = Path.of(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY)
                 .orElseThrow().getSqlDump());
 
         fixture.service(SOURCE).runSnapshotCopies(Instant.now().plus(Duration.ofHours(12)));
-        assertTrue(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").isPresent());
+        assertTrue(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).isPresent());
 
         fixture.service(SOURCE).runSnapshotCopies(Instant.now().plus(Duration.ofDays(2)));
-        assertTrue(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").isEmpty());
+        assertTrue(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).isEmpty());
         assertFalse(Files.exists(copiedDump));
         assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "nightly").isPresent());
         assertTrue(Files.exists(Path.of(fixture.snapshots().getForAccount(ACCOUNT, "nightly")
@@ -164,12 +166,12 @@ class RedshiftSnapshotCopyServiceTest {
         Snapshot unmarked = new Snapshot(source);
         unmarked.getCopiedToRegions().clear();
         fixture.snapshots().putForAccount(ACCOUNT, "nightly", unmarked);
-        String committedDump = fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly")
+        String committedDump = fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY)
                 .orElseThrow().getSqlDump();
 
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
 
-        assertEquals(committedDump, fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly")
+        assertEquals(committedDump, fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY)
                 .orElseThrow().getSqlDump());
         assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "nightly").orElseThrow()
                 .getCopiedToRegions().contains(DESTINATION));
@@ -185,16 +187,14 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
 
         assertTrue(fixture.copies().scanForAccount("222222222222", key -> true).isEmpty());
-        assertTrue(Path.of(fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").orElseThrow()
+        assertTrue(Path.of(fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).orElseThrow()
                 .getSqlDump()).startsWith(directory.resolve("redshift-dumps").resolve(ACCOUNT)));
     }
 
     @Test
     void enablingCopyIntoTheClustersOwnRegionIsRefused() {
         Fixture fixture = fixture();
-        Cluster cluster = seedCluster(fixture, "warehouse", null);
-        cluster.setSnapshotCopyDestinationRegion(null);
-        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+        seedCluster(fixture, "warehouse", SOURCE, null, null);
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> fixture.service(SOURCE).enableSnapshotCopy("warehouse", SOURCE, null, null, null));
@@ -204,6 +204,37 @@ class RedshiftSnapshotCopyServiceTest {
         assertNotNull(enabled.getSnapshotCopyEnabledAt());
     }
 
+    /**
+     * A snapshot copy grant is made in the destination Region, as on AWS: enabling copy names one there, the copy
+     * takes its key, and it can't be deleted there while the cluster copies with it. A grant of the same name in
+     * the source Region is another grant.
+     */
+    @Test
+    void theSnapshotCopyGrantIsTheDestinationRegions() {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", SOURCE, null, null);
+        fixture.service(SOURCE).createSnapshotCopyGrant("copies", "source-key", null);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> fixture.service(SOURCE).enableSnapshotCopy("warehouse", DESTINATION, null, null, "copies"));
+        assertEquals("SnapshotCopyGrantNotFoundFault", missing.getErrorCode());
+
+        fixture.service(DESTINATION).createSnapshotCopyGrant("copies", "destination-key", null);
+        fixture.service(SOURCE).enableSnapshotCopy("warehouse", DESTINATION, null, null, "copies");
+        Cluster enabled = fixture.clusters().getForAccount(ACCOUNT, "warehouse").orElseThrow();
+        enabled.setSnapshotCopyEnabledAt(Instant.now().minusSeconds(60));
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", enabled);
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        assertEquals("destination-key", fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY)
+                .orElseThrow().getKmsKeyId());
+        AwsException inUse = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).deleteSnapshotCopyGrant("copies"));
+        assertEquals("InvalidSnapshotCopyGrantStateFault", inUse.getErrorCode());
+        assertEquals("source-key", fixture.service(SOURCE).deleteSnapshotCopyGrant("copies").getKmsKeyId());
+    }
+
     @Test
     void aNewSnapshotCannotTakeTheIdentifierOfACopyInThatRegion() {
         Fixture fixture = fixture();
@@ -211,9 +242,10 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
         fixture.service(SOURCE).deleteSnapshot("nightly");
+        seedCluster(fixture, "replica", DESTINATION, null, null);
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> fixture.service(DESTINATION).createSnapshot("nightly", "warehouse"));
+                () -> fixture.service(DESTINATION).createSnapshot("nightly", "replica"));
         assertEquals("ClusterSnapshotAlreadyExists", refused.getErrorCode());
     }
 
@@ -223,7 +255,7 @@ class RedshiftSnapshotCopyServiceTest {
         seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
-        String key = DESTINATION + "::nightly";
+        String key = NIGHTLY_COPY;
         Snapshot retained = new Snapshot(fixture.copies().getForAccount(ACCOUNT, key).orElseThrow());
         retained.setSourceSnapshotCreateTime(retained.getSourceSnapshotCreateTime().minusSeconds(30));
         retained.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
@@ -250,7 +282,7 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
-        String key = DESTINATION + "::nightly";
+        String key = NIGHTLY_COPY;
         Snapshot copy = new Snapshot(fixture.copies().getForAccount(ACCOUNT, key).orElseThrow());
         copy.setSnapshotType("automated");
         copy.setSnapshotCreateTime(Instant.now().minus(Duration.ofDays(3)));
@@ -284,6 +316,31 @@ class RedshiftSnapshotCopyServiceTest {
                 .describeTags(null, "snapshot", null);
 
         assertEquals(List.of(new RedshiftService.TaggedResource(copyArn, "snapshot", "env", "test")), tags);
+    }
+
+    @Test
+    void regionalCopyDoesNotInheritRestoreAccessGrants() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).authorizeSnapshotAccess("nightly", "warehouse", "222222222222");
+
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        Snapshot copy = fixture.copies().getForAccount(ACCOUNT, NIGHTLY_COPY).orElseThrow();
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
+    }
+
+    @Test
+    void authorizingAccessToACopyIsRefused() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).authorizeSnapshotAccess("nightly", "warehouse", "222222222222"));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
     }
 
     private long dumpFilesUnderCopies() {
@@ -322,14 +379,20 @@ class RedshiftSnapshotCopyServiceTest {
     }
 
     private static Cluster seedCluster(Fixture fixture, String id, Instant copyEnabledAt) {
+        return seedCluster(fixture, id, SOURCE, DESTINATION, copyEnabledAt);
+    }
+
+    /** An available cluster of {@code region}, copying its snapshots to {@code copyDestination} when not null. */
+    private static Cluster seedCluster(Fixture fixture, String id, String region, String copyDestination,
+                                       Instant copyEnabledAt) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(id);
         cluster.setNodeType("dc2.large");
         cluster.setMasterUsername("admin");
         cluster.setMasterPassword("Secret123!");
         cluster.setClusterStatus("available");
-        cluster.setSnapshotRegion(SOURCE);
-        cluster.setSnapshotCopyDestinationRegion(DESTINATION);
+        cluster.setSnapshotRegion(region);
+        cluster.setSnapshotCopyDestinationRegion(copyDestination);
         cluster.setSnapshotCopyRetentionPeriod(7);
         cluster.setSnapshotCopyManualRetentionPeriod(-1);
         cluster.setSnapshotCopyEnabledAt(copyEnabledAt);

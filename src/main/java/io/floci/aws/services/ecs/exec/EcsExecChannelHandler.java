@@ -193,7 +193,7 @@ public class EcsExecChannelHandler {
                 return;
             }
             containerInput = toContainer;
-            vertx.<Closeables>executeBlocking(() -> new Closeables(lifecycleManager.getDockerClient()
+            vertx.<Closeables>executeBlocking(() -> new Closeables(lifecycleManager.getStreamingDockerClient()
                     .execStartCmd(id)
                     .withStdIn(execStdin)
                     .withTty(current.interactive())

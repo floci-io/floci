@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
+import io.floci.aws.services.athena.model.NamedQuery;
 import io.floci.aws.services.athena.model.QueryExecution;
 import io.floci.aws.services.athena.model.QueryExecutionContext;
 import io.floci.aws.services.athena.model.ResultConfiguration;
@@ -25,16 +26,59 @@ import java.util.Map;
 public class AthenaJsonHandler {
 
     private final AthenaService athenaService;
+    private final AthenaNamedQueryService namedQueryService;
     private final ObjectMapper mapper;
 
     @Inject
-    public AthenaJsonHandler(AthenaService athenaService, ObjectMapper mapper) {
+    public AthenaJsonHandler(AthenaService athenaService, AthenaNamedQueryService namedQueryService,
+                              ObjectMapper mapper) {
         this.athenaService = athenaService;
+        this.namedQueryService = namedQueryService;
         this.mapper = mapper;
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
+        AthenaRequestShapes.check(action, request);
         return switch (action) {
+            case "CreateNamedQuery" -> {
+                String id = namedQueryService.createNamedQuery(region, text(request, "Name"),
+                        text(request, "Database"), text(request, "QueryString"),
+                        text(request, "Description"), text(request, "WorkGroup"),
+                        text(request, "ClientRequestToken"));
+                yield Response.ok(Map.of("NamedQueryId", id)).build();
+            }
+            case "GetNamedQuery" -> Response.ok(Map.of("NamedQuery",
+                    namedQueryService.getNamedQuery(region, text(request, "NamedQueryId")))).build();
+            case "BatchGetNamedQuery" -> {
+                JsonNode ids = request.get("NamedQueryIds");
+                List<String> queryIds = new ArrayList<>();
+                for (JsonNode id : ids) {
+                    queryIds.add(id.textValue());
+                }
+                yield Response.ok(namedQueryService.batchGetNamedQuery(region, queryIds)).build();
+            }
+            case "ListNamedQueries" -> {
+                PaginatedResult<NamedQuery> page = namedQueryService.listNamedQueries(region,
+                        text(request, "WorkGroup"),
+                        Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException"),
+                        Pagination.parseNextToken(request, "NextToken", "InvalidRequestException"));
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("NamedQueryIds", page.items().stream().map(NamedQuery::namedQueryId).toList());
+                if (page.nextToken() != null) {
+                    response.put("NextToken", page.nextToken());
+                }
+                yield Response.ok(response).build();
+            }
+            case "UpdateNamedQuery" -> {
+                namedQueryService.updateNamedQuery(region, text(request, "NamedQueryId"),
+                        text(request, "Name"), text(request, "QueryString"),
+                        text(request, "Description"));
+                yield Response.ok().build();
+            }
+            case "DeleteNamedQuery" -> {
+                namedQueryService.deleteNamedQuery(region, text(request, "NamedQueryId"));
+                yield Response.ok().build();
+            }
             case "StartQueryExecution" -> {
                 String query = request.get("QueryString").asText();
                 String named = text(request, "WorkGroup");
@@ -50,7 +94,8 @@ public class AthenaJsonHandler {
                     resultConfiguration = mapper.treeToValue(request.get("ResultConfiguration"), ResultConfiguration.class);
                 }
 
-                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration);
+                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration,
+                        strings(request, "ExecutionParameters"));
                 yield Response.ok(Map.of("QueryExecutionId", id)).build();
             }
             case "GetQueryExecution" -> {
@@ -150,20 +195,23 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "UntagResource" -> {
-                athenaService.untagResource(text(request, "ResourceARN"), tagKeys(request));
+                athenaService.untagResource(text(request, "ResourceARN"), strings(request, "TagKeys"));
                 yield Response.ok(Map.of()).build();
             }
             case "ListDatabases" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
             }
             case "ListTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
             }
             case "GetTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
@@ -173,14 +221,8 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("Tags", athenaService.listTagsForResource(resourceArn))).build();
             }
             case "DeleteWorkGroup" -> {
-                String wg = request.path("WorkGroup").asText(null);
-                if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
-                    throw new AwsException("InvalidRequestException", "WorkGroup is required.", 400);
-                }
-                if ("primary".equals(wg)) {
-                    throw new AwsException("InvalidRequestException", "The primary workgroup cannot be deleted.", 400);
-                }
-                athenaService.deleteWorkGroup(wg, region);
+                String wg = text(request, "WorkGroup");
+                namedQueryService.deleteWorkGroup(region, wg, request.path("RecursiveDeleteOption").asBoolean(false));
                 yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
@@ -219,15 +261,16 @@ public class AthenaJsonHandler {
         return tags;
     }
 
-    private static List<String> tagKeys(JsonNode request) {
-        JsonNode node = request.get("TagKeys");
+    /** The strings of the list member {@code field}, such as {@code TagKeys}; none when it is absent. */
+    private static List<String> strings(JsonNode request, String field) {
+        JsonNode node = request.get(field);
         if (node == null || !node.isArray()) {
             return List.of();
         }
-        List<String> keys = new ArrayList<>();
-        for (JsonNode key : node) {
-            keys.add(key.asText());
+        List<String> strings = new ArrayList<>();
+        for (JsonNode string : node) {
+            strings.add(string.asText());
         }
-        return keys;
+        return strings;
     }
 }

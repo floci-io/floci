@@ -57,7 +57,7 @@ class ContainerLifecycleManagerStartFailureTest {
     @BeforeEach
     void setUp() {
         manager = spy(new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config));
+                dockerClient, dockerClient, imageCacheService, containerDetector, config));
     }
 
     @Test

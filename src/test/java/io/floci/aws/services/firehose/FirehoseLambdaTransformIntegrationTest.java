@@ -1,17 +1,16 @@
 package io.floci.aws.services.firehose;
 
 import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 
 import static io.floci.aws.testing.FirehoseRequests.answerTransforms;
 import static io.floci.aws.testing.FirehoseRequests.encode;
@@ -34,18 +33,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The function itself is mocked. Running a real one needs Docker, which a
  * delivery-path test should not depend on, and the invocation payload is
  * asserted here from what the mock received.
+ *
+ * <p>The class runs on {@link RdsMockProfile}, which delivers a batch of two records inline: each
+ * test puts a batch of two.
  */
 @QuarkusTest
-@TestProfile(FirehoseLambdaTransformIntegrationTest.FlushEveryPairProfile.class)
+@TestProfile(RdsMockProfile.class)
 class FirehoseLambdaTransformIntegrationTest {
-
-    public static class FlushEveryPairProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            // Each test puts a batch of two, which then delivers inline.
-            return Map.of("floci.services.firehose.flush-record-count", "2");
-        }
-    }
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "Firehose_20150804.";

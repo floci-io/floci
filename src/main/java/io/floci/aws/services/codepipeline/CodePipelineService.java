@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DeadlineCharSequence;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -69,6 +70,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
@@ -76,9 +78,13 @@ import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
 
 @ApplicationScoped
-public class CodePipelineService {
+public class CodePipelineService implements StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(CodePipelineService.class);
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
+    /** What a custom action type's ARN resource starts with, its Owner/Category/Provider/Version following. */
+    private static final String ACTION_TYPE_RESOURCE = "actiontype:";
+    /** What a webhook's ARN resource starts with, its name following. */
+    private static final String WEBHOOK_RESOURCE = "webhook:";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
     private static final int MAX_ACTIVE_EXECUTIONS = 50;
     private static final long DEFAULT_WORKER_POLL_INTERVAL_MS = 100L;
@@ -123,6 +129,9 @@ public class CodePipelineService {
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
     // until the running execution finished.
     private final KeyedLockPool startLocks = new KeyedLockPool();
+    // Serializes the create, delete and tag writes of each custom action type, so two creates cannot both
+    // pass the existence check and a tag write cannot bring back a deleted type. Package-private for tests.
+    final KeyedLockPool actionTypeLocks = new KeyedLockPool();
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
     // An execution's status turns Failed as soon as one action fails, while its runner is still waiting
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
@@ -645,22 +654,19 @@ public class CodePipelineService {
     private ObjectNode stopPipelineExecution(JsonNode request, String region, String account) {
         CodePipelineExecution execution = requireExecution(
                 account, region, text(request, "pipelineName"), text(request, "pipelineExecutionId"));
-        if (isTerminal(execution.getStatus())) {
-            throw new AwsException("PipelineExecutionNotStoppableException",
-                    "Pipeline execution is already in a terminal state", 400);
-        }
-        // Publish the stop mode before the stop signal. The provider polling loop reads
-        // stopRequested first, so observing it also observes the matching abandon value.
-        execution.setAbandon(request.path("abandon").asBoolean(false));
-        execution.setStopRequested(true);
-        execution.setStatus("Stopping");
-        execution.setStatusSummary(request.path("reason").asText("Stop requested."));
-        execution.setLastUpdateTime(now());
-        if (execution.getCurrentStage() != null) {
-            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
-        }
-        if (execution.isAbandon()) {
-            synchronized (execution) {
+        synchronized (execution) {
+            if (isTerminal(execution.getStatus())) {
+                throw new AwsException("PipelineExecutionNotStoppableException",
+                        "Pipeline execution is already in a terminal state", 400);
+            }
+            execution.setAbandon(request.path("abandon").asBoolean(false));
+            execution.setStatus("Stopping");
+            execution.setStatusSummary(request.path("reason").asText("Stop requested."));
+            execution.setLastUpdateTime(now());
+            if (execution.getCurrentStage() != null) {
+                execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
+            }
+            if (execution.isAbandon()) {
                 execution.getActionExecutions().stream()
                         .filter(a -> "InProgress".equals(a.getStatus()))
                         .forEach(a -> {
@@ -668,8 +674,9 @@ public class CodePipelineService {
                             a.setLastUpdateTime(now());
                         });
             }
+            execution.setStopRequested(true);
+            putExecution(execution);
         }
-        putExecution(execution);
         eventPublisher.pipelineStateChange(execution, "STOPPING");
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
@@ -859,22 +866,24 @@ public class CodePipelineService {
             throw new AwsException("InvalidApprovalTokenException", "Approval token is invalid", 400);
         }
 
-        if (!"InProgress".equals(approval.getStatus())) {
-            throw new AwsException("ApprovalAlreadyCompletedException",
-                    "The approval action has already been approved or rejected.", 400);
-        }
+        synchronized (execution) {
+            if (!"InProgress".equals(approval.getStatus())) {
+                throw new AwsException("ApprovalAlreadyCompletedException",
+                        "The approval action has already been approved or rejected.", 400);
+            }
 
-        boolean approved = "Approved".equals(status);
-        approval.setStatus(approved ? "Succeeded" : "Failed");
-        approval.setSummary(summary);
-        approval.setLastUpdateTime(now());
-        if (!approved) {
-            execution.setStatus("Failed");
-            execution.setStatusSummary("Action " + actionName + " failed: " + summary);
-            execution.getStageExecutionStatuses().put(stageName, "Failed");
-            execution.setLastUpdateTime(now());
+            boolean approved = "Approved".equals(status);
+            approval.setStatus(approved ? "Succeeded" : "Failed");
+            approval.setSummary(summary);
+            approval.setLastUpdateTime(now());
+            if (!approved) {
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Action " + actionName + " failed: " + summary);
+                execution.getStageExecutionStatuses().put(stageName, "Failed");
+                execution.setLastUpdateTime(now());
+            }
+            putExecution(execution);
         }
-        putExecution(execution);
         return mapper.createObjectNode().put("approvedAt", now());
     }
 
@@ -1301,18 +1310,29 @@ public class CodePipelineService {
     private ObjectNode createCustomActionType(JsonNode request, String region, String account) {
         String id = actionTypeId(request.path("category").asText(), "Custom",
                 request.path("provider").asText(), request.path("version").asText());
-        if (itemStore.getForAccount(account, itemKey(region, "action", id)).isPresent()) {
-            throw new AwsException("ActionTypeAlreadyExistsException", "Action type already exists", 400);
-        }
-        ObjectNode actionType = mapper.createObjectNode();
-        actionType.setAll((ObjectNode) request.deepCopy());
-        actionType.putObject("id")
-                .put("category", request.path("category").asText())
-                .put("owner", "Custom")
-                .put("provider", request.path("provider").asText())
-                .put("version", request.path("version").asText());
-        storeItem(account, region, "action", id, "Active", actionType);
-        return mapper.createObjectNode().set("actionType", actionType);
+        String key = itemKey(region, "action", id);
+        return actionTypeLocks.withLock(account + ":" + key, () -> {
+            if (itemStore.getForAccount(account, key).isPresent()) {
+                throw new AwsException("ActionTypeAlreadyExistsException", "Action type already exists", 400);
+            }
+            ObjectNode actionType = mapper.createObjectNode();
+            actionType.setAll((ObjectNode) request.deepCopy());
+            actionType.remove("tags");
+            actionType.putObject("id")
+                    .put("category", request.path("category").asText())
+                    .put("owner", "Custom")
+                    .put("provider", request.path("provider").asText())
+                    .put("version", request.path("version").asText());
+            CodePipelineStoredItem item = newItem(account, region, "action", id, "Active", actionType);
+            item.setTags(parseTags(request.path("tags")));
+            putItem(item);
+            ObjectNode response = mapper.createObjectNode();
+            response.set("actionType", actionType);
+            if (!item.getTags().isEmpty()) {
+                response.set("tags", tagsNode(item.getTags()));
+            }
+            return response;
+        });
     }
 
     private ObjectNode updateActionType(JsonNode request, String region, String account) {
@@ -1337,7 +1357,8 @@ public class CodePipelineService {
     private ObjectNode deleteCustomActionType(JsonNode request, String region, String account) {
         String id = actionTypeId(request.path("category").asText(), "Custom",
                 request.path("provider").asText(), request.path("version").asText());
-        itemStore.deleteForAccount(account, itemKey(region, "action", id));
+        String key = itemKey(region, "action", id);
+        actionTypeLocks.withLock(account + ":" + key, () -> itemStore.deleteForAccount(account, key));
         return mapper.createObjectNode();
     }
 
@@ -1440,7 +1461,7 @@ public class CodePipelineService {
         ObjectNode item = mapper.createObjectNode();
         item.set("definition", webhook.deepCopy());
         item.put("url", "http://localhost:4566/codepipeline/webhooks/" + name);
-        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook:" + name).toString());
+        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, WEBHOOK_RESOURCE + name).toString());
         if (request.path("tags").isArray() && !request.path("tags").isEmpty()) {
             item.set("tags", request.path("tags").deepCopy());
         }
@@ -1474,22 +1495,129 @@ public class CodePipelineService {
     }
 
     private ObjectNode tagResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        pipeline.getTags().putAll(parseTags(request.path("tags")));
-        putPipeline(pipeline);
+        updateTags(account, region, text(request, "resourceArn"), tags -> {
+            tags.putAll(parseTags(request.path("tags")));
+            return requireTagLimit(tags);
+        });
         return mapper.createObjectNode();
     }
 
     private ObjectNode untagResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        request.path("tagKeys").forEach(k -> pipeline.getTags().remove(k.asText()));
-        putPipeline(pipeline);
+        updateTags(account, region, text(request, "resourceArn"), tags -> {
+            request.path("tagKeys").forEach(k -> tags.remove(k.asText()));
+            return tags;
+        });
         return mapper.createObjectNode();
     }
 
     private ObjectNode listTagsForResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        return mapper.createObjectNode().set("tags", tagsNode(pipeline.getTags()));
+        String arn = text(request, "resourceArn");
+        Map<String, String> tags = actionTypeKey(account, region, arn)
+                .flatMap(key -> itemStore.getForAccount(account, key))
+                .map(CodePipelineStoredItem::getTags)
+                .orElseGet(() -> requirePipelineByArn(account, region, arn).getTags());
+        return mapper.createObjectNode().set("tags", tagsNode(tags));
+    }
+
+    /**
+     * Stores {@code update} applied to a copy of the resource's tags, under the lock its create and
+     * delete take. The map is replaced, never edited, since ListTagsForResource and the stores'
+     * serializers read it without that lock.
+     */
+    private void updateTags(String account, String region, String arn, UnaryOperator<Map<String, String>> update) {
+        Optional<String> actionTypeKey = actionTypeKey(account, region, arn);
+        if (actionTypeKey.isPresent()) {
+            String key = actionTypeKey.get();
+            actionTypeLocks.withLock(account + ":" + key, () -> {
+                CodePipelineStoredItem item = itemStore.getForAccount(account, key)
+                        .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                                "Resource not found: " + arn, 400));
+                item.setTags(update.apply(new LinkedHashMap<>(item.getTags())));
+                putItem(item);
+            });
+            return;
+        }
+        String name = requirePipelineByArn(account, region, arn).getName();
+        sourcePollLocks.withLock(pipelineLockKey(account, region, name), () -> {
+            CodePipelinePipeline pipeline = requirePipelineByArn(account, region, arn);
+            pipeline.setTags(update.apply(new LinkedHashMap<>(pipeline.getTags())));
+            putPipeline(pipeline);
+        });
+    }
+
+    @Override
+    public String namespace() {
+        return "codepipeline";
+    }
+
+    /** A request names a pipeline, a webhook or an action type by its name or its id, which its ARN carries whole. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the pipeline, the webhook or the custom action type whose ARN is {@code arn}, in the request's
+     * account, where the tag handlers read: an ARN of another account names none. Read in place under the Region the
+     * ARN names, a record stored before storage was account-aware included: a pipeline under its name and a webhook
+     * under its name, each matched on the whole ARN it recorded, and an action type under the key its ARN gives, as
+     * the tag handlers find it, the type recording no ARN of its own. A webhook's tags are the ones PutWebhook gave
+     * it. A stage's or an action's ARN reads nothing, Floci holding no tags of their own. Tags are replaced by a new
+     * map under the resource's lock, never changed in place, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "codepipeline")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = pipelineStore.accountId();
+        if (!parsed.accountId().equals(account)) {
+            return Map.of();
+        }
+        String resource = parsed.resource();
+        Map<String, String> tags;
+        if (resource.startsWith(ACTION_TYPE_RESOURCE)) {
+            tags = actionTypeKey(account, parsed.region(), arn)
+                    .flatMap(key -> AccountAwareStorageBackend.readInAccount(itemStore, account, key))
+                    .map(CodePipelineStoredItem::getTags)
+                    .orElse(Map.of());
+        } else if (resource.startsWith(WEBHOOK_RESOURCE)) {
+            tags = AccountAwareStorageBackend.readInAccount(itemStore, account,
+                            itemKey(parsed.region(), "webhook", resource.substring(WEBHOOK_RESOURCE.length())))
+                    .map(CodePipelineStoredItem::getData)
+                    .filter(data -> arn.equals(data.path("arn").asText(null)))
+                    .map(data -> webhookTags(data.path("tags")))
+                    .orElse(Map.of());
+        } else if (resource.indexOf('/') < 0) {
+            tags = AccountAwareStorageBackend.readInAccount(pipelineStore, account,
+                            pipelineKey(parsed.region(), resource))
+                    .filter(pipeline -> arn.equals(pipeline.getArn()))
+                    .map(CodePipelinePipeline::getTags)
+                    .orElse(Map.of());
+        } else {
+            tags = Map.of();
+        }
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
+        return copy;
+    }
+
+    /** The {@code key}/{@code value} pairs of the tags PutWebhook stored with a webhook. */
+    private static Map<String, String> webhookTags(JsonNode tags) {
+        Map<String, String> read = new LinkedHashMap<>();
+        tags.forEach(tag -> read.put(tag.path("key").asText(), tag.path("value").asText("")));
+        return read;
+    }
+
+    private Optional<String> actionTypeKey(String account, String region, String arn) {
+        return AwsArnUtils.parseIfArnIn(arn, "codepipeline", region)
+                .filter(parsed -> account.equals(parsed.accountId())
+                        && parsed.resource().startsWith(ACTION_TYPE_RESOURCE))
+                // The ARN names the type as Owner/Category/Provider/Version.
+                .map(parsed -> parsed.resource().substring(ACTION_TYPE_RESOURCE.length()).split("/"))
+                .filter(id -> id.length == 4)
+                .map(id -> itemKey(region, "action", actionTypeId(id[1], id[0], id[2], id[3])));
     }
 
     /**
@@ -1829,10 +1957,12 @@ public class CodePipelineService {
     }
 
     private void failForCondition(CodePipelineExecution execution, String stageName, String conditionType) {
-        execution.setStatus("Failed");
-        execution.setStatusSummary(
-                "Condition " + conditionType + " failed in stage " + stageName + ".");
-        putExecution(execution);
+        synchronized (execution) {
+            execution.setStatus("Failed");
+            execution.setStatusSummary(
+                    "Condition " + conditionType + " failed in stage " + stageName + ".");
+            putExecution(execution);
+        }
     }
 
     private void finishExecutionRun(CodePipelineExecution execution) {
@@ -1929,7 +2059,9 @@ public class CodePipelineService {
                     .toList();
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
             if (futures.stream().anyMatch(CompletableFuture::isCompletedExceptionally)) {
-                execution.setStatus("Failed");
+                synchronized (execution) {
+                    execution.setStatus("Failed");
+                }
             }
         });
     }
@@ -1974,8 +2106,10 @@ public class CodePipelineService {
             state.setErrorDetails(Map.of(
                     "code", e instanceof AwsException aws ? aws.getErrorCode() : "ActionExecutionFailed",
                     "message", Objects.toString(e.getMessage(), "Action failed")));
-            execution.setStatus("Failed");
-            execution.setStatusSummary("Action " + state.getActionName() + " failed: " + state.getSummary());
+            synchronized (execution) {
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Action " + state.getActionName() + " failed: " + state.getSummary());
+            }
         } finally {
             state.setLastUpdateTime(now());
             putExecution(execution);
@@ -2585,22 +2719,24 @@ public class CodePipelineService {
     }
 
     private boolean finishIfStopped(CodePipelineExecution execution) {
-        if (!execution.isStopRequested()) {
-            return false;
+        synchronized (execution) {
+            if (!execution.isStopRequested()) {
+                return false;
+            }
+            boolean anyRunning = actionExecutionsSnapshot(execution).stream()
+                    .anyMatch(a -> "InProgress".equals(a.getStatus()));
+            if (!execution.isAbandon() && anyRunning) {
+                return false;
+            }
+            execution.setStatus("Stopped");
+            execution.setStatusSummary("Pipeline execution stopped.");
+            execution.setLastUpdateTime(now());
+            if (execution.getCurrentStage() != null) {
+                execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopped");
+            }
+            putExecution(execution);
+            return true;
         }
-        boolean anyRunning = actionExecutionsSnapshot(execution).stream()
-                .anyMatch(a -> "InProgress".equals(a.getStatus()));
-        if (!execution.isAbandon() && anyRunning) {
-            return false;
-        }
-        execution.setStatus("Stopped");
-        execution.setStatusSummary("Pipeline execution stopped.");
-        execution.setLastUpdateTime(now());
-        if (execution.getCurrentStage() != null) {
-            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopped");
-        }
-        putExecution(execution);
-        return true;
     }
 
     private void initializeTransitions(CodePipelinePipeline pipeline) {
@@ -2659,6 +2795,11 @@ public class CodePipelineService {
 
     private void storeItem(String account, String region, String type, String id,
                            String status, JsonNode data) {
+        putItem(newItem(account, region, type, id, status, data));
+    }
+
+    private CodePipelineStoredItem newItem(String account, String region, String type, String id,
+                                           String status, JsonNode data) {
         CodePipelineStoredItem item = new CodePipelineStoredItem();
         item.setAccountId(account);
         item.setRegion(region);
@@ -2668,7 +2809,7 @@ public class CodePipelineService {
         item.setCreated(now());
         item.setUpdated(item.getCreated());
         item.setData(data.deepCopy());
-        putItem(item);
+        return item;
     }
 
     private void putItem(CodePipelineStoredItem item) {
@@ -3073,6 +3214,10 @@ public class CodePipelineService {
                 tags.put(tag.path("key").asText(), tag.path("value").asText(""));
             }
         }
+        return requireTagLimit(tags);
+    }
+
+    private static Map<String, String> requireTagLimit(Map<String, String> tags) {
         if (tags.size() > 50) {
             throw new AwsException("TooManyTagsException", "A resource can have at most 50 tags", 400);
         }

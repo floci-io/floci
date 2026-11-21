@@ -20,18 +20,18 @@ public class NetworkFirewallJsonHandler {
         return switch (action) {
             case "CreateRuleGroup" -> ok(service.createRuleGroup(request, region, accountId));
             case "DescribeRuleGroup" -> ok(service.describeRuleGroup(
-                    textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName")));
-            case "UpdateRuleGroup" -> ok(service.updateRuleGroup(request));
+                    textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName"), region));
+            case "UpdateRuleGroup" -> ok(service.updateRuleGroup(request, region));
             case "DeleteRuleGroup" -> ok(service.deleteRuleGroup(
-                    textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName")));
-            case "ListRuleGroups" -> ok(service.listRuleGroups(textOrNull(request, "Type")));
+                    textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName"), region));
+            case "ListRuleGroups" -> ok(service.listRuleGroups(textOrNull(request, "Type"), region));
             case "CreateFirewallPolicy" -> ok(service.createFirewallPolicy(request, region, accountId));
             case "DescribeFirewallPolicy" -> ok(service.describeFirewallPolicy(
-                    textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName")));
-            case "UpdateFirewallPolicy" -> ok(service.updateFirewallPolicy(request));
+                    textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName"), region));
+            case "UpdateFirewallPolicy" -> ok(service.updateFirewallPolicy(request, region));
             case "DeleteFirewallPolicy" -> ok(service.deleteFirewallPolicy(
-                    textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName")));
-            case "ListFirewallPolicies" -> ok(service.listFirewallPolicies());
+                    textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName"), region));
+            case "ListFirewallPolicies" -> ok(service.listFirewallPolicies(region));
             case "CreateFirewall" -> ok(service.createFirewall(request, region, accountId));
             case "DescribeFirewall" -> Response.ok(service.describeFirewall(
                     textOrNull(request, "FirewallArn"),
@@ -40,18 +40,18 @@ public class NetworkFirewallJsonHandler {
                     accountId)).build();
             case "DeleteFirewall" -> ok(service.deleteFirewall(
                     textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName"), region));
-            case "ListFirewalls" -> ok(service.listFirewalls(request));
+            case "ListFirewalls" -> ok(service.listFirewalls(request, region));
             case "UpdateFirewallDeleteProtection", "UpdateFirewallPolicyChangeProtection",
                  "UpdateSubnetChangeProtection", "UpdateAvailabilityZoneChangeProtection",
                  "UpdateFirewallDescription", "UpdateFirewallAnalysisSettings"
                     -> ok(service.updateFirewall(action, request, region, accountId));
-            case "AssociateSubnets" -> ok(service.associateSubnets(request));
-            case "DisassociateSubnets" -> ok(service.disassociateSubnets(request));
-            case "AssociateAvailabilityZones" -> ok(service.associateAvailabilityZones(request));
-            case "DisassociateAvailabilityZones" -> ok(service.disassociateAvailabilityZones(request));
-            case "UpdateLoggingConfiguration" -> ok(service.putLoggingConfiguration(request));
+            case "AssociateSubnets" -> ok(service.associateSubnets(request, region));
+            case "DisassociateSubnets" -> ok(service.disassociateSubnets(request, region));
+            case "AssociateAvailabilityZones" -> ok(service.associateAvailabilityZones(request, region));
+            case "DisassociateAvailabilityZones" -> ok(service.disassociateAvailabilityZones(request, region));
+            case "UpdateLoggingConfiguration" -> ok(service.putLoggingConfiguration(request, region));
             case "DescribeLoggingConfiguration" -> ok(service.describeLoggingConfiguration(
-                    textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName")));
+                    textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName"), region));
             case "AssociateFirewallPolicy" -> ok(service.associateFirewallPolicy(request, region, accountId));
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",

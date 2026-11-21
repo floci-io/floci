@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
@@ -50,7 +51,7 @@ class LambdaScopedTablePermissionIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
-        iamService.createRole(roleName, "/", "{}", null, 3600, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         iamService.putRolePolicy(roleName, "TableAccess", """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                  "Action":["dynamodb:PutItem","dynamodb:GetItem"],"Resource":"%s"}]}

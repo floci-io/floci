@@ -1,13 +1,17 @@
 package io.floci.aws.services.emr;
 
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Network;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.S3Uri;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -15,16 +19,27 @@ import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
+import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,9 +47,16 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Keeps each EMR cluster's storage in Docker volumes, one for its primary node's {@code /home/hadoop} and one for its
@@ -46,7 +68,16 @@ import java.util.function.LongSupplier;
  * primary node's, with their data in a third volume, so that the first container to mount the {@code /mnt} one is a
  * step's, which fills it from the step's image. On a cluster with Hive or HCatalog the same container runs Hive's
  * metastore service, as EMR's primary node does, with its database in that third volume, reaching S3 with a session
- * for the cluster's instance profile's role, which goes with the container.
+ * for the cluster's instance profile's role, which goes with the container. Where it has core nodes, "Core nodes run
+ * the Data Node daemon" and "a core node runs YARN NodeManager daemons", and "Task nodes don't run the Data Node
+ * daemon", each is a container of its own on the cluster's network, with its data in a volume of its own. Each node is
+ * on the network the cluster's steps run on too, the one Floci's other containers are on, MSK's brokers and RDS's
+ * databases among them, from before it starts, with Floci's DNS, so a cluster-mode driver or an executor on it reaches
+ * them by the endpoints Floci gives, as a cluster's nodes reach what is in their VPC, and a virtual-hosted bucket name
+ * under Floci's host name resolves. Their HDFS and YARN listen on their address on the cluster's network alone (see
+ * BIND_SETUP), so that network's other containers reach neither; Hive 3's metastore has no setting for the address it
+ * listens on, so the primary node of a cluster with Hive or HCatalog, which runs it, stays off that network, and so does
+ * every node where Docker does not say the subnet of the cluster's network.
  */
 @ApplicationScoped
 public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
@@ -61,10 +92,16 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private static final String CONTAINER_NETWORK_PREFIX = "container:";
     private static final String NO_NETWORK = "none";
     private static final String LOOPBACK = "127.0.0.1";
+    // The address a node's daemons listen on, which its start writes here for what asks them later (see BIND_SETUP).
+    private static final String BIND_FILE = "/tmp/floci-hdfs-bind";
+    private static final String BIND = "$(cat " + BIND_FILE + ")";
+    // The subnet of the cluster's own network, set where its node joins the steps' network too, whose containers then do
+    // not reach the node's daemons, which listen on its address on the cluster's network alone.
+    private static final String SUBNET_VARIABLE = "FLOCI_HDFS_SUBNET";
     // The NameNode's JMX on its web port, which says when the DataNode has joined and safe mode has ended without
     // starting a JVM of hdfs's own each time it is asked; each look is given five seconds, so one the NameNode does not
     // answer while it starts is asked again.
-    private static final String NAMENODE_JMX = "http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=";
+    private static final String NAMENODE_JMX = "http://" + BIND + ":9870/jmx?qry=Hadoop:service=NameNode,name=";
     // The metastore service's --hiveconf settings, Floci's S3 among them; set only on a cluster with Hive or
     // HCatalog.
     private static final String HIVE_METASTORE_VARIABLE = "FLOCI_HIVE_METASTORE";
@@ -76,42 +113,132 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // image's hive.user.install.directory: the primary node puts it there first, as two sessions uploading it at once
     // can leave one with a jar that changed under it, whose Tez tasks then fail to launch.
     private static final String HIVE_JARS = "/tmp/hadoop/.hiveJars";
-    // The name Floci's own container has on a cluster's network, which it joins for the metastore service to reach it.
+    // The memory, in MB, and the virtual cores a cluster's NodeManager offers YARN's containers; set only on a cluster
+    // whose primary node runs YARN.
+    private static final String YARN_MEMORY_VARIABLE = "FLOCI_YARN_MEMORY_MB";
+    private static final String YARN_VCORES_VARIABLE = "FLOCI_YARN_VCORES";
+    // The folder of the image holding the Hadoop the node's daemons run from; set only when that is not the image's own.
+    private static final String HADOOP_FOLDER_VARIABLE = "FLOCI_HADOOP_FOLDER";
+    // A core or task node's container: its host name, and whether it holds a DataNode, as a resize must know them again
+    // after Floci restarts.
+    private static final String NODE_COMPONENT = SparkJobRunner.Storage.NODE_COMPONENT;
+    private static final String NODE_HOST_LABEL = "io.floci.emr.node-host";
+    private static final String NODE_CORE_LABEL = "io.floci.emr.node-core";
+    private static final String NODE_HOST_VARIABLE = "FLOCI_NODE_HOST";
+    private static final String NODE_CORE_VARIABLE = "FLOCI_NODE_CORE";
+    // Set on a primary node whose cluster was created with core nodes, which hold its DataNodes and NodeManagers in its
+    // place.
+    private static final String NODE_WORKERS_VARIABLE = "FLOCI_NODE_WORKERS";
+    private static final String REPLICATION_VARIABLE = "FLOCI_HDFS_REPLICATION";
+    // The nodes being decommissioned, one host name to a line, as HDFS and YARN read them on the primary node.
+    private static final String DFS_EXCLUDE = HDFS_CONF + "/dfs.exclude";
+    private static final String YARN_EXCLUDE = HDFS_CONF + "/yarn.exclude";
+    /** The ResourceManager's web port, "YARN ResourceManager | http://master-public-dns-name:8088/". */
+    static final int RESOURCE_MANAGER_WEB_PORT = 8088;
+    /** A NodeManager's web port, "YARN NodeManager | http://coretask-public-dns-name:8042/". */
+    static final int NODE_MANAGER_WEB_PORT = 8042;
+    // The ResourceManager's cluster metrics on its web port, which say when the NodeManager has registered.
+    private static final String RESOURCE_MANAGER_METRICS = "http://" + BIND + ":" + RESOURCE_MANAGER_WEB_PORT
+            + "/ws/v1/cluster/metrics";
+    private static final String RESOURCE_MANAGER_NODES = "http://" + BIND + ":" + RESOURCE_MANAGER_WEB_PORT
+            + "/ws/v1/cluster/nodes?states=";
+    // The MapReduce JobHistory server's information on its web port, which says it has started.
+    private static final String JOB_HISTORY_INFO = "http://" + BIND + ":"
+            + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT + "/ws/v1/history/info";
+    /** The YARN timeline server's web port, Hadoop's default {@code yarn.timeline-service.webapp.address}'s. */
+    static final int TIMELINE_WEB_PORT = 8188;
+    /** The port the Tez UI is served on, at {@link #TEZ_UI_PATH}: "Tez | http://master-public-dns-name:8080/tez-ui". */
+    static final int TEZ_UI_PORT = 8080;
+    static final String TEZ_UI_PATH = "/tez-ui/";
+    // Set on a primary node that runs the YARN timeline server, as on a cluster with Hadoop, and the Tez UI, as on one
+    // with Tez; what each answers on its web port says it has started. The Tez UI's configuration, which its page
+    // reads, names the timeline server and the ResourceManager by the node's name, whose links Floci makes the
+    // browser's.
+    private static final String TIMELINE_VARIABLE = "FLOCI_YARN_TIMELINE";
+    private static final String TEZ_UI_VARIABLE = "FLOCI_TEZ_UI";
+    private static final String TIMELINE_ABOUT = "http://" + BIND + ":" + TIMELINE_WEB_PORT + "/ws/v1/timeline";
+    private static final String TEZ_UI_PAGE = "http://" + BIND + ":" + TEZ_UI_PORT + TEZ_UI_PATH;
+    private static final String TEZ_UI_CONFIG = "/etc/tez-ui/conf/configs.js";
+    // The Tez UI's files, which an image with Tez has, one with Hive or Floci's Pig.
+    private static final String TEZ_UI_FILES = "/usr/lib/tez/tez-ui";
+    // A cluster's kept history: a volume of its primary node's, mounted here, which holds the YARN timeline server's
+    // store and, once the cluster has ended, its Spark applications' event logs, and which a container of its own
+    // serves after the cluster's other storage has gone; set where the node runs either.
+    static final String HISTORY_PATH = "/var/lib/floci-history";
+    private static final String HISTORY_COMPONENT = "emr-history";
+    private static final String HISTORY_VARIABLE = "FLOCI_HISTORY";
+    private static final String HISTORY_READY = "/tmp/floci-history-ready";
+    private static final String HISTORY_CONF = "/tmp/floci-history-conf";
+    private static final String HISTORY_EVENT_LOGS = HISTORY_PATH + "/spark-events";
+    private static final String HISTORY_TIMELINE = HISTORY_PATH + "/timeline";
+    // How long the timeline server keeps an entity, 7 days by default: "The logs are available for 30 days after the
+    // application ends".
+    private static final long TIMELINE_TTL_MS = 30L * 24 * 60 * 60 * 1000;
+    private static final int HISTORY_COPY_SECONDS = 120;
+    // Set on a primary node that runs a Spark History Server, as on a cluster with Spark; its version on its web port
+    // says it has started.
+    private static final String SPARK_HISTORY_VARIABLE = "FLOCI_SPARK_HISTORY";
+    private static final String SPARK_HISTORY_VERSION = "http://" + BIND + ":"
+            + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "/api/v1/version";
+    // Where a NodeManager keeps its containers' logs, on the node's volume, as <application>/<container>/<file>.
+    private static final String YARN_LOGS = "/mnt/yarn/logs";
+    private static final int LOG_LISTING_SECONDS = 30;
+    // A container's launch script holds its environment, the step's AWS session among it, so it stays on the node.
+    private static final String CONTAINER_LAUNCH_SCRIPT = "launch_container.sh";
+    // The name Floci's own container has on a cluster's network, which it joins for the metastore service and YARN's
+    // executors to reach it.
     private static final String FLOCI_ALIAS = "floci";
     // How long a cluster's HDFS and metastore may take to start, the NameNode formatted the first time, before a step
     // gives up.
     private static final Duration HDFS_START_TIMEOUT = Duration.ofSeconds(120);
     private static final Duration HDFS_POLL_INTERVAL = Duration.ofMillis(500);
-    // The primary node's HDFS, started as root: its daemons log their warnings and errors to the container's output,
-    // which docker logs shows; its host name, FLOCI_HDFS_HOST, leads to this container's address, where the DataNode
-    // registers, so steps reach both by it; /mnt, its data's volume, becomes the image's user's, which runs a NameNode
-    // and a DataNode with their data in it, the NameNode formatted the first time, with one copy of each block and
-    // without permissions, listening on FLOCI_HDFS_BIND: every address of the container, on the cluster's own network,
-    // or, in a namespace the steps share, the host's or a container's, only its loopback, which its name leads to, so
-    // no other interface serves files anyone could change; in a container's, the hosts file the name goes in is the
-    // one the namespace's containers share, the steps' too. Once the NameNode on its port is this container's own,
-    // its ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has
-    // joined and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the
-    // folders EMR's HDFS has for steps, /tmp and the hadoop user's home, are made. With HIVE_METASTORE_VARIABLE set,
-    // Hive's metastore service starts too, with the image's Hadoop configuration, as Hive steps run, its settings after
-    // it: "Hive records metastore information in a MySQL database on the primary node's file system", kept as a Derby
-    // database in /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its
-    // warehouse in the HDFS, Hive's exec jar in HIVE_JARS; the cluster's core-site and hive-site, last, replace any of
-    // them, as on EMR's primary node. HDFS_READY then says the node is ready. A daemon that exits,
-    // before or after, the metastore among them, ends the container, its readiness gone, so the next step starts it
-    // again on its data.
-    private static final String HDFS_SCRIPT = String.join("\n",
-            "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
-            "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit",
+    // How long a node being decommissioned may take before it goes anyway: EMR's default for a graceful one, "3600s
+    // (one hour)", and a minute more for the ResourceManager's own timeout to pass first.
+    private static final Duration GRACEFUL_DECOMMISSION = Duration.ofHours(1);
+    private static final Duration DECOMMISSION_MARGIN = Duration.ofMinutes(1);
+    private static final Duration DECOMMISSION_POLL = Duration.ofSeconds(3);
+    // A core node that has gone stays in HDFS's exclude list until the NameNode has it dead: taken out while the
+    // NameNode still has it live, it is back in service, the copies of its blocks count again, and the NameNode drops
+    // one copy of each block now held twice, which may be the remaining node's. The NameNode has a node dead after twice
+    // its heartbeat recheck interval and ten heartbeats, 2 x 5s + 10 x 3s with NODE_SETUP's setting; this has a margin.
+    private static final Duration DEAD_NODE_WAIT = Duration.ofSeconds(60);
+    private static final int NODE_COMMAND_SECONDS = 120;
+    // How much of a node's output is logged when it does not become ready, and how long reading it may take.
+    private static final int NODE_LOG_LINES = 40;
+    private static final Duration NODE_LOG_READ = Duration.ofSeconds(5);
+    // Every daemon of a node, and each command run on it, uses the Hadoop in HADOOP_FOLDER_VARIABLE when that is set.
+    private static final String HADOOP_FOLDER_SETUP = String.join("\n",
+            "if [ -n \"$" + HADOOP_FOLDER_VARIABLE + "\" ]; then",
+            "  h=$" + HADOOP_FOLDER_VARIABLE,
+            "  export HADOOP_HOME=$h/hadoop HADOOP_COMMON_HOME=$h/hadoop HADOOP_LIBEXEC_DIR=$h/hadoop/libexec"
+                    + " HADOOP_HDFS_HOME=$h/hadoop-hdfs HADOOP_MAPRED_HOME=$h/hadoop-mapreduce"
+                    + " HADOOP_YARN_HOME=$h/hadoop-yarn"
+                    + " PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop-mapreduce/bin:$h/hadoop/bin:$PATH",
+            "fi");
+    // What every node of a cluster writes before its daemons start: the files that say which node it is, the Hadoop
+    // configuration, its name among the nodes in HDFS's when it is given one, and the empty files listing the nodes
+    // being decommissioned.
+    private static final String NODE_SETUP = String.join("\n",
             "chown hadoop:hadoop /mnt || exit",
+            EmrServerlessSparkRunner.NODE_INFO,
+            EmrServerlessSparkRunner.HIVE_ONE_SDK,
             "mkdir -p " + HDFS_CONF + " || exit",
             "printf '%s\\n' '<configuration>'"
                     + " \"<property><name>fs.defaultFS</name><value>hdfs://$FLOCI_HDFS_HOST:8020</value></property>\""
                     + " '</configuration>' > " + HDFS_CONF + "/core-site.xml",
+            "datanode_name=; [ -z \"$" + NODE_HOST_VARIABLE + "\" ] || datanode_name=\"<property>"
+                    + "<name>dfs.datanode.hostname</name><value>$" + NODE_HOST_VARIABLE + "</value></property>\"",
+            ": > " + DFS_EXCLUDE + " || exit",
+            ": > " + YARN_EXCLUDE + " || exit",
             "printf '%s\\n' '<configuration>'"
                     + " '<property><name>dfs.namenode.name.dir</name><value>file:///mnt/namenode</value></property>'"
                     + " '<property><name>dfs.datanode.data.dir</name><value>file:///mnt/datanode</value></property>'"
-                    + " '<property><name>dfs.replication</name><value>1</value></property>'"
+                    + " \"<property><name>dfs.replication</name><value>${" + REPLICATION_VARIABLE
+                    + ":-1}</value></property>\""
+                    + " '<property><name>dfs.hosts.exclude</name><value>" + DFS_EXCLUDE + "</value></property>'"
+                    + " '<property><name>dfs.namenode.decommission.interval</name><value>3</value></property>'"
+                    + " '<property><name>dfs.namenode.heartbeat.recheck-interval</name><value>5000</value></property>'"
+                    + " \"$datanode_name\""
                     + " '<property><name>dfs.permissions.enabled</name><value>false</value></property>'"
                     + " \"<property><name>dfs.namenode.rpc-bind-host</name><value>$FLOCI_HDFS_BIND</value></property>\""
                     + " \"<property><name>dfs.namenode.http-address</name>"
@@ -122,32 +249,137 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " \"<property><name>dfs.datanode.ipc.address</name>"
                     + "<value>$FLOCI_HDFS_BIND:9867</value></property>\""
                     + " '</configuration>' > " + HDFS_CONF + "/hdfs-site.xml",
+            "timeline_store=/mnt/yarn/timeline",
+            "if [ -n \"$" + HISTORY_VARIABLE + "\" ]; then",
+            "  mkdir -p " + HISTORY_EVENT_LOGS + " " + HISTORY_TIMELINE + " && chown -R hadoop:hadoop " + HISTORY_PATH
+                    + " || exit",
+            "  timeline_store=" + HISTORY_TIMELINE,
+            "fi",
+            "timeline=; [ -z \"$" + TIMELINE_VARIABLE + "\" ] || timeline=\"" + String.join("", List.of(
+                    property("yarn.timeline-service.enabled", "true"),
+                    property("yarn.timeline-service.hostname", "$FLOCI_HDFS_HOST"),
+                    property("yarn.timeline-service.bind-host", "$FLOCI_HDFS_BIND"),
+                    property("yarn.timeline-service.leveldb-timeline-store.path", "$timeline_store"),
+                    property("yarn.timeline-service.ttl-ms", String.valueOf(TIMELINE_TTL_MS)),
+                    property("yarn.timeline-service.http-cross-origin.enabled", "true"),
+                    property("yarn.resourcemanager.webapp.cross-origin.enabled", "true"),
+                    // The ResourceManager publishes its applications there: Hadoop 3.4 reads the first, which
+                    // deprecates the second that earlier releases' Hadoop may still read.
+                    property("yarn.system-metrics-publisher.enabled", "true"),
+                    property("yarn.resourcemanager.system-metrics-publisher.enabled", "true"))) + "\"",
+            "if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then",
+            "  mkdir -p " + TEZ_UI_CONFIG.substring(0, TEZ_UI_CONFIG.lastIndexOf('/')) + " && printf '%s\\n' 'ENV = {'"
+                    + " '  hosts: {' \"    timeline: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\""
+                    + " \"    rm: 'http://$FLOCI_HDFS_HOST:" + RESOURCE_MANAGER_WEB_PORT + "',\" '  },' '};'"
+                    + " > " + TEZ_UI_CONFIG + " || exit",
+            "fi",
+            "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then",
+            "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
+                    "yarn.resourcemanager.hostname", "$FLOCI_HDFS_HOST",
+                    "yarn.resourcemanager.bind-host", "$FLOCI_HDFS_BIND",
+                    "yarn.nodemanager.bind-host", "$FLOCI_HDFS_BIND",
+                    "yarn.nodemanager.resource.memory-mb", "$" + YARN_MEMORY_VARIABLE,
+                    "yarn.nodemanager.resource.cpu-vcores", "$" + YARN_VCORES_VARIABLE,
+                    "yarn.scheduler.minimum-allocation-mb", "256",
+                    "yarn.scheduler.maximum-allocation-mb", "$" + YARN_MEMORY_VARIABLE,
+                    "yarn.scheduler.maximum-allocation-vcores", "$" + YARN_VCORES_VARIABLE,
+                    "yarn.nodemanager.vmem-check-enabled", "false",
+                    "yarn.nodemanager.pmem-check-enabled", "false",
+                    "yarn.nodemanager.local-dirs", "/mnt/yarn/local",
+                    "yarn.nodemanager.log-dirs", "/mnt/yarn/logs",
+                    "yarn.nodemanager.disk-health-checker.max-disk-utilization-per-disk-percentage", "100",
+                    "yarn.nodemanager.aux-services", "mapreduce_shuffle",
+                    "yarn.resourcemanager.nodes.exclude-path", YARN_EXCLUDE,
+                    "yarn.resourcemanager.decommissioning-nodes-watcher.poll-interval-secs", "3"))
+                    + " \"$timeline\" '</configuration>' > " + HDFS_CONF + "/yarn-site.xml || exit",
+            "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
+                    "yarn.scheduler.capacity.root.queues", "default",
+                    "yarn.scheduler.capacity.root.default.capacity", "100",
+                    "yarn.scheduler.capacity.root.default.maximum-capacity", "100",
+                    "yarn.scheduler.capacity.maximum-am-resource-percent", "0.5"))
+                    + " '</configuration>' > " + HDFS_CONF + "/capacity-scheduler.xml || exit",
+            "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
+                    "mapreduce.jobhistory.address", "$FLOCI_HDFS_HOST:" + EmrServerlessSparkRunner.JOB_HISTORY_PORT,
+                    "mapreduce.jobhistory.webapp.address",
+                    "$FLOCI_HDFS_HOST:" + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT,
+                    "mapreduce.jobhistory.admin.address", "$FLOCI_HDFS_HOST:10033",
+                    "mapreduce.jobhistory.bind-host", "$FLOCI_HDFS_BIND"))
+                    + " '</configuration>' > " + HDFS_CONF + "/mapred-site.xml || exit",
+            "fi",
             "printf '%s\\n' 'log4j.rootLogger=WARN,console' 'log4j.appender.console=org.apache.log4j.ConsoleAppender'"
                     + " 'log4j.appender.console.layout=org.apache.log4j.PatternLayout'"
                     + " 'log4j.appender.console.layout.ConversionPattern=%d %p %c: %m%n'"
                     + " > " + HDFS_CONF + "/log4j.properties",
+            HADOOP_FOLDER_SETUP);
+    // The primary node's HDFS, started as root: its daemons log their warnings and errors to the container's output,
+    // which docker logs shows; its host name, FLOCI_HDFS_HOST, leads to this container's address, where the DataNode
+    // registers, so steps reach both by it; /mnt, its data's volume, becomes the image's user's, which runs a NameNode
+    // and a DataNode with their data in it, the NameNode formatted the first time, with one copy of each block and
+    // without permissions, listening on FLOCI_HDFS_BIND: every address of the container, on the cluster's own network,
+    // or, in a namespace the steps share, the host's or a container's, only its loopback, which its name leads to, so
+    // no other interface serves files anyone could change; in a container's, the hosts file the name goes in is the one
+    // the namespace's containers share, the steps' too. The other daemons start with them, as none needs the HDFS to
+    // start. With HIVE_METASTORE_VARIABLE set, Hive's metastore service does, with the Hive image's Hadoop
+    // configuration, which the node's image keeps at HIVE_HADOOP_CONF, as Hive steps run, its settings after it: "Hive
+    // records metastore information in a MySQL database on the primary node's file system", kept as a Derby database in
+    // /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its warehouse in the
+    // HDFS; the cluster's core-site and hive-site, last, replace any of them, as on EMR's primary node. With
+    // YARN_MEMORY_VARIABLE set, YARN does, as "the primary node runs the YARN ResourceManager service": a
+    // ResourceManager and, as on a cluster of one node, a NodeManager, which offers that much memory and
+    // YARN_VCORES_VARIABLE's cores to the containers it runs the steps' Spark executors in, its local and log folders
+    // in /mnt, and the MapReduce JobHistory server EMR runs too (a release's mapred-site "Restarts Hadoop
+    // MapReduce-HistoryServer"), which a client asks about a MapReduce job whose application master has ended, the
+    // jobs' history in the HDFS; Java 17 opening to each the packages they reach into. Where the cluster's core nodes
+    // hold them (NODE_WORKERS_VARIABLE), the node runs no DataNode or NodeManager, but a DataNode on a volume that
+    // holds one's data, so the blocks it kept stay in reach. Once the NameNode on its port is this container's own, its
+    // ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has joined
+    // and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the folders EMR's
+    // HDFS has for steps, /tmp and the hadoop user's home, are made, and the metastore's warehouse and HIVE_JARS, which
+    // Hive's exec jar goes in, and, with YARN, the folder its Spark applications' event logs go in
+    // (EmrServerlessSparkRunner.SPARK_EVENT_LOGS). With SPARK_HISTORY_VARIABLE set, a Spark History Server starts then,
+    // as EMR's primary node runs one on a cluster with Spark, reading that folder, listening on its port where HDFS
+    // does. HDFS_READY then says the node is ready, once the metastore takes connections, the NodeManager has
+    // registered, and the JobHistory server and the Spark History Server answer. A daemon that exits, before or after,
+    // the metastore among them, ends the container, its readiness gone, so the next step starts it again on its data.
+    // With HADOOP_FOLDER_VARIABLE set, every daemon runs from the Hadoop in that folder.
+    // Where a node's daemons listen: FLOCI_HDFS_BIND, or, with SUBNET_VARIABLE set, the node's own address in that subnet,
+    // its cluster's network, alone, so another network it joins does not reach its HDFS or its YARN; written to
+    // BIND_FILE. Hive 3's metastore has no setting for the address it listens on, so it takes every one.
+    private static final String BIND_SETUP = String.join("\n",
+            "if [ -n \"${" + SUBNET_VARIABLE + ":-}\" ]; then",
+            "  int() { local IFS=.; set -- $1; echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 )); }",
+            "  net=${" + SUBNET_VARIABLE + "%/*} bits=${" + SUBNET_VARIABLE + "#*/}",
+            "  mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))",
+            "  for a in $(hostname -I); do",
+            "    case \"$a\" in *:*) continue ;; esac",
+            "    [ $(( $(int \"$a\") & mask )) -ne $(( $(int \"$net\") & mask )) ] || FLOCI_HDFS_BIND=$a",
+            "  done",
+            "  if [ \"$FLOCI_HDFS_BIND\" = 0.0.0.0 ]; then",
+            "    echo \"Floci: no address of this node is in $" + SUBNET_VARIABLE + "\" >&2; exit 1",
+            "  fi",
+            "  export FLOCI_HDFS_BIND",
+            "fi",
+            "echo \"$FLOCI_HDFS_BIND\" > " + BIND_FILE + " || exit");
+    private static final String HDFS_SCRIPT = String.join("\n",
+            BIND_SETUP,
+            "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
+            "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit",
+            NODE_SETUP,
             "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
                     + "[ -d /mnt/namenode/current ] || hdfs namenode -format -nonInteractive || exit; "
                     + "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION); "
-                    + "hdfs namenode & hdfs datanode & n=2; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
-                    + " | grep -q \"\\\"NumLiveDataNodes\\\" : 1,\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1; "
+                    + "hdfs namenode & n=1; "
+                    + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ] || [ -d /mnt/datanode/current ]; then "
+                    + "hdfs datanode & n=2; fi; "
+                    + "dirs=\"/tmp /user/hadoop\"; "
+                    + "[ -z \"$" + YARN_MEMORY_VARIABLE + "\" ] || dirs=\"$dirs "
+                    + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + "\"; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
-                    + "hdfs dfs -mkdir -p /user/hive/warehouse " + HIVE_JARS + " || exit 1; "
-                    + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
-                    + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
-                    + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
+                    + "dirs=\"$dirs /user/hive/warehouse " + HIVE_JARS + "\"; "
                     + "[ -z \"$" + HIVE_METASTORE_SITE_VARIABLE + "\" ] || mapfile -t site <<< \"$"
                     + HIVE_METASTORE_SITE_VARIABLE + "\"; "
-                    + "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR=/etc/hadoop/conf"
+                    + "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR="
+                    + EmrServerlessSparkRunner.HIVE_HADOOP_CONF
                     + " hive --service metastore -p " + HIVE_METASTORE_PORT
                     + " --hiveconf fs.defaultFS=hdfs://$FLOCI_HDFS_HOST:8020 $"
                     + HIVE_METASTORE_VARIABLE
@@ -157,13 +389,148 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " --hiveconf hive.metastore.schema.verification=false"
                     + " --hiveconf hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
                     + " \"${site[@]}\" & n=$((n + 1)); "
-                    + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + "fi; "
+                    + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn timelineserver & n=$((n + 1)); fi; "
+                    + "tez_ui=; if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then "
+                    + "if [ -d " + TEZ_UI_FILES + " ]; then tez_ui=1; "
+                    + "else echo \"Floci: no Tez UI in this image, at " + TEZ_UI_FILES + "\" >&2; fi; fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + "python3 -m http.server " + TEZ_UI_PORT + " --bind $FLOCI_HDFS_BIND --directory /usr/lib/tez"
+                    + " > /dev/null 2>&1 & n=$((n + 1)); fi; "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn resourcemanager & n=$((n + 1)); "
+                    + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ]; then "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & n=$((n + 1)); fi; "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" mapred historyserver & n=$((n + 1)); "
+                    + "fi; "
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                            + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"")
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
+                            + " | grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"")
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                            + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"")
+                    + "hdfs dfs -mkdir -p $dirs || exit 1; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + "SPARK_LOCAL_IP=$FLOCI_HDFS_BIND SPARK_HISTORY_OPTS=\"-Dspark.history.fs.logDirectory="
+                    + "hdfs://$FLOCI_HDFS_HOST:8020" + EmrServerlessSparkRunner.SPARK_EVENT_LOGS
+                    + " -Dspark.history.ui.port=" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "\""
+                    + " /usr/lib/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer & n=$((n + 1)); "
+                    + "fi; "
+                    + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
+                    + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
+                    + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
+                    + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
+                    + untilReady("(exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null")
+                    + "fi; "
+                    + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 " + RESOURCE_MANAGER_METRICS
+                            + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
+                    + untilReady("curl -sf -m 5 " + JOB_HISTORY_INFO + " | grep -q historyInfo")
+                    + "fi; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 " + SPARK_HISTORY_VERSION + " > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 " + TIMELINE_ABOUT + " > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + untilReady("curl -sf -m 5 " + TEZ_UI_PAGE + " > /dev/null")
                     + "fi; "
                     + "touch " + HDFS_READY + "; "
                     // Not wait -n: an emr-6.x image's bash, 4.2, does not have it.
                     + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HDFS_READY
                     + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+
+    // A core or task node, started as root: a NodeManager and, on a core node, a DataNode, which reach the primary node
+    // by its name on the cluster's network and register under the node's own. It is ready once the ResourceManager, and
+    // on a core node the NameNode, knows it. A daemon that exits ends the container, as on the primary node.
+    private static final String NODE_SCRIPT = String.join("\n",
+            BIND_SETUP,
+            NODE_SETUP,
+            "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
+                    + "n=1; if [ -n \"$" + NODE_CORE_VARIABLE + "\" ]; then hdfs datanode & n=2; fi; "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & "
+                    + untilReady("curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:8088/ws/v1/cluster/nodes?states=RUNNING\""
+                            + " | grep -q \"\\\"nodeHostName\\\":\\\"$" + NODE_HOST_VARIABLE + "\\\"\"")
+                    + "if [ -n \"$" + NODE_CORE_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:9870/jmx?qry=Hadoop:service=NameNode,"
+                            + "name=NameNodeInfo\" | grep -q \"$" + NODE_HOST_VARIABLE + ":9866\"")
+                    + "fi; "
+                    + "touch " + HDFS_READY + "; "
+                    + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HDFS_READY
+                    + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+
+    // What serves a cluster's kept history once it has ended, started as root: the Spark History Server, reading the
+    // event logs kept beside the timeline server's store, the YARN timeline server, on that store, and the Tez UI, as
+    // the primary node ran them (SPARK_HISTORY_VARIABLE, TIMELINE_VARIABLE and TEZ_UI_VARIABLE), on their ports, with
+    // a configuration of their own, as the cluster's HDFS has gone; the Tez UI's naming the timeline server and the
+    // ResourceManager by the primary node's name, FLOCI_HDFS_HOST, as on the node, whose links Floci makes the
+    // browser's; with no ResourceManager there, the Tez UI's asks for it go to the timeline server, which answers them
+    // that it has nothing, rather than to the node that has gone. HISTORY_READY says it is ready once each answers; a
+    // daemon that exits ends the container, which the next link starts again.
+    private static final String HISTORY_SCRIPT = String.join("\n",
+            "mkdir -p " + HISTORY_CONF + " || exit",
+            "printf '%s\\n' '<configuration>' '" + property("fs.defaultFS", "file:///") + "' '</configuration>'"
+                    + " > " + HISTORY_CONF + "/core-site.xml || exit",
+            "printf '%s\\n' '<configuration>' '" + String.join("", List.of(
+                    property("yarn.timeline-service.enabled", "true"),
+                    property("yarn.timeline-service.hostname", "localhost"),
+                    property("yarn.timeline-service.bind-host", "0.0.0.0"),
+                    property("yarn.timeline-service.leveldb-timeline-store.path", HISTORY_TIMELINE),
+                    property("yarn.timeline-service.ttl-ms", String.valueOf(TIMELINE_TTL_MS)),
+                    property("yarn.timeline-service.http-cross-origin.enabled", "true")))
+                    + "' '</configuration>' > " + HISTORY_CONF + "/yarn-site.xml || exit",
+            "printf '%s\\n' 'log4j.rootLogger=WARN,console' 'log4j.appender.console=org.apache.log4j.ConsoleAppender'"
+                    + " 'log4j.appender.console.layout=org.apache.log4j.PatternLayout'"
+                    + " 'log4j.appender.console.layout.ConversionPattern=%d %p %c: %m%n'"
+                    + " > " + HISTORY_CONF + "/log4j.properties || exit",
+            "if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then",
+            "  mkdir -p " + TEZ_UI_CONFIG.substring(0, TEZ_UI_CONFIG.lastIndexOf('/')) + " && printf '%s\\n' 'ENV = {'"
+                    + " '  hosts: {' \"    timeline: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\""
+                    + " \"    rm: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\" '  },' '};'"
+                    + " > " + TEZ_UI_CONFIG + " || exit",
+            "fi",
+            HADOOP_FOLDER_SETUP,
+            "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
+                    + "n=0; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + "SPARK_HISTORY_OPTS=\"-Dspark.history.fs.logDirectory=file://" + HISTORY_EVENT_LOGS
+                    + " -Dspark.history.ui.port=" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "\""
+                    + " /usr/lib/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer & n=$((n + 1)); "
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + "HADOOP_CONF_DIR=" + HISTORY_CONF + " JDK_JAVA_OPTIONS=\"" + yarnOpens()
+                    + "\" yarn timelineserver & n=$((n + 1)); fi; "
+                    + "tez_ui=; [ -z \"$" + TEZ_UI_VARIABLE + "\" ] || [ ! -d " + TEZ_UI_FILES + " ] || tez_ui=1; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + "python3 -m http.server " + TEZ_UI_PORT + " --bind 0.0.0.0 --directory /usr/lib/tez"
+                    + " > /dev/null 2>&1 & n=$((n + 1)); fi; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT
+                            + "/api/v1/version > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + TIMELINE_WEB_PORT + "/ws/v1/timeline > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + TEZ_UI_PORT + TEZ_UI_PATH + " > /dev/null")
+                    + "fi; "
+                    + "touch " + HISTORY_READY + "; "
+                    + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HISTORY_READY
+                    + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+    // Copies the Spark applications' event logs, where there are any, out of the cluster's HDFS into its kept history,
+    // as the image's user, the node's daemons' (see keepHistory).
+    private static final String KEEP_EVENT_LOGS = String.join("\n",
+            HADOOP_FOLDER_SETUP,
+            "[ -d " + HISTORY_EVENT_LOGS + " ] || exit 0",
+            "hdfs dfs -test -d " + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + " || exit 0",
+            "[ -n \"$(hdfs dfs -ls -C " + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + ")\" ] || exit 0",
+            "exec hdfs dfs -get -f '" + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + "/*' " + HISTORY_EVENT_LOGS + "/");
+    // The clusters whose history container is being started, and the history containers this process has started or
+    // found, by name, which a reset or a shutdown removes.
+    private final Set<String> historyStarts = ConcurrentHashMap.newKeySet();
+    private final Set<String> historyContainers = ConcurrentHashMap.newKeySet();
 
     // One start at a time in a namespace the steps share, whatever the cluster, as it holds one HDFS.
     private final Object sharedNamespaceStarts = new Object();
@@ -172,37 +539,86 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The metastore services this process started, by container name: the session each reaches S3 with, if any, and
     // the address of Floci's it was given.
     private final Map<String, MetastoreSession> sessions = new ConcurrentHashMap<>();
+    // For each node, the size of each container log already in S3, by its path under YARN_LOGS.
+    private final Map<String, Map<String, Long>> archivedLogs = new ConcurrentHashMap<>();
     // The HDFS containers this process has started or found running, by name, which a reset or a shutdown removes.
     private final Set<String> running = ConcurrentHashMap.newKeySet();
+    // The core and task nodes' containers this process has started or found, by name.
+    private final Set<String> runningNodes = ConcurrentHashMap.newKeySet();
+    // What each cluster's last step started its nodes from, which a resize starts new ones from.
+    private final Map<String, NodeRequest> nodeRequests = new ConcurrentHashMap<>();
+    // For each cluster, the nodes being decommissioned, by container name.
+    private final Map<String, Map<String, Draining>> draining = new ConcurrentHashMap<>();
+    // For each cluster, the core nodes that have gone and are still in HDFS's exclude list, by host name, with the
+    // nanoTime they went at.
+    private final Map<String, Map<String, Long>> departed = new ConcurrentHashMap<>();
+    // The clusters a thread is decommissioning nodes of.
+    private final Set<String> decommissioning = ConcurrentHashMap.newKeySet();
+    private final Executor decommissions;
+    private final Duration decommissionPoll;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerBuilder containerBuilder;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials roleCredentials;
     private final CurrentContainerNetworkResolver currentContainer;
     private final EmulatorConfig config;
+    private final S3Service s3Service;
     private final Duration hdfsStartTimeout;
     private final LongSupplier nanoTime;
+    // The subnet of each cluster's own network, once read (see clusterSubnet).
+    private final Map<String, String> subnets = new ConcurrentHashMap<>();
+    // The clusters' instance metadata relays; none in a test that has no use for them.
+    private final EmrMetadataRelays relays;
+    // How each cluster's nodes are known as EC2 instances, by node name (see ClusterStorage.identify).
+    private final Map<String, Function<String, Instance>> identities = new ConcurrentHashMap<>();
+    // The link-local address each node's container this process started was given, by container name.
+    private final Map<String, String> nodeAddresses = new ConcurrentHashMap<>();
     // How many teardowns, by a reset or a shutdown, have run: a step waiting for its cluster's HDFS through one stops.
     private final AtomicLong teardowns = new AtomicLong();
 
     @Inject
     public EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
                              LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
-                             CurrentContainerNetworkResolver currentContainer, EmulatorConfig config) {
-        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, HDFS_START_TIMEOUT,
-                System::nanoTime);
+                             CurrentContainerNetworkResolver currentContainer, EmulatorConfig config,
+                             S3Service s3Service, EmrMetadataRelays relays) {
+        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3Service,
+                HDFS_START_TIMEOUT, System::nanoTime,
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-decommission-", 0).factory()),
+                DECOMMISSION_POLL, relays);
     }
 
     EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
                       LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
-                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config,
+                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config, S3Service s3Service,
                       Duration hdfsStartTimeout, LongSupplier nanoTime) {
+        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3Service,
+                hdfsStartTimeout, nanoTime, Runnable::run, Duration.ZERO);
+    }
+
+    EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
+                      LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
+                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config, S3Service s3Service,
+                      Duration hdfsStartTimeout, LongSupplier nanoTime, Executor decommissions,
+                      Duration decommissionPoll) {
+        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3Service,
+                hdfsStartTimeout, nanoTime, decommissions, decommissionPoll, null);
+    }
+
+    EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
+                      LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
+                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config, S3Service s3Service,
+                      Duration hdfsStartTimeout, LongSupplier nanoTime, Executor decommissions,
+                      Duration decommissionPoll, EmrMetadataRelays relays) {
+        this.relays = relays;
+        this.decommissions = decommissions;
+        this.decommissionPoll = decommissionPoll;
         this.lifecycleManager = lifecycleManager;
         this.containerBuilder = containerBuilder;
         this.awsEnv = awsEnv;
         this.roleCredentials = roleCredentials;
         this.currentContainer = currentContainer;
         this.config = config;
+        this.s3Service = s3Service;
         this.hdfsStartTimeout = hdfsStartTimeout;
         this.nanoTime = nanoTime;
     }
@@ -223,8 +639,199 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     }
 
     @Override
+    public void archiveContainerLogs(String clusterId, String accountId, String region, String logFolder) {
+        archiveNodeLogs(clusterId, hdfsName(clusterId), accountId, region, logFolder);
+        Collection<String> nodes;
+        try {
+            nodes = nodeContainers(clusterId).keySet();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not find the nodes of EMR cluster {0} to write their container logs to {1}: {2}",
+                    clusterId, logFolder, e.getMessage());
+            return;
+        }
+        for (String node : nodes) {
+            archiveNodeLogs(clusterId, node, accountId, region, logFolder);
+        }
+    }
+
+    private void archiveNodeLogs(String clusterId, String name, String accountId, String region, String logFolder) {
+        Map<String, Long> archived = archivedLogs.computeIfAbsent(name, node -> new ConcurrentHashMap<>());
+        // One step's end at a time for a node, so of two reading a log that is still growing the later is written last.
+        synchronized (archived) {
+            try {
+                S3Uri folder = S3Uri.parseAnyScheme(logFolder);
+                if (lifecycleManager.probeContainer(name) == ContainerLiveness.NOT_RUNNING) {
+                    archiveStoppedNodeLogs(name, archived, accountId, region, folder);
+                    return;
+                }
+                for (String log : changedLogs(name, archived)) {
+                    archiveLog(name, log, archived, accountId, region, folder);
+                }
+            } catch (IOException | RuntimeException e) {
+                LOG.warnv(e, "Could not write the container logs of EMR cluster {0} to {1}: {2}", clusterId, logFolder,
+                        e.getMessage());
+            }
+        }
+    }
+
+    // The node's container logs whose size is not the one already in S3, as <application>/<container>/<file>, but the
+    // launch scripts: only those are read from Docker, so a step's end does not bring every earlier application's again.
+    // A primary node whose core nodes run the NodeManagers has no such folder, and so none.
+    private List<String> changedLogs(String name, Map<String, Long> archived) {
+        ContainerExec.Result listed = ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                new String[]{"bash", "-c", "[ ! -d " + YARN_LOGS + " ] || exec find " + YARN_LOGS
+                        + " -mindepth 3 -maxdepth 3 -type f -printf '%s %P\\n'"},
+                LOG_LISTING_SECONDS);
+        if (listed.exitCode() != 0) {
+            throw new IllegalStateException("Could not list them: " + listed.stderr());
+        }
+        List<String> changed = new ArrayList<>();
+        for (String line : listed.stdout().split("\n")) {
+            int space = line.indexOf(' ');
+            if (space > 0 && !line.endsWith("/" + CONTAINER_LAUNCH_SCRIPT)
+                    && !Long.valueOf(line.substring(0, space)).equals(archived.get(line.substring(space + 1)))) {
+                changed.add(line.substring(space + 1));
+            }
+        }
+        return changed;
+    }
+
+    // A stopped node answers no command, a decommissioned one among them, whose NodeManager exits once it is, which ends
+    // its container, but Docker still copies its files: the whole folder, as this is the last look at a node that goes.
+    private void archiveStoppedNodeLogs(String name, Map<String, Long> archived, String accountId, String region,
+                                        S3Uri folder) throws IOException {
+        try (InputStream archive = lifecycleManager.getDockerClient().copyArchiveFromContainerCmd(name, YARN_LOGS)
+                .exec(); TarArchiveInputStream entries = new TarArchiveInputStream(archive)) {
+            TarArchiveEntry entry;
+            while ((entry = entries.getNextEntry()) != null) {
+                // logs/<application>/<container>/<file>, as Docker archives the folder.
+                String[] path = entry.getName().split("/");
+                if (!entry.isFile() || path.length != 4 || CONTAINER_LAUNCH_SCRIPT.equals(path[3])) {
+                    continue;
+                }
+                String log = path[1] + "/" + path[2] + "/" + path[3];
+                if (!Objects.equals(archived.get(log), entry.getSize())) {
+                    putContainerLog(entries, accountId, region, folder.bucket(), folder.key() + log + ".gz");
+                    archived.put(log, entry.getSize());
+                }
+            }
+        }
+    }
+
+    private void archiveLog(String name, String log, Map<String, Long> archived, String accountId, String region,
+                            S3Uri folder) throws IOException {
+        try (InputStream archive = lifecycleManager.getDockerClient()
+                .copyArchiveFromContainerCmd(name, YARN_LOGS + "/" + log).exec();
+                TarArchiveInputStream entries = new TarArchiveInputStream(archive)) {
+            TarArchiveEntry entry = entries.getNextEntry();
+            if (entry != null && entry.isFile()) {
+                putContainerLog(entries, accountId, region, folder.bucket(), folder.key() + log + ".gz");
+                // The size Docker gave, which the next look compares, as the log may have grown since it was listed.
+                archived.put(log, entry.getSize());
+            }
+        }
+    }
+
+    // Spooled to a file while it is gzipped, as a container's log can be larger than memory should hold.
+    private void putContainerLog(InputStream log, String accountId, String region, String bucket, String key)
+            throws IOException {
+        Path spool = Files.createTempFile("floci-emr-container-log", ".gz");
+        try {
+            try (OutputStream gzip = new GZIPOutputStream(Files.newOutputStream(spool))) {
+                log.transferTo(gzip);
+            }
+            try (InputStream gzipped = Files.newInputStream(spool)) {
+                EmrServerlessSparkRunner.putLog(s3Service, accountId, region, bucket, key, gzipped);
+            }
+        } finally {
+            Files.deleteIfExists(spool);
+        }
+    }
+
+    @Override
+    public boolean metadataServed(String dockerNetwork) {
+        String network = network(dockerNetwork);
+        return relays != null && network != null && !NO_NETWORK.equals(network) && !sharesNamespace(network);
+    }
+
+    @Override
+    public String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                  String dockerNetwork) {
+        if (!metadataServed(dockerNetwork)) {
+            return null;
+        }
+        String name = hdfsName(clusterId);
+        lifecycleManager.ensureNetwork(name, labels(clusterId, accountId, region, HDFS_COMPONENT));
+        relays.start(clusterId, accountId, region, name, relayImage, metadataTarget(name));
+        return name;
+    }
+
+    @Override
+    public String metadataAddress(String clusterId, Instance instance) {
+        return relays != null ? relays.give(clusterId, instance) : null;
+    }
+
+    @Override
+    public void identify(String clusterId, Function<String, Instance> nodes) {
+        identities.put(clusterId, nodes);
+    }
+
+    // The address the container of a cluster's node is given on its cluster's network, where its relay answers it as
+    // that node, the one it had before released; null where no relay serves the cluster or the node is not known.
+    private String nodeAddress(String clusterId, String containerName, String node) {
+        releaseNodeAddress(containerName);
+        Function<String, Instance> known = identities.get(clusterId);
+        Instance instance = served(clusterId) && known != null ? known.apply(node) : null;
+        if (instance == null) {
+            return null;
+        }
+        String address = relays.give(clusterId, instance);
+        nodeAddresses.put(containerName, address);
+        return address;
+    }
+
+    private void releaseNodeAddress(String containerName) {
+        String address = nodeAddresses.remove(containerName);
+        if (address != null && relays != null) {
+            relays.release(address);
+        }
+    }
+
+    // Whether a node's container found running can serve its metadata: on a network a relay serves, one this process
+    // did not give an address, an earlier Floci's, has one this process does not know, which it could give another
+    // container, so it starts again. One in a namespace the steps share, which no relay serves, has none to know.
+    private boolean metadataKnown(String clusterId, String containerName) {
+        return !served(clusterId) || !identities.containsKey(clusterId) || nodeAddresses.containsKey(containerName);
+    }
+
+    // Whether a relay serves cluster clusterId's network.
+    private boolean served(String clusterId) {
+        return relays != null && relays.serves(clusterId);
+    }
+
+    @Override
+    public void releaseMetadataAddress(String address) {
+        if (relays != null) {
+            relays.release(address);
+        }
+    }
+
+    // Where the metadata relay on a cluster's network reaches Floci: as FLOCI_ALIAS, Floci's container joining the
+    // network, as for the metastore, else Floci on the host at the host's address.
+    private String metadataTarget(String network) {
+        return attachFloci(network) ? FLOCI_ALIAS : URI.create(awsEnv.flociEndpoint(false)).getHost();
+    }
+
+    @Override
+    public boolean ownNetwork(String dockerNetwork) {
+        String network = network(dockerNetwork);
+        return !NO_NETWORK.equals(network) && !sharesNamespace(network);
+    }
+
+    @Override
     public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
-                                       String dockerNetwork, HiveMetastore hiveMetastore, BooleanSupplier stopped) {
+                                       String dockerNetwork, HiveMetastore hiveMetastore, Supplier<Yarn> yarnNow,
+                                       BooleanSupplier stopped) {
         String name = hdfsName(clusterId);
         String network = network(dockerNetwork);
         if (NO_NETWORK.equals(network)) {
@@ -241,7 +848,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         boolean shared = sharesNamespace(network);
         long deadline = nanoTime.getAsLong() + hdfsStartTimeout.toNanos();
         synchronized (starting.computeIfAbsent(clusterId, id -> new Object())) {
+            // Read here, so a resize before this took the lock counts, and one after it waits and finds these nodes.
+            Yarn yarn = yarnNow != null ? yarnNow.get() : null;
+            NodeRequest nodeRequest = yarn == null ? null
+                    : new NodeRequest(clusterId, accountId, region, host, imageId, yarn, shared ? null : network);
             String containerId = null;
+            List<String> nodes = List.of();
             // One found running whose daemon has just exited stops before it is ready, and is started again, once.
             for (int attempt = 0; containerId == null; attempt++) {
                 stopIfStopped(clusterId, teardown, stopped);
@@ -252,16 +864,22 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                             + " runs");
                 }
                 boolean found = liveness == ContainerLiveness.RUNNING && attempt == 0
-                        && inStepsNamespace(name, shared ? network : name)
+                        && inStepsNamespace(name, shared ? network : name,
+                                shared || hiveMetastore != null || clusterSubnet(clusterId) == null ? null : network,
+                                imageId)
+                        && metadataKnown(clusterId, name)
                         && (shared || hiveMetastore == null || metastoreCurrent(name));
                 // Known before it starts, so a teardown while it starts removes it.
                 running.add(name);
                 String candidate = found ? name
-                        : start(clusterId, accountId, region, host, imageId, dockerNetwork, hiveMetastore);
+                        : start(clusterId, accountId, region, host, imageId, dockerNetwork, hiveMetastore, yarn);
+                // Before it is awaited, as its readiness needs a DataNode of theirs.
+                nodes = nodeRequest != null ? reconcileNodes(nodeRequest, teardown) : List.of();
                 if (awaitReady(clusterId, candidate, deadline, teardown, stopped)) {
                     containerId = candidate;
                 } else if (!found) {
                     stopIfStopped(clusterId, teardown, stopped);
+                    logNodeOutput(clusterId, candidate);
                     throw new IllegalStateException("The HDFS of EMR cluster " + clusterId
                             + " stopped before it was ready");
                 }
@@ -269,9 +887,436 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (shared) {
                 return volumes(clusterId).withHdfs(host, LOOPBACK, null);
             }
+            if (nodeRequest != null) {
+                awaitNodes(nodeRequest, nodes, deadline, teardown, stopped);
+                nodeRequests.put(clusterId, nodeRequest);
+            }
             SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, address(clusterId, containerId), name);
-            return hiveMetastore != null
-                    ? storage.withHiveMetastore("thrift://" + host + ":" + HIVE_METASTORE_PORT) : storage;
+            if (hiveMetastore != null) {
+                storage = storage.withHiveMetastore("thrift://" + host + ":" + HIVE_METASTORE_PORT);
+            }
+            if (yarn == null) {
+                return storage;
+            }
+            // Its executors reach Floci's S3 from the node as the steps do, the node being on their network too, else
+            // at Floci's address on the cluster's network.
+            boolean everyWorkerJoined = network != null && clusterSubnet(clusterId) != null
+                    && (hiveMetastore == null || !yarn.primaryWorks());
+            storage = storage.withYarn(host, everyWorkerJoined ? awsEnv.flociEndpoint() : flociEndpointOn(name));
+            if (yarn.sparkHistory()) {
+                storage = storage.withSparkHistoryServer(host);
+            }
+            if (yarn.timelineServer()) {
+                storage = storage.withTimelineServer(host);
+            }
+            return yarn.nodes().stream().anyMatch(Node::core) ? storage.withReplication(yarn.replication()) : storage;
+        }
+    }
+
+    @Override
+    public void resize(String clusterId, Supplier<Yarn> yarn) {
+        long teardown = teardowns.get();
+        try {
+            synchronized (starting.computeIfAbsent(clusterId, id -> new Object())) {
+                NodeRequest known = nodeRequests.get(clusterId);
+                if (known == null) {
+                    return;
+                }
+                // Read here too, so of two resizes the one that takes the lock last applies what the cluster says now.
+                NodeRequest request = known.resizedTo(yarn.get());
+                nodeRequests.put(clusterId, request);
+                reconcileNodes(request, teardown);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not resize the nodes of EMR cluster {0}: {1}", clusterId, e.getMessage());
+        }
+    }
+
+    // A cluster's core and task nodes: one wanted and not running in the image starts, on the data its volume keeps, one
+    // no longer wanted is decommissioned on a thread of its own, and one being decommissioned that is wanted again
+    // carries on. A core node found only as its volume, as a shutdown leaves one it cut off while it was decommissioned,
+    // starts again on its data to be decommissioned, so HDFS moves its blocks; a task node's volume goes, as it holds
+    // none. The names of those wanted.
+    private List<String> reconcileNodes(NodeRequest request, long teardown) {
+        String clusterId = request.clusterId();
+        Map<String, Container> present = nodeContainers(clusterId);
+        Map<String, Draining> leaving = draining.computeIfAbsent(clusterId, id -> new ConcurrentHashMap<>());
+        boolean changed = false;
+        List<String> wanted = new ArrayList<>();
+        for (Node node : request.yarn().nodes()) {
+            String name = nodeName(clusterId, node);
+            wanted.add(name);
+            changed |= leaving.remove(name) != null;
+            Container container = present.get(name);
+            if (container == null || !"running".equals(container.getState())
+                    || !imageOf(request, node).equals(container.getImageId())
+                    || !joins(container.getNetworkSettings() != null ? container.getNetworkSettings().getNetworks()
+                            : null, clusterSubnet(clusterId) != null ? request.joinedNetwork() : null)
+                    || !metadataKnown(clusterId, name)) {
+                startNode(request, node.host(), node.core(), imageOf(request, node), name, teardown);
+            } else {
+                runningNodes.add(name);
+            }
+        }
+        for (Map.Entry<String, Container> node : present.entrySet()) {
+            if (!wanted.contains(node.getKey()) && !leaving.containsKey(node.getKey())) {
+                leaving.put(node.getKey(), draining(node.getValue().getLabels(), node.getValue().getImageId()));
+                runningNodes.add(node.getKey());
+                changed = true;
+            }
+        }
+        for (Map.Entry<String, Map<String, String>> volume : nodeVolumes(clusterId).entrySet()) {
+            String name = volume.getKey();
+            if (wanted.contains(name) || present.containsKey(name) || leaving.containsKey(name)) {
+                continue;
+            }
+            // Its container, and the image it ran, gone with a shutdown: it starts from the steps' image, which holds
+            // HDFS too, and runs only until HDFS has moved its blocks.
+            Draining node = draining(volume.getValue(), null);
+            if (node.core()) {
+                startNode(request, node.host(), true, request.imageId(), name, teardown);
+                leaving.put(name, node);
+                changed = true;
+            } else {
+                lifecycleManager.removeVolume(name);
+            }
+        }
+        if (changed) {
+            syncExcludes(clusterId, leaving.values());
+        }
+        if (!leaving.isEmpty() && decommissioning.add(clusterId)) {
+            decommissions.execute(() -> decommission(request, teardown));
+        }
+        return wanted;
+    }
+
+    // A node being decommissioned, as its container's or its volume's labels say, with an hour and a minute to go in,
+    // and the image its container ran, null where it has none.
+    private Draining draining(Map<String, String> labels, String imageId) {
+        Map<String, String> known = labels != null ? labels : Map.of();
+        return new Draining(known.get(NODE_HOST_LABEL), Boolean.parseBoolean(known.get(NODE_CORE_LABEL)),
+                nanoTime.getAsLong() + GRACEFUL_DECOMMISSION.plus(DECOMMISSION_MARGIN).toNanos(), imageId);
+    }
+
+    // The image a node runs from: the one its own bootstrap left, else the steps'.
+    private static String imageOf(NodeRequest request, Node node) {
+        return node.image() != null ? node.image() : request.imageId();
+    }
+
+    // A node's container, started on the data its volume keeps, from imageId; one whose start a teardown passed goes,
+    // as the teardown's sweep may have looked before it was there.
+    private void startNode(NodeRequest request, String host, boolean core, String imageId, String name,
+                           long teardown) {
+        String clusterId = request.clusterId();
+        Yarn yarn = request.yarn();
+        // Known before it starts, so a teardown while it starts removes it.
+        runningNodes.add(name);
+        lifecycleManager.removeIfExistsStrict(name);
+        // Its volume says whose it is too, so a shutdown that removes its container leaves it findable.
+        Map<String, String> volumeLabels = labels(clusterId, request.accountId(), request.region(), COMPONENT);
+        volumeLabels.put(NODE_HOST_LABEL, host);
+        volumeLabels.put(NODE_CORE_LABEL, String.valueOf(core));
+        lifecycleManager.ensureVolume(name, volumeLabels);
+        Map<String, String> labels = labels(clusterId, request.accountId(), request.region(), NODE_COMPONENT);
+        labels.put(NODE_HOST_LABEL, host);
+        labels.put(NODE_CORE_LABEL, String.valueOf(core));
+        ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
+                .withName(name)
+                .withUser("root")
+                .withEntrypoint(List.of("/bin/bash", "-c", NODE_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, core ? "CORE" : "TASK")
+                .withEnv("FLOCI_HDFS_HOST", request.host())
+                .withEnv("FLOCI_HDFS_BIND", "0.0.0.0")
+                .withEnv(NODE_HOST_VARIABLE, host)
+                .withEnv(REPLICATION_VARIABLE, String.valueOf(yarn.replication()))
+                .withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
+                .withEnv(YARN_VCORES_VARIABLE, String.valueOf(yarn.vcores()))
+                .withEnv("HADOOP_CONF_DIR", HDFS_CONF)
+                .withEnv("HADOOP_LOG_DIR", "/tmp/floci-hdfs-logs")
+                .withNamedVolume(name, "/mnt")
+                .withDockerNetwork(Optional.of(hdfsName(clusterId)))
+                .withDnsName(host)
+                .withLogRotation()
+                .withLabels(labels)
+                // Its executors reach Floci, Floci on the host by its address, Floci's own certificate trusted.
+                .withHostDockerInternalOnLinux()
+                .withJavaTrustStore();
+        String subnet = request.joinedNetwork() != null ? clusterSubnet(clusterId) : null;
+        if (subnet != null) {
+            spec.withJoinedNetwork(request.joinedNetwork()).withEmbeddedDns().withEnv(SUBNET_VARIABLE, subnet);
+        }
+        String address = nodeAddress(clusterId, name, name.substring(name.lastIndexOf("-node-") + "-node-".length()));
+        if (address != null) {
+            spec.withLinkLocalIp(address);
+        }
+        if (core) {
+            spec.withEnv(NODE_CORE_VARIABLE, "1");
+        }
+        if (yarn.hadoopFolder() != null) {
+            spec.withEnv(HADOOP_FOLDER_VARIABLE, yarn.hadoopFolder());
+        }
+        lifecycleManager.createAndStart(spec.build());
+        if (teardowns.get() != teardown) {
+            removeNode(name, false);
+            return;
+        }
+        LOG.infov("Started the {0} node {1} of EMR cluster {2}", core ? "core" : "task", host, clusterId);
+    }
+
+    // Each node ready by the deadline; one that stopped before it was is started again, once.
+    private void awaitNodes(NodeRequest request, List<String> nodes, long deadline, long teardown,
+                            BooleanSupplier stopped) {
+        List<String> wanted = nodes;
+        for (int attempt = 0; ; attempt++) {
+            boolean ready = true;
+            for (String node : wanted) {
+                ready = ready && awaitReady(request.clusterId(), node, deadline, teardown, stopped);
+            }
+            if (ready) {
+                return;
+            }
+            stopIfStopped(request.clusterId(), teardown, stopped);
+            if (attempt > 0) {
+                throw new IllegalStateException("A node of EMR cluster " + request.clusterId()
+                        + " stopped before it was ready");
+            }
+            wanted = reconcileNodes(request, teardown);
+        }
+    }
+
+    // The containers of a cluster's core and task nodes, running or not, by name.
+    private Map<String, Container> nodeContainers(String clusterId) {
+        Map<String, Container> nodes = new LinkedHashMap<>();
+        List<Container> containers = lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, NODE_COMPONENT,
+                        ContainerStorageHelper.RESOURCE_ID_LABEL, clusterId,
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                .exec();
+        for (Container container : containers) {
+            nodes.put(container.getNames()[0].substring(1), container);
+        }
+        return nodes;
+    }
+
+    // The volumes of a cluster's core and task nodes, with their labels, by name, whether a container has them or not.
+    private Map<String, Map<String, String>> nodeVolumes(String clusterId) {
+        ListVolumesResponse response = lifecycleManager.getDockerClient().listVolumesCmd()
+                .withFilter("label", List.of(ContainerStorageHelper.COMPONENT_LABEL + "=" + COMPONENT,
+                        ContainerStorageHelper.RESOURCE_ID_LABEL + "=" + clusterId,
+                        ContainerStorageHelper.OWNER_LABEL + "=" + ContainerStorageHelper.ownerIdentity(config),
+                        NODE_HOST_LABEL))
+                .exec();
+        Map<String, Map<String, String>> volumes = new LinkedHashMap<>();
+        if (response != null && response.getVolumes() != null) {
+            for (InspectVolumeResponse volume : response.getVolumes()) {
+                Map<String, String> labels = volume.getLabels() != null ? volume.getLabels() : Map.of();
+                if (clusterId.equals(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))
+                        && labels.containsKey(NODE_HOST_LABEL)) {
+                    volumes.put(volume.getName(), labels);
+                }
+            }
+        }
+        return volumes;
+    }
+
+    // Writes the lists of the nodes being decommissioned on the primary node, when they changed, a primary node started
+    // again holding none, and has HDFS and YARN read them: "both YARN NodeManager and HDFS DataNode daemons must be
+    // decommissioned" on a core node, and only the first on a task node. A node leaves YARN's list once it has gone, as
+    // a node that comes back under its name is a new one, and HDFS's once the NameNode has it dead (DEAD_NODE_WAIT). A
+    // refresh that fails takes its list away, so the next round's differs and is read again.
+    private void syncExcludes(String clusterId, Collection<Draining> nodes) {
+        String yarnHosts = hostLines(nodes.stream().filter(Draining::hdfsDone).map(Draining::host).toList());
+        List<String> dfs = new ArrayList<>(nodes.stream().filter(Draining::core).map(Draining::host).toList());
+        dfs.addAll(departed.getOrDefault(clusterId, Map.of()).keySet());
+        String dfsHosts = hostLines(dfs);
+        String script = String.join("\n", HADOOP_FOLDER_SETUP,
+                "printf '" + yarnHosts + "' > " + YARN_EXCLUDE + ".new || exit 1",
+                "printf '" + dfsHosts + "' > " + DFS_EXCLUDE + ".new || exit 1",
+                "if ! cmp -s " + YARN_EXCLUDE + ".new " + YARN_EXCLUDE + "; then mv " + YARN_EXCLUDE + ".new "
+                        + YARN_EXCLUDE + " && yarn rmadmin -refreshNodes -g " + GRACEFUL_DECOMMISSION.toSeconds()
+                        + " -server || { rm -f " + YARN_EXCLUDE + "; exit 1; }; fi",
+                "if ! cmp -s " + DFS_EXCLUDE + ".new " + DFS_EXCLUDE + "; then mv " + DFS_EXCLUDE + ".new "
+                        + DFS_EXCLUDE + " && hdfs dfsadmin -refreshNodes || { rm -f " + DFS_EXCLUDE + "; exit 1; }; fi");
+        try {
+            ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), hdfsName(clusterId),
+                    new String[]{"bash", "-c", script}, NODE_COMMAND_SECONDS);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Could not tell EMR cluster {0} which nodes to decommission, which the next round tries"
+                        + " again: {1}", clusterId, result.stderr());
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not tell EMR cluster {0} which nodes to decommission, which the next round tries"
+                    + " again: {1}", clusterId, e.getMessage());
+        }
+    }
+
+    private static String hostLines(List<String> hosts) {
+        return hosts.stream().map(host -> host + "\\n").collect(Collectors.joining());
+    }
+
+    // A thread's work: each node being decommissioned goes once HDFS and YARN have let it, or the time it was given is
+    // up, and its containers' logs with it. It ends once the last core node to go is dead to the NameNode, or with its
+    // cluster or a teardown. A round that fails, Docker or a command on the primary node failing, leaves every node as it
+    // is, and the next asks again.
+    private void decommission(NodeRequest request, long teardown) {
+        String clusterId = request.clusterId();
+        boolean ended = false;
+        boolean failing = false;
+        try {
+            while (true) {
+                try {
+                    synchronized (starting.computeIfAbsent(clusterId, id -> new Object())) {
+                        if (decommissionRound(request, teardown)) {
+                            // Under the lock, so a resize from now on starts a thread of its own.
+                            decommissioning.remove(clusterId);
+                            ended = true;
+                            return;
+                        }
+                    }
+                    failing = false;
+                } catch (RuntimeException e) {
+                    if (failing) {
+                        LOG.debugv(e, "Could not decommission the nodes of EMR cluster {0} again: {1}", clusterId,
+                                e.getMessage());
+                    } else {
+                        LOG.warnv(e, "Could not decommission the nodes of EMR cluster {0}, which the next round tries"
+                                + " again: {1}", clusterId, e.getMessage());
+                    }
+                    failing = true;
+                }
+                Thread.sleep(decommissionPoll.toMillis());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (!ended) {
+                decommissioning.remove(clusterId);
+            }
+        }
+    }
+
+    // One round of a cluster's decommissioning, under its lock: true once there is nothing left to do.
+    private boolean decommissionRound(NodeRequest request, long teardown) {
+        String clusterId = request.clusterId();
+        Map<String, Draining> leaving = draining.get(clusterId);
+        if (leaving == null || teardowns.get() != teardown) {
+            return true;
+        }
+        Map<String, Long> gone = departed.computeIfAbsent(clusterId, id -> new ConcurrentHashMap<>());
+        long now = nanoTime.getAsLong();
+        gone.values().removeIf(at -> now - at >= DEAD_NODE_WAIT.toNanos());
+        syncExcludes(clusterId, leaving.values());
+        for (Map.Entry<String, Draining> node : List.copyOf(leaving.entrySet())) {
+            boolean late = now >= node.getValue().deadline();
+            if (late || decommissioned(request, node.getKey(), node.getValue(), teardown)) {
+                if (late) {
+                    LOG.warnv("Node {0} of EMR cluster {1} was not decommissioned in time, and goes anyway",
+                            node.getValue().host(), clusterId);
+                }
+                if (removeDecommissioned(request, node.getKey())) {
+                    leaving.remove(node.getKey());
+                    if (node.getValue().core()) {
+                        gone.put(node.getValue().host(), nanoTime.getAsLong());
+                    }
+                }
+            } else if (!node.getValue().hdfsDone() && hdfsDecommissioned(clusterId, node.getValue())) {
+                // YARN is told on the next round.
+                leaving.put(node.getKey(), node.getValue().hdfsDecommissioned());
+            }
+        }
+        if (leaving.isEmpty() && gone.isEmpty()) {
+            syncExcludes(clusterId, leaving.values());
+            return true;
+        }
+        return false;
+    }
+
+    // Whether YARN has finished with a node HDFS has finished with, or it has stopped with nothing left for HDFS to move.
+    // A core node that stopped before HDFS moved its blocks holds them still, so it starts again on its data, and one
+    // Docker cannot tell the state of is asked about again on the next round.
+    private boolean decommissioned(NodeRequest request, String name, Draining node, long teardown) {
+        ContainerLiveness liveness = lifecycleManager.probeContainer(name);
+        if (liveness == ContainerLiveness.UNKNOWN) {
+            return false;
+        }
+        if (liveness == ContainerLiveness.NOT_RUNNING) {
+            if (node.hdfsDone()) {
+                return true;
+            }
+            LOG.infov("The core node {0} of EMR cluster {1} stopped before HDFS moved its blocks, and starts again on"
+                    + " its data", node.host(), request.clusterId());
+            startNode(request, node.host(), true, node.imageId() != null ? node.imageId() : request.imageId(), name,
+                    teardown);
+            return false;
+        }
+        return node.hdfsDone() && onPrimary(request.clusterId(), "curl -sf -m 5 \"" + RESOURCE_MANAGER_NODES
+                + "DECOMMISSIONED\" | grep -q '\"nodeHostName\":\"" + node.host() + "\"'");
+    }
+
+    // Whether HDFS has moved a core node's blocks to the nodes that stay.
+    private boolean hdfsDecommissioned(String clusterId, Draining node) {
+        return onPrimary(clusterId, "curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\" | grep -Eq '" + node.host()
+                + ":9866[^}]*Decommissioned'");
+    }
+
+    private boolean onPrimary(String clusterId, String command) {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), hdfsName(clusterId),
+                new String[]{"bash", "-c", command}, NODE_COMMAND_SECONDS).exitCode() == 0;
+    }
+
+    // A node that has been decommissioned goes, with its data, as an EC2 instance's disks go with it, its containers'
+    // logs in S3 first, while its container is there. Whether it has gone: one Docker keeps, or keeps the data of, is
+    // tried again on the next round.
+    private boolean removeDecommissioned(NodeRequest request, String name) {
+        if (request.yarn().logFolder() != null && runningNodes.contains(name)) {
+            archiveNodeLogs(request.clusterId(), name, request.accountId(), request.region(),
+                    request.yarn().logFolder());
+        }
+        if (!removeNode(name, true)) {
+            LOG.warnv("Docker kept node {0} of EMR cluster {1} or its data, which the next round removes",
+                    name, request.clusterId());
+            return false;
+        }
+        LOG.infov("Node {0} of EMR cluster {1} was decommissioned", name, request.clusterId());
+        return true;
+    }
+
+    // Removes a node's container and, when asked, its volume; a removal Docker refuses leaves it known, so the next
+    // reset or shutdown tries again. Whether it has gone.
+    private boolean removeNode(String name, boolean withVolume) {
+        try {
+            lifecycleManager.removeIfExistsStrict(name);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the EMR node container {0}: {1}", name, e.getMessage());
+            return false;
+        }
+        // Its address goes only now, so no other container is given it while this one is there.
+        releaseNodeAddress(name);
+        runningNodes.remove(name);
+        archivedLogs.remove(name);
+        return !withVolume || lifecycleManager.removeVolume(name);
+    }
+
+    private record NodeRequest(String clusterId, String accountId, String region, String host, String imageId,
+                               Yarn yarn, String joinedNetwork) {
+
+        NodeRequest resizedTo(Yarn resized) {
+            return new NodeRequest(clusterId, accountId, region, host, imageId, resized, joinedNetwork);
+        }
+    }
+
+    // A node being decommissioned, which goes anyway at the nanoTime deadline, its own, so one a later resize adds has
+    // the whole time too. A core node goes to YARN's decommission only once HDFS has moved its blocks: a decommissioned
+    // NodeManager exits, which ends its container, the DataNode with it.
+    // It starts again, where it must, from imageId, the image it ran, its own bootstrap's say, or the steps' where it
+    // is not known.
+    private record Draining(String host, boolean core, boolean hdfsDone, long deadline, String imageId) {
+        Draining(String host, boolean core, long deadline, String imageId) {
+            this(host, core, !core, deadline, imageId);
+        }
+
+        Draining hdfsDecommissioned() {
+            return new Draining(host, core, true, deadline, imageId);
         }
     }
 
@@ -296,12 +1341,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     }
 
     // Whether the HDFS container found running is in the namespace the steps run in, as its network mode says: the
-    // cluster's own network, the host's, or the same container's; one a process with another docker-network left
-    // goes, and starts again on its data.
-    private boolean inStepsNamespace(String name, String stepsNetwork) {
-        HostConfig hostConfig = lifecycleManager.getDockerClient().inspectContainerCmd(name).exec().getHostConfig();
+    // cluster's own network, the host's, or the same container's, and of the image they run in; one a process with
+    // another docker-network left, or one of another image, an earlier Floci's in the Hive image, goes, and starts
+    // again on its data.
+    private boolean inStepsNamespace(String name, String stepsNetwork, String joinedNetwork, String imageId) {
+        InspectContainerResponse container = lifecycleManager.getDockerClient().inspectContainerCmd(name).exec();
+        HostConfig hostConfig = container.getHostConfig();
         String networkMode = hostConfig != null ? hostConfig.getNetworkMode() : null;
-        return Objects.equals(namespaceOf(networkMode), namespaceOf(stepsNetwork));
+        return Objects.equals(namespaceOf(networkMode), namespaceOf(stepsNetwork))
+                && imageId.equals(container.getImageId())
+                && joins(container.getNetworkSettings() != null ? container.getNetworkSettings().getNetworks() : null,
+                        joinedNetwork);
+    }
+
+    // Whether a node's container is on the network its cluster's steps run on too, as one an earlier Floci started on
+    // its cluster's network alone is not; true where it need not be.
+    private static boolean joins(Map<String, ContainerNetwork> networks, String joinedNetwork) {
+        return joinedNetwork == null || networks != null && networks.containsKey(joinedNetwork);
     }
 
     // The namespace a network mode puts a container in, the same for a container's name and its id: the network,
@@ -330,17 +1386,44 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return HOST_NETWORK.equals(network) || network != null && network.startsWith(CONTAINER_NETWORK_PREFIX);
     }
 
+    // Each name and value as a Hadoop property, an argument of the script's printf in double quotes, so a value may
+    // name one of the container's variables.
+    private static String yarnProperties(List<String> namesAndValues) {
+        StringBuilder properties = new StringBuilder();
+        for (int i = 0; i < namesAndValues.size(); i += 2) {
+            properties.append(" \"<property><name>").append(namesAndValues.get(i)).append("</name><value>")
+                    .append(namesAndValues.get(i + 1)).append("</value></property>\"");
+        }
+        return properties.toString();
+    }
+
+    // A Hadoop property, as a line of a site file.
+    private static String property(String name, String value) {
+        return "<property><name>" + name + "</name><value>" + value + "</value></property>";
+    }
+
+    // A node script's wait until condition holds, polled; one of its n daemons exiting meanwhile ends the node.
+    private static String untilReady(String condition) {
+        return "until " + condition + "; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; ";
+    }
+
+    // The JVM options that open to Hadoop's classes the packages its daemons reach into.
+    private static String yarnOpens() {
+        return EmrServerlessSparkRunner.yarnJavaOptions();
+    }
+
     // A cluster's HDFS container, started anew on the HDFS data its volume holds, which goes with the cluster's other
     // two, with its metastore service when asked; one a restart, a stop or a daemon's exit left goes first. It runs on
-    // a Docker network of the cluster's own, which only the cluster's steps join, as its HDFS and its metastore serve
-    // its files and tables to any client that reaches them: the steps of other clusters, of other accounts too, do
-    // not. In a namespace the steps share it listens on the loopback alone, and the metastore does not run, as Hive 3's
-    // has no setting for the address it listens on: it would serve every interface, the host's own for one.
+    // a Docker network of the cluster's own, where its nodes and steps reach it by its name, and joins the steps'
+    // network too, as the other nodes do, its HDFS on its address on the cluster's network alone, unless it runs the
+    // metastore, which listens on every one (see the class's comment). In a namespace the steps share it listens on the
+    // loopback alone, and the metastore does not run,
+    // as Hive 3's has no setting for the address it listens on: it would serve every interface, the host's own for one.
     private String start(String clusterId, String accountId, String region, String host, String imageId,
-                         String dockerNetwork, HiveMetastore hiveMetastore) {
+                         String dockerNetwork, HiveMetastore hiveMetastore, Yarn yarn) {
         String network = network(dockerNetwork);
         if (!sharesNamespace(network)) {
-            return createContainer(clusterId, accountId, region, host, imageId, network, false, hiveMetastore);
+            return createContainer(clusterId, accountId, region, host, imageId, network, false, hiveMetastore, yarn);
         }
         // One namespace holds one HDFS's ports, whose daemons would answer this one's readiness and its steps: the look
         // for another cluster's and this one's start go together, so two clusters' steps cannot both pass it.
@@ -350,14 +1433,14 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 throw new IllegalStateException("The HDFS of EMR cluster " + clusterId + " cannot start while that of"
                         + " EMR cluster " + other + " runs in the network namespace they share");
             }
-            return createContainer(clusterId, accountId, region, host, imageId, network, true, null);
+            return createContainer(clusterId, accountId, region, host, imageId, network, true, null, null);
         }
     }
 
     // Creates and starts the container start() decided on, in the namespace the steps share or on a network of its
     // cluster's own.
     private String createContainer(String clusterId, String accountId, String region, String host, String imageId,
-                                   String network, boolean shared, HiveMetastore hiveMetastore) {
+                                   String network, boolean shared, HiveMetastore hiveMetastore, Yarn yarn) {
         String name = hdfsName(clusterId);
         // One left stopped goes first, and a removal Docker refuses fails the start as it is, not as a name clash.
         lifecycleManager.removeIfExistsStrict(name);
@@ -370,6 +1453,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", HDFS_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, "MASTER")
                 .withEnv("FLOCI_HDFS_HOST", host)
                 .withEnv("FLOCI_HDFS_BIND", shared ? LOOPBACK : "0.0.0.0")
                 .withEnv("HADOOP_CONF_DIR", HDFS_CONF)
@@ -378,6 +1462,68 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withDockerNetwork(Optional.of(shared ? network : name))
                 .withLogRotation()
                 .withLabels(labels(clusterId, accountId, region, HDFS_COMPONENT));
+        if (!shared) {
+            // Its core and task nodes reach it by its name on the network, which a new address does not change.
+            spec.withDnsName(host);
+            // With its metastore, which Hive 3 lets listen on every address alone, it stays off the steps' network.
+            String subnet = network != null && hiveMetastore == null ? clusterSubnet(clusterId) : null;
+            if (subnet != null) {
+                spec.withJoinedNetwork(network).withEmbeddedDns().withEnv(SUBNET_VARIABLE, subnet);
+            }
+            String address = nodeAddress(clusterId, name, PRIMARY_NODE);
+            if (address != null) {
+                spec.withLinkLocalIp(address);
+            }
+        }
+        if (yarn != null && !shared) {
+            // Its web interfaces, which Floci's application UI links reach, published on the host's loopback interface
+            // alone, as Floci on the host reaches them there, and they take no credentials.
+            spec.withLoopbackPortBinding(RESOURCE_MANAGER_WEB_PORT, 0)
+                    .withLoopbackPortBinding(EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT, 0);
+            if (yarn.primaryWorks()) {
+                spec.withLoopbackPortBinding(NODE_MANAGER_WEB_PORT, 0);
+            }
+            if (yarn.sparkHistory()) {
+                spec.withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+            }
+            if (yarn.timelineServer()) {
+                spec.withLoopbackPortBinding(TIMELINE_WEB_PORT, 0);
+            }
+            if (yarn.tezUi()) {
+                spec.withLoopbackPortBinding(TEZ_UI_PORT, 0);
+            }
+            if (yarn.sparkHistory() || yarn.timelineServer()) {
+                // Its history, in a volume of its own, which outlives the cluster's other storage (see keepHistory).
+                String history = historyName(clusterId);
+                lifecycleManager.ensureVolume(history, labels(clusterId, accountId, region, HISTORY_COMPONENT));
+                spec.withNamedVolume(history, HISTORY_PATH).withEnv(HISTORY_VARIABLE, "1");
+            }
+        }
+        if (yarn != null) {
+            spec.withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
+                    .withEnv(YARN_VCORES_VARIABLE, String.valueOf(yarn.vcores()))
+                    .withEnv(REPLICATION_VARIABLE, String.valueOf(yarn.replication()));
+            if (!yarn.primaryWorks()) {
+                spec.withEnv(NODE_WORKERS_VARIABLE, "1");
+            }
+            if (yarn.hadoopFolder() != null) {
+                spec.withEnv(HADOOP_FOLDER_VARIABLE, yarn.hadoopFolder());
+            }
+            if (yarn.sparkHistory()) {
+                spec.withEnv(SPARK_HISTORY_VARIABLE, "1");
+            }
+            if (yarn.timelineServer()) {
+                spec.withEnv(TIMELINE_VARIABLE, "1");
+            }
+            if (yarn.tezUi()) {
+                spec.withEnv(TEZ_UI_VARIABLE, "1");
+            }
+        }
+        // The metastore and the executors YARN runs reach Floci, Floci on the host by its address, Floci's own
+        // certificate trusted when it serves TLS.
+        if (hiveMetastore != null || yarn != null) {
+            spec.withHostDockerInternalOnLinux().withJavaTrustStore();
+        }
         String containerId;
         try {
             if (hiveMetastore != null) {
@@ -389,9 +1535,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                         .withEnv(HIVE_METASTORE_VARIABLE, String.join(" ",
                                 EmrServerlessSparkRunner.hiveMetastoreSettings(region, accountId, endpoint)))
                         .withEnv(HIVE_METASTORE_SITE_VARIABLE, String.join("\n",
-                                EmrServerlessSparkRunner.hiveSettings(hiveMetastore.settings())))
-                        .withHostDockerInternalOnLinux()
-                        .withJavaTrustStore();
+                                EmrServerlessSparkRunner.hiveSettings(hiveMetastore.settings())));
             }
             containerId = lifecycleManager.createAndStart(spec.build()).containerId();
         } catch (RuntimeException e) {
@@ -404,6 +1548,34 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         }
         LOG.infov("Started the HDFS of EMR cluster {0} as {1}", clusterId, host);
         return containerId;
+    }
+
+    // The subnet of a cluster's own network, which exists, as Docker says it: where it is known, the cluster's nodes join
+    // the steps' network too, their HDFS and YARN listening on their address in that subnet alone (see BIND_SETUP), so
+    // the steps' network's containers, other clusters' among them, reach neither; where it is not, they stay on their
+    // cluster's network alone, as is logged. Kept once read, for the network keeps it.
+    private String clusterSubnet(String clusterId) {
+        String known = subnets.get(clusterId);
+        if (known != null) {
+            return known;
+        }
+        String network = hdfsName(clusterId);
+        String subnet = null;
+        try {
+            Network inspected = lifecycleManager.getDockerClient().inspectNetworkCmd().withNetworkId(network).exec();
+            if (inspected != null && inspected.getIpam() != null && inspected.getIpam().getConfig() != null
+                    && !inspected.getIpam().getConfig().isEmpty()) {
+                subnet = inspected.getIpam().getConfig().getFirst().getSubnet();
+            }
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not read the subnet of Docker network {0}: {1}", network, e.getMessage());
+        }
+        if (subnet == null || !subnet.contains(".")) {
+            LOG.warnv("The nodes of EMR cluster {0} stay on its network alone, as its subnet is not known", clusterId);
+            return null;
+        }
+        subnets.put(clusterId, subnet);
+        return subnet;
     }
 
     // Where the metastore service, on the cluster's network, which Docker keeps apart from Floci's, reaches Floci's
@@ -425,8 +1597,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             lifecycleManager.ensureConnected(floci.get(), network, FLOCI_ALIAS);
             return true;
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not connect Floci's container {0} to the Docker network {1}, so the Hive metastore"
-                    + " on it may not reach Floci's S3: {2}", floci.get(), network, e.getMessage());
+            LOG.warnv(e, "Could not connect Floci''s container {0} to the Docker network {1}, so the Hive metastore"
+                    + " on it may not reach Floci''s S3: {2}", floci.get(), network, e.getMessage());
             return false;
         }
     }
@@ -468,6 +1640,237 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return null;
     }
 
+    /**
+     * Where Floci reaches a web interface's port on the cluster's primary node, once the node is ready: Floci on the
+     * host at the port Docker published for it on the host's loopback interface; Floci in a container of its own at
+     * the node's address on the cluster's network, which its container joins, as the node's daemons listen there
+     * alone (see BIND_SETUP).
+     */
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        String name = hdfsName(clusterId);
+        try {
+            if (lifecycleManager.probeContainer(name) != ContainerLiveness.RUNNING
+                    || ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                            new String[]{"test", "-f", HDFS_READY}, 10).exitCode() != 0) {
+                return Optional.empty();
+            }
+            if (currentContainer.resolveContainerId().isPresent() && !attachFloci(name)) {
+                return Optional.empty();
+            }
+            return Optional.of(lifecycleManager.resolveEndpoint(name, port, name));
+        } catch (RuntimeException e) {
+            // Stopped since it was looked at, or started before its ports were published.
+            LOG.debugv(e, "Port {0} of the primary node of EMR cluster {1} is not reachable: {2}", port, clusterId,
+                    e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public boolean keepHistory(String clusterId) {
+        try {
+            if (!historyKept(clusterId)) {
+                return true;
+            }
+            if (lifecycleManager.probeContainer(hdfsName(clusterId)) != ContainerLiveness.RUNNING) {
+                // Its HDFS, which holds them, is read only through its NameNode.
+                LOG.warnv("The Spark event logs of EMR cluster {0} since its primary node last stopped are not kept, as"
+                        + " the node is not running", clusterId);
+                return true;
+            }
+            return copyEventLogs(hdfsName(clusterId));
+        } catch (RuntimeException e) {
+            // Docker did not answer, so its storage stays for a later try.
+            LOG.warnv(e, "Could not keep the Spark event logs of EMR cluster {0}: {1}", clusterId, e.getMessage());
+            return false;
+        }
+    }
+
+    // Copies a running primary node's Spark event logs into its kept history, where it has one (KEEP_EVENT_LOGS): as
+    // its cluster's storage goes, and before a teardown or a sweep at start removes the node, which neither can put
+    // off; whether they were kept.
+    private boolean copyEventLogs(String name) {
+        try {
+            ContainerExec.Result copied = ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                    new String[]{"setpriv", "--reuid=hadoop", "--regid=hadoop", "--clear-groups", "bash", "-c",
+                            KEEP_EVENT_LOGS}, HISTORY_COPY_SECONDS);
+            if (copied.exitCode() != 0) {
+                LOG.warnv("Could not keep the Spark event logs of {0}: {1}", name, copied.stderr());
+                return false;
+            }
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not keep the Spark event logs of {0}: {1}", name, e.getMessage());
+            return false;
+        }
+    }
+
+    // Whether the cluster's kept history's volume is there; a failure to tell is thrown, rather than taken for none.
+    @Override
+    public boolean historyKept(String clusterId) {
+        try {
+            lifecycleManager.getDockerClient().inspectVolumeCmd(historyName(clusterId)).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Where Floci reaches a port of the container serving a cluster's kept history, once it is ready: on the host's
+     * loopback interface, where it is published, or, Floci in a container, on the history's own network, which Floci's
+     * container joins, so no step's container reaches it. One not running is started on a thread of its own, as its
+     * image may need making first.
+     */
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> historyInterface(String clusterId, String accountId,
+                                                                             String region, Supplier<String> image,
+                                                                             Consumer<String> released,
+                                                                             String primaryHost, Yarn yarn,
+                                                                             int port) {
+        String name = historyUiName(clusterId);
+        try {
+            ContainerLiveness liveness = lifecycleManager.probeContainer(name);
+            if (liveness == ContainerLiveness.RUNNING) {
+                if (ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                        new String[]{"test", "-f", HISTORY_READY}, 10).exitCode() != 0) {
+                    return Optional.empty();
+                }
+                String network = historyName(clusterId);
+                if (currentContainer.resolveContainerId().isPresent() && !attachFloci(network)) {
+                    return Optional.empty();
+                }
+                return Optional.of(lifecycleManager.resolveEndpoint(name, port, network));
+            }
+            if (liveness == ContainerLiveness.NOT_RUNNING && historyStarts.add(clusterId)) {
+                long teardown = teardowns.get();
+                decommissions.execute(() -> {
+                    try {
+                        startHistory(clusterId, accountId, region, image, released, primaryHost, yarn, teardown);
+                    } catch (RuntimeException e) {
+                        LOG.warnv(e, "Could not start the history of EMR cluster {0}: {1}", clusterId,
+                                e.getMessage());
+                    } finally {
+                        historyStarts.remove(clusterId);
+                    }
+                });
+            }
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "The history of EMR cluster {0} is not reachable: {1}", clusterId, e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    // The container serving a cluster's kept history, on a network of its own, its ports published as the primary
+    // node's were, made from the image the cluster ran; none once a teardown has run since it was asked for, or the
+    // history has gone, whose volume the container would make again, empty.
+    private void startHistory(String clusterId, String accountId, String region, Supplier<String> image,
+                              Consumer<String> released, String primaryHost, Yarn yarn, long teardown) {
+        String imageId = image.get();
+        try {
+            if (teardowns.get() != teardown || !historyKept(clusterId)) {
+                return;
+            }
+            String name = historyUiName(clusterId);
+            String network = historyName(clusterId);
+            lifecycleManager.removeIfExistsStrict(name);
+            lifecycleManager.ensureNetwork(network, labels(clusterId, accountId, region, HISTORY_COMPONENT));
+            // Known before it starts, so a teardown while it starts removes it.
+            historyContainers.add(name);
+            ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
+                    .withName(name)
+                    .withUser("root")
+                    .withEntrypoint(List.of("/bin/bash", "-c", HISTORY_SCRIPT))
+                    .withEnv("FLOCI_HDFS_HOST", primaryHost)
+                    .withEnv("HADOOP_LOG_DIR", "/tmp/floci-history-logs")
+                    .withNamedVolume(historyName(clusterId), HISTORY_PATH)
+                    .withDockerNetwork(Optional.of(network))
+                    .withLogRotation()
+                    .withLabels(labels(clusterId, accountId, region, HISTORY_COMPONENT));
+            if (yarn.sparkHistory()) {
+                spec.withEnv(SPARK_HISTORY_VARIABLE, "1")
+                        .withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+            }
+            if (yarn.timelineServer()) {
+                spec.withEnv(TIMELINE_VARIABLE, "1").withLoopbackPortBinding(TIMELINE_WEB_PORT, 0);
+            }
+            if (yarn.tezUi()) {
+                spec.withEnv(TEZ_UI_VARIABLE, "1").withLoopbackPortBinding(TEZ_UI_PORT, 0);
+            }
+            if (yarn.hadoopFolder() != null) {
+                spec.withEnv(HADOOP_FOLDER_VARIABLE, yarn.hadoopFolder());
+            }
+            lifecycleManager.createAndStart(spec.build());
+            if (teardowns.get() != teardown) {
+                // A teardown ran while it started, and may have missed it.
+                lifecycleManager.removeIfExistsStrict(name);
+                historyContainers.remove(name);
+                return;
+            }
+            LOG.infov("Started the history of EMR cluster {0}", clusterId);
+        } finally {
+            released.accept(imageId);
+        }
+    }
+
+    @Override
+    public void stopHistory(String clusterId) {
+        try {
+            lifecycleManager.removeIfExistsStrict(historyUiName(clusterId));
+            historyContainers.remove(historyUiName(clusterId));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not stop the history of EMR cluster {0}: {1}", clusterId, e.getMessage());
+        }
+    }
+
+    /** Removes the kept histories of the clusters not in {@code kept}, their containers first, as each holds one. */
+    @Override
+    public void removeHistoriesBut(Set<String> kept) {
+        removeHistoryContainers(kept);
+        try {
+            ListVolumesResponse response = lifecycleManager.getDockerClient().listVolumesCmd()
+                    .withFilter("label", historyLabels()).exec();
+            List<InspectVolumeResponse> volumes = response != null && response.getVolumes() != null
+                    ? response.getVolumes() : List.of();
+            for (InspectVolumeResponse volume : volumes) {
+                Map<String, String> labels = volume.getLabels() != null ? volume.getLabels() : Map.of();
+                if (!kept.contains(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))) {
+                    lifecycleManager.removeVolume(volume.getName());
+                    // Its network, named as it is, with Floci's container off it first.
+                    detachFloci(volume.getName());
+                    lifecycleManager.removeNetwork(volume.getName());
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the kept histories of EMR clusters: {0}", e.getMessage());
+        }
+    }
+
+    // Removes the containers serving the kept histories of the clusters not in kept; those of the clusters kept, which
+    // an earlier process may have left, are known from now, so a reset or a shutdown removes them.
+    private void removeHistoryContainers(Set<String> kept) {
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(historyLabels()).exec()) {
+                Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
+                String clusterId = labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL);
+                if (!kept.contains(clusterId)) {
+                    lifecycleManager.removeIfExistsStrict(container.getId());
+                } else {
+                    historyContainers.add(historyUiName(clusterId));
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the containers of EMR clusters' kept histories: {0}", e.getMessage());
+        }
+    }
+
+    private List<String> historyLabels() {
+        return List.of(ContainerStorageHelper.COMPONENT_LABEL + "=" + HISTORY_COMPONENT,
+                ContainerStorageHelper.OWNER_LABEL + "=" + ContainerStorageHelper.ownerIdentity(config));
+    }
+
     // Whether the container became ready by the deadline, false when it stopped first, or the step did, or a teardown
     // has run since it asked; a failure to become ready in time is thrown.
     private boolean awaitReady(String clusterId, String containerId, long deadline, long teardown,
@@ -492,6 +1895,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 return true;
             }
             if (nanoTime.getAsLong() >= deadline) {
+                logNodeOutput(clusterId, containerId);
                 throw new IllegalStateException("The HDFS of EMR cluster " + clusterId + " did not start within "
                         + hdfsStartTimeout.toSeconds() + " seconds");
             }
@@ -503,6 +1907,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
         }
         return false;
+    }
+
+    // What a node that did not become ready last wrote, in Floci's log, as the container goes with its cluster.
+    private void logNodeOutput(String clusterId, String containerId) {
+        LOG.warnv("A node of EMR cluster {0}, {1}, did not become ready. It last wrote:\n{2}", clusterId, containerId,
+                lifecycleManager.lastLogLines(containerId, NODE_LOG_LINES, NODE_LOG_READ));
     }
 
     // A teardown since the step asked for its cluster's HDFS stops the step as it would its driver, and the container
@@ -518,9 +1928,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         }
     }
 
+    // The name of a cluster's core or task node's container, and of the volume its data is in.
+    private String nodeName(String clusterId, Node node) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-node-" + node.id());
+    }
+
     // The name of a cluster's HDFS container, of the volume its data is in, and of the Docker network it is on.
     private String hdfsName(String clusterId) {
         return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-hdfs");
+    }
+
+    // A cluster's kept history's volume, and the container serving it.
+    private String historyName(String clusterId) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-history");
+    }
+
+    private String historyUiName(String clusterId) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-history-ui");
     }
 
     private Map<String, String> labels(String clusterId, String accountId, String region, String component) {
@@ -536,14 +1960,37 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         // Its HDFS goes first, as its container holds the volume of its data and its network, and its lock with it, so
         // the clusters that have ended leave none behind.
         starting.remove(clusterId);
+        subnets.remove(clusterId);
+        nodeRequests.remove(clusterId);
+        draining.remove(clusterId);
+        departed.remove(clusterId);
+        boolean nodesGone = true;
+        try {
+            for (String node : nodeContainers(clusterId).keySet()) {
+                nodesGone &= removeNode(node, true);
+            }
+            // A node's data whose container a shutdown removed, which no list of containers finds.
+            for (String volume : nodeVolumes(clusterId).keySet()) {
+                nodesGone &= lifecycleManager.removeVolume(volume);
+            }
+        } catch (RuntimeException e) {
+            // The rest is removed all the same, and the cluster's storage is asked for again.
+            LOG.warnv(e, "Could not find the nodes of EMR cluster {0} to remove: {1}", clusterId, e.getMessage());
+            nodesGone = false;
+        }
         boolean containerGone = removeKnown(hdfsName(clusterId));
+        // Its relay goes, trusted no more, and every address given on its network with it.
+        boolean relayGone = relays == null || relays.stop(clusterId);
+        identities.remove(clusterId);
+        String nodes = ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-node-");
+        nodeAddresses.keySet().removeIf(name -> name.equals(hdfsName(clusterId)) || name.startsWith(nodes));
         SparkJobRunner.Storage storage = volumes(clusterId);
         // Each is tried, so one Docker refused does not keep the others.
         boolean networkGone = lifecycleManager.removeNetwork(hdfsName(clusterId));
         boolean homeGone = lifecycleManager.removeVolume(storage.home());
         boolean mntGone = lifecycleManager.removeVolume(storage.mnt());
         return lifecycleManager.removeVolume(hdfsName(clusterId)) && mntGone && homeGone && networkGone
-                && containerGone;
+                && containerGone && nodesGone && relayGone;
     }
 
     /**
@@ -555,8 +2002,27 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     @Override
     public void stopManagedContainers() {
         teardowns.incrementAndGet();
+        nodeRequests.clear();
+        draining.clear();
+        departed.clear();
+        for (String name : List.copyOf(runningNodes)) {
+            removeNode(name, false);
+        }
         for (String name : List.copyOf(running)) {
+            // What its history interfaces show goes into its kept history first, as nothing reads its HDFS after.
+            if (lifecycleManager.probeContainer(name) == ContainerLiveness.RUNNING) {
+                copyEventLogs(name);
+            }
             removeKnown(name);
+        }
+        // The containers serving kept histories, which a later link starts again; the histories stay.
+        for (String name : List.copyOf(historyContainers)) {
+            try {
+                lifecycleManager.removeIfExistsStrict(name);
+                historyContainers.remove(name);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not remove the history container {0}: {1}", name, e.getMessage());
+            }
         }
     }
 
@@ -570,11 +2036,13 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             LOG.warnv(e, "Could not remove the HDFS container {0}: {1}", name, e.getMessage());
             return false;
         }
+        releaseNodeAddress(name);
         releaseSession(name);
         if (!detachFloci(name)) {
             return false;
         }
         running.remove(name);
+        archivedLogs.remove(name);
         return true;
     }
 
@@ -588,6 +2056,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         // Each sweep on its own, so Docker refusing one list does not keep the others from going.
         try {
             for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, NODE_COMPONENT,
+                            ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                    .exec()) {
+                Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
+                String name = container.getNames()[0].substring(1);
+                runningNodes.add(name);
+                if (!kept.contains(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))) {
+                    removeNode(name, false);
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the nodes of EMR clusters that have ended: {0}", e.getMessage());
+        }
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, HDFS_COMPONENT,
                             ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
                     .exec()) {
@@ -597,6 +2080,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     // Known first, so one Docker refuses to remove stays for the next reset or shutdown to remove.
                     String name = clusterId != null ? hdfsName(clusterId) : container.getId();
                     running.add(name);
+                    if ("running".equals(container.getState())) {
+                        copyEventLogs(name);
+                    }
                     removeKnown(name);
                 } else {
                     // A cluster still up keeps the HDFS an earlier process left, which a reset or a shutdown removes.
@@ -605,6 +2091,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the HDFS of EMR clusters that have ended: {0}", e.getMessage());
+        }
+        // The instance metadata relays an earlier process left, whose networks they would keep: the next bootstrap or step
+        // of a cluster still up starts another.
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, EmrMetadataRelays.COMPONENT,
+                            ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                    .exec()) {
+                Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
+                if (EmrMetadataRelays.COMPONENT.equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))) {
+                    lifecycleManager.stopAndRemove(container.getId(), null, 0);
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the instance metadata relays an earlier Floci left: {0}", e.getMessage());
         }
         try {
             for (Network network : lifecycleManager.getDockerClient().listNetworksCmd()

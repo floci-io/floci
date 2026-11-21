@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -28,6 +29,7 @@ import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.Record;
+import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.sns.model.PlatformApplication;
@@ -43,6 +45,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
@@ -76,6 +79,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SnsService implements Resettable, ResourceProvider {
@@ -104,8 +108,10 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final int SANDBOX_PAGE_SIZE = 100;
     /**
      * The actions a topic policy statement can grant, which are SNS's actions in AWS's service
-     * reference (https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json).
-     * {@code AddPermission} refuses any other name.
+     * reference (https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json), plus
+     * {@code Receive}, which AWS's former default topic policy granted and AWS still accepts.
+     * {@code AddPermission} refuses any other name, and a policy set on a topic any other
+     * {@code sns:} action.
      */
     private static final Set<String> SNS_POLICY_ACTIONS = Set.of(
             "AddPermission", "CheckIfPhoneNumberIsOptedOut", "ConfirmSubscription",
@@ -119,7 +125,11 @@ public class SnsService implements Resettable, ResourceProvider {
             "ListTagsForResource", "ListTopics", "OptInPhoneNumber", "Publish", "PutDataProtectionPolicy",
             "RemovePermission", "SetEndpointAttributes", "SetPlatformApplicationAttributes",
             "SetSMSAttributes", "SetSubscriptionAttributes", "SetTopicAttributes", "Subscribe",
-            "TagResource", "Unsubscribe", "UntagResource", "VerifySMSSandboxPhoneNumber");
+            "TagResource", "Unsubscribe", "UntagResource", "VerifySMSSandboxPhoneNumber", "Receive");
+    /** {@link #SNS_POLICY_ACTIONS} in lower case: a policy's action names are matched ignoring case. */
+    private static final Set<String> SNS_POLICY_ACTIONS_LOWER_CASE = SNS_POLICY_ACTIONS.stream()
+            .map(action -> action.toLowerCase(Locale.ROOT))
+            .collect(Collectors.toUnmodifiableSet());
     /** What the default statement of a topic's policy grants its owner. */
     private static final List<String> DEFAULT_TOPIC_POLICY_ACTIONS = List.of(
             "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission",
@@ -215,7 +225,8 @@ public class SnsService implements Resettable, ResourceProvider {
                 firehoseService,
                 config.effectiveBaseUrl(),
                 objectMapper,
-                messageSigner
+                messageSigner,
+                ContainerCaBundle.sslContext(config).orElse(null)
         );
     }
 
@@ -336,6 +347,22 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore, smsStore,
+                smsAttributesStore, smsSandboxStore, regionResolver, sqsService, lambdaService,
+                firehoseService, baseUrl, objectMapper, messageSigner, null);
+    }
+
+    private SnsService(StorageBackend<String, Topic> topicStore,
+                       StorageBackend<String, Subscription> subscriptionStore,
+                       StorageBackend<String, PlatformApplication> platformAppStore,
+                       StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+                       StorageBackend<String, SentSms> smsStore,
+                       StorageBackend<String, Map<String, String>> smsAttributesStore,
+                       StorageBackend<String, SmsSandboxPhoneNumber> smsSandboxStore,
+                       RegionResolver regionResolver, SqsService sqsService,
+                       LambdaService lambdaService, FirehoseService firehoseService,
+                       String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner,
+                       SSLContext sslContext) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -349,12 +376,17 @@ public class SnsService implements Resettable, ResourceProvider {
         this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        // Pin to HTTP/1.1 like AWS SNS: the default HTTP_2 sends an h2c upgrade to http:// endpoints.
-        this.httpClient = HttpClient.newBuilder()
+        this.httpClient = deliveryClient(sslContext);
+        this.messageSigner = messageSigner;
+    }
+
+    // The client HTTP and HTTPS subscriptions are posted to. Pin to HTTP/1.1 like AWS SNS: the default
+    // HTTP_2 sends an h2c upgrade to http:// endpoints.
+    private static HttpClient deliveryClient(SSLContext sslContext) {
+        return ContainerCaBundle.httpClientBuilder(sslContext)
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
-        this.messageSigner = messageSigner;
     }
 
     public void clear() {
@@ -545,6 +577,13 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
+    private static void requirePublishablePhoneNumber(String phoneNumber) {
+        if (!E164_PHONE_NUMBER.matcher(phoneNumber).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: PhoneNumber Reason: " + phoneNumber + " is not valid to publish to", 400);
+        }
+    }
+
     private static void requireSandboxPhoneNumber(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.isEmpty()
                 || phoneNumber.length() > SANDBOX_PHONE_NUMBER_MAX_LENGTH
@@ -579,6 +618,9 @@ public class SnsService implements Resettable, ResourceProvider {
         }
         if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
             validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
+        }
+        if (attributes != null) {
+            requireSnsPolicyActions(attributes.get("Policy"));
         }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
@@ -704,7 +746,52 @@ public class SnsService implements Resettable, ResourceProvider {
                 && validateMaximumMessageSize(attributeValue, false) > DEFAULT_MAX_MESSAGE_SIZE) {
             requireLargePayloadSubscriptions(topicArn, region);
         }
+        if ("Policy".equals(attributeName)) {
+            requireSnsPolicyActions(attributeValue);
+        }
         topic.getAttributes().put(attributeName, attributeValue);
+        topicStore.put(key, topic);
+    }
+
+    /**
+     * Refuses a topic policy whose statements grant an {@code sns:} action SNS does not have, as
+     * AWS does. Wildcards, {@code NotAction}, actions of other services and a value that is not
+     * JSON are left alone.
+     */
+    private void requireSnsPolicyActions(String policy) {
+        if (policy == null || policy.isBlank()) {
+            return;
+        }
+        JsonNode document;
+        try {
+            document = objectMapper.readTree(policy);
+        } catch (JsonProcessingException ignored) {
+            // Not JSON: this check only reads the actions of a policy that parses.
+            return;
+        }
+        for (JsonNode statement : PolicyDocument.statementsOf(document)) {
+            JsonNode actions = statement.path("Action");
+            for (JsonNode action : actions.isArray() ? actions : List.of(actions)) {
+                String name = action.asText("").toLowerCase(Locale.ROOT);
+                if (name.startsWith("sns:") && !name.contains("*") && !name.contains("?")
+                        && !SNS_POLICY_ACTIONS_LOWER_CASE.contains(name.substring(4))) {
+                    throw actionOutOfServiceScope();
+                }
+            }
+        }
+    }
+
+    private static AwsException actionOutOfServiceScope() {
+        return new AwsException("InvalidParameter",
+                "Invalid parameter: Policy statement action out of service scope!", 400);
+    }
+
+    /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
+    public synchronized void removeTopicAttribute(String topicArn, String attributeName, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        topic.getAttributes().remove(attributeName);
         topicStore.put(key, topic);
     }
 
@@ -732,8 +819,7 @@ public class SnsService implements Resettable, ResourceProvider {
         Topic topic = topicStore.get(key).orElseThrow(SnsService::permissionTopicNotFound);
         for (String action : actionNames) {
             if (!SNS_POLICY_ACTIONS.contains(action)) {
-                throw new AwsException("InvalidParameter",
-                        "Invalid parameter: Policy statement action out of service scope!", 400);
+                throw actionOutOfServiceScope();
             }
         }
         ObjectNode policy = topicPolicy(topic, topicArn);
@@ -1069,6 +1155,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         // Send SMS
         if (phoneNumber != null) {
+            requirePublishablePhoneNumber(phoneNumber);
             requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             return recordSms(phoneNumber, message, subject, region);
         }
@@ -1639,22 +1726,45 @@ public class SnsService implements Resettable, ResourceProvider {
         return new BatchPublishResult(successful, failed);
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+    /**
+     * Gives the topic a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags, String region) {
         String key = topicKey(region, resourceArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
-        if (tags != null) topic.getTags().putAll(tags);
+        if (tags != null) {
+            Map<String, String> merged = new LinkedHashMap<>(topic.getTags());
+            merged.putAll(tags);
+            topic.setTags(merged);
+        }
         topicStore.put(key, topic);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+    /** Gives the topic a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys, String region) {
         String key = topicKey(region, resourceArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource does not exist.", 404));
-        if (tagKeys != null) tagKeys.forEach(topic.getTags()::remove);
+        if (tagKeys != null) {
+            Map<String, String> remaining = new LinkedHashMap<>(topic.getTags());
+            tagKeys.forEach(remaining::remove);
+            topic.setTags(remaining);
+        }
         topicStore.put(key, topic);
+    }
+
+    /**
+     * The tags of the topic whose ARN is {@code topicArn} in {@code account}, read in place under the key the handlers
+     * read for the ARN's Region; none when there is no such topic.
+     */
+    Map<String, String> topicTagsInAccount(String account, String topicArn) {
+        return AccountAwareStorageBackend.readInAccount(topicStore, account,
+                        topicKey(AwsArnUtils.parse(topicArn).region(), topicArn))
+                .map(Topic::getTags).orElse(Map.of());
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {

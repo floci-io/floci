@@ -3,7 +3,6 @@ package io.floci.aws.core.storage;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -39,10 +38,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     public HybridStorage(Path filePath, TypeReference<Map<K, V>> typeReference, long flushIntervalMs) {
         this.filePath = filePath;
         this.typeReference = typeReference;
-        this.objectMapper = new ObjectMapper();
-        this.objectMapper.registerModule(new JavaTimeModule());
-        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
+        this.objectMapper = StorageJson.mapper().enable(SerializationFeature.INDENT_OUTPUT);
 
         this.scheduler = StorageFiles.scheduleEvery("hybrid-storage-flush", flushIntervalMs, this::flushIfDirty);
     }

@@ -2,9 +2,11 @@ package io.floci.aws.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -13,6 +15,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -53,7 +56,8 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     @Inject
     public PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper) {
-        this(manager, mapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+        this(manager, mapper, HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper, HttpClient httpClient) {
@@ -124,13 +128,53 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     }
 
     /**
-     * PEP 503 normalization: lowercase, runs of {@code -_.} collapsed to one {@code -}, same as
-     * {@code CodeArtifactPypiController}'s own pre-upload index check. {@code -} and {@code _}
+     * {@link #fetchPackageVersionAsset}'s streamed sibling; see {@link RepositorySidecarManager}
+     * for why. Uses the worst-case download timeout, not the byte[] overload's flat 10 seconds:
+     * this one asset download can be gigabytes, and its real size isn't known until the response
+     * itself arrives.
+     */
+    @Override
+    public Optional<StreamedAsset> fetchPackageVersionAssetStreamed(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        if (!filenameEmbedsVersion(assetName, packageName, version)) {
+            return Optional.empty();
+        }
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        if (!packageIndexListsAsset(baseUrl, packageName, assetName)) {
+            return Optional.empty();
+        }
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/packages/" + SidecarUriUtils.encodeSegment(assetName));
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to fetch " + assetName, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            throw new IllegalStateException("Could not fetch " + assetName + " from the pypiserver sidecar: "
+                    + "upstream returned " + response.statusCode());
+        }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new StreamedAsset(response.body(), contentLength));
+    }
+
+    /**
+     * PEP 503 normalization: lowercase, runs of {@code -_.} collapsed to one {@code -}. Not
+     * {@code private}: {@code CodeArtifactPypiController}'s own pre-upload index check and the
+     * pypi external-connection classes ({@link PypiExternalConnectionClient}, {@link
+     * CodeArtifactPypiExternalConnectionImporter}) all need the exact same normalization, so this
+     * is the one copy all of them call rather than each keeping its own. {@code -} and {@code _}
      * collapsing to the same character here is what lets this match a filename's own escaped
      * name portion (wheels, and modern sdists, replace a name's internal {@code -}/{@code .}
      * with {@code _}) against the caller-supplied, unescaped {@code packageName}.
      */
-    private static String normalizePackageName(String packageName) {
+    static String normalizePackageName(String packageName) {
         return packageName.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
     }
 
@@ -336,6 +380,59 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * pypiserver's own {@code /<project>/json} API carries only filenames and URLs, never a
+     * distribution's embedded {@code Requires-Dist} metadata, so this picks a representative
+     * asset for the version and opens it directly: a {@code .whl} (a plain ZIP, simpler and more
+     * reliable to parse) if one exists, otherwise an sdist in one of the formats this reader can
+     * actually decompress ({@code .tar.gz}/{@code .tgz}, both gzip+tar, or {@code .zip}). When
+     * several wheels exist for the version (e.g. per-platform builds), the first by lexicographic
+     * filename order is used, a deterministic choice rather than "whichever happens to list
+     * first" - a documented simplification, since real AWS's own tie-break for this case is not
+     * publicly documented either. Empty when the version has no wheel or decompressible-sdist
+     * asset at all (including when it exists only as a real {@code .tar.bz2}/{@code .tar.xz}
+     * sdist, both real formats {@link #ARCHIVE_SUFFIX} recognizes that this reader deliberately
+     * does not attempt, since bzip2/xz decompression would need a new runtime dependency), or the
+     * chosen asset has no parseable {@code Requires-Dist} metadata.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        List<String> filenames = listPackageVersionAssetNames(repositoryContainerId, domain, repository, namespace,
+                packageName, version);
+        String wheel = filenames.stream().filter(name -> name.endsWith(".whl")).sorted().findFirst().orElse(null);
+        String assetName = wheel;
+        if (assetName == null) {
+            // .tar.gz/.tgz (both real gzip+tar) and .zip are all real sdist formats this sidecar's
+            // own ARCHIVE_SUFFIX already recognizes and this reader can actually decompress. A
+            // release available only as .tar.bz2/.tar.xz (also real, ARCHIVE_SUFFIX-recognized
+            // formats) falls through to the empty-list return below rather than being misread:
+            // bzip2/xz decompression would need a new runtime dependency this codebase
+            // deliberately avoids.
+            assetName = filenames.stream()
+                    .filter(name -> name.endsWith(".tar.gz") || name.endsWith(".tgz") || name.endsWith(".zip"))
+                    .sorted().findFirst().orElse(null);
+        }
+        if (assetName == null) {
+            return List.of();
+        }
+        Optional<byte[]> asset = fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace,
+                packageName, version, assetName);
+        if (asset.isEmpty()) {
+            return List.of();
+        }
+        Optional<byte[]> metadata;
+        if (wheel != null) {
+            metadata = PypiVersionMetadata.extractWheelMetadata(asset.get());
+        } else if (assetName.endsWith(".zip")) {
+            metadata = PypiVersionMetadata.extractZipSdistMetadata(asset.get());
+        } else {
+            metadata = PypiVersionMetadata.extractSdistMetadata(asset.get());
+        }
+        return metadata.map(PypiVersionMetadata::parseRequiresDist).orElse(List.of());
+    }
+
+    /**
      * Uploads {@code content} as {@code assetName} the same real {@code twine upload} wire shape
      * {@code CodeArtifactPypiController#upload} already forwards unmodified, confirmed against a
      * live pypiserver container: a {@code multipart/form-data} {@code POST} to the repository
@@ -361,7 +458,36 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             String namespace, String packageName, String version, String assetName, byte[] content) {
         String baseUrl = ensureReady(repositoryContainerId, null);
         String boundary = "flociPypiCopyBoundary" + System.nanoTime();
-        byte[] head = ("--" + boundary + "\r\n"
+        byte[] head = multipartHead(boundary, packageName, version, assetName);
+        byte[] tail = multipartTail(boundary);
+        byte[] body = new byte[head.length + content.length + tail.length];
+        System.arraycopy(head, 0, body, 0, head.length);
+        System.arraycopy(content, 0, body, head.length, content.length);
+        System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+        sendMultipartUpload(baseUrl, boundary, BodyPublishers.ofByteArray(body), assetName, body.length);
+    }
+
+    /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling: the same multipart shape, but the file part streams
+     * straight from disk via {@code BodyPublishers.concat}, so the asset's own content is never
+     * copied into one combined array the way the {@code byte[]} overload above still does for
+     * content that is already resident.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        String boundary = "flociPypiCopyBoundary" + System.nanoTime();
+        byte[] head = multipartHead(boundary, packageName, version, assetName);
+        byte[] tail = multipartTail(boundary);
+        HttpRequest.BodyPublisher publisher = MultipartFilePublisher.concat(head, content, tail);
+        sendMultipartUpload(baseUrl, boundary, publisher, assetName, contentLength);
+    }
+
+    private static byte[] multipartHead(String boundary, String packageName, String version, String assetName) {
+        return ("--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\nfile_upload\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"name\"\r\n\r\n" + packageName + "\r\n"
@@ -370,16 +496,18 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"content\"; filename=\"" + assetName + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
-        byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
-        byte[] body = new byte[head.length + content.length + tail.length];
-        System.arraycopy(head, 0, body, 0, head.length);
-        System.arraycopy(content, 0, body, head.length, content.length);
-        System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+    }
 
+    private static byte[] multipartTail(String boundary) {
+        return ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void sendMultipartUpload(String baseUrl, String boundary, HttpRequest.BodyPublisher publisher,
+            String assetName, long contentLength) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(SidecarUriUtils.transferTimeout(contentLength))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .POST(BodyPublishers.ofByteArray(body))
+                .POST(publisher)
                 .build();
         HttpResponse<String> response;
         try {

@@ -46,6 +46,7 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
         table.setTableName(TABLE_NAME);
         table.setTableArn(TABLE_ARN);
         table.setKeySchema(List.of(new KeySchemaElement("id", "HASH")));
+        table.setAttributeDefinitions(List.of(new AttributeDefinition("id", "S")));
         return table;
     }
 
@@ -89,6 +90,27 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
                                        Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
                                        List<LocalSecondaryIndex> localSecondaryIndexes) {
         return record("createTable", scope);
+    }
+
+    @Override
+    public TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return record("createTable", scope);
+    }
+
+    @Override
+    public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
+        return record("updateThroughput", scope);
+    }
+
+    @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return record("createOnDemandTable", scope);
     }
 
     @Override
@@ -158,6 +180,12 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     @Override
     public void untagResource(Scope scope, String resourceArn, List<String> tagKeys) {
         record("untagResource", scope);
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        invocations.add(new Invocation("storedTags", null, null));
+        return Map.of();
     }
 
     @Override

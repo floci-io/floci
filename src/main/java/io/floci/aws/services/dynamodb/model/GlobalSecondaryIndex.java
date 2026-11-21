@@ -21,6 +21,9 @@ public class GlobalSecondaryIndex {
     private List<String> nonKeyAttributes;
     private Integer onDemandMaxReadRequestUnits;
     private Integer onDemandMaxWriteRequestUnits;
+    // Null until a request sets the index's warm throughput.
+    private Long warmReadUnitsPerSecond;
+    private Long warmWriteUnitsPerSecond;
     // Null until the first UpdateContributorInsights call on this index.
     private ContributorInsights contributorInsights;
 
@@ -73,6 +76,12 @@ public class GlobalSecondaryIndex {
 
     public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
     public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
+
+    public Long getWarmReadUnitsPerSecond() { return warmReadUnitsPerSecond; }
+    public void setWarmReadUnitsPerSecond(Long v) { this.warmReadUnitsPerSecond = v; }
+
+    public Long getWarmWriteUnitsPerSecond() { return warmWriteUnitsPerSecond; }
+    public void setWarmWriteUnitsPerSecond(Long v) { this.warmWriteUnitsPerSecond = v; }
 
     public ContributorInsights getContributorInsights() { return contributorInsights; }
     public void setContributorInsights(ContributorInsights contributorInsights) {

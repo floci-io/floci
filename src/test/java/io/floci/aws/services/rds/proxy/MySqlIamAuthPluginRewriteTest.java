@@ -45,6 +45,52 @@ class MySqlIamAuthPluginRewriteTest {
         assertNull(rewrite("SELECT 1"));
         assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED BY 'secret'"));
         assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY 'x'"));
+        assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED BY 'IDENTIFIED WITH AWSAuthenticationPlugin'"));
+        assertNull(rewrite("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                + " IDENTIFIED BY 'secret'"));
+    }
+
+    @Test
+    void leavesLongerPluginIdentifierUntouched() {
+        assertNull(rewrite("CREATE USER a IDENTIFIED WITH AWSAuthenticationPluginSuffix AS 'x'"));
+        assertNull(rewrite("CREATE USER a IDENTIFIED WITH `AWSAuthenticationPluginSuffix` AS 'x'"));
+    }
+
+    @Test
+    void rewritesUserDdlInsideExecutableVersionComment() {
+        assertEquals("/*!50000 CREATE USER a IDENTIFIED WITH mysql_native_password AS '" + HASH + "' */",
+                rewrite("/*!50000 CREATE USER a IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' */"));
+    }
+
+    @Test
+    void rewritesActualClauseAfterPluginNameInComment() {
+        assertEquals("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                        + " IDENTIFIED WITH mysql_native_password AS '" + HASH + "'",
+                rewrite("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                        + " IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
+    }
+
+    @Test
+    void rewritesCompleteQuotedAuthValues() {
+        String prefix = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS ";
+        String expected = "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS '" + HASH + "'";
+        assertEquals(expected, rewrite(prefix + "'abc\\'def'"));
+        assertEquals(expected, rewrite(prefix + "'abc''def'"));
+        assertEquals(expected, rewrite(prefix + "\"abc\\\"def\""));
+        assertEquals(expected, rewrite(prefix + "\"abc\"\"def\""));
+    }
+
+    @Test
+    void leavesUnterminatedQuotedAuthValueUntouched() {
+        String prefix = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS ";
+        assertNull(rewrite(prefix + "'abc\\'def"));
+        assertNull(rewrite(prefix + "\"abc\\\"def"));
+    }
+
+    @Test
+    void rewritesAfterBackslashInBacktickIdentifier() {
+        assertEquals("CREATE USER `svc\\`@'%' IDENTIFIED WITH mysql_native_password AS '" + HASH + "'",
+                rewrite("CREATE USER `svc\\`@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
     }
 
     @Test

@@ -12,6 +12,7 @@ import io.floci.aws.services.codeartifact.CodeArtifactService.PublishPackageVers
 import io.floci.aws.services.codeartifact.model.CodeArtifactDomain;
 import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Assumptions;
@@ -650,7 +651,8 @@ class CodeArtifactAssetPersistenceTest {
                 format, null, null, null, null, "BLOCK", "BLOCK");
         assertEquals(List.of(normalized), listed.packages().stream()
                 .map(CodeArtifactService.PackageSummaryEntry::packageName).toList());
-        assertTrue(upgraded.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+        assertTrue(upgraded.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized,
+                "EXTERNAL_UPSTREAM"));
         AccountAwareStorageBackend<PackageOriginConfig> migrated = accountAware(dir, file,
                 new TypeReference<Map<String, PackageOriginConfig>>() {});
         assertTrue(migrated.getForAccount(ACCOUNT_ID, prefix + original).isEmpty());
@@ -680,6 +682,8 @@ class CodeArtifactAssetPersistenceTest {
                 "codeartifact-package-versions.json", new TypeReference<Map<String, CodeArtifactPackageVersion>>() {});
         AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore = accountAware(dir,
                 "codeartifact-package-origin-configs.json", new TypeReference<Map<String, PackageOriginConfig>>() {});
+        AccountAwareStorageBackend<PackageGroup> packageGroupStore = accountAware(dir,
+                "codeartifact-package-groups.json", new TypeReference<Map<String, PackageGroup>>() {});
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -691,7 +695,7 @@ class CodeArtifactAssetPersistenceTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         return new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
-                regionResolver, config, false, dir.resolve("codeartifact-assets"),
+                packageGroupStore, regionResolver, config, false, dir.resolve("codeartifact-assets"),
                 persistenceSidecars());
     }
 

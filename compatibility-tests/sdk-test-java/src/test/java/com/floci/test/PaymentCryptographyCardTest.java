@@ -111,15 +111,7 @@ class PaymentCryptographyCardTest {
 
     @Test
     void theCardVerificationValueIsGeneratedAndVerifies() {
-        GenerateCardValidationDataResponse generated = client.generateCardValidationData(r -> r
-                .keyIdentifier(cardVerificationKeyArn)
-                .primaryAccountNumber(PAN)
-                .generationAttributes(CardGenerationAttributes.builder()
-                        .cardVerificationValue1(CardVerificationValue1.builder()
-                                .cardExpiryDate(EXPIRY)
-                                .serviceCode(SERVICE_CODE)
-                                .build())
-                        .build()));
+        GenerateCardValidationDataResponse generated = generateCardVerificationValue();
 
         String value = generated.validationData();
         assertThat(value).isNotBlank();
@@ -141,10 +133,14 @@ class PaymentCryptographyCardTest {
 
     @Test
     void aCardVerificationValueThatDoesNotVerifyIsRefused() {
+        String value = generateCardVerificationValue().validationData();
+        String differentFirstDigit = value.startsWith("0") ? "1" : "0";
+        String invalidValue = differentFirstDigit + value.substring(1);
+
         assertThatThrownBy(() -> client.verifyCardValidationData(r -> r
                 .keyIdentifier(cardVerificationKeyArn)
                 .primaryAccountNumber(PAN)
-                .validationData("999")
+                .validationData(invalidValue)
                 .verificationAttributes(CardVerificationAttributes.builder()
                         .cardVerificationValue1(CardVerificationValue1.builder()
                                 .cardExpiryDate(EXPIRY)
@@ -156,6 +152,18 @@ class PaymentCryptographyCardTest {
                 // does not verify, so the caller can tell the two failures apart.
                 .extracting(e -> ((VerificationFailedException) e).reason())
                 .isEqualTo(VerificationFailedReason.INVALID_VALIDATION_DATA);
+    }
+
+    private static GenerateCardValidationDataResponse generateCardVerificationValue() {
+        return client.generateCardValidationData(r -> r
+                .keyIdentifier(cardVerificationKeyArn)
+                .primaryAccountNumber(PAN)
+                .generationAttributes(CardGenerationAttributes.builder()
+                        .cardVerificationValue1(CardVerificationValue1.builder()
+                                .cardExpiryDate(EXPIRY)
+                                .serviceCode(SERVICE_CODE)
+                                .build())
+                        .build()));
     }
 
     @Test

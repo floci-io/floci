@@ -72,7 +72,7 @@ public class PaymentCryptographyCardValidationOperations {
                 : validationDataLength;
         CardAttrs attrs = resolveCardAttrs(request.get("GenerationAttributes"));
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Generate");
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -95,7 +95,7 @@ public class PaymentCryptographyCardValidationOperations {
         int length = validationData.length();
         CardAttrs attrs = resolveCardAttrs(request.get("VerificationAttributes"));
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Verify");
 
         String computed = computeValue(pan, attrs, key, length);
@@ -224,17 +224,8 @@ public class PaymentCryptographyCardValidationOperations {
         }
     }
 
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
-        }
-        PaymentCryptographyKeyRules.requireEnabled(key);
-        return key;
-    }
-
     /**
-     * Checks that the key has the mode of use the operation needs.
+     * The error a card request is refused with.
      */
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);

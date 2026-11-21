@@ -1,5 +1,7 @@
 package io.floci.aws.services.redshift.proxy;
 
+import io.floci.aws.core.common.SqlParameterParser;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -45,10 +47,6 @@ public final class RedshiftSqlInterceptor {
             "(?is)^\\s*(?:(?:--[^\\n]*\\n)|(?:/\\*.*?\\*/)|\\s)*(?:CREATE|ALTER)\\s+(?:(?:GLOBAL|LOCAL)\\s+)?"
                     + "(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\b");
 
-    /** Single-quoted string literal (doubled '' is escaped quote) and PostgreSQL dollar-quoted string literal ($tag$...$tag$). */
-    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile(
-            "'(?:[^']|'')*'|(?s)\\$([^$\\s]*)\\$.*?\\$\\1\\$");
-
     private static final Pattern DISTSTYLE_PATTERN = Pattern.compile("(?i)\\bDISTSTYLE\\s+(ALL|EVEN|KEY|AUTO)\\b");
     private static final Pattern DISTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\bDISTKEY\\s*\\([^)]*\\)");
     private static final Pattern SORTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\b(?:COMPOUND|INTERLEAVED)?\\s*SORTKEY\\s*\\([^)]*\\)");
@@ -68,6 +66,21 @@ public final class RedshiftSqlInterceptor {
     /** {@code ENCODE <codec>} where {@code <codec>} is an actual Redshift column encoding or {@code AUTO}. */
     private static final Pattern ENCODE_PATTERN = Pattern.compile(
             "(?i)\\bENCODE\\s+(RAW|AZ64|BYTEDICT|DELTA32K|DELTA|LZO|MOSTLY8|MOSTLY16|MOSTLY32|RUNLENGTH|TEXT255|TEXT32K|ZSTD|AUTO)\\b");
+    /** Whitespace and SQL comments, which may sit between the parts of a column definition. */
+    private static final String GAP = "(?:\\s|/\\*.*?\\*/|--[^\\n]*(?:\\n|$))";
+    /**
+     * {@code VARBYTE(n)}, {@code VARBINARY(n)} and {@code BINARY VARYING(n)}, and the two aliases without a length, as
+     * the type of a column: the {@code varbyte} domain takes no length, and PostgreSQL has no type of the other names.
+     * A type is only the word after a column's name, and a column's definition only starts after the {@code (} or
+     * {@code ,} of a column list or after {@code ADD [COLUMN] [IF NOT EXISTS]}. A column called {@code varbinary}, a
+     * {@code RENAME COLUMN a TO varbinary} and the like are never in that position. Group 1 is what leads up to the
+     * type, kept as it is.
+     */
+    private static final Pattern VARBYTE_TYPE_PATTERN = Pattern.compile(
+            "(?is)((?:[(,]|\\bADD\\s+(?:COLUMN\\s+)?+(?:IF\\s+NOT\\s+EXISTS\\s+)?+)" + GAP + "*(?:\"[^\"]+\"|\\w+)" + GAP + "+)"
+                    + "(?:VARBYTE|VARBINARY|BINARY\\s+VARYING)(?:\\s*\\(\\s*\\d+\\s*\\))?(?=[\\s,)]|/\\*|--|$)");
+    /** A table made from a query has no column types to rewrite, only select lists whose aliases could look like one. */
+    private static final Pattern TABLE_FROM_QUERY_PATTERN = Pattern.compile("(?is)\\bAS\\s*\\(?\\s*(?:SELECT|WITH)\\b");
     private static final Pattern DOUBLE_COMMA_PATTERN = Pattern.compile(",(?:\\s*,)+");
     private static final Pattern COMMA_CLOSE_PAREN_PATTERN = Pattern.compile(",\\s*\\)");
 
@@ -113,19 +126,24 @@ public final class RedshiftSqlInterceptor {
         s = KEY_COLUMN_CONSTRAINT_PATTERN.matcher(s).replaceAll("");
         s = TABLE_LEVEL_KEY_IDENT_PATTERN.matcher(s).replaceAll("");
         s = ENCODE_PATTERN.matcher(s).replaceAll("");
+        if (!TABLE_FROM_QUERY_PATTERN.matcher(s).find()) {
+            s = VARBYTE_TYPE_PATTERN.matcher(s).replaceAll("$1varbyte");
+        }
         s = DOUBLE_COMMA_PATTERN.matcher(s).replaceAll(",");
         s = COMMA_CLOSE_PAREN_PATTERN.matcher(s).replaceAll(")");
         return s;
     }
 
     private static String maskStringLiterals(String sql, List<String> out) {
-        Matcher m = STRING_LITERAL_PATTERN.matcher(sql);
         StringBuilder sb = new StringBuilder(sql.length());
-        while (m.find()) {
-            out.add(m.group());
-            m.appendReplacement(sb, Matcher.quoteReplacement(MASK_SENTINEL + (out.size() - 1) + MASK_SENTINEL));
+        int copied = 0;
+        for (int[] span : SqlParameterParser.literalSpans(sql, SqlParameterParser.Options.REDSHIFT)) {
+            sb.append(sql, copied, span[0]);
+            out.add(sql.substring(span[0], span[1]));
+            sb.append(MASK_SENTINEL).append(out.size() - 1).append(MASK_SENTINEL);
+            copied = span[1];
         }
-        m.appendTail(sb);
+        sb.append(sql, copied, sql.length());
         return sb.toString();
     }
 

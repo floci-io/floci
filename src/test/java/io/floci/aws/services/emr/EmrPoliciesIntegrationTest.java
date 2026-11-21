@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.anEmptyMap;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -79,10 +80,11 @@ class EmrPoliciesIntegrationTest {
     void managedScalingPolicyPutGetRemove() {
         emr("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":{\"ComputeLimits\":"
                 + "{\"UnitType\":\"VCPU\",\"MinimumCapacityUnits\":4,\"MaximumCapacityUnits\":32},"
-                + "\"ScalingStrategy\":\"ADVANCED\"}}").then().statusCode(200);
+                + "\"ScalingStrategy\":\"ADVANCED\",\"UtilizationPerformanceIndex\":25}}").then().statusCode(200);
         emr("GetManagedScalingPolicy", cluster() + "}").then().statusCode(200)
                 .body("ManagedScalingPolicy.ComputeLimits.UnitType", equalTo("VCPU"))
-                .body("ManagedScalingPolicy.ScalingStrategy", equalTo("ADVANCED"));
+                .body("ManagedScalingPolicy.ScalingStrategy", equalTo("ADVANCED"))
+                .body("ManagedScalingPolicy.UtilizationPerformanceIndex", equalTo(25));
         emr("RemoveManagedScalingPolicy", cluster() + "}").then().statusCode(200);
         emr("GetManagedScalingPolicy", cluster() + "}").then().statusCode(200)
                 .body("$", anEmptyMap());
@@ -102,6 +104,18 @@ class EmrPoliciesIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
         emr("PutManagedScalingPolicy", "{\"ClusterId\":\"j-MISSING\",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}")
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        // "Possible values are 1, 25, 50, 75 and 100": the model's range first, then the guide's values.
+        String indexed = cluster() + ",\"ManagedScalingPolicy\":{\"ComputeLimits\":{\"UnitType\":\"VCPU\","
+                + "\"MinimumCapacityUnits\":4,\"MaximumCapacityUnits\":32},\"ScalingStrategy\":\"ADVANCED\","
+                + "\"UtilizationPerformanceIndex\":%s}}";
+        emr("PutManagedScalingPolicy", indexed.formatted("0")).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'managedScalingPolicy.utilizationPerformanceIndex'"));
+        emr("PutManagedScalingPolicy", indexed.formatted("30")).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("1, 25, 50, 75, 100"));
+        emr("GetManagedScalingPolicy", cluster() + "}").then().statusCode(200)
+                .body("$", anEmptyMap());
     }
 
     @Test
@@ -179,5 +193,35 @@ class EmrPoliciesIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
         emr("PutBlockPublicAccessConfiguration", "{\"BlockPublicAccessConfiguration\":{}}")
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+    }
+
+    @Test
+    @Order(8)
+    void anEndedClustersPoliciesCannotBeChangedNorItsManagedScalingPolicyRead() {
+        String core = ",\"InstanceGroupId\":\"" + coreGroupId + "\"";
+        emr("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}")
+                .then().statusCode(200);
+        emr("PutAutoScalingPolicy", cluster() + core + ",\"AutoScalingPolicy\":" + AUTO_SCALING + "}")
+                .then().statusCode(200);
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
+
+        assertShutDown("GetManagedScalingPolicy", cluster() + "}");
+        assertShutDown("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}");
+        assertShutDown("RemoveManagedScalingPolicy", cluster() + "}");
+        assertShutDown("PutAutoTerminationPolicy", cluster() + ",\"AutoTerminationPolicy\":{\"IdleTimeout\":3600}}");
+        assertShutDown("RemoveAutoTerminationPolicy", cluster() + "}");
+        assertShutDown("PutAutoScalingPolicy", cluster() + core + ",\"AutoScalingPolicy\":" + AUTO_SCALING + "}");
+        assertShutDown("RemoveAutoScalingPolicy", cluster() + core + "}");
+
+        emr("ListInstanceGroups", cluster() + "}").then().statusCode(200)
+                .body("InstanceGroups.find { it.Id == '" + coreGroupId + "' }.AutoScalingPolicy.Constraints.MaxCapacity",
+                        equalTo(4));
+    }
+
+    private static void assertShutDown(String action, String body) {
+        emr(action, body).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(
+                        "A job flow that is shutting down, terminated, or finished may not be modified."));
     }
 }

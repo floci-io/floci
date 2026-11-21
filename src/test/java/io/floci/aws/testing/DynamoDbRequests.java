@@ -26,6 +26,14 @@ public final class DynamoDbRequests {
                 .then();
     }
 
+    public static String nestedMap(int depth, String member, String leaf) {
+        String value = leaf;
+        for (int level = 0; level < depth; level++) {
+            value = "{\"M\":{" + EXACT.getNodeFactory().textNode(member) + ":" + value + "}}";
+        }
+        return value;
+    }
+
     public static BigDecimal decimalAt(ValidatableResponse response, String pointer) throws Exception {
         return EXACT.readTree(response.extract().asString()).at(pointer).decimalValue();
     }

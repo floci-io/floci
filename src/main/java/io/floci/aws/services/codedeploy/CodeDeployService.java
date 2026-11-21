@@ -18,6 +18,7 @@ import io.floci.aws.services.codedeploy.model.DeploymentConfig;
 import io.floci.aws.services.codedeploy.model.DeploymentGroup;
 import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.model.CreateTaskSetRequest;
 import io.floci.aws.services.ecs.model.TaskSet;
@@ -34,10 +35,11 @@ import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,6 +48,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -96,6 +99,10 @@ public class CodeDeployService {
     }
 
     // ---- Durable (persisted) ----
+    /** CreateApplication's constraints from the CodeDeploy API reference. */
+    private static final Pattern APPLICATION_NAME = Pattern.compile("[A-Za-z0-9+=,.@_-]{1,100}");
+    private static final Set<String> COMPUTE_PLATFORMS = Set.of("Server", "Lambda", "ECS", "Kubernetes");
+
     // key: region -> name -> application
     private Map<String, Map<String, Application>> applications = new ConcurrentHashMap<>();
     // key: region -> appName -> groupName -> group
@@ -174,7 +181,7 @@ public class CodeDeployService {
             if (store == null) {
                 continue;
             }
-            double now = EpochSeconds.fromInstant(Instant.now());
+            double now = EpochSeconds.fromInstant(clock.instant());
             boolean changed = false;
             for (String name : BUILT_IN_CONFIG_NAMES) {
                 if (!store.containsKey(name)) {
@@ -264,7 +271,7 @@ public class CodeDeployService {
     private Map<String, DeploymentConfig> deploymentConfigsFor(String region) {
         return deploymentConfigs.computeIfAbsent(region, r -> {
             ConcurrentHashMap<String, DeploymentConfig> store = new ConcurrentHashMap<>();
-            double now = EpochSeconds.fromInstant(Instant.now());
+            double now = EpochSeconds.fromInstant(clock.instant());
             for (String name : BUILT_IN_CONFIG_NAMES) {
                 store.put(name, buildBuiltInConfig(name, now));
             }
@@ -331,6 +338,18 @@ public class CodeDeployService {
 
     public Application createApplication(String region, String name, String computePlatform,
                                           List<Map<String, String>> tags) {
+        if (name == null || name.isEmpty()) {
+            throw new AwsException("ApplicationNameRequiredException",
+                    "The minimum number of required characters for applicationName is 1.", 400);
+        }
+        if (!APPLICATION_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidApplicationNameException",
+                    "The application name was specified in an invalid format.", 400);
+        }
+        if (computePlatform != null && !COMPUTE_PLATFORMS.contains(computePlatform)) {
+            throw new AwsException("InvalidComputePlatformException",
+                    "The computePlatform is invalid. The computePlatform should be Lambda, Server, or ECS.", 400);
+        }
         Map<String, Application> store = applicationsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("ApplicationAlreadyExistsException",
@@ -339,7 +358,7 @@ public class CodeDeployService {
         Application app = new Application();
         app.setApplicationId(UUID.randomUUID().toString());
         app.setApplicationName(name);
-        app.setCreateTime(EpochSeconds.fromInstant(Instant.now()));
+        app.setCreateTime(EpochSeconds.fromInstant(clock.instant()));
         app.setLinkedToGitHub(false);
         app.setComputePlatform(computePlatform != null ? computePlatform : "Server");
         store.put(name, app);
@@ -347,7 +366,7 @@ public class CodeDeployService {
 
         if (tags != null && !tags.isEmpty()) {
             String arn = applicationArn(region, name);
-            applyTags(arn, tags);
+            tagResource(arn, tags);
         }
         return app;
     }
@@ -394,6 +413,13 @@ public class CodeDeployService {
                     "Application does not exist: " + name, 400);
         }
         persistRegion(applications, region);
+        tags.remove(applicationArn(region, name));
+        // As on AWS, the application's deployment groups go with it.
+        Map<String, DeploymentGroup> groups = deploymentGroupsFor(region).remove(name);
+        if (groups != null) {
+            groups.keySet().forEach(group -> tags.remove(deploymentGroupArn(region, name, group)));
+            persistRegion(deploymentGroups, region);
+        }
     }
 
     public List<String> listApplications(String region) {
@@ -424,7 +450,7 @@ public class CodeDeployService {
 
     public DeploymentGroup createDeploymentGroup(String region, String appName, String groupName,
                                                   String deploymentConfigName, String serviceRoleArn,
-                                                  Map<String, Object> fields) {
+                                                  Map<String, Object> fields, List<Map<String, String>> tags) {
         getApplication(region, appName);
         Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
         Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
@@ -442,6 +468,9 @@ public class CodeDeployService {
         applyGroupFields(group, fields);
         groupStore.put(groupName, group);
         persistRegion(deploymentGroups, region);
+        if (tags != null && !tags.isEmpty()) {
+            tagResource(deploymentGroupArn(region, appName, groupName), tags);
+        }
         return group;
     }
 
@@ -465,14 +494,25 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
                 .computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
 
+        if (newGroupName != null && !newGroupName.equals(currentGroupName)
+                && groupStore.containsKey(newGroupName)) {
+            throw new AwsException("DeploymentGroupAlreadyExistsException",
+                    "Deployment group already exists: " + newGroupName, 400);
+        }
+
         if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
 
         if (newGroupName != null && !newGroupName.equals(currentGroupName)) {
+            String oldArn = deploymentGroupArn(region, appName, currentGroupName);
             groupStore.remove(currentGroupName);
             group.setDeploymentGroupName(newGroupName);
             groupStore.put(newGroupName, group);
+            Map<String, String> groupTags = tags.remove(oldArn);
+            if (groupTags != null) {
+                tags.put(deploymentGroupArn(region, appName, newGroupName), groupTags);
+            }
         }
         persistRegion(deploymentGroups, region);
         return group;
@@ -486,6 +526,7 @@ public class CodeDeployService {
             throw new AwsException("DeploymentGroupDoesNotExistException",
                     "Deployment group does not exist: " + groupName, 400);
         }
+        tags.remove(deploymentGroupArn(region, appName, groupName));
         persistRegion(deploymentGroups, region);
     }
 
@@ -529,7 +570,7 @@ public class CodeDeployService {
         cfg.setDeploymentConfigId(UUID.randomUUID().toString());
         cfg.setDeploymentConfigName(name);
         cfg.setMinimumHealthyHosts(minimumHealthyHosts);
-        cfg.setCreateTime(EpochSeconds.fromInstant(Instant.now()));
+        cfg.setCreateTime(EpochSeconds.fromInstant(clock.instant()));
         cfg.setComputePlatform(computePlatform != null ? computePlatform : "Server");
         cfg.setTrafficRoutingConfig(trafficRoutingConfig);
         cfg.setZonalConfig(zonalConfig);
@@ -599,7 +640,7 @@ public class CodeDeployService {
         String effectiveConfig = configName != null ? configName : group.getDeploymentConfigName();
 
         String deploymentId = generateDeploymentId();
-        double now = EpochSeconds.fromInstant(Instant.now());
+        double now = EpochSeconds.fromInstant(clock.instant());
 
         Deployment deployment = new Deployment();
         deployment.setDeploymentId(deploymentId);
@@ -732,7 +773,7 @@ public class CodeDeployService {
                 "instance/" + instanceName).toString());
         inst.setIamSessionArn(iamSessionArn);
         inst.setIamUserArn(iamUserArn);
-        inst.setRegisterTime(EpochSeconds.fromInstant(Instant.now()));
+        inst.setRegisterTime(EpochSeconds.fromInstant(clock.instant()));
         inst.setRegistrationStatus("Registered");
         store.put(instanceName, inst);
         persistRegion(onPremisesInstances, region);
@@ -741,7 +782,7 @@ public class CodeDeployService {
 
     public void deregisterOnPremisesInstance(String region, String instanceName) {
         OnPremisesInstance inst = requireOnPremisesInstance(region, instanceName);
-        inst.setDeregisterTime(EpochSeconds.fromInstant(Instant.now()));
+        inst.setDeregisterTime(EpochSeconds.fromInstant(clock.instant()));
         inst.setRegistrationStatus("Deregistered");
         persistRegion(onPremisesInstances, region);
     }
@@ -758,7 +799,8 @@ public class CodeDeployService {
                                                  List<Map<String, String>> tagFilters) {
         return onPremisesFor(region).values().stream()
                 .filter(i -> registrationStatus == null || registrationStatus.equals(i.getRegistrationStatus()))
-                .filter(i -> tagFilters == null || tagFilters.isEmpty() || matchesTagFilters(i.getTags(), tagFilters))
+                .filter(i -> tagFilters == null || tagFilters.isEmpty()
+                        || matchesTagFilters(i.getTags(), tagFilters, TagFilterMatchMode.ALL))
                 .map(OnPremisesInstance::getInstanceName)
                 .collect(Collectors.toList());
     }
@@ -802,7 +844,7 @@ public class CodeDeployService {
         String effectiveConfig = configName != null ? configName : group.getDeploymentConfigName();
 
         String deploymentId = generateDeploymentId();
-        double now = EpochSeconds.fromInstant(Instant.now());
+        double now = EpochSeconds.fromInstant(clock.instant());
 
         Deployment deployment = new Deployment();
         deployment.setDeploymentId(deploymentId);
@@ -862,7 +904,7 @@ public class CodeDeployService {
         String deploymentId = deployment.getDeploymentId();
         try {
             deployment.setStatus("InProgress");
-            deployment.setStartTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setStartTime(EpochSeconds.fromInstant(clock.instant()));
             instanceTargetMaps.forEach(m -> updateTargetStatus(m, "InProgress"));
 
             boolean anyFailed = false;
@@ -870,7 +912,7 @@ public class CodeDeployService {
                 if (stopFlag.get()) {
                     instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Skipped"));
                     deployment.setStatus("Stopped");
-                    deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+                    deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
                     return;
                 }
                 String instanceId = instanceIds.get(i);
@@ -890,18 +932,18 @@ public class CodeDeployService {
             } else {
                 deployment.setStatus("Succeeded");
             }
-            deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Skipped"));
             deployment.setStatus("Stopped");
-            deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
         } catch (Exception e) {
             LOG.warnv("Server deployment {0} failed: {1}", deploymentId, e.getMessage());
             instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Failed"));
             deployment.setStatus("Failed");
-            deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
             deployment.setErrorInformation(Map.of("code", "DeploymentFailed",
                     "message", e.getMessage() != null ? e.getMessage() : "Unknown error"));
         } finally {
@@ -1076,17 +1118,11 @@ public class CodeDeployService {
         // EC2 instances by tag filters
         List<Map<String, String>> ec2TagFilters = group.getEc2TagFilters();
         if (ec2TagFilters != null && !ec2TagFilters.isEmpty()) {
-            Map<String, List<String>> filters = new java.util.LinkedHashMap<>();
-            for (Map<String, String> filter : ec2TagFilters) {
-                String key = filter.get("Key");
-                String value = filter.get("Value");
-                if (key != null && value != null) {
-                    filters.computeIfAbsent("tag:" + key, k -> new ArrayList<>()).add(value);
-                }
-            }
             try {
-                ec2Service.describeInstances(region, null, filters).stream()
+                ec2Service.describeInstances(region, List.of(), Map.of()).stream()
                         .flatMap(r -> r.getInstances().stream())
+                        .filter(inst -> matchesTagFilters(ec2TagMaps(inst.getTags()),
+                                ec2TagFilters, TagFilterMatchMode.ANY))
                         .map(inst -> inst.getInstanceId())
                         .filter(id -> id != null)
                         .forEach(instanceIds::add);
@@ -1100,7 +1136,7 @@ public class CodeDeployService {
         if (onPremFilters != null && !onPremFilters.isEmpty()) {
             onPremisesFor(region).values().stream()
                     .filter(inst -> "Registered".equals(inst.getRegistrationStatus()))
-                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters))
+                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters, TagFilterMatchMode.ANY))
                     .map(OnPremisesInstance::getInstanceName)
                     .forEach(instanceIds::add);
         }
@@ -1117,18 +1153,46 @@ public class CodeDeployService {
         return instanceIds;
     }
 
+    private List<Map<String, String>> ec2TagMaps(List<Tag> tags) {
+        if (tags == null) { return List.of(); }
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Tag tag : tags) {
+            Map<String, String> fields = new HashMap<>();
+            fields.put("Key", tag.getKey());
+            fields.put("Value", tag.getValue());
+            result.add(fields);
+        }
+        return result;
+    }
+
+    private enum TagFilterMatchMode { ALL, ANY }
+
     private boolean matchesTagFilters(List<Map<String, String>> instanceTags,
-                                       List<Map<String, String>> filters) {
+                                       List<Map<String, String>> filters, TagFilterMatchMode mode) {
+        boolean hasApplicableFilter = false;
         for (Map<String, String> filter : filters) {
             String key = filter.get("Key");
             String value = filter.get("Value");
-            if (key == null) { continue; }
-            boolean found = instanceTags.stream()
-                    .anyMatch(t -> key.equals(t.get("Key"))
-                            && (value == null || value.equals(t.get("Value"))));
-            if (!found) { return false; }
+            String type = filter.get("Type");
+            if (key == null && type == null) { continue; }
+            hasApplicableFilter = true;
+            boolean found = instanceTags.stream().anyMatch(tag -> {
+                if ("VALUE_ONLY".equals(type)) {
+                    return value != null && value.equals(tag.get("Value"));
+                }
+                if ("KEY_ONLY".equals(type)) {
+                    return key != null && key.equals(tag.get("Key"));
+                }
+                if ("KEY_AND_VALUE".equals(type) && value == null) {
+                    return false;
+                }
+                return key != null && key.equals(tag.get("Key"))
+                        && (value == null || value.equals(tag.get("Value")));
+            });
+            if (mode == TagFilterMatchMode.ANY && found) { return true; }
+            if (mode == TagFilterMatchMode.ALL && !found) { return false; }
         }
-        return true;
+        return mode == TagFilterMatchMode.ALL || !hasApplicableFilter;
     }
 
     private AppSpecInfo parseAppSpec(Map<String, Object> revision) {
@@ -1247,7 +1311,7 @@ public class CodeDeployService {
         String effectiveConfig = configName != null ? configName : group.getDeploymentConfigName();
 
         String deploymentId = generateDeploymentId();
-        double now = EpochSeconds.fromInstant(Instant.now());
+        double now = EpochSeconds.fromInstant(clock.instant());
 
         Deployment deployment = new Deployment();
         deployment.setDeploymentId(deploymentId);
@@ -1347,7 +1411,7 @@ public class CodeDeployService {
         TaskSet blueTaskSet = null;
         try {
             deployment.setStatus("InProgress");
-            deployment.setStartTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setStartTime(EpochSeconds.fromInstant(clock.instant()));
             updateEcsTargetStatus(ecsTargetMap, "InProgress");
 
             if (stopFlag.get()) { finishEcsStopped(deployment, ecsTargetMap); return; }
@@ -1464,7 +1528,7 @@ public class CodeDeployService {
 
             updateEcsTargetStatus(ecsTargetMap, "Succeeded");
             deployment.setStatus("Succeeded");
-            deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -1555,20 +1619,20 @@ public class CodeDeployService {
 
     private void updateEcsTargetStatus(Map<String, Object> ecsTargetMap, String status) {
         ecsTargetMap.put("status", status);
-        ecsTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(Instant.now()));
+        ecsTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(clock.instant()));
     }
 
     private void finishEcsStopped(Deployment deployment, Map<String, Object> ecsTargetMap) {
         updateEcsTargetStatus(ecsTargetMap, "Skipped");
         deployment.setStatus("Stopped");
-        deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+        deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
     }
 
     private void finishEcsFailed(Deployment deployment, Map<String, Object> ecsTargetMap,
                                   String errorCode, String message) {
         updateEcsTargetStatus(ecsTargetMap, "Failed");
         deployment.setStatus("Failed");
-        deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+        deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
         deployment.setErrorInformation(Map.of("code", errorCode, "message", message != null ? message : ""));
     }
 
@@ -1607,7 +1671,7 @@ public class CodeDeployService {
         String deploymentId = deployment.getDeploymentId();
         try {
             deployment.setStatus("InProgress");
-            deployment.setStartTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setStartTime(EpochSeconds.fromInstant(clock.instant()));
             updateTargetStatus(lambdaTargetMap, "InProgress");
 
             if (stopFlag.get()) { finishStopped(deployment, lambdaTargetMap); return; }
@@ -1636,7 +1700,7 @@ public class CodeDeployService {
 
             updateTargetStatus(lambdaTargetMap, "Succeeded");
             deployment.setStatus("Succeeded");
-            deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+            deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -1782,18 +1846,18 @@ public class CodeDeployService {
     private Map<String, Object> addLifecycleEvent(Map<String, Object> lambdaTargetMap, String name) {
         Map<String, Object> event = new ConcurrentHashMap<>();
         event.put("lifecycleEventName", name);
-        event.put("startTime", EpochSeconds.fromInstant(Instant.now()));
+        event.put("startTime", EpochSeconds.fromInstant(clock.instant()));
         event.put("status", "InProgress");
         List<Map<String, Object>> events = (List<Map<String, Object>>) lambdaTargetMap.get("lifecycleEvents");
         if (events != null) {
             events.add(event);
         }
-        lambdaTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(Instant.now()));
+        lambdaTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(clock.instant()));
         return event;
     }
 
     private void finishLifecycleEvent(Map<String, Object> event, String status) {
-        event.put("endTime", EpochSeconds.fromInstant(Instant.now()));
+        event.put("endTime", EpochSeconds.fromInstant(clock.instant()));
         event.put("status", status);
     }
 
@@ -1805,20 +1869,20 @@ public class CodeDeployService {
 
     private void updateTargetStatus(Map<String, Object> lambdaTargetMap, String status) {
         lambdaTargetMap.put("status", status);
-        lambdaTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(Instant.now()));
+        lambdaTargetMap.put("lastUpdatedAt", EpochSeconds.fromInstant(clock.instant()));
     }
 
     private void finishStopped(Deployment deployment, Map<String, Object> lambdaTargetMap) {
         updateTargetStatus(lambdaTargetMap, "Skipped");
         deployment.setStatus("Stopped");
-        deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+        deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
     }
 
     private void finishFailed(Deployment deployment, Map<String, Object> lambdaTargetMap,
                                String errorCode, String message) {
         updateTargetStatus(lambdaTargetMap, "Failed");
         deployment.setStatus("Failed");
-        deployment.setCompleteTime(EpochSeconds.fromInstant(Instant.now()));
+        deployment.setCompleteTime(EpochSeconds.fromInstant(clock.instant()));
         deployment.setErrorInformation(Map.of("code", errorCode, "message", message != null ? message : ""));
     }
 
@@ -1914,15 +1978,5 @@ public class CodeDeployService {
         if (val instanceof Map<?, ?> m) {
             setter.accept(group, (Map<String, Object>) m);
         }
-    }
-
-    private void applyTags(String arn, List<Map<String, String>> tagList) {
-        Map<String, String> tagMap = tags.computeIfAbsent(arn, k -> new ConcurrentHashMap<>());
-        for (Map<String, String> t : tagList) {
-            String key = t.containsKey("Key") ? t.get("Key") : t.get("key");
-            String value = t.containsKey("Value") ? t.get("Value") : t.get("value");
-            if (key != null) { tagMap.put(key, value != null ? value : ""); }
-        }
-        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 }

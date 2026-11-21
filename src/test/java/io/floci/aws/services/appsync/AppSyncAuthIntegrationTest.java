@@ -297,6 +297,19 @@ class AppSyncAuthIntegrationTest {
     }
 
     @Test
+    void cognitoDirectiveDoesNotRequireGroupsInSchema() {
+        String apiId = createApi("cognito-sdl-" + UUID.randomUUID().toString().substring(0, 8));
+        startSchema(apiId, """
+                type Todo @aws_cognito_user_pools { title: String }
+                type Query {
+                  todo: Todo @aws_cognito_user_pools
+                  secret: String @aws_cognito_user_pools(cognito_groups: ["Admins"])
+                }
+                """);
+        awaitSchemaSuccess(apiId);
+    }
+
+    @Test
     void awsAuthOnFieldDefinitionSchemaSucceeds() {
         String apiId = createApi("aws-auth-" + UUID.randomUUID().toString().substring(0, 8));
         startSchema(apiId, "type Query { secret: String @aws_auth(cognito_groups: [\"Admins\"]) }");

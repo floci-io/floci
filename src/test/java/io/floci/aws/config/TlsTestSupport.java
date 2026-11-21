@@ -1,8 +1,11 @@
 package io.floci.aws.config;
 
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.testing.TlsTrust;
 
 import javax.net.ssl.SSLContext;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.X509Certificate;
 import java.util.List;
@@ -15,6 +18,13 @@ final class TlsTestSupport {
 
     static SSLContext trustOnlyTheCa() throws Exception {
         return TlsTrust.trusting(FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
+    }
+
+    // Writes the certificate of ca and then a private key to file, as a combined certificate-and-key file holds.
+    static Path caWithPrivateKey(FlociCertificateAuthority ca, Path file) throws Exception {
+        CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("floci", List.of("floci"),
+                KeyAlgorithm.RSA_2048, null);
+        return Files.writeString(file, ca.caPem() + leaf.privateKeyPem());
     }
 
     static Set<String> dnsSans(X509Certificate certificate) throws Exception {

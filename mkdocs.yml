@@ -86,6 +86,7 @@ nav:
     - Docker Compose: configuration/docker-compose.md
     - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
+    - Control-Plane Endpoints: configuration/endpoints.md
     - Multi-Account Isolation: configuration/multi-account.md
     - AWS Partitions: configuration/partitions.md
     - Storage Modes: configuration/storage.md
@@ -166,6 +167,7 @@ nav:
     - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
+    - X-Ray: services/xray.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
@@ -218,6 +220,7 @@ nav:
     - DataSync: services/datasync.md
     - AWS Config: services/config.md
     - EMR: services/emr.md
+    - EMR on EKS: services/emr-containers.md
     - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md
     - AWS Network Firewall: services/network-firewall.md

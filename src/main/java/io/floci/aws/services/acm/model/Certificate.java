@@ -36,7 +36,7 @@ public class Certificate {
     private KeyAlgorithm keyAlgorithm;
     private String signatureAlgorithm;
     private List<String> inUseBy;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private String certificateBody;
     private String privateKey;
     private String certificateChain;

@@ -3,6 +3,7 @@ package io.floci.aws.services.apigatewayv2.proxy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -163,5 +164,52 @@ class RequestParameterMapperTest {
         mapper.apply(Map.of("overwrite:header.x-name", "$request.path.proxy"), builder, encoded);
 
         assertEquals("b c", builder.headers().get("x-name").get(0));
+    }
+
+    private RequestContext withBody(String body, Map<String, String> stageVariables) {
+        return new RequestContext("api1", "$default", "POST", "/orders", null, "POST /orders", "req-1", "1.2.3.4",
+                Map.of(), Map.of(), Map.of("proxy", "balance"), body.getBytes(StandardCharsets.UTF_8),
+                Map.of(), Map.of()).withVariables(stageVariables, Map.of());
+    }
+
+    @Test
+    void overwritePathSelectsAnIndexedBodyValue() {
+        RequestContext withItems = withBody("{\"items\":[{\"id\":\"i-1\"},{\"id\":\"i-2\"}]}", Map.of());
+
+        mapper.apply(Map.of("overwrite:path", "/orders/$request.body.items[1].id/lines"), builder, withItems);
+
+        assertEquals("http://backend.local/orders/i-2/lines", builder.url());
+    }
+
+    @Test
+    void overwritePathSelectsQuotedKeys() {
+        RequestContext withKeys = withBody("{\"order id\":\"o 42\",\"meta\":{\"a.b\":\"v\"}}", Map.of());
+
+        mapper.apply(Map.of("overwrite:path", "/o/$request.body.['order id']/$request.body.meta[\"a.b\"]/x"),
+                builder, withKeys);
+
+        assertEquals("http://backend.local/o/o%2042/v/x", builder.url());
+    }
+
+    @Test
+    void overwritePathReadsNamesThatStartWithAnUnderscoreOrDigit() {
+        RequestContext withNames = withBody("{\"_id\":\"x1\",\"2nd\":\"two\"}",
+                Map.of("_backend", "blue", "1st", "one"));
+
+        mapper.apply(Map.of("overwrite:path",
+                "/$stageVariables._backend/$stageVariables.1st/$request.body._id/$request.body.2nd"),
+                builder, withNames);
+
+        assertEquals("http://backend.local/blue/one/x1/two", builder.url());
+    }
+
+    @Test
+    void overwritePathEndsAnEmbeddedNameWhereItsSyntaxEnds() {
+        RequestContext withEnv = withBody("{\"id\":\"o-1\"}", Map.of("env", "blue"));
+
+        mapper.apply(Map.of("overwrite:path", "/$stageVariables.env-v2/$request.path.proxy.json"),
+                builder, withEnv);
+
+        assertEquals("http://backend.local/blue-v2/balance.json", builder.url());
     }
 }

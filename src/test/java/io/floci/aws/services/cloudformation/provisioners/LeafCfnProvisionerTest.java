@@ -100,8 +100,8 @@ class LeafCfnProvisionerTest {
 
             assertEquals("k-123", r.getPhysicalId(), "Ref is the key id (schema primaryIdentifier)");
             // aws-kms-key.json readOnlyProperties
-            assertEquals(Map.of("Arn", "arn:aws:kms:us-east-1:000000000000:key/k-123", "KeyId", "k-123"),
-                    r.getAttributes());
+            assertEquals(Map.of("Arn", "arn:aws:kms:us-east-1:000000000000:key/k-123", "KeyId", "k-123",
+                    KmsCfnProvisioner.TAG_KEYS_ATTR, "[\"env\"]"), r.getAttributes());
         }
 
         @Test
@@ -138,7 +138,8 @@ class LeafCfnProvisionerTest {
 
             verify(kms, never()).describeKey(anyString(), anyString());
             assertEquals("k-real", r.getPhysicalId());
-            assertEquals(Map.of("Arn", key.getArn(), "KeyId", "k-real"), r.getAttributes());
+            assertEquals(Map.of("Arn", key.getArn(), "KeyId", "k-real", KmsCfnProvisioner.TAG_KEYS_ATTR, "[]"),
+                    r.getAttributes());
         }
 
         @Test
@@ -176,6 +177,35 @@ class LeafCfnProvisionerTest {
 
             verify(kms).createAlias("alias/app", "k-123", REGION);
             assertEquals("alias/app", r.getPhysicalId());
+        }
+
+        @Test
+        void updatingAnAliasRetargetsItInPlaceInsteadOfCreatingItAgain() {
+            StackResource r = resource("Alias", "AWS::KMS::Alias");
+            ProvisionContext update = new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                    "alias/app");
+
+            provisioner.provision(r, props("""
+                    {"AliasName": "alias/app", "TargetKeyId": "k-456"}
+                    """), update);
+
+            verify(kms).updateAlias("alias/app", "k-456", REGION);
+            verify(kms, never()).createAlias(anyString(), anyString(), anyString());
+            assertEquals("alias/app", r.getPhysicalId());
+        }
+
+        @Test
+        void updatingAnAliasToANewNameCreatesTheNewAlias() {
+            StackResource r = resource("Alias", "AWS::KMS::Alias");
+            ProvisionContext update = new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                    "alias/old");
+
+            provisioner.provision(r, props("""
+                    {"AliasName": "alias/new", "TargetKeyId": "k-456"}
+                    """), update);
+
+            verify(kms).createAlias("alias/new", "k-456", REGION);
+            verify(kms, never()).updateAlias(anyString(), anyString(), anyString());
         }
 
         @Test

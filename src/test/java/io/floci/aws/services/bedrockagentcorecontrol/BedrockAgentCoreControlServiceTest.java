@@ -66,9 +66,9 @@ class BedrockAgentCoreControlServiceTest {
         assertEquals(1, rt.getLatestVersion());
         assertEquals("READY", rt.getStatus());
         assertTrue(rt.getWorkloadIdentityArn().contains(":bedrock-agentcore:"));
-        assertTrue(service.arn(rt, "1", REGION)
-                .matches("arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/[0-9a-f-]{36}:1"),
-                service.arn(rt, "1", REGION));
+        assertTrue(service.arn(rt, REGION)
+                .equals("arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/" + rt.getAgentRuntimeId()),
+                service.arn(rt, REGION));
     }
 
     @Test
@@ -442,7 +442,7 @@ class BedrockAgentCoreControlServiceTest {
         String id = rt.getAgentRuntimeId();
         AgentRuntimeEndpoint ep = service.createEndpoint(id, "prod", null, null,
                 Map.of("env", "prod"), null, REGION);
-        String endpointArn = service.endpointArn(ep, REGION);
+        String endpointArn = service.endpointArn(id, ep, REGION);
 
         assertEquals(Map.of("env", "prod"), service.getEndpointTagsByArn(REGION, endpointArn));
 
@@ -451,7 +451,7 @@ class BedrockAgentCoreControlServiceTest {
 
         assertEquals(Map.of("team", "ml"), service.getEndpointTagsByArn(REGION, endpointArn));
         assertEquals(Map.of("owner", "runtime"),
-                service.getTagsByArn(REGION, service.arn(rt, "1", REGION)));
+                service.getTagsByArn(REGION, service.arn(rt, REGION)));
         assertTrue(service.getEndpoint(id, "DEFAULT", REGION).getTags().isEmpty());
     }
 
@@ -461,7 +461,7 @@ class BedrockAgentCoreControlServiceTest {
         String id = rt.getAgentRuntimeId();
         AgentRuntimeEndpoint ep = service.createEndpoint(id, "prod", null, null,
                 Map.of("fixed", "1"), null, REGION);
-        String endpointArn = service.endpointArn(ep, REGION);
+        String endpointArn = service.endpointArn(id, ep, REGION);
         AtomicInteger inconsistent = new AtomicInteger();
         try (ExecutorService executor = Executors.newFixedThreadPool(3)) {
             Future<?> writer = executor.submit(() -> {
@@ -503,7 +503,7 @@ class BedrockAgentCoreControlServiceTest {
         String id = rt.getAgentRuntimeId();
         AgentRuntimeEndpoint ep = service.createEndpoint(id, "prod", null, null,
                 Map.of("env", "prod"), null, REGION);
-        String endpointArn = service.endpointArn(ep, REGION);
+        String endpointArn = service.endpointArn(id, ep, REGION);
 
         service.deleteEndpoint(id, "prod", null, REGION);
 

@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsServiceNamespaces;
 import io.floci.aws.core.common.CidrCanonicalizer;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.services.iam.model.CallerContext;
+import io.floci.aws.services.iam.model.PolicySource;
 import io.floci.aws.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -88,6 +89,36 @@ public class IamPolicyEvaluator {
         NEUTRAL
     }
 
+    /** What a request came to: allowed, denied by an explicit Deny, or denied for want of an Allow. */
+    public enum Outcome { ALLOW, EXPLICIT_DENY, IMPLICIT_DENY }
+
+    /** The policy family that decided a request. */
+    public enum PolicyLayer { IDENTITY, RESOURCE, SESSION, PERMISSIONS_BOUNDARY, SERVICE_CONTROL }
+
+    /**
+     * The statement that decided a request.
+     *
+     * @param layer     the policy family it sits in
+     * @param level     the SCP level, or -1 outside {@link PolicyLayer#SERVICE_CONTROL}
+     * @param document  its document's index in that layer's list (SCP: within the level; session and
+     *                  boundary: 0); -1 for {@link PolicyLayer#RESOURCE}, which arrives already decided
+     * @param statement its index in the document's {@code Statement} (0 for a single object); -1 for
+     *                  {@link PolicyLayer#RESOURCE}
+     * @param sid       its {@code Sid}, or null
+     */
+    public record DecidingStatement(PolicyLayer layer, int level, int document, int statement, String sid) {
+    }
+
+    /**
+     * Why a request was decided as it was. {@code statement} is null for an implicit deny, which no
+     * statement caused.
+     */
+    public record DecisionRecord(Outcome outcome, PolicyLayer layer, DecidingStatement statement) {
+        public Decision decision() {
+            return outcome == Outcome.ALLOW ? Decision.ALLOW : Decision.DENY;
+        }
+    }
+
     /** How a resource policy statement's principal names a caller: itself, only its account, or not at all. */
     private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
 
@@ -110,6 +141,30 @@ public class IamPolicyEvaluator {
         public String awsValue() {
             return awsValue;
         }
+    }
+
+    /**
+     * A statement a simulation reports, by the policy it came from and the place it sits in that
+     * policy's text. The source names nothing for a document nothing names, and the span is null
+     * for one whose text was not read.
+     */
+    public record MatchedStatement(PolicySource source, PolicyStatementPositions.Span span) {
+    }
+
+    /**
+     * What a simulation answers for one action on one resource.
+     *
+     * @param decision                     the simulated decision
+     * @param matchedStatements            the statements that decided it, in document order
+     * @param missingContextValues         the context keys it wanted and had no value for
+     * @param allowedByOrganizations       whether the organization levels allowed it, or null when
+     *                                     the simulation was handed none
+     * @param allowedByPermissionsBoundary whether the permissions boundary allowed it, or null when
+     *                                     there is no boundary in the simulation
+     */
+    public record SimulationReport(SimulationDecision decision, List<MatchedStatement> matchedStatements,
+                                   List<String> missingContextValues, Boolean allowedByOrganizations,
+                                   Boolean allowedByPermissionsBoundary) {
     }
 
     private static final Logger LOG = Logger.getLogger(IamPolicyEvaluator.class);
@@ -190,25 +245,117 @@ public class IamPolicyEvaluator {
             String action,
             String resource,
             Map<String, List<String>> conditionCtx) {
+        return explain(caller, resourcePolicyDecision, accountRelationship, action, resource, conditionCtx)
+                .decision();
+    }
+
+    /**
+     * Evaluates exactly as {@link #evaluateResolvedResourcePolicy} does and names what decided it:
+     * the outcome, the policy family and, for an explicit deny or an identity allow, the statement.
+     * An explicit deny names the first one in the order SCP levels, identity, resource, session,
+     * boundary. An implicit deny names the first layer that stops the request: SCP levels,
+     * identity (or resource), boundary, session.
+     */
+    public DecisionRecord explain(
+            CallerContext caller,
+            ResourcePolicyDecision resourcePolicyDecision,
+            ResourceAccountRelationship accountRelationship,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
-        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
-                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
-        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
-                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        String loweredAction = lowercase(action);
+        List<CachedDocument> identityDocs = parseEach(caller.identityPolicies());
+        List<CachedDocument> sessionDocs = caller.sessionPolicyDocument() == null
+                ? null : parseEach(List.of(caller.sessionPolicyDocument()));
+        List<CachedDocument> boundaryDocs = caller.boundaryPolicyDocument() == null
+                ? null : parseEach(List.of(caller.boundaryPolicyDocument()));
         ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
                 ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
         ResourceAccountRelationship relationship = accountRelationship == null
                 ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship;
-        return evaluateParsed(
-                caller, identityStmts, sessionStmts, boundaryStmts,
-                resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY,
-                resolvedDecision == ResourcePolicyDecision.ALLOW
-                        || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
-                        || resolvedDecision == ResourcePolicyDecision.ALLOW_ACCOUNT
-                                && relationship == ResourceAccountRelationship.CROSS_ACCOUNT,
-                resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
-                relationship, lowercase(action), resource, ctx);
+        boolean resourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW
+                || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                || resolvedDecision == ResourcePolicyDecision.ALLOW_ACCOUNT
+                        && relationship == ResourceAccountRelationship.CROSS_ACCOUNT;
+        boolean directIamUserResourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
+
+        // 1. Explicit deny in ANY policy → DENY, whatever else would have been decided.
+        ScpWalk scp = scpWalk(caller.scpLevels(), loweredAction, resource, ctx);
+        DecidingStatement deny = scp.firstDeny();
+        if (deny == null) {
+            deny = firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny == null && resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY) {
+            deny = resourceStatement();
+        }
+        if (deny == null && sessionDocs != null) {
+            deny = firstMatch(PolicyLayer.SESSION, -1, sessionDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny == null && boundaryDocs != null) {
+            deny = firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny != null) {
+            return new DecisionRecord(Outcome.EXPLICIT_DENY, deny.layer(), deny);
+        }
+
+        // 2. Service control policies gate everything: the action must be allowed at EVERY
+        //    organization level and explicitly denied at none, before identity policies are
+        //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
+        //    a level holding an unparseable document denies.
+        if (!scp.allows()) {
+            return implicitDeny(PolicyLayer.SERVICE_CONTROL);
+        }
+
+        // 3. Base grant: same-account access needs either policy family; cross-account access
+        //    needs both the caller's identity policy and the resource owner's policy.
+        DecidingStatement identityAllow =
+                firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, false, loweredAction, resource, ctx);
+        if (relationship == ResourceAccountRelationship.CROSS_ACCOUNT) {
+            if (identityAllow == null) {
+                return implicitDeny(PolicyLayer.IDENTITY);
+            }
+            if (!resourceAllow) {
+                return implicitDeny(PolicyLayer.RESOURCE);
+            }
+        } else if (identityAllow == null && !resourceAllow) {
+            return implicitDeny(PolicyLayer.IDENTITY);
+        }
+
+        // 4. A same-account resource policy that names an IAM user ARN grants directly to that
+        //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
+        //    already handled above. Other grants remain limited by the boundary intersection.
+        //    AWS checks the boundary ahead of the session policy, so a request both lack is
+        //    stopped at the boundary.
+        boolean directSameAccountUserGrant = directIamUserResourceAllow
+                && relationship == ResourceAccountRelationship.SAME_ACCOUNT;
+        boolean boundaryAllows = boundaryDocs == null
+                || firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, false,
+                        loweredAction, resource, ctx) != null;
+        if (!directSameAccountUserGrant && !boundaryAllows) {
+            return implicitDeny(PolicyLayer.PERMISSIONS_BOUNDARY);
+        }
+
+        // 5. Session policy (if present) must also allow (intersection)
+        if (sessionDocs != null
+                && firstMatch(PolicyLayer.SESSION, -1, sessionDocs, false, loweredAction, resource, ctx) == null) {
+            return implicitDeny(PolicyLayer.SESSION);
+        }
+
+        // 6. Allowed: the identity statement that granted it, or the resource policy alone. A direct
+        //    grant the boundary does not allow is the resource policy's, whatever identity said.
+        DecidingStatement granting = identityAllow != null && !(directSameAccountUserGrant && !boundaryAllows)
+                ? identityAllow : resourceStatement();
+        return new DecisionRecord(Outcome.ALLOW, granting.layer(), granting);
+    }
+
+    private static DecisionRecord implicitDeny(PolicyLayer layer) {
+        return new DecisionRecord(Outcome.IMPLICIT_DENY, layer, null);
+    }
+
+    /** The resource layer arrives already decided, so it has no statement to point at. */
+    private static DecidingStatement resourceStatement() {
+        return new DecidingStatement(PolicyLayer.RESOURCE, -1, -1, -1, null);
     }
 
     /**
@@ -283,64 +430,6 @@ public class IamPolicyEvaluator {
         return decision == ResourcePolicyDecision.ALLOW ? Decision.ALLOW : Decision.DENY;
     }
 
-    private Decision evaluateParsed(
-            CallerContext caller,
-            List<PolicyStatement> identityStmts,
-            List<PolicyStatement> sessionStmts,
-            List<PolicyStatement> boundaryStmts,
-            boolean resourceExplicitDeny,
-            boolean resourceAllow,
-            boolean directIamUserResourceAllow,
-            ResourceAccountRelationship accountRelationship,
-            String action,
-            String resource,
-            Map<String, List<String>> ctx) {
-
-        // 0. Service control policies gate everything: the action must be allowed at EVERY
-        //    organization level and explicitly denied at none, before identity policies are
-        //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
-        //    a level holding an unparseable document denies.
-        if (!scpAllows(caller.scpLevels(), action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        // 1. Explicit deny in ANY policy → DENY immediately
-        if (anyExplicitDeny(identityStmts, action, resource, ctx)
-                || resourceExplicitDeny
-                || (sessionStmts  != null && anyExplicitDeny(sessionStmts,  action, resource, ctx))
-                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
-            return Decision.DENY;
-        }
-
-        // 2. Base grant: same-account access needs either policy family; cross-account access
-        //    needs both the caller's identity policy and the resource owner's policy.
-        boolean identityAllow = anyExplicitAllow(identityStmts, action, resource, ctx);
-        if (accountRelationship == ResourceAccountRelationship.CROSS_ACCOUNT) {
-            if (!identityAllow || !resourceAllow) {
-                return Decision.DENY;
-            }
-        } else if (!identityAllow && !resourceAllow) {
-            return Decision.DENY;
-        }
-
-        // 3. Session policy (if present) must also allow (intersection)
-        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        // 4. A same-account resource policy that names an IAM user ARN grants directly to that
-        //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
-        //    already handled above. Other grants remain limited by the boundary intersection.
-        boolean directSameAccountUserGrant = directIamUserResourceAllow
-                && accountRelationship == ResourceAccountRelationship.SAME_ACCOUNT;
-        if (!directSameAccountUserGrant && boundaryStmts != null
-                && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        return Decision.ALLOW;
-    }
-
     /**
      * Convenience overload: identity policies only, no conditions.
      * Backward-compatible with Phase 1 callers.
@@ -365,27 +454,259 @@ public class IamPolicyEvaluator {
                                                       Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
-        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
-        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
-                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
-        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
-                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        return simulationDecision(simulatedPolicies(caller, loweredAction, resource, ctx),
+                loweredAction, resource, ctx);
+    }
 
-        if (anyExplicitDeny(identityStmts, loweredAction, resource, ctx)
-                || (sessionStmts != null && anyExplicitDeny(sessionStmts, loweredAction, resource, ctx))
-                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, loweredAction, resource, ctx))) {
+    /**
+     * The whole of what a simulation answers for one action on one resource: the decision, the
+     * statements that decided it, the context keys it wanted and had no value for, and the effect
+     * of the two policy types a result reports on their own.
+     *
+     * <p>The decision is the walk a live request takes, in its order: an explicit deny anywhere
+     * decides, then the organization levels gate, then the identity policies have to allow, and
+     * the session policy and the permissions boundary have to allow beside them.
+     */
+    public SimulationReport simulate(CallerContext caller,
+                                     String action,
+                                     String resource,
+                                     Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
+        String loweredAction = lowercase(action);
+        SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
+        SimulationDecision decision = simulationDecision(policies, loweredAction, resource, ctx);
+        List<CachedDocument> boundary = policies.boundary();
+        return new SimulationReport(decision,
+                matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
+                missingContextValues(policies, loweredAction, resource, ctx),
+                caller.scpLevels() == null
+                        ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
+                boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)
+                        && anyMatch(boundary, false, loweredAction, resource, ctx));
+    }
+
+    /**
+     * The documents a simulation reads, parsed and kept per document so a statement can be
+     * located, with what the organization levels said about the request beside them.
+     */
+    private record SimulatedPolicies(List<CachedDocument> identity, List<CachedDocument> session,
+                                     List<CachedDocument> boundary, ScpWalk scp) {
+    }
+
+    private SimulatedPolicies simulatedPolicies(CallerContext caller, String action, String resource,
+                                                Map<String, List<String>> ctx) {
+        // Organization levels gate a simulation the way they gate the call it stands for: the
+        // action must be allowed at every level and explicitly denied at none, before the input
+        // policies are consulted. This is the live path's own walk, so a simulation cannot answer
+        // differently from the request it models.
+        return new SimulatedPolicies(
+                parseEach(caller.identityPolicies()),
+                caller.sessionPolicyDocument() == null
+                        ? null : parseEach(List.of(caller.sessionPolicyDocument())),
+                caller.boundaryPolicyDocument() == null
+                        ? null : parseEach(List.of(caller.boundaryPolicyDocument())),
+                scpWalk(caller.scpLevels(), action, resource, ctx));
+    }
+
+    private SimulationDecision simulationDecision(SimulatedPolicies policies, String action,
+                                                  String resource, Map<String, List<String>> ctx) {
+        List<CachedDocument> session = policies.session();
+        List<CachedDocument> boundary = policies.boundary();
+        if (policies.scp().firstDeny() != null) {
             return SimulationDecision.EXPLICIT_DENY;
         }
-        if (!anyExplicitAllow(identityStmts, loweredAction, resource, ctx)) {
+        if (anyMatch(policies.identity(), true, action, resource, ctx)
+                || (session != null && anyMatch(session, true, action, resource, ctx))
+                || (boundary != null && anyMatch(boundary, true, action, resource, ctx))) {
+            return SimulationDecision.EXPLICIT_DENY;
+        }
+        if (!policies.scp().allows()) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, loweredAction, resource, ctx)) {
+        if (!anyMatch(policies.identity(), false, action, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, loweredAction, resource, ctx)) {
+        if (session != null && !anyMatch(session, false, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        if (boundary != null && !anyMatch(boundary, false, action, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /** Whether any statement of these documents denies (or allows) the request. */
+    private boolean anyMatch(List<CachedDocument> documents, boolean deny, String action, String resource,
+                             Map<String, List<String>> ctx) {
+        for (CachedDocument document : documents) {
+            if (indexOfMatch(document.statements(), deny, action, resource, ctx) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The statements a result reports as having decided this scenario: "a list of the statements in
+     * the input policies that determine the result", where "even if multiple statements allow the
+     * operation on the resource, if only one statement denies that operation, then the explicit
+     * deny overrides any allow. In addition, the deny statement is the only entry included in the
+     * result". So an allow reports every statement that allowed, an explicit deny reports the one
+     * that denied, and an implicit deny reports none, nothing having matched.
+     *
+     * <p>Only the identity policies are read here. AWS says of this member that it "doesn't include
+     * statements from service control policies (SCPs)" and that "only statements from
+     * identity-based and resource-based policies appear here", so a deny that came from an SCP,
+     * from a session policy or from the permissions boundary leaves the member empty, and the
+     * boundary's own effect is reported by {@code PermissionsBoundaryDecisionDetail} instead, which
+     * is what AWS's own same-account example shows for a boundary that allowed the action.
+     */
+    private List<MatchedStatement> matchedStatements(SimulationDecision decision, CallerContext caller,
+                                                     List<CachedDocument> identityDocs, String action,
+                                                     String resource, Map<String, List<String>> ctx) {
+        if (decision == SimulationDecision.IMPLICIT_DENY) {
+            return List.of();
+        }
+        boolean deny = decision == SimulationDecision.EXPLICIT_DENY;
+        List<MatchedStatement> matched = new ArrayList<>();
+        for (int document = 0; document < identityDocs.size(); document++) {
+            CachedDocument parsed = identityDocs.get(document);
+            List<PolicyStatement> statements = parsed.statements();
+            for (int statement = 0; statement < statements.size(); statement++) {
+                PolicyStatement stmt = statements.get(statement);
+                if ((deny ? stmt.isDeny() : stmt.isAllow())
+                        && matchesStatement(stmt, action, resource, ctx)) {
+                    matched.add(new MatchedStatement(caller.identityPolicySource(document),
+                            parsed.positionOf(statement)));
+                    if (deny) {
+                        return List.copyOf(matched);
+                    }
+                }
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    /**
+     * The context keys this scenario wanted and the request had no value for: "a list of context
+     * keys that are required by the included input policies but that were not provided by one of
+     * the input parameters".
+     *
+     * <p>A key is wanted when a statement the evaluation reaches for this action names it: the
+     * variables its resources are written with, which a value has to resolve before the resource
+     * can be compared at all, and, for a statement whose resources do match, the keys its
+     * conditions compare. A statement the action does not match is reached by nothing and wants
+     * nothing, which is what gives the per-resource lists a meaning of their own.
+     *
+     * <p>Whichever element the statement writes its resources with is read, {@code Resource} or
+     * {@code NotResource}: {@link #matchesResource} takes its patterns from either and resolves
+     * their variables either way, so a value supplied for one of them can change the answer, which
+     * is what the member is for. An excluding pattern whose variable has no value excludes nothing
+     * and one carrying a value excludes what it names, which the enforcement cases pin.
+     *
+     * <p>The organization levels are left out: AWS says the member "doesn't include context keys
+     * referenced by service control policies (SCPs)" and that a key "referenced only by an SCP" is
+     * not returned, the decision still being answered. A key the context carries with no values at
+     * all counts as provided, an empty set being a value and not an absence.
+     *
+     * <p>A variable only counts under a document version that gives {@code ${...}} meaning. Under
+     * the older version the text is literal and names no key, so nothing is missing for it.
+     *
+     * <p>A key an operator answers for without a value is not one the policy requires, so it is
+     * not reported. An {@code ...IfExists} operator publishes exactly that: "if the key is not
+     * present, evaluate the condition element as true", and {@code Null} asking for absence,
+     * {@code "key": "true"}, is satisfied by the absence itself. The two the evaluation already
+     * reads the same way follow: {@code ForAllValues} holds vacuously over no values, and a
+     * negated operator holds against a key that matches nothing. {@code Null} asking for presence,
+     * {@code "key": "false"}, does require the key, and reports it.
+     */
+    private List<String> missingContextValues(SimulatedPolicies policies, String action,
+                                              String resource, Map<String, List<String>> ctx) {
+        Map<String, String> missing = new LinkedHashMap<>();
+        for (List<CachedDocument> layer : List.of(policies.identity(),
+                policies.session() == null ? List.<CachedDocument>of() : policies.session(),
+                policies.boundary() == null ? List.<CachedDocument>of() : policies.boundary())) {
+            for (CachedDocument document : layer) {
+                for (PolicyStatement statement : document.statements()) {
+                    collectMissingContextValues(statement, action, resource, ctx, missing);
+                }
+            }
+        }
+        return List.copyOf(missing.values());
+    }
+
+    private void collectMissingContextValues(PolicyStatement statement, String action, String resource,
+                                             Map<String, List<String>> ctx, Map<String, String> missing) {
+        if (!matchesAction(statement, action)) {
+            return;
+        }
+        boolean variables = policyVariables(statement);
+        List<String> resourceKeys = new ArrayList<>();
+        if (variables) {
+            collectPolicyVariableKeys(statement.getResources() != null
+                    ? statement.getResources() : statement.getNotResources(), resourceKeys);
+        }
+        boolean resourceUnresolved = addMissing(resourceKeys, ctx, missing);
+        if (!resourceUnresolved && !matchesResource(statement, action, resource, ctx)) {
+            return;
+        }
+        List<String> conditionKeys = new ArrayList<>();
+        collectRequiredConditionKeys(statement, variables, conditionKeys);
+        addMissing(conditionKeys, ctx, missing);
+    }
+
+    /**
+     * The keys a statement's conditions require a value for, which is every key its operators
+     * would fail on rather than answer for when the request carries none. Same walk as
+     * {@link #collectConditionKeys}, which keeps reporting every key referenced, that being what
+     * the two context-key operations answer with.
+     */
+    private void collectRequiredConditionKeys(PolicyStatement stmt, boolean variables, List<String> keys) {
+        Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
+        if (conditions == null) {
+            return;
+        }
+        for (Map.Entry<String, Map<String, List<String>>> block : conditions.entrySet()) {
+            ParsedOperator parsed = parseOperator(block.getKey());
+            for (Map.Entry<String, List<String>> entry : block.getValue().entrySet()) {
+                if (absenceAnswered(parsed, entry.getValue())) {
+                    continue;
+                }
+                keys.add(entry.getKey());
+                if (variables) {
+                    collectPolicyVariableKeys(entry.getValue(), keys);
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether this operator answers for a key the request carries no value for, which is the same
+     * reading {@link #evaluateConditionBlock} applies when it meets one: an {@code ...IfExists}
+     * suffix, a {@code Null} asking for absence, a {@code ForAllValues} quantifier, and a negated
+     * operator a missing key cannot match.
+     */
+    private static boolean absenceAnswered(ParsedOperator parsed, List<String> condValues) {
+        if ("Null".equalsIgnoreCase(parsed.baseOp())) {
+            return condValues.stream().anyMatch("true"::equalsIgnoreCase);
+        }
+        return parsed.ifExists()
+                || parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES
+                || parsed.quantifier() == SetQuantifier.NONE && isNegatedOperator(parsed.baseOp());
+    }
+
+    /** Records every key the context has no entry for, keeping the spelling the policy used. */
+    private static boolean addMissing(List<String> referenced, Map<String, List<String>> ctx,
+                                      Map<String, String> missing) {
+        boolean any = false;
+        for (String key : referenced) {
+            String lowered = lowercase(key);
+            if (!ctx.containsKey(lowered)) {
+                missing.putIfAbsent(lowered, key);
+                any = true;
+            }
+        }
+        return any;
     }
 
     /**
@@ -411,18 +732,31 @@ public class IamPolicyEvaluator {
     public List<String> contextKeysReferencedIn(List<String> policyDocuments) {
         List<String> keys = new ArrayList<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
-            Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
-            if (conditions != null) {
-                for (Map<String, List<String>> byContextKey : conditions.values()) {
-                    for (Map.Entry<String, List<String>> entry : byContextKey.entrySet()) {
-                        keys.add(entry.getKey());
-                        collectPolicyVariableKeys(entry.getValue(), keys);
-                    }
-                }
-            }
+            collectConditionKeys(stmt, true, keys);
             collectPolicyVariableKeys(stmt.getResources(), keys);
         }
         return keys;
+    }
+
+    /**
+     * Every context key a statement's conditions name: each operator's key, and the
+     * {@code ${...}} variables named in its values when {@code variables} says the document's
+     * version gives them meaning. In the order the document writes them, not de-duplicated, which
+     * is what the two context-key operations answer with.
+     */
+    private void collectConditionKeys(PolicyStatement stmt, boolean variables, List<String> keys) {
+        Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
+        if (conditions == null) {
+            return;
+        }
+        for (Map<String, List<String>> byContextKey : conditions.values()) {
+            for (Map.Entry<String, List<String>> entry : byContextKey.entrySet()) {
+                keys.add(entry.getKey());
+                if (variables) {
+                    collectPolicyVariableKeys(entry.getValue(), keys);
+                }
+            }
+        }
     }
 
     /**
@@ -442,7 +776,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         for (PolicyStatement stmt : parseAll(List.of(policyDocument))) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getActions() != null) {
@@ -479,7 +813,7 @@ public class IamPolicyEvaluator {
     public List<String> servicesGrantedBy(List<String> policyDocuments) {
         Set<String> granted = new TreeSet<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getNotActions() != null) {
@@ -555,7 +889,7 @@ public class IamPolicyEvaluator {
      * The service namespaces an SCP chain leaves reachable, backing the service list in
      * {@code GetOrganizationsAccessReport}.
      *
-     * <p>Level conventions are {@link #scpAllows}'s. A {@code null} chain means SCPs do not apply
+     * <p>Level conventions are {@link #scpWalk}'s. A {@code null} chain means SCPs do not apply
      * and every published namespace is reachable, which is the management account's case. A level
      * with no document constrains nothing, since AWS keeps FullAWSAccess attached to every target,
      * and a level carrying a document that fails to parse leaves nothing reachable, because the
@@ -569,7 +903,7 @@ public class IamPolicyEvaluator {
      * What a namespace-wide reading got right stays right: an SCP denying {@code s3:DeleteBucket}
      * alone keeps S3 on the list, because every other S3 action is still reachable.
      *
-     * <p>This is not {@link #scpAllows} asked once per namespace. That question needs a concrete
+     * <p>This is not {@link #scpWalk} asked once per namespace. That question needs a concrete
      * action, and a request action of {@code s3:*} would not match a statement naming
      * {@code s3:GetObject}, because a pattern globs against a request value and never the other
      * way round. The survivors are found by probing instead, with the actions the policies
@@ -600,7 +934,7 @@ public class IamPolicyEvaluator {
             for (PolicyStatement stmt : parsed.statements()) {
                 if (stmt.isDeny()) {
                     denials.add(stmt);
-                } else {
+                } else if (stmt.isAllow()) {
                     allows.add(stmt);
                 }
             }
@@ -727,7 +1061,14 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    /** Whether a {@code Deny} applies to every request, rather than to some of them. */
+    /**
+     * Whether a {@code Deny} applies to every request, rather than to some of them. A statement
+     * reaches through whichever resource element it names, so one that names neither reaches no
+     * request at all: {@link #matchesResource} answers no for it, and this answers the same way
+     * rather than reading the absence as every resource. Taking an entry that is no string for no
+     * value is what leaves that shape, so the two readings have to agree, or a report would drop a
+     * service over a {@code Deny} that the decision it reports never applies.
+     */
     private static boolean deniesEveryRequest(PolicyStatement stmt) {
         if (stmt.getConditions() != null && !stmt.getConditions().isEmpty()) {
             return false;
@@ -736,7 +1077,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         List<String> resources = stmt.getResources();
-        return resources == null || resources.isEmpty() || resources.contains("*");
+        return resources != null && resources.contains("*");
     }
 
     /** Appends the key name inside every {@code ${key}} policy variable found in {@code values}. */
@@ -756,36 +1097,45 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * SCP evaluation: at every organization level the action must be explicitly allowed
-     * and not explicitly denied. {@code null} levels mean SCPs don't apply; a level with
-     * no documents at all (defensive — the last SCP on a target can't be detached) is
-     * FullAWSAccess semantics and passes.
+     * SCP evaluation, in one pass over the levels: at every organization level the action must be
+     * explicitly allowed and not explicitly denied. {@code null} levels mean SCPs don't apply; a
+     * level with no documents at all (defensive: the last SCP on a target can't be detached) is
+     * FullAWSAccess semantics and passes. The result carries the first explicit Deny (level,
+     * document, statement order) as well, since an explicit Deny decides ahead of every other
+     * layer.
      *
      * <p>A level containing a document that fails to parse denies. The ceiling cannot tell
      * what an unreadable guardrail would have said, and every target also carries
      * FullAWSAccess, so skipping the bad document would silently leave the level allowing
-     * everything the operator meant to forbid.</p>
+     * everything the operator meant to forbid. The Deny lookup alone skips such a document.</p>
      */
-    private boolean scpAllows(List<List<String>> scpLevels, String action, String resource,
-                              Map<String, List<String>> ctx) {
+    private ScpWalk scpWalk(List<List<String>> scpLevels, String action, String resource,
+                            Map<String, List<String>> ctx) {
         if (scpLevels == null) {
-            return true;
+            return new ScpWalk(null, true);
         }
-        for (List<String> level : scpLevels) {
-            ParsedDocuments parsed = parseAllTracked(level);
-            if (parsed.anyFailed()) {
-                return false;
+        boolean allows = true;
+        for (int level = 0; level < scpLevels.size(); level++) {
+            ParsedDocuments parsed = parseAllTracked(scpLevels.get(level));
+            DecidingStatement deny = firstMatch(PolicyLayer.SERVICE_CONTROL, level, parsed.documents(), true,
+                    action, resource, ctx);
+            if (deny != null) {
+                return new ScpWalk(deny, false);
             }
-            List<PolicyStatement> levelStmts = parsed.statements();
-            if (levelStmts.isEmpty()) {
+            if (!allows) {
                 continue;
             }
-            if (anyExplicitDeny(levelStmts, action, resource, ctx)
-                    || !anyExplicitAllow(levelStmts, action, resource, ctx)) {
-                return false;
+            List<PolicyStatement> levelStmts = parsed.statements();
+            if (parsed.anyFailed()
+                    || (!levelStmts.isEmpty() && !anyExplicitAllow(levelStmts, action, resource, ctx))) {
+                allows = false;
             }
         }
-        return true;
+        return new ScpWalk(null, allows);
+    }
+
+    /** What {@link #scpWalk} found: the first explicit Deny or null, and whether every level passes. */
+    private record ScpWalk(DecidingStatement firstDeny, boolean allows) {
     }
 
     // -----------------------------------------------------------------------
@@ -815,24 +1165,47 @@ public class IamPolicyEvaluator {
         return normalized;
     }
 
-    private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
-                                     Map<String, List<String>> ctx) {
-        for (PolicyStatement stmt : stmts) {
-            if (stmt.isDeny() && matchesStatement(stmt, action, resource, ctx)) {
-                return true;
+    /**
+     * The first statement, in document then statement order, whose Effect is Deny (or Allow) and
+     * which matches the request, or null. The matching loop is {@link #indexOfMatch}.
+     */
+    private DecidingStatement firstMatch(PolicyLayer layer, int level, List<CachedDocument> documents,
+                                         boolean deny, String action, String resource,
+                                         Map<String, List<String>> ctx) {
+        for (int d = 0; d < documents.size(); d++) {
+            List<PolicyStatement> stmts = documents.get(d).statements();
+            int s = indexOfMatch(stmts, deny, action, resource, ctx);
+            if (s >= 0) {
+                return new DecidingStatement(layer, level, d, s, stmts.get(s).getSid());
             }
         }
-        return false;
+        return null;
+    }
+
+    /**
+     * The index of the first statement whose Effect is Deny (or Allow) and which matches the
+     * request, or -1. The one loop behind {@link #firstMatch}, {@link #anyExplicitDeny} and
+     * {@link #anyExplicitAllow}.
+     */
+    private int indexOfMatch(List<PolicyStatement> stmts, boolean deny, String action, String resource,
+                             Map<String, List<String>> ctx) {
+        for (int i = 0; i < stmts.size(); i++) {
+            PolicyStatement stmt = stmts.get(i);
+            if ((deny ? stmt.isDeny() : stmt.isAllow()) && matchesStatement(stmt, action, resource, ctx)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
+                                     Map<String, List<String>> ctx) {
+        return indexOfMatch(stmts, true, action, resource, ctx) >= 0;
     }
 
     private boolean anyExplicitAllow(List<PolicyStatement> stmts, String action, String resource,
                                       Map<String, List<String>> ctx) {
-        for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesStatement(stmt, action, resource, ctx)) {
-                return true;
-            }
-        }
-        return false;
+        return indexOfMatch(stmts, false, action, resource, ctx) >= 0;
     }
 
     private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
@@ -954,18 +1327,24 @@ public class IamPolicyEvaluator {
         return match;
     }
 
-    /** A {@code NotPrincipal} statement applies to every caller it does not spare. */
+    /**
+     * A {@code NotPrincipal} statement applies to every caller it does not spare. A {@code
+     * Principal} the statement carries decides it instead, naming nobody included, and an element
+     * that names nobody carves nobody out, so the statement covers no caller.
+     */
     private PrincipalMatch principalMatch(PolicyStatement stmt, RequestPrincipal principal) {
-        if (stmt.getPrincipals() != null) {
-            return matchAnyPrincipal(stmt.getPrincipals(), principal);
+        Map<String, List<String>> principals = stmt.getPrincipals();
+        if (principals != null) {
+            return matchAnyPrincipal(principals, principal);
         }
-        if (stmt.getNotPrincipals() != null) {
-            boolean spared = stmt.isDeny()
-                    ? sparedFromDeny(stmt.getNotPrincipals(), principal)
-                    : matchAnyPrincipal(stmt.getNotPrincipals(), principal) != PrincipalMatch.NONE;
-            return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
+        Map<String, List<String>> notPrincipals = stmt.getNotPrincipals();
+        if (notPrincipals == null || notPrincipals.isEmpty()) {
+            return PrincipalMatch.NONE;
         }
-        return PrincipalMatch.NONE;
+        boolean spared = stmt.isDeny()
+                ? sparedFromDeny(notPrincipals, principal)
+                : matchAnyPrincipal(notPrincipals, principal) != PrincipalMatch.NONE;
+        return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
     }
 
     /**
@@ -1677,30 +2056,60 @@ public class IamPolicyEvaluator {
     // Policy document parsing
     // -----------------------------------------------------------------------
 
+    /**
+     * Whether {@code document} reads as an IAM policy document at all: a value that parses as a
+     * JSON object and carries the element the grammar requires of every policy, {@code Statement},
+     * "the main element for a policy. This element is required."
+     *
+     * <p>Only a document a request SUPPLIED is asked this. An operation taking one takes "the
+     * complete, valid JSON text of an IAM policy", so a value that is not one is an input the
+     * operation answers rather than a document the evaluation reads nothing out of. A document
+     * already stored is read by {@link #parseAll} instead, which contributes no statements for one
+     * it cannot parse and leaves the decision to the rest: a policy the account accepted once must
+     * not make every later call fail.
+     */
+    public boolean readsAsPolicyDocument(String document) {
+        // One reader of the grammar rather than two: the writes hold a document to this same
+        // top-level shape and need to know which way it failed in order to word their refusal, so
+        // the reading lives in IamPolicyDocuments and this is its boolean face. A stored document
+        // carrying the same text is logged where it is parsed, in parseUncached.
+        return IamPolicyDocuments.readsAsPolicyDocument(document);
+    }
+
+    /** Each document's parse, in order and position for position, so a statement can be located. */
+    private List<CachedDocument> parseEach(List<String> documents) {
+        List<CachedDocument> result = new ArrayList<>();
+        if (documents != null) {
+            for (String doc : documents) {
+                result.add(parseDocument(doc));
+            }
+        }
+        return result;
+    }
+
     private List<PolicyStatement> parseAll(List<String> documents) {
         return parseAllTracked(documents).statements();
     }
 
     /**
-     * Parses every document, skipping (and logging) any that fails, and reports whether
-     * any did. Callers that can safely ignore a broken document use {@link #parseAll};
-     * SCP evaluation reads {@code anyFailed} so the ceiling can fail closed.
+     * Parses every document through {@link #parseEach} and flattens the statements, skipping (and
+     * logging) any that fails, and reports whether any did. Callers that can safely ignore a
+     * broken document use {@link #parseAll}; SCP evaluation reads {@code anyFailed} so the ceiling
+     * can fail closed, and keeps the documents so a statement can be located.
      */
     private ParsedDocuments parseAllTracked(List<String> documents) {
-        List<PolicyStatement> result = new ArrayList<>();
-        if (documents == null) {
-            return new ParsedDocuments(result, false);
-        }
+        List<CachedDocument> parsed = parseEach(documents);
+        List<PolicyStatement> statements = new ArrayList<>();
         boolean anyFailed = false;
-        for (String doc : documents) {
-            CachedDocument parsed = parseDocument(doc);
-            result.addAll(parsed.statements());
-            anyFailed |= parsed.failed();
+        for (CachedDocument document : parsed) {
+            statements.addAll(document.statements());
+            anyFailed |= document.failed();
         }
-        return new ParsedDocuments(result, anyFailed);
+        return new ParsedDocuments(parsed, statements, anyFailed);
     }
 
-    private record ParsedDocuments(List<PolicyStatement> statements, boolean anyFailed) {
+    private record ParsedDocuments(List<CachedDocument> documents, List<PolicyStatement> statements,
+                                   boolean anyFailed) {
     }
 
     private CachedDocument parseDocument(String document) {
@@ -1721,14 +2130,25 @@ public class IamPolicyEvaluator {
 
     private CachedDocument parseUncached(String document) {
         try {
-            return new CachedDocument(List.copyOf(parseStatements(document)), false);
+            return new CachedDocument(List.copyOf(parseStatements(document)),
+                    PolicyStatementPositions.of(document), false);
         } catch (Exception e) {
             LOG.warnv("Failed to parse policy document: {0}", e.getMessage());
-            return new CachedDocument(List.of(), true);
+            return new CachedDocument(List.of(), List.of(), true);
         }
     }
 
-    private record CachedDocument(List<PolicyStatement> statements, boolean failed) {
+    /**
+     * One parsed document: its statements, and where each of them sits in the document's text,
+     * position for position, so a result can report the statement that decided it.
+     */
+    private record CachedDocument(List<PolicyStatement> statements,
+                                  List<PolicyStatementPositions.Span> positions, boolean failed) {
+
+        /** Where statement {@code index} sits, or null for a document whose text was not read. */
+        PolicyStatementPositions.Span positionOf(int index) {
+            return index >= 0 && index < positions.size() ? positions.get(index) : null;
+        }
     }
 
     private List<PolicyStatement> parseStatements(String document) throws Exception {
@@ -1747,15 +2167,23 @@ public class IamPolicyEvaluator {
     }
 
     private PolicyStatement parseStatement(JsonNode stmt, String version) {
-        String effect = stmt.path("Effect").asText("Allow");
+        // A statement states one of the two effects the policy language defines or it states
+        // nothing. An Effect that is absent, is not a string, or names neither is read as neither:
+        // the statement grants nothing, denies nothing, and leaves the request to the rest of the
+        // document. Reading an absent Effect as an Allow would grant on a statement that describes
+        // no permission. The two words are the words themselves, "The Effect value is case
+        // sensitive" (IAM User Guide, "AWS JSON policy elements: Effect"), which is the comparison
+        // IamPolicyDocuments makes of a document being written, so "allow" states nothing here
+        // rather than granting what no write of this package would have stored.
+        String effect = stmt.path("Effect").isTextual() ? stmt.get("Effect").asText() : "";
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
         // Action names are case-insensitive on AWS, so they are lowercased once here instead of
         // on every request. Resource ARNs are case-sensitive on AWS and are kept as written.
-        List<String> actions     = lowercaseAll(nodeToList(stmt.get("Action")));
-        List<String> notActions  = lowercaseAll(nodeToList(stmt.get("NotAction")));
-        List<String> resources   = nodeToList(stmt.get("Resource"));
-        List<String> notResources= nodeToList(stmt.get("NotResource"));
+        List<String> actions     = lowercaseAll(patternValues(stmt.get("Action")));
+        List<String> notActions  = lowercaseAll(patternValues(stmt.get("NotAction")));
+        List<String> resources   = patternValues(stmt.get("Resource"));
+        List<String> notResources= patternValues(stmt.get("NotResource"));
         Map<String, Map<String, List<String>>> conditions = parseConditions(stmt.get("Condition"));
         return new PolicyStatement(
                 effect,
@@ -1766,32 +2194,51 @@ public class IamPolicyEvaluator {
                 resources.isEmpty()   ? null : resources,
                 notResources.isEmpty()? null : notResources,
                 conditions,
-                version);
+                version,
+                stmt.path("Sid").isTextual() ? stmt.get("Sid").asText() : null);
     }
 
+    /**
+     * The callers a {@code Principal} or {@code NotPrincipal} element names, by principal type.
+     * Each of them is written as a {@code <principal_id_string>}, so an entry that is no string
+     * names nobody, as {@link #patternValues} reads the action and resource patterns beside it. An
+     * element naming nobody at all is no principal element rather than one naming an empty list,
+     * which the typed spelling already came to by dropping a type whose entries named nobody and
+     * the string and list spellings are read the same way here.
+     *
+     * <p>Where it tells is {@code NotPrincipal}, the element whose statement covers every caller it
+     * does not name: one naming nobody spared nobody, so an {@code Allow} whose {@code
+     * NotPrincipal} was an empty list, or a list of entries that are no strings, granted to anyone
+     * the statement otherwise covered. A statement whose principal element names nobody matches no
+     * caller now, which is how a {@code NotAction} or {@code NotResource} naming nothing already
+     * leaves a statement matching neither.
+     *
+     * <p>An element that is written and names nobody is still the element the statement carries, so
+     * this answers an empty map rather than null and only an absent element answers null. A
+     * statement carrying both elements is a shape the grammar does not describe, and the {@code
+     * Principal} it names decides it either way, so writing that one as an empty list leaves the
+     * statement matching nobody instead of handing the decision to the {@code NotPrincipal} beside
+     * it.
+     */
     private Map<String, List<String>> parsePrincipals(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
         Map<String, List<String>> result = new LinkedHashMap<>();
-        if (node.isTextual()) {
-            result.put("*", List.of(node.asText()));
-            return result;
-        }
-        if (node.isArray()) {
-            result.put("*", nodeToList(node));
-            return result;
-        }
-        if (node.isObject()) {
+        if (node.isTextual() || node.isArray()) {
+            List<String> values = patternValues(node);
+            if (!values.isEmpty()) {
+                result.put("*", values);
+            }
+        } else if (node.isObject()) {
             node.fields().forEachRemaining(entry -> {
-                List<String> values = nodeToList(entry.getValue());
+                List<String> values = patternValues(entry.getValue());
                 if (!values.isEmpty()) {
                     result.put(entry.getKey(), values);
                 }
             });
-            return result.isEmpty() ? null : result;
         }
-        return null;
+        return result;
     }
 
     private Map<String, Map<String, List<String>>> parseConditions(JsonNode condNode) {
@@ -1804,7 +2251,7 @@ public class IamPolicyEvaluator {
             opEntry.getValue().fields().forEachRemaining(kvEntry -> {
                 JsonNode value = kvEntry.getValue();
                 kvMap.put(kvEntry.getKey(), value.isBoolean() || value.isNumber()
-                        ? List.of(value.asText()) : nodeToList(value));
+                        ? List.of(value.asText()) : conditionValues(value));
             });
             result.put(opEntry.getKey(), kvMap);
         });
@@ -1819,7 +2266,43 @@ public class IamPolicyEvaluator {
         return lowered;
     }
 
-    private List<String> nodeToList(JsonNode node) {
+    /**
+     * The values a pattern element names. The grammar writes each of them as a string: an action is
+     * an {@code <action_string>}, a resource a {@code <resource_string>} and a principal a
+     * {@code <principal_id_string>}, so an entry that is no string names no value and is left out.
+     * A bare non-string element was read that way already, while a list carrying one took its text
+     * for a pattern, so {@code "Resource": 123} named no resource and {@code "Resource": [123]}
+     * named the pattern {@code 123}. The list is read like the bare element now.
+     *
+     * <p>It tells most where a pattern carves an exception out, since the element the statement
+     * matches on is whichever of the two it names: a {@code NotAction} or {@code NotResource} whose
+     * entries name nothing excludes nothing, and a statement excluding nothing covers every action
+     * or every resource there is. Naming no value leaves the statement matching neither instead.
+     */
+    private List<String> patternValues(JsonNode node) {
+        List<String> values = new ArrayList<>();
+        if (node == null) {
+            return values;
+        }
+        if (node.isTextual()) {
+            values.add(node.asText());
+        } else if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (item.isTextual()) {
+                    values.add(item.asText());
+                }
+            }
+        }
+        return values;
+    }
+
+    /**
+     * The values a condition element names, where a number and a boolean are values of their own:
+     * the grammar's JSON rules say quotation marks "are optional for numeric and Boolean values",
+     * and an operator reads what it is given as the text of the value either way. A lone number or
+     * boolean is read by the caller, so what is left here is the list a key may carry.
+     */
+    private List<String> conditionValues(JsonNode node) {
         List<String> list = new ArrayList<>();
         if (node == null) {
             return list;

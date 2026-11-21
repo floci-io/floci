@@ -6,10 +6,17 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -19,6 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The wire contract towards the real public npm registry, exercised against a local {@code
@@ -59,6 +71,97 @@ class NpmExternalConnectionClientTest {
 
         assertTrue(result.isPresent());
         assertArrayEquals(content, result.get().content());
+    }
+
+    @Test
+    void fetchPackumentRetriesAConnectionResetBeforeReceivingTheBody() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        HttpResponse<InputStream> response = mock(HttpResponse.class);
+        byte[] content = "{\"name\":\"widget\"}".getBytes(StandardCharsets.UTF_8);
+        when(response.statusCode()).thenReturn(200);
+        when(response.body()).thenReturn(new ByteArrayInputStream(content));
+        when(anySend(transport))
+                .thenThrow(new IOException("Connection reset"))
+                .thenReturn(response);
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        Optional<NpmExternalConnectionClient.FetchedAsset> result =
+                retryClient.fetchPackument("fake", null, "widget");
+
+        assertTrue(result.isPresent());
+        assertArrayEquals(content, result.get().content());
+        anySend(verify(transport, times(2)));
+    }
+
+    @Test
+    void fetchPackumentDoesNotRetryARequestTimeout() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        when(anySend(transport))
+                .thenThrow(new HttpTimeoutException("request timed out"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
+
+        anySend(verify(transport));
+    }
+
+    @Test
+    void fetchPackumentStopsAfterTwoFailedTransportAttempts() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        when(anySend(transport))
+                .thenThrow(new IOException("Connection reset"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
+
+        anySend(verify(transport, times(2)));
+    }
+
+    @Test
+    void fetchPackumentDoesNotRetryAnHttpNotFoundResponse() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        HttpResponse<InputStream> response = mock(HttpResponse.class);
+        when(response.statusCode()).thenReturn(404);
+        when(response.body()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        when(anySend(transport)).thenReturn(response);
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
+
+        anySend(verify(transport));
+    }
+
+    @Test
+    void fetchPackumentDoesNotReplayAPartiallyConsumedBody() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        HttpResponse<InputStream> response = mock(HttpResponse.class);
+        InputStream body = mock(InputStream.class);
+        when(response.statusCode()).thenReturn(200);
+        when(response.body()).thenReturn(body);
+        when(body.transferTo(any())).thenThrow(new IOException("Connection reset while reading"));
+        when(anySend(transport)).thenReturn(response);
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
+
+        anySend(verify(transport));
+        verify(body).close();
+    }
+
+    @Test
+    void fetchPackumentPreservesInterruptionWithoutRetrying() throws Exception {
+        HttpClient transport = mock(HttpClient.class);
+        when(anySend(transport))
+                .thenThrow(new InterruptedException("cancelled"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
+
+        try {
+            assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
+            assertTrue(Thread.currentThread().isInterrupted());
+            anySend(verify(transport));
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     /**
@@ -143,6 +246,35 @@ class NpmExternalConnectionClientTest {
         assertArrayEquals(content, result.get().content());
     }
 
+    /**
+     * {@code fetchTarball(..., Path)} is the streamed sibling that a large tarball import
+     * actually uses: unlike the {@code byte[]} overload above, it writes straight to a file via
+     * an {@link AssetDigestingInputStream}-wrapped copy, so this confirms that wrapping still
+     * lands the real bytes on disk and reports their real size, not just that the plain {@code
+     * byte[]} path works.
+     */
+    @Test
+    void fetchTarballToAPathWritesTheRealBytesAndReportsTheirSize() throws IOException {
+        byte[] content = "tarball-content".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/widget/-/widget-1.0.0.tgz", exchange -> {
+            exchange.sendResponseHeaders(200, content.length);
+            exchange.getResponseBody().write(content);
+            exchange.close();
+        });
+        Path destination = Files.createTempFile("npm-external-connection-test-", ".tgz");
+
+        try {
+            Optional<NpmExternalConnectionClient.FetchedFile> result =
+                    client.fetchTarball("fake", null, "widget", "1.0.0", destination);
+
+            assertTrue(result.isPresent());
+            assertEquals(content.length, result.get().size());
+            assertArrayEquals(content, Files.readAllBytes(destination));
+        } finally {
+            Files.deleteIfExists(destination);
+        }
+    }
+
     @Test
     void fetchTarballReturnsEmptyOnA404() throws IOException {
         server.createContext("/widget/-/widget-1.0.0.tgz", exchange -> respondEmpty(exchange, 404));
@@ -159,6 +291,14 @@ class NpmExternalConnectionClientTest {
                 client.fetchTarball("public:npmjs", null, "widget", "1.0.0");
 
         assertFalse(result.isPresent());
+    }
+
+    private static NpmExternalConnectionClient clientWithTransport(HttpClient transport) {
+        return new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+    }
+
+    private static HttpResponse<InputStream> anySend(HttpClient transport) throws IOException, InterruptedException {
+        return transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
     }
 
     private static void respondEmpty(HttpExchange exchange, int status) throws IOException {

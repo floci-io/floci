@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   pr-limit:
-    uses: floci-io/.github/.github/workflows/pr-limit.yml@main
+    uses: floci-io/.github/.github/workflows/pr-limit.yml@663517154c96512976791195d7d54f9fc5899c0b # main, 2026-11-19
     with:
       pr-number: ${{ format('{0}', github.event.pull_request.number || inputs.pr_number) }}
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}

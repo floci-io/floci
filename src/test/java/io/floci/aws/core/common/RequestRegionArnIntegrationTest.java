@@ -8,6 +8,7 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -130,9 +131,18 @@ class RequestRegionArnIntegrationTest {
             .then()
                 .statusCode(200)
                 .extract().path("graphqlApi.apiId");
-        // A namespace lives in its API's region, even when the request is signed for another one.
+        // A namespace lives in its API's Region, the only Region that reaches the API.
         given()
                 .header("Authorization", auth(OTHER_REGION, "appsync"))
+                .contentType("application/json")
+                .body("{\"name\": \"region-arn-ns\"}")
+            .when()
+                .post("/v2/apis/" + apiId + "/channelNamespaces")
+            .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+        given()
+                .header("Authorization", auth("appsync"))
                 .contentType("application/json")
                 .body("{\"name\": \"region-arn-ns\"}")
             .when()
@@ -161,9 +171,17 @@ class RequestRegionArnIntegrationTest {
                 .statusCode(200)
                 .body("CreateUserResponse.CreateUserResult.ARN", startsWith("arn:aws:elasticache:" + REGION + ":"));
 
-        // Users are not stored per region, so another region can read this one; its ARN must not change.
+        // A user is Regional: another Region does not find it, and its own Region reads it with the ARN minted there.
         given()
                 .header("Authorization", auth(OTHER_REGION, "elasticache"))
+                .formParam("Action", "DescribeUsers")
+                .formParam("UserId", "region-arn-user")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(404);
+        given()
+                .header("Authorization", auth("elasticache"))
                 .formParam("Action", "DescribeUsers")
                 .formParam("UserId", "region-arn-user")
             .when()

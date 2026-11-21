@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -41,14 +42,8 @@ class LambdaLayerIntegrationTest {
         return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 
-    private static String functionZipBase64() throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("exports.handler = async () => ({ statusCode: 200 });".getBytes());
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    private static String functionZipBase64() {
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 200 });");
     }
 
     // ── PublishLayerVersion ───────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.eventbridge.EventBridgeService;
@@ -234,6 +235,24 @@ class SsmServiceTest {
         assertEquals(Map.of(letter.repeat(128), "x"), ssmService.listTagsForResource("/tags/code-points", region));
         assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
                 + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
+    void restoreParameter_overwritesANameThatPutParameterRejectsUnderThatExactName() {
+        String legacy = " /legacy name ";
+        assertThrows(AwsException.class,
+                () -> ssmService.putParameter(legacy, "v", "String", null, true, "us-east-1"));
+
+        ssmService.restoreParameter(legacy, "v1", "String", null, null, null, null, null, "us-east-1");
+        long version = ssmService.restoreParameter(legacy, "v2", "String", "restored", null, null, null, null,
+                "us-east-1");
+
+        assertEquals(2L, version);
+        Parameter restored = ssmService.getParameter(legacy, "us-east-1");
+        assertEquals(legacy, restored.getName());
+        assertEquals("v2", restored.getValue());
+        assertEquals("restored", restored.getDescription());
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/legacy name", "us-east-1"));
     }
 
     @Test
@@ -1591,6 +1610,39 @@ class SsmServiceTest {
     }
 
     @Test
+    void tagOperations_byLegacyArnWithoutParameterSlash_tagTheTopLevelParameter() {
+        ssmService.putParameter("legacy-tagged", "v", "String", null, false, "us-east-1");
+        String legacyArn = "arn:aws:ssm:us-east-1:000000000000:parameterlegacy-tagged";
+
+        ssmService.addTagsToResource(legacyArn, Map.of("env", "dev", "team", "core"), "us-east-1");
+        assertEquals(Map.of("env", "dev", "team", "core"), ssmService.listTagsForResource(legacyArn, "us-east-1"));
+        ssmService.removeTagsFromResource(legacyArn, List.of("team"), "us-east-1");
+        assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource("legacy-tagged", "us-east-1"));
+    }
+
+    @Test
+    void tagOperations_byArn_findNothingOutsideTheRequestRegionAndAccount() {
+        ssmService.putParameter("/arn/scoped", "v", "String", null, false, "us-east-1");
+        ssmService.putParameter("secret", "v", "String", null, false, "us-east-1");
+
+        for (String arn : List.of("arn:aws:ssm:us-west-2:000000000000:parameter/arn/scoped",
+                "arn:aws:ssm:us-east-1:111122223333:parameter/arn/scoped",
+                "arn:aws-us-gov:ssm:us-east-1:000000000000:parameter/arn/scoped",
+                "arn:aws:ssm:us-west-2:000000000000:parametersecret",
+                "arn:aws:ssm:us-east-1:111122223333:parametersecret",
+                "arn:aws-us-gov:ssm:us-east-1:000000000000:parametersecret")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1"));
+            assertEquals("InvalidResourceId", ex.getErrorCode());
+            assertThrows(AwsException.class, () -> ssmService.listTagsForResource(arn, "us-east-1"));
+            assertThrows(AwsException.class,
+                    () -> ssmService.removeTagsFromResource(arn, List.of("env"), "us-east-1"));
+        }
+        assertEquals(Map.of(), ssmService.listTagsForResource("/arn/scoped", "us-east-1"));
+        assertEquals(Map.of(), ssmService.listTagsForResource("secret", "us-east-1"));
+    }
+
+    @Test
     void tagOperations_byArn_findAPathStoredWithoutLeadingSlash() {
         ssmService.putParameter("arn/relative", "v", "String", null, false, "us-east-1");
         String arn = ssmService.getParameter("arn/relative", "us-east-1").getArn();
@@ -1606,6 +1658,54 @@ class SsmServiceTest {
 
         ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1");
         assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource("/arn/tagged", "us-east-1"));
+    }
+
+    @Test
+    void storedTagsAreTheTagsOfTheParameterDocumentOrAssociationTheWholeArnNamesAndTaggingPutsANewMap() {
+        String region = "us-east-1";
+        String arns = "arn:aws:ssm:us-east-1:000000000000:";
+        ssmService.putParameter("/app/db", "v", "String", null, false, Map.of("team", "data"), region);
+        ssmService.putParameter("plain", "v", "String", null, false, Map.of("team", "web"), region);
+        ssmService.createDocument("RunIt", "{}", "Command", region);
+        ssmService.addTagsToResource("Document", "RunIt", Map.of("owner", "ops"), region);
+        String associationId = ssmService.createAssociation("RunIt", "nightly", null, "i-123", null, null, null, region)
+                .getAssociationId();
+        ssmService.addTagsToResource("Association", associationId, Map.of("cadence", "daily"), region);
+
+        assertEquals(Map.of("team", "data"), ssmService.storedTags(arns + "parameter/app/db"));
+        assertEquals(Map.of("team", "web"), ssmService.storedTags(arns + "parameter/plain"));
+        assertEquals(Map.of("owner", "ops"), ssmService.storedTags(arns + "document/RunIt"));
+        assertEquals(Map.of("cadence", "daily"), ssmService.storedTags(arns + "association/" + associationId));
+        // Another Region, another account's parameter of that name, an ARN whose partition is not its Region's and a
+        // type Floci keeps no record of hold none.
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws:ssm:us-west-2:000000000000:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws:ssm:us-east-1:111122223333:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws-us-gov:ssm:us-east-1:000000000000:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags(arns + "maintenancewindow/mw-0123456789abcdef0"));
+
+        Map<String, String> heldParameterTags = ssmService.listTagsForResource("/app/db", region);
+        Map<String, String> heldDocumentTags = ssmService.listTagsForResource("Document", "RunIt", region);
+        ssmService.addTagsToResource("/app/db", Map.of("env", "prod"), region);
+        ssmService.removeTagsFromResource("Document", "RunIt", List.of("owner"), region);
+
+        assertEquals(Map.of("team", "data"), heldParameterTags);
+        assertEquals(Map.of("owner", "ops"), heldDocumentTags);
+        assertEquals(Map.of("team", "data", "env", "prod"), ssmService.storedTags(arns + "parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags(arns + "document/RunIt"));
+    }
+
+    /**
+     * A top-level name stored both with and without its leading slash has one ARN, which AWS's format gives both; it
+     * names the slashed parameter, as the tagging operations read that ARN.
+     */
+    @Test
+    void storedTagsOfATopLevelArnAreTheSlashedParametersWhenBothFormsAreStored() {
+        ssmService.putParameter("twin", "v", "String", null, false, Map.of("form", "bare"), "us-east-1");
+        ssmService.putParameter("/twin", "v", "String", null, false, Map.of("form", "slashed"), "us-east-1");
+        String arn = "arn:aws:ssm:us-east-1:000000000000:parameter/twin";
+
+        assertEquals(Map.of("form", "slashed"), ssmService.storedTags(arn));
+        assertEquals(Map.of("form", "slashed"), ssmService.listTagsForResource(arn, "us-east-1"));
     }
 
     @Test
@@ -1913,5 +2013,64 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 ssmService.describeParameters(List.of(filter), "us-east-1"));
         assertEquals(errorCode, ex.getErrorCode());
+    }
+
+    private static final String CALLER = "000000000000";
+    private static final String OWNER = "100000008364";
+
+    @Test
+    void anAssociationOnASharedDocumentGivenByItsArnTakesANewDocumentVersion() {
+        AccountAwareStorageBackend<List<String>> permissions = AccountAwareStorageBackend.inMemory(CALLER);
+        AccountAwareStorageBackend<SsmDocument> documents = AccountAwareStorageBackend.inMemory(CALLER);
+        documents.putForAccount(OWNER, "us-east-1::shared", ownerDocument("shared"));
+        permissions.putForAccount(OWNER, "us-east-1::shared", List.of(CALLER));
+        SsmService service = sharingService(permissions, documents);
+        SsmAssociation association = service.createAssociation("arn:aws:ssm:us-east-1:" + OWNER + ":document/shared",
+                null, null, "i-0123456789abcdef0", null, null, null, "us-east-1");
+
+        SsmAssociation updated = service.updateAssociation(association.getAssociationId(), null, "1", null, null,
+                null, null, null, null, "us-east-1");
+
+        assertEquals("1", updated.getDocumentVersion());
+    }
+
+    @Test
+    void aSharedDocumentGivenByAnArnOfAnotherPartitionDoesNotExist() {
+        AccountAwareStorageBackend<List<String>> permissions = AccountAwareStorageBackend.inMemory(CALLER);
+        AccountAwareStorageBackend<SsmDocument> documents = AccountAwareStorageBackend.inMemory(CALLER);
+        documents.putForAccount(OWNER, "us-east-1::shared", ownerDocument("shared"));
+        permissions.putForAccount(OWNER, "us-east-1::shared", List.of(CALLER));
+        SsmService service = sharingService(permissions, documents);
+        String otherPartition = "arn:aws-cn:ssm:us-east-1:" + OWNER + ":document/shared";
+
+        AwsException e = assertThrows(AwsException.class, () -> service.createAssociation(otherPartition,
+                null, null, "i-0123456789abcdef0", null, null, null, "us-east-1"));
+        assertEquals("InvalidDocument", e.getErrorCode());
+        assertFalse(service.reachedInItsAccount(otherPartition, CALLER));
+    }
+
+    @Test
+    void aDocumentSharedBeforeStorageWasScopedByAccountIsStillShared() {
+        InMemoryStorage<String, List<String>> permissions = new InMemoryStorage<>();
+        InMemoryStorage<String, SsmDocument> documents = new InMemoryStorage<>();
+        permissions.put("us-east-1::legacy", List.of(OWNER));
+        documents.put("us-east-1::legacy", ownerDocument("legacy"));
+        SsmService service = sharingService(new AccountAwareStorageBackend<>(permissions, null, CALLER),
+                new AccountAwareStorageBackend<>(documents, null, CALLER));
+
+        assertEquals(List.of(OWNER), service.documentSharedWith(CALLER, "legacy", "us-east-1"));
+    }
+
+    private static SsmService sharingService(StorageBackend<String, List<String>> permissions,
+                                             StorageBackend<String, SsmDocument> documents) {
+        return new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(), permissions, documents,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", CALLER));
+    }
+
+    private static SsmDocument ownerDocument(String name) {
+        SsmDocument document = new SsmDocument(name, "{}", "Command");
+        document.setDocumentVersion(1);
+        document.setVersions(new LinkedHashMap<>(Map.of("1", "{}")));
+        return document;
     }
 }

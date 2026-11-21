@@ -3,7 +3,7 @@ package io.floci.aws.services.emrserverless;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.S3TestClients;
@@ -20,12 +20,8 @@ import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrServerlessRequests.awaitJobRun;
 import static io.floci.aws.testing.EmrServerlessRequests.createApplication;
@@ -42,7 +38,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * pulling; CI pulls it (2.7 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EmrServerlessHiveDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -171,10 +167,6 @@ class EmrServerlessHiveDockerIntegrationTest {
     }
 
     private String gunzipped(String key) {
-        try (GZIPInputStream in = new GZIPInputStream(s3.getObject(request -> request.bucket(bucket).key(key)))) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return S3TestClients.gunzipped(s3, bucket, key);
     }
 }

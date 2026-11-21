@@ -3,7 +3,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -20,7 +19,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -62,13 +60,13 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Template properties the backing service does not store. The runtime's capacity provider,
-     * filesystems, lifecycle, platform version and request-header allowlist, and the memory's
-     * strategies, indexed keys, namespace keys and stream delivery have no representation in the
-     * emulated control plane; the endpoint model carries no tags.
+     * filesystems, hooks, lifecycle, platform version, request-header allowlist and resource
+     * configurations, and the memory's strategies, indexed keys, namespace keys and stream delivery
+     * have no representation in the emulated control plane.
      */
     private static final Set<String> RUNTIME_NOT_STORED = Set.of("CapacityProviderConfiguration",
-            "FilesystemConfigurations", "LifecycleConfiguration", "PlatformVersion", "RequestHeaderConfiguration");
-    private static final Set<String> RUNTIME_ENDPOINT_NOT_STORED = Set.of("Tags");
+            "FilesystemConfigurations", "HooksConfiguration", "LifecycleConfiguration", "PlatformVersion",
+            "RequestHeaderConfiguration", "ResourceConfigurations");
     private static final Set<String> MEMORY_NOT_STORED = Set.of("IndexedKeys", "MemoryStrategies",
             "NamespaceKeys", "StreamDeliveryResources");
     private static final Set<String> WARNED_NOT_STORED = ConcurrentHashMap.newKeySet();
@@ -82,8 +80,8 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * What an in-place update changed on a reused entity, recorded before the change so a stack
-     * rollback can put it back: the runtime's configuration and tags, the endpoint's target version
-     * and description, the memory's mutable properties and tags. Internal, like the other
+     * rollback can put it back: the runtime's configuration and tags, the endpoint's target version,
+     * description and tags, the memory's mutable properties and tags. Internal, like the other
      * {@code __Floci} attributes.
      */
     static final String IN_PLACE_PRIOR_ATTR = "__FlociBedrockAgentCorePrior";
@@ -152,7 +150,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                     && Objects.equals(authorizer, prior.getAuthorizerConfiguration())
                     && Objects.equals(protocolConfiguration, prior.getProtocolConfiguration())
                     && environment.equals(prior.getEnvironmentVariables()));
-            String arn = runtimeService.arn(prior, String.valueOf(prior.getLatestVersion()), region);
+            String arn = runtimeService.arn(prior, region);
             Map<String, String> priorTags = runtimeService.getTagsByArn(region, arn);
             if (configurationChanged || !priorTags.equals(tags)) {
                 ObjectNode snapshot = inPlacePrior(prior.getAgentRuntimeId(), region);
@@ -193,19 +191,15 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void reconcileRuntimeTags(String arn, Map<String, String> desired, String region) {
-        List<String> stale = ProvisionContext.staleTagKeys(runtimeService.getTagsByArn(region, arn), desired);
-        if (!stale.isEmpty()) {
-            runtimeService.untagByArn(region, arn, stale);
-        }
-        if (!desired.isEmpty()) {
-            runtimeService.tagByArn(region, arn, desired);
-        }
+        CfnRollback.reconcileTags(runtimeService.getTagsByArn(region, arn).keySet(), desired,
+                stale -> runtimeService.untagByArn(region, arn, stale),
+                tags -> runtimeService.tagByArn(region, arn, tags));
     }
 
     private void publishRuntime(StackResource r, AgentRuntime runtime, String region) {
         String version = String.valueOf(runtime.getLatestVersion());
         r.setPhysicalId(runtime.getAgentRuntimeId());
-        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, version, region));
+        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, region));
         r.getAttributes().put("AgentRuntimeId", runtime.getAgentRuntimeId());
         r.getAttributes().put("AgentRuntimeVersion", version);
         r.getAttributes().put("Status", runtime.getStatus());
@@ -236,7 +230,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         String name = required(props, "Name", ctx, RUNTIME_ENDPOINT);
         String version = ctx.resolveOrDefault(props, "AgentRuntimeVersion", null);
         String description = ctx.resolveOrDefault(props, "Description", null);
-        warnNotStored(RUNTIME_ENDPOINT, props, RUNTIME_ENDPOINT_NOT_STORED);
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         EndpointLocation prior = ctx.isUpdate()
                 ? runtimeService.findEndpointByArn(region, ctx.priorPhysicalId()).orElse(null)
@@ -245,37 +239,52 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                 && name.equals(prior.endpoint().getName())) {
             AgentRuntimeEndpoint existing = prior.endpoint();
             // An omitted version leaves the endpoint on the version it serves, as UpdateAgentRuntimeEndpoint does.
-            boolean unchanged = (version == null || version.equals(existing.getTargetVersion()))
-                    && Objects.equals(description, existing.getDescription());
-            if (unchanged) {
+            boolean configurationChanged = !((version == null || version.equals(existing.getTargetVersion()))
+                    && Objects.equals(description, existing.getDescription()));
+            String arn = runtimeService.endpointArn(runtimeId, existing, region);
+            Map<String, String> priorTags = runtimeService.getEndpointTagsByArn(region, arn);
+            if (!configurationChanged && priorTags.equals(tags)) {
                 publishRuntimeEndpoint(r, prior.runtime(), existing, region);
                 return;
             }
             ObjectNode snapshot = inPlacePrior(runtimeId, region);
             ObjectNode endpointPrior = snapshot.putObject("endpoint");
             endpointPrior.put("name", name);
-            endpointPrior.put("targetVersion", existing.getTargetVersion());
-            endpointPrior.put("description", existing.getDescription());
+            if (configurationChanged) {
+                endpointPrior.put("targetVersion", existing.getTargetVersion());
+                endpointPrior.put("description", existing.getDescription());
+            }
+            snapshot.set("tags", MAPPER.valueToTree(priorTags));
             writeInPlacePrior(r, snapshot);
-            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r),
-                    () -> publishRuntimeEndpoint(r, prior.runtime(),
-                            runtimeService.updateEndpoint(runtimeId, name, version, description, true, region), region));
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
+                AgentRuntimeEndpoint endpoint = configurationChanged
+                        ? runtimeService.updateEndpoint(runtimeId, name, version, description, true, region)
+                        : existing;
+                reconcileEndpointTags(arn, tags, region);
+                publishRuntimeEndpoint(r, prior.runtime(), endpoint, region);
+            });
         } else {
             AgentRuntimeEndpoint endpoint = runtimeService.createEndpoint(runtimeId, name, version, description,
-                    null, region);
-            r.setPhysicalId(runtimeService.endpointArn(endpoint, region));
+                    tags, null, region);
+            r.setPhysicalId(runtimeService.endpointArn(runtimeId, endpoint, region));
             CfnRollback.guarded(r, ctx, true, () -> runtimeService.deleteEndpoint(runtimeId, name, null, region),
                     () -> undoInPlace(r),
                     () -> publishRuntimeEndpoint(r, runtimeService.getAgentRuntime(runtimeId, region), endpoint, region));
         }
     }
 
+    private void reconcileEndpointTags(String arn, Map<String, String> desired, String region) {
+        CfnRollback.reconcileTags(runtimeService.getEndpointTagsByArn(region, arn).keySet(), desired,
+                stale -> runtimeService.untagEndpointByArn(region, arn, stale),
+                tags -> runtimeService.tagEndpointByArn(region, arn, tags));
+    }
+
     private void publishRuntimeEndpoint(StackResource r, AgentRuntime runtime, AgentRuntimeEndpoint endpoint,
                                         String region) {
-        String endpointArn = runtimeService.endpointArn(endpoint, region);
+        String endpointArn = runtimeService.endpointArn(runtime.getAgentRuntimeId(), endpoint, region);
         r.setPhysicalId(endpointArn);
         r.getAttributes().put("AgentRuntimeEndpointArn", endpointArn);
-        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, endpoint.getTargetVersion(), region));
+        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, region));
         r.getAttributes().put("Id", endpoint.getUuid());
         r.getAttributes().put("Status", endpoint.getStatus());
         r.getAttributes().put("TargetVersion", endpoint.getTargetVersion());
@@ -333,13 +342,9 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void reconcileMemoryTags(String arn, Map<String, String> desired, String region) {
-        List<String> stale = ProvisionContext.staleTagKeys(memoryService.getTagsByArn(region, arn), desired);
-        if (!stale.isEmpty()) {
-            memoryService.untagByArn(region, arn, stale);
-        }
-        if (!desired.isEmpty()) {
-            memoryService.tagByArn(region, arn, desired);
-        }
+        CfnRollback.reconcileTags(memoryService.getTagsByArn(region, arn).keySet(), desired,
+                stale -> memoryService.untagByArn(region, arn, stale),
+                tags -> memoryService.tagByArn(region, arn, tags));
     }
 
     private void publishMemory(StackResource r, Memory memory, String region) {
@@ -437,6 +442,17 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * Keeps the snapshot of an in-place update whose own undo did not complete. The engine restores
+     * the previous resource and reports the rollback failure once; with the snapshot of the state
+     * the update started from, a ContinueUpdateRollback restores that state instead of finding
+     * nothing to undo.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        CfnRollback.carryFailedUndoSnapshot(previous, attempted, IN_PLACE_PRIOR_ATTR);
+    }
+
+    /**
      * A replacement is undone through the cleanup record: the displaced entity was never touched.
      * A reused entity the update changed in place is put back from the snapshot taken before the
      * change, which is spent only once the restore succeeded so a restore that throws is reported
@@ -478,15 +494,23 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                             node(configuration, "authorizer"), node(configuration, "protocol"), region);
                 }
                 if (prior.has("tags")) {
-                    reconcileRuntimeTags(runtimeService.arn(runtime, String.valueOf(runtime.getLatestVersion()), region),
+                    reconcileRuntimeTags(runtimeService.arn(runtime, region),
                             stringMap(prior.get("tags")), region);
                 }
                 publishRuntime(resource, runtime, region);
             }
             case RUNTIME_ENDPOINT -> {
                 ObjectNode endpointPrior = (ObjectNode) prior.get("endpoint");
-                AgentRuntimeEndpoint endpoint = runtimeService.updateEndpoint(entityId, text(endpointPrior, "name"),
-                        text(endpointPrior, "targetVersion"), text(endpointPrior, "description"), true, region);
+                String endpointName = text(endpointPrior, "name");
+                // A tag-only change snapshots no configuration, and restoring none leaves LastUpdatedAt alone.
+                AgentRuntimeEndpoint endpoint = endpointPrior.has("targetVersion")
+                        ? runtimeService.updateEndpoint(entityId, endpointName, text(endpointPrior, "targetVersion"),
+                                text(endpointPrior, "description"), true, region)
+                        : runtimeService.getEndpoint(entityId, endpointName, region);
+                if (prior.has("tags")) {
+                    reconcileEndpointTags(runtimeService.endpointArn(entityId, endpoint, region),
+                            stringMap(prior.get("tags")), region);
+                }
                 publishRuntimeEndpoint(resource, runtimeService.getAgentRuntime(entityId, region), endpoint, region);
             }
             case MEMORY -> {
@@ -562,30 +586,8 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
-        return resolved == null || resolved.isNull() || !resolved.isObject() ? null : toApiShape(resolved);
-    }
-
-    /** Recursively renames the members of a resolved node to the API's camelCase, dropping nulls. */
-    private static JsonNode toApiShape(JsonNode node) {
-        if (node.isObject()) {
-            ObjectNode out = JsonNodeFactory.instance.objectNode();
-            node.fields().forEachRemaining(field -> {
-                if (!field.getValue().isNull()) {
-                    out.set(decapitalize(field.getKey()), toApiShape(field.getValue()));
-                }
-            });
-            return out;
-        }
-        if (node.isArray()) {
-            ArrayNode out = JsonNodeFactory.instance.arrayNode();
-            node.forEach(item -> out.add(toApiShape(item)));
-            return out;
-        }
-        return node;
-    }
-
-    private static String decapitalize(String key) {
-        return key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
+        return resolved == null || resolved.isNull() || !resolved.isObject() ? null
+                : CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES);
     }
 
     /** A {@code {key: value}} property with each value resolved, or an empty map when absent. */

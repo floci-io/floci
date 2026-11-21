@@ -3,7 +3,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.cloudformation.model.StackResource;
@@ -22,7 +21,9 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}.
+ * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}, without the
+ * surrounding spaces {@code PutParameter} strips before it stores the parameter. A prior physical id recorded
+ * with those spaces is a different name, so the update replaces that parameter.
  *
  * <p>A create, and the replacement a changed name makes, is one {@code PutParameter} that carries
  * the template's tags and does not overwrite, as AWS's handler sends it: a name that already exists
@@ -60,8 +61,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"),
-                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false);
+        String name = SsmService.withoutSurroundingSpaces(ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false));
         String value = ctx.resolveOptional(props, "Value");
         if (value == null) {
             value = "";
@@ -123,18 +124,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         if (current.getPolicies() != null) {
             snapshot.putArray("policies").addAll(current.getPolicies());
         }
-        // A managed key the parameter did not carry is listed without a value, so the rollback removes it.
         Set<String> managedKeys = new TreeSet<>(templateTagKeys(attributesBefore));
         managedKeys.addAll(desiredTagKeys);
-        Map<String, String> currentTags = current.getTags() == null ? Map.of() : current.getTags();
-        ArrayNode tagKeys = snapshot.putArray("tagKeys");
-        ObjectNode tags = snapshot.putObject("tags");
-        for (String key : managedKeys) {
-            tagKeys.add(key);
-            if (currentTags.containsKey(key)) {
-                tags.put(key, currentTags.get(key));
-            }
-        }
+        CfnRollback.putTagSnapshot(snapshot, managedKeys, current.getTags() == null ? Map.of() : current.getTags());
         r.getAttributes().put(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
@@ -262,13 +254,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
                 && Objects.equals(tier, current.getTier())
                 && Objects.equals(policies, current.getPolicies());
         if (!unchanged) {
-            ssmService.putParameter(name, value, type, description, true, null, keyId, allowedPattern, tier,
-                    policies, region);
+            ssmService.restoreParameter(name, value, type, description, keyId, allowedPattern, tier, policies,
+                    region);
         }
-        List<String> managedKeys = new ArrayList<>();
-        snapshot.path("tagKeys").forEach(key -> managedKeys.add(key.asText()));
-        Map<String, String> tags = new HashMap<>();
-        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
-        reconcileTags(name, managedKeys, tags, region);
+        reconcileTags(name, CfnRollback.snapshotTagKeys(snapshot), CfnRollback.snapshotTags(snapshot), region);
     }
 }

@@ -35,8 +35,8 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttri
  *
  * <p>Two derivations are refused rather than approximated. The American Express one is
  * proprietary and there is nothing to verify it against, and a plausible wrong cryptogram is
- * worse than an error. The EMV 2000 one is the EMV 4.1 tree derivation, which needs the
- * card's public key certificate.
+ * worse than an error. The EMV 2000 one is the EMV 4.1 tree derivation, which is over the
+ * master key and the ATC, and this service does not implement it.
  */
 @ApplicationScoped
 public class PaymentCryptographyAuthCryptogramOperations {
@@ -101,7 +101,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
                         text(request, "TransactionData")));
         SessionKey sk = resolveDerivation(request);
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         PaymentCryptographyKeyRules.requireUsage(key,
                 List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
         PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
@@ -169,7 +169,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
             }
         }
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         PaymentCryptographyKeyRules.requireUsage(key,
                 List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
         PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
@@ -260,11 +260,9 @@ public class PaymentCryptographyAuthCryptogramOperations {
     private static SessionKey resolveDerivation(JsonNode request) {
         boolean optionB = "EMV_OPTION_B".equals(text(request, "MajorKeyDerivationMode"));
 
-        JsonNode skd = request.get("SessionKeyDerivationAttributes");
-        if (skd == null) {
-            throw validation("SessionKeyDerivationAttributes is required");
-        }
-        String variant = soleVariant(skd);
+        // The shape check settles the derivation attributes, so they are there, and the
+        // attributes must name exactly one variant.
+        String variant = soleVariant(request.get("SessionKeyDerivationAttributes"));
         if (variant == null) {
             throw validation("SessionKeyDerivationAttributes must specify exactly one variant");
         }
@@ -285,7 +283,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
             throw validation("SessionKeyDerivationAttributes." + variant
                     + " is not a recognized variant");
         }
-        JsonNode attrs = skd.get(variant);
+        JsonNode attrs = request.get("SessionKeyDerivationAttributes").get(variant);
         String pan = text(attrs, "PrimaryAccountNumber");
         String psn = text(attrs, "PanSequenceNumber");
         String atc = text(attrs, "ApplicationTransactionCounter");
@@ -308,15 +306,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
     }
 
     // ---- the helpers ---------------------------------------------------------
-
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
-        }
-        PaymentCryptographyKeyRules.requireEnabled(key);
-        return key;
-    }
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);

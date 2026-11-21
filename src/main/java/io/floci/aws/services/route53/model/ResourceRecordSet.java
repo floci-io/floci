@@ -17,6 +17,7 @@ public class ResourceRecordSet {
     private String setIdentifier;
     private String failover;
     private String healthCheckId;
+    private Boolean multiValueAnswer;
 
     public ResourceRecordSet() {}
 
@@ -31,6 +32,7 @@ public class ResourceRecordSet {
         setIdentifier = source.setIdentifier;
         failover = source.failover;
         healthCheckId = source.healthCheckId;
+        multiValueAnswer = source.multiValueAnswer;
     }
 
     public String getName() { return name; }
@@ -62,4 +64,7 @@ public class ResourceRecordSet {
 
     public String getHealthCheckId() { return healthCheckId; }
     public void setHealthCheckId(String healthCheckId) { this.healthCheckId = healthCheckId; }
+
+    public Boolean getMultiValueAnswer() { return multiValueAnswer; }
+    public void setMultiValueAnswer(Boolean multiValueAnswer) { this.multiValueAnswer = multiValueAnswer; }
 }

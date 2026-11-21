@@ -3,6 +3,7 @@ package io.floci.aws.services.applicationautoscaling;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.applicationautoscaling.model.PredefinedMetricSpecification;
 import io.floci.aws.services.applicationautoscaling.model.ScalableTarget;
@@ -71,12 +72,54 @@ class ApplicationAutoScalingServiceTest {
 
         service = new ApplicationAutoScalingService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, cloudWatch);
+                new InMemoryStorage<>(), regionResolver, cloudWatch, mock(EcsCapacityAdjuster.class));
     }
 
     private ScalableTarget register() {
         return service.registerScalableTarget(NAMESPACE, RESOURCE_ID, DIMENSION, 1, 10,
                 null, null, Map.of("Environment", "dev"), REGION);
+    }
+
+    /**
+     * IAM's tag lookup reads the tags held on the scalable target whose ARN it is given, in that ARN's Region, as
+     * tagging and an update's tags leave them; nothing for another Region's ARN or an unknown target's.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheScalableTargetTheArnNames() {
+        String arn = register().getScalableTargetArn();
+        service.tagResource(arn, Map.of("team", "data"), REGION);
+        service.untagResource(arn, List.of("Environment"), REGION);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(arn.replace(":" + REGION + ":", ":eu-west-1:")));
+        assertEquals(Map.of(), service.storedTags(arn + "0"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+    }
+
+    /**
+     * A target stored before storage was account-aware is read in place for the default account, its ECS resource id
+     * slashes and all, and never migrated; another account's ARN reads nothing.
+     */
+    @Test
+    void storedTagsReadsAPreMultiAccountTargetOfTheDefaultAccountInPlace() {
+        InMemoryStorage<String, ScalableTarget> raw = new InMemoryStorage<>();
+        ApplicationAutoScalingService legacy = new ApplicationAutoScalingService(
+                new AccountAwareStorageBackend<>(raw, null, "000000000000"), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"),
+                cloudWatch, mock(EcsCapacityAdjuster.class));
+        String arn = "arn:aws:application-autoscaling:" + REGION + ":000000000000:scalable-target/0123456789abcdef";
+        ScalableTarget target = new ScalableTarget();
+        target.setServiceNamespace(NAMESPACE);
+        target.setResourceId(RESOURCE_ID);
+        target.setScalableDimension(DIMENSION);
+        target.setScalableTargetArn(arn);
+        target.setTags(Map.of("team", "data"));
+        String key = REGION + "::" + NAMESPACE + "::" + DIMENSION + "::" + RESOURCE_ID;
+        raw.put(key, target);
+
+        assertEquals(Map.of("team", "data"), legacy.storedTags(arn));
+        assertEquals(Map.of(), legacy.storedTags(arn.replace(":000000000000:", ":111122223333:")));
+        assertTrue(raw.get(key).isPresent());
     }
 
     private TargetTrackingConfiguration targetTracking(double value, String metricType, String resourceLabel) {

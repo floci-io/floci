@@ -8,13 +8,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,7 +42,7 @@ class GlueJsonHandlerTest {
         mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         GlueSchemaRegistryService schemaRegistryService =
                 new GlueSchemaRegistryService(storageFactory, regionResolver);
         GlueService glueService = new GlueService(
@@ -55,7 +55,81 @@ class GlueJsonHandlerTest {
         handler = new GlueJsonHandler(glueService, jobRunService, crawlerRunService,
                 new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService,
                         jobRunService, crawlerRunService),
-                schemaRegistryService, mapper);
+                schemaRegistryService, new GlueCatalogService(new InMemoryStorage<>(), null, null,
+                        new RegionResolver("us-east-1", "000000000000"), null, mapper), mapper);
+    }
+
+    @Test
+    void databasesPageAcrossResultsAndPreserveMetadata() throws Exception {
+        for (String name : List.of("third", "first", "second")) {
+            ObjectNode create = mapper.createObjectNode();
+            create.putObject("DatabaseInput").put("Name", name).put("Description", "description-" + name);
+            handler.handle("CreateDatabase", create, REGION);
+        }
+        JsonNode first = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 2), REGION)));
+        assertEquals(2, first.get("DatabaseList").size());
+        assertEquals("first", first.get("DatabaseList").get(0).get("Name").asText());
+        assertEquals("description-first", first.get("DatabaseList").get(0).get("Description").asText());
+        assertEquals(ACCOUNT_ID, first.get("DatabaseList").get(0).get("CatalogId").asText());
+        JsonNode last = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 2)
+                        .put("NextToken", first.get("NextToken").asText()), REGION)));
+        assertEquals(1, last.get("DatabaseList").size());
+        assertEquals("third", last.get("DatabaseList").get(0).get("Name").asText());
+        assertFalse(last.has("NextToken"));
+    }
+
+    @Test
+    void databasesUseHundredRowDefault() throws Exception {
+        for (int index = 0; index < 101; index++) {
+            ObjectNode create = mapper.createObjectNode();
+            create.putObject("DatabaseInput").put("Name", "database-%03d".formatted(index));
+            handler.handle("CreateDatabase", create, REGION);
+        }
+        JsonNode first = mapper.valueToTree(body(handler.handle("GetDatabases", mapper.createObjectNode(), REGION)));
+        assertEquals(100, first.get("DatabaseList").size());
+        JsonNode last = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("NextToken", first.get("NextToken").asText()), REGION)));
+        assertEquals(1, last.get("DatabaseList").size());
+        assertFalse(last.has("NextToken"));
+    }
+
+    @Test
+    void databasesRejectInvalidPageSizesAndTokens() {
+        for (int limit : List.of(-1, 0, 101)) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("GetDatabases",
+                    mapper.createObjectNode().put("MaxResults", limit), REGION));
+            assertEquals("InvalidInputException", error.getErrorCode());
+        }
+        for (String token : List.of("invalid", "-1", "1")) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("GetDatabases",
+                    mapper.createObjectNode().put("NextToken", token), REGION));
+            assertEquals("InvalidInputException", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void catalogListsRejectNonIntegerPageSizesAndNonStringTokens() {
+        for (String action : List.of("GetDatabases", "GetTables", "GetPartitions", "GetTableVersions")) {
+            for (JsonNode value : List.of(mapper.getNodeFactory().textNode("1"),
+                    mapper.getNodeFactory().numberNode(1.5), mapper.getNodeFactory().numberNode(Long.MAX_VALUE))) {
+                ObjectNode request = mapper.createObjectNode().put("DatabaseName", "catalog-db").put("TableName", "catalog-table");
+                request.set("MaxResults", value);
+                assertEquals("InvalidInputException", assertThrows(AwsException.class,
+                        () -> handler.handle(action, request, REGION)).getErrorCode());
+            }
+            assertEquals("InvalidInputException", assertThrows(AwsException.class, () -> handler.handle(action,
+                    mapper.createObjectNode().put("DatabaseName", "catalog-db").put("TableName", "catalog-table").put("NextToken", 0), REGION)).getErrorCode());
+        }
+    }
+
+    @Test
+    void databasesReturnEmptyTerminalPage() throws Exception {
+        JsonNode empty = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 100), REGION)));
+        assertEquals(0, empty.get("DatabaseList").size());
+        assertFalse(empty.has("NextToken"));
     }
 
     private void createDatabaseAndTable(String dbName, String tableName) throws Exception {
@@ -626,18 +700,6 @@ class GlueJsonHandlerTest {
         assertEquals("beta", ((Table) tables.get(0)).getName());
     }
 
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory("000000000000");
-        }
-    }
 
     private ObjectNode connectionInput(String name) {
         ObjectNode input = mapper.createObjectNode();

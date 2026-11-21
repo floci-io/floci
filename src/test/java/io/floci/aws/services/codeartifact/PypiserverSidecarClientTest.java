@@ -10,18 +10,26 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.GZIPOutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -57,6 +65,23 @@ class PypiserverSidecarClientTest {
     }
 
     @Test
+    void defaultTransportDoesNotRequestAnH2cUpgrade() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        AtomicReference<String> upgrade = new AtomicReference<>("request not received");
+        backend.createContext("/simple/demo-pkg/", exchange -> {
+            upgrade.set(exchange.getRequestHeaders().getFirst("Upgrade"));
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        PypiserverSidecarClient defaultClient = new PypiserverSidecarClient(manager, new ObjectMapper());
+
+        assertTrue(defaultClient.fetchPackageVersionAsset("pypi-repo-1", "dom", "repo", null,
+                "demo-pkg", "1.0.0", "demo_pkg-1.0.0.tar.gz").isEmpty());
+        assertNull(upgrade.get(), "the pinned pypiserver accepts HTTP/1.1 without an h2c upgrade");
+    }
+
+    @Test
     void fetchPackageVersionAssetGetsTheFlatPackagesPath() throws Exception {
         PypiserverSidecarManager manager = manager();
         seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
@@ -73,6 +98,63 @@ class PypiserverSidecarClientTest {
 
         assertTrue(result.isPresent());
         assertEquals("sdist bytes", new String(result.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * {@link #fetchPackageVersionAssetGetsTheFlatPackagesPath}'s own streamed sibling: same wire
+     * behavior, but the caller gets an open {@link InputStream} plus the real {@code
+     * Content-Length} instead of an already-resident {@code byte[]}.
+     */
+    @Test
+    void fetchPackageVersionAssetStreamedGetsTheFlatPackagesPath() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithSimpleIndex("demo-pkg", "demo_pkg-1.0.0.tar.gz");
+        backend.createContext("/packages/demo_pkg-1.0.0.tar.gz", exchange -> {
+            byte[] body = "sdist bytes".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        Optional<RepositorySidecarManager.StreamedAsset> result = client(manager).fetchPackageVersionAssetStreamed(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0", "demo_pkg-1.0.0.tar.gz");
+
+        assertTrue(result.isPresent());
+        try (InputStream in = result.get().content()) {
+            assertEquals("sdist bytes", new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(11, result.get().contentLength());
+    }
+
+    /**
+     * {@link PypiserverSidecarClient#storePackageVersionAsset(String, String, String, String,
+     * String, String, String, Path, long)}'s own wire contract: the staged file's real content
+     * ends up in the multipart body's {@code content} part, not just some bytes of the right
+     * length, built via {@code BodyPublishers.concat} rather than one combined array.
+     */
+    @Test
+    void storePackageVersionAssetStreamedSendsTheStagedFilesRealContent() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        Path staged = Files.createTempFile("pypiserver-client-test-", ".tmp");
+        Files.writeString(staged, "staged sdist bytes");
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            received.set(exchange.getRequestBody().readAllBytes());
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+
+        try {
+            client(manager).storePackageVersionAsset("pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0",
+                    "demo_pkg-1.0.0.tar.gz", staged, Files.size(staged));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+
+        String body = new String(received.get(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("staged sdist bytes"));
     }
 
     /**
@@ -471,6 +553,121 @@ class PypiserverSidecarClientTest {
                 () -> client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg"));
     }
 
+    @Test
+    void listPackageVersionDependenciesParsesRequiresDistFromARealWheel() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        String filename = "demo_pkg-1.0.0-py3-none-any.whl";
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of(filename)));
+        respondWithSimpleIndex("demo-pkg", filename);
+        byte[] wheel = buildWheel("demo_pkg-1.0.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: demo-pkg\nRequires-Dist: requests (>=2.0.0)\n");
+        backend.createContext("/packages/" + filename, exchange -> {
+            exchange.sendResponseHeaders(200, wheel.length);
+            exchange.getResponseBody().write(wheel);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertEquals(List.of(new CodeArtifactService.PackageDependency(null, "requests", "Requires-Dist",
+                "(>=2.0.0)")), dependencies);
+    }
+
+    /**
+     * {@code .tar.bz2}/{@code .tar.xz} are real, {@code ARCHIVE_SUFFIX}-recognized sdist formats
+     * this reader deliberately never attempts to decompress (bzip2/xz would need a new runtime
+     * dependency) — a version available only in one of those must come back empty, not throw.
+     */
+    @Test
+    void listPackageVersionDependenciesIsEmptyWhenTheVersionHasNoWheelOrSupportedSdist() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of("demo_pkg-1.0.0.tar.bz2")));
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertTrue(dependencies.isEmpty());
+    }
+
+    /** {@code .tgz} is the same real gzip+tar format as {@code .tar.gz}, just a shorter suffix. */
+    @Test
+    void listPackageVersionDependenciesParsesRequiresDistFromARealTgzSdist() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        String filename = "demo_pkg-1.0.0.tgz";
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of(filename)));
+        respondWithSimpleIndex("demo-pkg", filename);
+        byte[] sdist = buildTarGzSdist("demo_pkg-1.0.0/PKG-INFO",
+                "Metadata-Version: 2.1\nName: demo-pkg\nRequires-Dist: requests (>=2.0.0)\n");
+        backend.createContext("/packages/" + filename, exchange -> {
+            exchange.sendResponseHeaders(200, sdist.length);
+            exchange.getResponseBody().write(sdist);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertEquals(List.of(new CodeArtifactService.PackageDependency(null, "requests", "Requires-Dist",
+                "(>=2.0.0)")), dependencies);
+    }
+
+    /** {@code .zip} is a real, pypiserver-recognized sdist format alongside {@code .tar.gz}. */
+    @Test
+    void listPackageVersionDependenciesParsesRequiresDistFromARealZipSdist() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        String filename = "demo_pkg-1.0.0.zip";
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of(filename)));
+        respondWithSimpleIndex("demo-pkg", filename);
+        byte[] sdist = buildWheel("demo_pkg-1.0.0/PKG-INFO",
+                "Metadata-Version: 2.1\nName: demo-pkg\nRequires-Dist: requests (>=2.0.0)\n");
+        backend.createContext("/packages/" + filename, exchange -> {
+            exchange.sendResponseHeaders(200, sdist.length);
+            exchange.getResponseBody().write(sdist);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertEquals(List.of(new CodeArtifactService.PackageDependency(null, "requests", "Requires-Dist",
+                "(>=2.0.0)")), dependencies);
+    }
+
+    private static byte[] buildTarGzSdist(String entryName, String content) throws Exception {
+        byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+        byte[] header = new byte[512];
+        byte[] nameBytes = entryName.getBytes(StandardCharsets.UTF_8);
+        System.arraycopy(nameBytes, 0, header, 0, nameBytes.length);
+        byte[] sizeOctal = String.format("%011o", contentBytes.length).getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(sizeOctal, 0, header, 124, sizeOctal.length);
+        header[156] = '0';
+        ByteArrayOutputStream tar = new ByteArrayOutputStream();
+        tar.write(header);
+        tar.write(contentBytes);
+        tar.write(new byte[(512 - contentBytes.length % 512) % 512]);
+        tar.write(new byte[1024]);
+        ByteArrayOutputStream gzipped = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(gzipped)) {
+            gzip.write(tar.toByteArray());
+        }
+        return gzipped.toByteArray();
+    }
+
+    private static byte[] buildWheel(String entryName, String metadataText) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(out)) {
+            zip.putNextEntry(new ZipEntry(entryName));
+            zip.write(metadataText.getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        return out.toByteArray();
+    }
+
     private void respondWithJsonReleases(String packageName, Map<String, List<String>> releases) {
         StringBuilder json = new StringBuilder("{\"info\":{\"version\":\"\"},\"releases\":{");
         boolean firstVersion = true;
@@ -529,7 +726,8 @@ class PypiserverSidecarClientTest {
     }
 
     private PypiserverSidecarManager manager() {
-        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config);
+        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     private PypiserverSidecarClient client(PypiserverSidecarManager manager) {

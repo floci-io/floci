@@ -15,13 +15,13 @@ import java.util.concurrent.TimeoutException;
 /**
  * Stands in for the Lambda container in protocol tests: functions resolve for real, but each
  * invocation is handed to the test, which plays the SDK over the REST API and then answers.
- * Enabled per test class through {@link LambdaDurableScriptedProfile}.
+ * Enabled for its test class through {@code S3EnforceAuthProfile}.
  */
 @Alternative
 @ApplicationScoped
 public class ScriptedDurableFunctionInvoker implements DurableFunctionInvoker {
 
-    public record Invocation(ResolvedDurableTarget target, byte[] payload,
+    public record Invocation(ResolvedDurableTarget target, byte[] payload, String traceId, boolean logTail,
                              CompletableFuture<DurableInvocationResult> response) {
     }
 
@@ -39,8 +39,15 @@ public class ScriptedDurableFunctionInvoker implements DurableFunctionInvoker {
     }
 
     @Override
-    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
-        Invocation invocation = new Invocation(target, payload, new CompletableFuture<>());
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
+        return invoke(target, payload, requestId, traceId, false);
+    }
+
+    @Override
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                          String traceId, boolean logTail) {
+        Invocation invocation = new Invocation(target, payload, traceId, logTail, new CompletableFuture<>());
         invocations.add(invocation);
         try {
             return invocation.response().get(30, TimeUnit.SECONDS);

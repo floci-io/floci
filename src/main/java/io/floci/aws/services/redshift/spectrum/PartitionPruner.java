@@ -77,10 +77,20 @@ final class PartitionPruner {
      * table has no usable predicate in some place it is named, or the text is not understood.
      */
     static Optional<Filter> filterFor(String sql, String schema, String table, List<Column> partitionKeys) {
+        return filterFor(sql, schema, table, partitionKeys, List.of());
+    }
+
+    /**
+     * Like {@link #filterFor(String, String, String, List)}, reading each {@code $n} as the text of
+     * {@code parameters.get(n - 1)}. A parameter with no value, or a null one, stays unknown, so a predicate on
+     * it is not used.
+     */
+    static Optional<Filter> filterFor(String sql, String schema, String table, List<Column> partitionKeys,
+                                      List<String> parameters) {
         if (sql == null || partitionKeys == null || partitionKeys.isEmpty()) {
             return Optional.empty();
         }
-        Tokens tokens = tokenize(sql);
+        Tokens tokens = bindParameters(tokenize(sql), parameters);
         if (tokens.unsafe || !tokens.balanced()) {
             return Optional.empty();
         }
@@ -721,6 +731,51 @@ final class PartitionPruner {
             return words.get(0).text.equals(schema) && words.get(1).text.equals(table);
         }
         return words.size() == 3 && words.get(1).text.equals(schema) && words.get(2).text.equals(table);
+    }
+
+    /** Whether the text names a bind parameter such as {@code $1} outside strings, comments and quoted names. */
+    static boolean hasParameters(String sql) {
+        if (sql == null || sql.indexOf('$') < 0) {
+            return false;
+        }
+        return tokenize(sql).list.stream().anyMatch(token -> parameterIndex(token) >= 0);
+    }
+
+    /** Zero-based position of a {@code $n} token, or -1 when the token is not a bind parameter. */
+    private static int parameterIndex(Token token) {
+        String text = token.text;
+        if (token.kind != Kind.OTHER || text.length() < 2 || text.charAt(0) != '$') {
+            return -1;
+        }
+        for (int i = 1; i < text.length(); i++) {
+            if (!Character.isDigit(text.charAt(i))) {
+                return -1;
+            }
+        }
+        try {
+            return Integer.parseInt(text.substring(1)) - 1;
+        } catch (NumberFormatException expected) {
+            // a number too long for an int is no parameter the client could have bound
+            return -1;
+        }
+    }
+
+    /**
+     * Replaces each {@code $n} that has a text value with a string literal of it, which the predicate parser
+     * reads like the same literal written in the query. Quotes in the value cannot end the literal: a token
+     * holds the text itself, not SQL.
+     */
+    private static Tokens bindParameters(Tokens tokens, List<String> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            return tokens;
+        }
+        List<Token> list = new ArrayList<>(tokens.list.size());
+        for (Token token : tokens.list) {
+            int index = parameterIndex(token);
+            String value = index >= 0 && index < parameters.size() ? parameters.get(index) : null;
+            list.add(value == null ? token : new Token(Kind.STRING, value, true));
+        }
+        return new Tokens(list, tokens.unsafe);
     }
 
     private static Tokens tokenize(String sql) {

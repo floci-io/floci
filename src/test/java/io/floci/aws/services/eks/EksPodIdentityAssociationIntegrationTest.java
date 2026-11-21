@@ -6,11 +6,16 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EksRequests.eks;
+import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
 class EksPodIdentityAssociationIntegrationTest {
+
+    private static final String REGION = "us-east-1";
 
     @Test
     void associationLifecycleRoundTrip() {
@@ -33,8 +38,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     "tags", Map.of("env", "test")
             );
 
-            String associationId = given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            String associationId = eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -52,8 +56,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .extract().path("association.associationId");
 
             // 2. Idempotent retry with same parameters and token
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -67,8 +70,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     "roleArn", roleArn,
                     "clientRequestToken", "token-abc"
             );
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(conflictReq)
                     .post(basePath)
                     .then()
@@ -81,8 +83,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     "serviceAccount", "my-service-account",
                     "roleArn", roleArn
             );
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(duplicateReq)
                     .post(basePath)
                     .then()
@@ -90,7 +91,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("__type", equalTo("ResourceInUseException"));
 
             // 5. Describe association
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/" + associationId)
                     .then()
                     .statusCode(200)
@@ -108,8 +109,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     "roleArn", updatedRoleArn,
                     "disableSessionTags", true
             );
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(updateReq)
                     .post(basePath + "/" + associationId)
                     .then()
@@ -120,7 +120,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("association.disableSessionTags", equalTo(true));
 
             // 7. List associations
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath)
                     .then()
                     .statusCode(200)
@@ -131,7 +131,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("associations[0].serviceAccount", equalTo("my-service-account"));
 
             // List with filter matching
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("namespace", "default")
                     .get(basePath)
                     .then()
@@ -139,7 +139,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("associations", hasSize(1));
 
             // List with filter non-matching
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("namespace", "other-namespace")
                     .get(basePath)
                     .then()
@@ -147,7 +147,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("associations", hasSize(0));
 
             // 8. Delete association
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .delete(basePath + "/" + associationId)
                     .then()
                     .statusCode(200)
@@ -155,7 +155,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("association.associationId", equalTo(associationId));
 
             // 9. Describe after delete returns 404
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/" + associationId)
                     .then()
                     .statusCode(404)
@@ -169,7 +169,7 @@ class EksPodIdentityAssociationIntegrationTest {
     void routeCollisionsAndMissingCluster() {
         String account = "123456789012";
         // Missing cluster returns 404 JSON, not S3 NoSuchBucket XML
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .get("/clusters/nonexistent-cluster/pod-identity-associations")
                 .then()
                 .statusCode(404)
@@ -190,18 +190,16 @@ class EksPodIdentityAssociationIntegrationTest {
 
         try {
             // Create two associations
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("namespace", "ns1", "serviceAccount", "sa1", "roleArn", roleArn))
                     .post(basePath).then().statusCode(200);
 
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("namespace", "ns2", "serviceAccount", "sa2", "roleArn", roleArn))
                     .post(basePath).then().statusCode(200);
 
             // maxResults = 1 returns first item and nextToken
-            String nextToken = given().header("Authorization", auth(account, "eks"))
+            String nextToken = eks(account, REGION)
                     .queryParam("maxResults", "1")
                     .get(basePath)
                     .then()
@@ -211,7 +209,7 @@ class EksPodIdentityAssociationIntegrationTest {
                     .extract().path("nextToken");
 
             // Fetch next page
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("maxResults", "1")
                     .queryParam("nextToken", nextToken)
                     .get(basePath)
@@ -221,14 +219,14 @@ class EksPodIdentityAssociationIntegrationTest {
                     .body("nextToken", nullValue());
 
             // Invalid maxResults returns 400 InvalidParameterException
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("maxResults", "0")
                     .get(basePath)
                     .then()
                     .statusCode(400)
                     .body("__type", equalTo("InvalidParameterException"));
 
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("maxResults", "invalid")
                     .get(basePath)
                     .then()
@@ -250,8 +248,7 @@ class EksPodIdentityAssociationIntegrationTest {
         createRole(account, roleName);
         createCluster(account, name);
 
-        given().header("Authorization", auth(account, "eks"))
-                .contentType("application/json")
+        eks(account, REGION)
                 .body(Map.of("namespace", "default", "serviceAccount", "sa", "roleArn", roleArn))
                 .post(basePath).then().statusCode(200);
 
@@ -262,7 +259,7 @@ class EksPodIdentityAssociationIntegrationTest {
         createCluster(account, name);
         try {
             // Associations must be empty
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath)
                     .then()
                     .statusCode(200)
@@ -278,24 +275,18 @@ class EksPodIdentityAssociationIntegrationTest {
                 .formParam("Action", "CreateRole")
                 .formParam("RoleName", roleName)
                 .formParam("Path", "/")
-                .formParam("AssumeRolePolicyDocument", "{}")
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT)
                 .post("/").then().statusCode(200);
     }
 
     private static void createCluster(String account, String name) {
-        given().header("Authorization", auth(account, "eks"))
-                .contentType("application/json")
+        eks(account, REGION)
                 .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + account + ":role/cluster"))
                 .post("/clusters").then().statusCode(200);
     }
 
     private static void deleteCluster(String account, String name) {
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .delete("/clusters/" + name).then().statusCode(200);
-    }
-
-    private static String auth(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20260920/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }

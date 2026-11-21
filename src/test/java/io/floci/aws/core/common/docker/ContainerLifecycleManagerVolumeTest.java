@@ -63,7 +63,7 @@ class ContainerLifecycleManagerVolumeTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config);
+                dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     @Test

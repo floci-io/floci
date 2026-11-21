@@ -94,7 +94,8 @@ class CognitoFederationServiceTest {
         stateStore = new CognitoFederationStateStore(CLOCK);
         federationService = new CognitoFederationService(
                 cognitoService, stateStore, new CognitoOidcClient(MAPPER), CLOCK);
-        pool = cognitoService.createUserPool(Map.of("PoolName", "FederationPool"), "us-east-1");
+        pool = cognitoService.createUserPool(Map.of("PoolName", "FederationPool", "Schema", List.of(
+                Map.of("Name", "note", "AttributeDataType", "String", "Mutable", true))), "us-east-1");
         tokenStatus = 200;
         tokenResponse = "{\"access_token\":\"provider-access-token\"}";
         claimsStatus = 200;

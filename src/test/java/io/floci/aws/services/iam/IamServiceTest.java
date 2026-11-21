@@ -24,6 +24,7 @@ import io.floci.aws.services.iam.model.OrganizationRootFeatures;
 import io.floci.aws.services.iam.model.PolicyVersion;
 import io.floci.aws.services.iam.model.SessionCredential;
 import io.floci.aws.services.iam.model.VirtualMfaDevice;
+import io.floci.aws.testing.ManualClock;
 import io.floci.aws.testing.MutableClock;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +53,8 @@ import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.*;
 
 class IamServiceTest {
@@ -65,6 +68,13 @@ class IamServiceTest {
     @BeforeEach
     void setUp() {
         iamService = iamService(false);
+    }
+
+    // A session's caller is the long-term principal it acts as plus aws:TokenIssueTime, which the
+    // IAM User Guide includes "only when the principal uses temporary credentials".
+    private static void assertSessionCaller(IamService.CallerArns expected, IamService.CallerArns actual) {
+        assertNotNull(actual.tokenIssueTime());
+        assertEquals(expected.withTokenIssueTime(actual.tokenIssueTime()), actual);
     }
 
     private static IamService iamService(boolean seedDeployerPrincipal) {
@@ -96,13 +106,19 @@ class IamServiceTest {
         );
     }
 
+    private static IamService iamServiceOn(Clock clock) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
+    }
+
     @Test
     void roleChainingRequiresALiveTokenMatchedRoleSession() {
         MutableClock clock = new MutableClock();
         IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("cn-north-1", "000000000000"), false, clock);
-        IamRole role = service.createRole("ChainRole", "/teams/chain/", "{}", null, 7200, null);
+        IamRole role = service.createRole("ChainRole", "/teams/chain/", EMPTY_POLICY_DOCUMENT, null, 7200, null);
         service.registerSession("ASIACHAIN", "secret", "token", role.getArn(), clock.instant().plusSeconds(60),
                 null, "000000000000");
         service.registerSession("ASIAUSER", "secret", "user-token", null, clock.instant().plusSeconds(60),
@@ -122,7 +138,7 @@ class IamServiceTest {
 
     @Test
     void aPrincipalArnNamesTheRootOrTheRoleOrUserIamHoldsAtItsOwnPath() {
-        iamService.createRole("reader", "/team/", "{}", null, 3600, null);
+        iamService.createRole("reader", "/team/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         iamService.createUser("writer", "/team/");
         String role = "arn:aws:iam::000000000000:role/team/reader";
         String user = "arn:aws:iam::000000000000:user/team/writer";
@@ -144,19 +160,19 @@ class IamServiceTest {
     void updateRoleDescriptionAnswersTheRoleAndMovesNothingElse() {
         // "This operation performs the same function as the Description parameter in the UpdateRole
         // operation", and UpdateRole answers no shape at all, so the role comes back from here.
-        iamService.createRole("R", "/", "{}", "before", 7200, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, "before", 7200, null);
 
         IamRole updated = iamService.updateRoleDescription("R", "after");
 
         assertEquals("after", updated.getDescription());
         assertEquals(7200, updated.getMaxSessionDuration());
-        assertEquals("{}", updated.getAssumeRolePolicyDocument());
+        assertEquals(EMPTY_POLICY_DOCUMENT, updated.getAssumeRolePolicyDocument());
         assertEquals("after", iamService.getRole("R").getDescription());
     }
 
     @Test
     void aRoleDescriptionIsHeldToItsShapeWhereverItIsTaken() {
-        iamService.createRole("R", "/", "{}", "fine", 3600, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, "fine", 3600, null);
 
         AwsException tooLong = assertThrows(AwsException.class,
                 () -> iamService.updateRoleDescription("R", "d".repeat(1001)));
@@ -172,7 +188,7 @@ class IamServiceTest {
         // Neither refusal wrote, and the create path answers the same way without storing a role.
         assertEquals("fine", iamService.getRole("R").getDescription());
         assertEquals("ValidationError", assertThrows(AwsException.class,
-                () -> iamService.createRole("R2", "/", "{}", "d".repeat(1001), 3600, null))
+                () -> iamService.createRole("R2", "/", EMPTY_POLICY_DOCUMENT, "d".repeat(1001), 3600, null))
                 .getErrorCode());
         assertThrows(AwsException.class, () -> iamService.getRole("R2"));
 
@@ -212,7 +228,7 @@ class IamServiceTest {
 
     @Test
     void roleInlinePolicyQuotaIgnoresWhitespaceAndPreservesRejectedReplacement() {
-        iamService.createRole("R", "/", "{}", null, 0, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         String exactLimit = policyWithNonWhitespaceLength(10_240);
         String padded = exactLimit.substring(0, 1) + " \n\t\r ".repeat(1_000) + exactLimit.substring(1);
         iamService.putRolePolicy("R", "inline-exec", padded);
@@ -227,7 +243,7 @@ class IamServiceTest {
 
     @Test
     void roleInlinePolicyQuotaCountsAllPolicies() {
-        iamService.createRole("R", "/", "{}", null, 0, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy("R", "first", policyWithNonWhitespaceLength(6_000));
         iamService.putRolePolicy("R", "second", policyWithNonWhitespaceLength(4_041));
 
@@ -241,7 +257,7 @@ class IamServiceTest {
 
     @Test
     void roleInlinePolicyQuotaIsAtomicAcrossConcurrentWrites() throws Exception {
-        iamService.createRole("R", "/", "{}", null, 0, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger accepted = new AtomicInteger();
         AtomicInteger rejected = new AtomicInteger();
@@ -490,9 +506,12 @@ class IamServiceTest {
         // The principal keys ride along from the same lookup: a role session is typed as an
         // assumed role, its aws:userid is the stored role-id:session-name, and it has no
         // aws:username, which the guide lists as not present for a role.
-        assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
+        // It carries what its credentials say about MFA as well, which for a session minted
+        // without a device is the key present and false.
+        assertSessionCaller(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
                         "arn:aws:iam::123456789012:role/team/TestRole",
-                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null),
+                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
@@ -558,7 +577,7 @@ class IamServiceTest {
 
     @Test
     void roleSessionPrincipalTagsComeFromTheStoredRoleWithItsPath() {
-        IamRole role = iamService.createRole("Worker", "/teams/platform/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("Worker", "/teams/platform/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         role.setTags(Map.of("Team", "platform"));
         iamService.registerSession("ASIATAGGEDROLE", "secret", "token", role.getArn(),
                 Instant.now().plusSeconds(3600), null, "000000000000", "worker", "AROAWORKER:worker");
@@ -587,7 +606,7 @@ class IamServiceTest {
         String boundaryArn = service.createPolicy("bound", "/", null, ALL_S3, null).getArn();
         service.createUser("alice", "/");
         String aliceKey = service.createAccessKey("alice").getAccessKeyId();
-        service.createRole("Worker", "/", "{}", null, 3600, null);
+        service.createRole("Worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         service.registerSession("ASIABOUNDEDROLE", "secret", "token",
                 "arn:aws:iam::000000000000:role/Worker", Instant.parse("2100-01-01T00:00:00Z"), null,
                 "000000000000", "s", "AROAWORKER:s");
@@ -608,7 +627,7 @@ class IamServiceTest {
         IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, clock);
-        service.createRole("ClockRole", "/", "{}", null, 3600, null);
+        service.createRole("ClockRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         Map<String, Predicate<String>> lookups = new LinkedHashMap<>();
         lookups.put("secret key", key -> service.findSecretKey(key, "token").isPresent());
         lookups.put("account", key -> service.resolveAccountId(key).isPresent());
@@ -649,7 +668,7 @@ class IamServiceTest {
                     new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                     new InMemoryStorage<>(), new InMemoryStorage<>(),
                     new RegionResolver("us-east-1", "000000000000"), false, Clock.fixed(expiration, ZoneOffset.UTC));
-            service.createRole("ClockRole", "/", "{}", null, 3600, null);
+            service.createRole("ClockRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
             service.registerSession("ASIABOUNDARYSESSION", "secret", "token",
                     "arn:aws:iam::000000000000:role/ClockRole", expiration, null, "000000000000", "s",
                     "AROACLOCKROLE:s");
@@ -733,8 +752,9 @@ class IamServiceTest {
         assertNull(context.sessionPolicyDocument());
         // Acting as the user means carrying the user's principal keys, aws:username included:
         // the guide gives one to an IAM user and to no other principal.
-        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn(),
-                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice"),
+        assertSessionCaller(new IamService.CallerArns(alice.getArn(), alice.getArn(),
+                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice")
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
         assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
     }
@@ -751,9 +771,10 @@ class IamServiceTest {
         assertEquals(1, context.identityPolicies().size());
         // "aws:userid: AWS account ID" and no aws:username, which the guide lists as not
         // present for the account root.
-        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root",
+        assertSessionCaller(new IamService.CallerArns("arn:aws:iam::000000000000:root",
                         "arn:aws:iam::000000000000:root", IamService.CallerArns.TYPE_ACCOUNT,
-                        "000000000000", null),
+                        "000000000000", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
     }
 
@@ -773,7 +794,7 @@ class IamServiceTest {
     @Test
     void aSessionTokenMintedWithAnotherSessionsKeyIsNoCredential() {
         IamService service = iamService(false);
-        service.createRole("Worker", "/", "{}", null, 3600, null);
+        service.createRole("Worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         service.putRolePolicy("Worker", "all", ALL_S3);
         service.registerSession("ASIAROLESESSION", "secret", "token",
                 "arn:aws:iam::000000000000:role/Worker", Instant.now().plusSeconds(3600), null,
@@ -783,6 +804,59 @@ class IamServiceTest {
                 Instant.now().plusSeconds(3600), null, "000000000000", "ASIAROLESESSION");
 
         assertNotACredential(service, "ASIAFROMSESSION");
+    }
+
+    @Test
+    void aSessionTokenReachesIamOnlyWhereADeviceMintedIt() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.registerIssuedSession("ASIANODEVICE", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+        service.registerIssuedSession("ASIABEHINDDEVICE", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+        service.recordSessionMfa("ASIABEHINDDEVICE", Instant.now());
+
+        // "You cannot call any IAM API operations unless MFA authentication information is
+        // included in the request."
+        assertEquals("Cannot call ListUsers with session credentials that include no MFA information",
+                service.sessionTokenRefusal("ASIANODEVICE", "iam:ListUsers").orElseThrow());
+        assertTrue(service.sessionTokenRefusal("ASIABEHINDDEVICE", "iam:ListUsers").isEmpty());
+        // "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity", which is not
+        // conditioned on a device, so the one minted behind it reaches no more of STS than the other.
+        assertEquals("Cannot call GetAccessKeyInfo with session credentials",
+                service.sessionTokenRefusal("ASIABEHINDDEVICE", "sts:GetAccessKeyInfo").orElseThrow());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "sts:AssumeRole").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "sts:GetCallerIdentity").isEmpty());
+        // Every other namespace is the policies' business rather than the credential's, and an
+        // action that names none is nobody's to refuse.
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "s3:GetObject").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", "iam").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANODEVICE", null).isEmpty());
+    }
+
+    @Test
+    void onlyASessionTokenCarriesTheseLimits() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.createRole("Worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        service.registerSession("ASIAROLESESSION", "secret", "token",
+                "arn:aws:iam::000000000000:role/Worker", Instant.now().plusSeconds(3600), null,
+                "000000000000", "s", "AROAWORKER:s");
+        service.registerIssuedSession("ASIAFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/Bob", Instant.now().plusSeconds(3600),
+                null, "000000000000", aliceKey);
+
+        // An assumed-role session reaches whatever its role allows: AWS keeps GetFederationToken
+        // and GetSessionToken from it, and both operations turn it away themselves.
+        assertTrue(service.sessionTokenRefusal("ASIAROLESESSION", "iam:ListUsers").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIAROLESESSION", "sts:GetAccessKeyInfo").isEmpty());
+        // A federated session carries limits of its own, as the Deny in the context it resolves to.
+        assertTrue(service.sessionTokenRefusal("ASIAFEDERATED", "iam:ListUsers").isEmpty());
+        // A long-term key carries none, and neither does a key no session matches.
+        assertTrue(service.sessionTokenRefusal(aliceKey, "iam:ListUsers").isEmpty());
+        assertTrue(service.sessionTokenRefusal("ASIANOSUCHSESSION", "iam:ListUsers").isEmpty());
     }
 
     @Test
@@ -849,7 +923,7 @@ class IamServiceTest {
         service.putUserPolicy("alice", "read", READ_S3);
         String aliceKey = service.createAccessKey("alice").getAccessKeyId();
         // A role with the federated user's name is not the federated user.
-        service.createRole("Bob", "/", "{}", null, 3600, null);
+        service.createRole("Bob", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         service.putRolePolicy("Bob", "all", ALL_S3);
         String federatedArn = "arn:aws:sts::000000000000:federated-user/Bob";
         service.registerIssuedSession("ASIAWITHPOLICY", "secret", "token", federatedArn,
@@ -861,8 +935,10 @@ class IamServiceTest {
         assertFederatedUserLimits(withPolicy.identityPolicies().getLast());
         assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
         // The same aws:userid both ways, since one derivation now serves both readers, and no
-        // aws:username: the guide lists it as not present for a federated user.
-        assertEquals(new IamService.CallerArns(federatedArn, federatedArn,
+        // aws:username: the guide lists it as not present for a federated user. No MFA state
+        // either, the same guide putting federated identities with the long-term keys, so this
+        // session publishes neither MFA key where every other session publishes the first.
+        assertSessionCaller(new IamService.CallerArns(federatedArn, federatedArn,
                         IamService.CallerArns.TYPE_FEDERATED_USER, "000000000000:Bob", null),
                 service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());
         assertEquals("000000000000:Bob", service.resolveCallerUserId("ASIAWITHPOLICY", "token").orElseThrow());
@@ -905,7 +981,7 @@ class IamServiceTest {
     @Test
     void aFederatedSessionStoredWithoutItsIssuerIsNoCredential() {
         IamService service = iamService(false);
-        service.createRole("Bob", "/", "{}", null, 3600, null);
+        service.createRole("Bob", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         service.putRolePolicy("Bob", "all", ALL_S3);
         // How sessions were stored before the issuer was recorded.
         service.registerSession("ASIALEGACYFEDERATED", "secret", "token",
@@ -1047,7 +1123,7 @@ class IamServiceTest {
     void deleteUserWithAttachedPolicyFails() {
         iamService.createUser("alice", "/");
         String policyArn = iamService.createPolicy("MyPolicy", "/", null,
-                "{\"Version\":\"2012-10-17\"}", null).getArn();
+                EMPTY_POLICY_DOCUMENT, null).getArn();
         iamService.attachUserPolicy("alice", policyArn);
         assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
     }
@@ -1462,7 +1538,7 @@ class IamServiceTest {
     @Test
     void deleteUserWithInlinePolicyIsDeleteConflict() {
         iamService.createUser("alice", "/");
-        iamService.putUserPolicy("alice", "inline-1", "{\"Version\":\"2012-10-17\"}");
+        iamService.putUserPolicy("alice", "inline-1", EMPTY_POLICY_DOCUMENT);
 
         AwsException ex = assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
         assertEquals("DeleteConflict", ex.getErrorCode());
@@ -1694,10 +1770,10 @@ class IamServiceTest {
 
     @Test
     void createRoleRejectsNameThatDiffersOnlyByCase() {
-        iamService.createRole("CaseRole", "/", "{}", null, 3600, null);
+        iamService.createRole("CaseRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
 
         AwsException error = assertThrows(AwsException.class,
-                () -> iamService.createRole("caserole", "/", "{}", null, 3600, null));
+                () -> iamService.createRole("caserole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null));
 
         assertEquals("EntityAlreadyExists", error.getErrorCode());
         assertEquals(409, error.getHttpStatus());
@@ -1719,7 +1795,7 @@ class IamServiceTest {
 
     @Test
     void provisionAccountAccessRoleReturnsTheRoleThatIsAlreadyThere() {
-        IamRole existing = iamService.createRole("OrganizationAccountAccessRole", "/", "{}", null, 3600, null);
+        IamRole existing = iamService.createRole("OrganizationAccountAccessRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
 
         IamRole role = iamService.provisionAccountAccessRole(
                 "000000000000", "OrganizationAccountAccessRole", "000000000000");
@@ -1729,7 +1805,7 @@ class IamServiceTest {
 
     @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
-        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
@@ -1739,7 +1815,7 @@ class IamServiceTest {
 
     @Test
     void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
-        iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
@@ -1753,7 +1829,7 @@ class IamServiceTest {
         // deleted and recreated under the same name since the caller last verified its identity,
         // the recreated role has a different RoleId. The update must be refused rather than
         // silently applied to a role the caller never actually verified owning.
-        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String originalDoc = role.getAssumeRolePolicyDocument();
         String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
 
@@ -1766,10 +1842,10 @@ class IamServiceTest {
 
     @Test
     void permissionsBoundaryWritesRefuseARoleRecreatedUnderTheSameName() {
-        String boundary = iamService.createPolicy("Bound", "/", null, "{}", null).getArn();
-        String staleId = iamService.createRole("Reused", "/", "{}", null, 3600, null).getRoleId();
+        String boundary = iamService.createPolicy("Bound", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
+        String staleId = iamService.createRole("Reused", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getRoleId();
         iamService.deleteRole("Reused");
-        iamService.createRole("Reused", "/", "{}", null, 3600, null);
+        iamService.createRole("Reused", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         iamService.putRolePermissionsBoundary("Reused", boundary);
 
         assertEquals("EntityAlreadyExists", assertThrows(AwsException.class,
@@ -1783,7 +1859,7 @@ class IamServiceTest {
 
     @Test
     void permissionsBoundaryWritesRefuseAUserRecreatedUnderTheSameName() {
-        String boundary = iamService.createPolicy("Bound", "/", null, "{}", null).getArn();
+        String boundary = iamService.createPolicy("Bound", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
         String staleId = iamService.createUser("reused", "/").getUserId();
         iamService.deleteUser("reused");
         iamService.createUser("reused", "/");
@@ -1822,7 +1898,7 @@ class IamServiceTest {
 
     @Test
     void createServiceLinkedRoleRejectsCaseInsensitiveRoleNameCollisionAsInvalidInput() {
-        iamService.createRole("awsserviceroleforaccessanalyzer", "/", "{}", null, 0, null);
+        iamService.createRole("awsserviceroleforaccessanalyzer", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         AwsException error = assertThrows(AwsException.class,
                 () -> iamService.createServiceLinkedRole("access-analyzer.amazonaws.com", null, null));
@@ -1833,15 +1909,15 @@ class IamServiceTest {
 
     @Test
     void deleteRoleWithAttachedPolicyFails() {
-        iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
-        String policyArn = iamService.createPolicy("P", "/", null, "{}", null).getArn();
+        iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        String policyArn = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
         iamService.attachRolePolicy("LambdaExec", policyArn);
         assertThrows(AwsException.class, () -> iamService.deleteRole("LambdaExec"));
     }
 
     @Test
     void tagAndUntagRole() {
-        iamService.createRole("MyRole", "/", "{}", null, 0, Map.of("env", "test"));
+        iamService.createRole("MyRole", "/", EMPTY_POLICY_DOCUMENT, null, 0, Map.of("env", "test"));
         iamService.tagRole("MyRole", Map.of("owner", "team-a"));
         Map<String, String> tags = iamService.listRoleTags("MyRole");
         assertEquals("test", tags.get("env"));
@@ -1870,10 +1946,10 @@ class IamServiceTest {
 
     @Test
     void createPolicyRejectsCaseInsensitiveNameAcrossPaths() {
-        iamService.createPolicy("CasePolicy", "/first/", null, "{}", null);
+        iamService.createPolicy("CasePolicy", "/first/", null, EMPTY_POLICY_DOCUMENT, null);
 
         AwsException error = assertThrows(AwsException.class,
-                () -> iamService.createPolicy("casepolicy", "/second/", null, "{}", null));
+                () -> iamService.createPolicy("casepolicy", "/second/", null, EMPTY_POLICY_DOCUMENT, null));
 
         assertEquals("EntityAlreadyExists", error.getErrorCode());
         assertEquals(409, error.getHttpStatus());
@@ -1956,9 +2032,32 @@ class IamServiceTest {
     }
 
     @Test
+    void aRestoreIsNotHeldToTheReadingAWriteIsHeldTo() {
+        // A document an earlier version stored, which the writes refuse now. The rollback of a
+        // failed CloudFormation update puts exactly this back, and refusing it there would leave
+        // the role or the policy without what the rollback had removed.
+        String legacy = "{}";
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        assertThrows(AwsException.class, () -> iamService.updateAssumeRolePolicy("R", legacy, null));
+        iamService.restoreAssumeRolePolicy("R", legacy, null);
+        assertEquals(legacy, iamService.getRole("R").getAssumeRolePolicyDocument());
+
+        assertThrows(AwsException.class, () -> iamService.putRolePolicy("R", "inline", legacy));
+        iamService.restoreRolePolicy("R", "inline", legacy);
+        assertEquals(legacy, iamService.getRole("R").getInlinePolicies().get("inline"));
+
+        String noActions = "{\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        assertThrows(AwsException.class,
+                () -> iamService.createPolicyVersion(policy.getArn(), noActions, false));
+        PolicyVersion restored = iamService.restorePolicyVersion(policy.getArn(), noActions, false);
+        assertEquals(noActions, restored.getDocument());
+    }
+
+    @Test
     void createPolicyVersionAndSetDefault() {
-        String doc1 = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
-        String doc2 = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\"}]}";
+        String doc1 = policyDocument("one");
+        String doc2 = policyDocument("two");
         IamPolicy policy = iamService.createPolicy("P", "/", null, doc1, null);
         String policyArn = policy.getArn();
 
@@ -1974,36 +2073,36 @@ class IamServiceTest {
 
     @Test
     void deletePolicyVersionDefaultFails() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         assertThrows(AwsException.class,
                 () -> iamService.deletePolicyVersion(policy.getArn(), "v1"));
     }
 
     @Test
     void policyVersionLimit() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
-            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", false);
+            iamService.createPolicyVersion(arn, policyDocument(i), false);
         }
         assertThrows(AwsException.class,
-                () -> iamService.createPolicyVersion(arn, "{\"v\":6}", false));
+                () -> iamService.createPolicyVersion(arn, policyDocument(6), false));
     }
 
     @Test
     void createPolicyVersionAfterDeletionDoesNotReuseVersionIds() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
-            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", true);
+            iamService.createPolicyVersion(arn, policyDocument(i), true);
         }
         // Prune the oldest non-default version (what CloudFormation does at the cap) and
         // create another. AWS version ids are monotonic — a deleted id is never reissued,
         // so the new version must be v6, not a rewrite of the surviving v5.
         iamService.deletePolicyVersion(arn, "v1");
-        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", true);
+        PolicyVersion next = iamService.createPolicyVersion(arn, policyDocument(6), true);
         assertEquals("v6", next.getVersionId());
-        assertEquals("{\"v\":5}", iamService.getPolicyVersion(arn, "v5").getDocument());
+        assertEquals(policyDocument(5), iamService.getPolicyVersion(arn, "v5").getDocument());
     }
 
     @Test
@@ -2011,15 +2110,15 @@ class IamServiceTest {
         // Deleting the HIGHEST surviving version (not the oldest, as above) is the case that
         // breaks a "derive from the live keys" implementation: with v5 gone, the live max is v4,
         // so a naive next-id computation reissues v5 rather than advancing to v6.
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
-            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", false);
+            iamService.createPolicyVersion(arn, policyDocument(i), false);
         }
         iamService.deletePolicyVersion(arn, "v5");
-        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", false);
+        PolicyVersion next = iamService.createPolicyVersion(arn, policyDocument(6), false);
         assertEquals("v6", next.getVersionId());
-        assertEquals("{\"v\":4}", iamService.getPolicyVersion(arn, "v4").getDocument());
+        assertEquals(policyDocument(4), iamService.getPolicyVersion(arn, "v4").getDocument());
     }
 
     @Test
@@ -2030,15 +2129,15 @@ class IamServiceTest {
         // versions map directly (bypassing createPolicyVersion, which is the only path that would
         // have kept nextVersionNumber honest) to reproduce exactly that rehydrated shape: v1-v4
         // live, as if v5 had been created and deleted before this field ever existed on disk.
-        IamPolicy policy = iamService.createPolicy("LegacyP", "/", null, "{\"v\":1}", null);
+        IamPolicy policy = iamService.createPolicy("LegacyP", "/", null, policyDocument(1), null);
         String arn = policy.getArn();
         for (int i = 2; i <= 4; i++) {
             policy.getVersions().put("v" + i,
                     new io.floci.aws.services.iam.model.PolicyVersion(
-                            "v" + i, "{\"v\":" + i + "}", false));
+                            "v" + i, policyDocument(i), false));
         }
         policy.setNextVersionNumber(null); // Jackson leaves this null when absent from old JSON
-        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":next}", false);
+        PolicyVersion next = iamService.createPolicyVersion(arn, policyDocument("next"), false);
         assertNotEquals("v5", next.getVersionId(),
                 "a legacy-rehydrated policy must not reissue the id of a version deleted before upgrade");
     }
@@ -2117,14 +2216,14 @@ class IamServiceTest {
     @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         iamService.attachUserPolicy("alice", policy.getArn());
         assertThrows(AwsException.class, () -> iamService.deletePolicy(policy.getArn()));
     }
 
     @Test
     void tagAndUntagPolicy() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         iamService.tagPolicy(policy.getArn(), Map.of("team", "security"));
         assertEquals("security", iamService.listPolicyTags(policy.getArn()).get("team"));
         iamService.untagPolicy(policy.getArn(), List.of("team"));
@@ -2138,7 +2237,7 @@ class IamServiceTest {
     @Test
     void attachAndDetachUserPolicy() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         iamService.attachUserPolicy("alice", policy.getArn());
 
         List<IamPolicy> attached = iamService.listAttachedUserPolicies("alice", null);
@@ -2154,7 +2253,7 @@ class IamServiceTest {
     @Test
     void attachAndDetachGroupPolicy() {
         iamService.createGroup("dev", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         iamService.attachGroupPolicy("dev", policy.getArn());
 
         assertEquals(1, iamService.listAttachedGroupPolicies("dev", null).size());
@@ -2164,8 +2263,8 @@ class IamServiceTest {
 
     @Test
     void attachAndDetachRolePolicy() {
-        iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         iamService.attachRolePolicy("LambdaExec", policy.getArn());
 
         assertEquals(1, iamService.listAttachedRolePolicies("LambdaExec", null).size());
@@ -2176,7 +2275,7 @@ class IamServiceTest {
     @Test
     void detachNonAttachedPolicyThrows() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
         assertThrows(AwsException.class, () -> iamService.detachUserPolicy("alice", policy.getArn()));
     }
 
@@ -2187,7 +2286,7 @@ class IamServiceTest {
     @Test
     void userInlinePolicyCrud() {
         iamService.createUser("alice", "/");
-        String doc = "{\"Version\":\"2012-10-17\"}";
+        String doc = EMPTY_POLICY_DOCUMENT;
         iamService.putUserPolicy("alice", "inline-1", doc);
 
         assertEquals(doc, iamService.getUserPolicy("alice", "inline-1"));
@@ -2199,9 +2298,9 @@ class IamServiceTest {
 
     @Test
     void roleInlinePolicyCrud() {
-        iamService.createRole("R", "/", "{}", null, 0, null);
-        iamService.putRolePolicy("R", "inline-exec", "{\"Effect\":\"Allow\"}");
-        assertEquals("{\"Effect\":\"Allow\"}", iamService.getRolePolicy("R", "inline-exec"));
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        iamService.putRolePolicy("R", "inline-exec", policyDocument("inline"));
+        assertEquals(policyDocument("inline"), iamService.getRolePolicy("R", "inline-exec"));
         iamService.deleteRolePolicy("R", "inline-exec");
         assertThrows(AwsException.class, () -> iamService.getRolePolicy("R", "inline-exec"));
     }
@@ -2780,7 +2879,7 @@ class IamServiceTest {
 
     @Test
     void addAndRemoveRoleFromInstanceProfile() {
-        iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
+        iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.createInstanceProfile("MyProfile", "/");
 
         iamService.addRoleToInstanceProfile("MyProfile", "LambdaExec");
@@ -2793,8 +2892,8 @@ class IamServiceTest {
 
     @Test
     void instanceProfileMaxOneRole() {
-        iamService.createRole("Role1", "/", "{}", null, 0, null);
-        iamService.createRole("Role2", "/", "{}", null, 0, null);
+        iamService.createRole("Role1", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        iamService.createRole("Role2", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.createInstanceProfile("Profile", "/");
 
         iamService.addRoleToInstanceProfile("Profile", "Role1");
@@ -2804,7 +2903,7 @@ class IamServiceTest {
 
     @Test
     void deleteInstanceProfileWithRoleFails() {
-        iamService.createRole("R", "/", "{}", null, 0, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.createInstanceProfile("P", "/");
         iamService.addRoleToInstanceProfile("P", "R");
         assertThrows(AwsException.class, () -> iamService.deleteInstanceProfile("P"));
@@ -2812,7 +2911,7 @@ class IamServiceTest {
 
     @Test
     void listInstanceProfilesForRole() {
-        iamService.createRole("R", "/", "{}", null, 0, null);
+        iamService.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.createInstanceProfile("P1", "/");
         iamService.createInstanceProfile("P2", "/");
         iamService.addRoleToInstanceProfile("P1", "R");
@@ -2905,7 +3004,7 @@ class IamServiceTest {
         // Regression: AmazonBedrockFullAccess was absent from the seed catalog, so
         // AttachRolePolicy (the Terraform path — CloudFormation attaches inline and
         // never calls it) 404'd with NoSuchEntity. Attaching it must now succeed.
-        iamService.createRole("BedrockRole", "/", "{}", null, 0, null);
+        iamService.createRole("BedrockRole", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.attachRolePolicy("BedrockRole", "arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
 
         List<String> attached = iamService.listAttachedRolePolicies("BedrockRole", null).stream()
@@ -2995,10 +3094,83 @@ class IamServiceTest {
         assertEquals("existing-secret", iamService.findSecretKey("floci").orElseThrow());
     }
 
+    /**
+     * Starts with the deployer seeded under an access key ID, on the stores an earlier start left
+     * behind, the way a restart under persistent storage does.
+     */
+    private static IamService startSeedingDeployerAs(String accessKeyId, StorageBackend<String, IamUser> users,
+                                                     StorageBackend<String, AccessKey> accessKeys) {
+        IamService service = new IamService(users, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), accessKeys, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), true, accessKeyId, null, Map.of(),
+                Clock.systemUTC());
+        service.seedDefaults();
+        return service;
+    }
+
+    private static List<String> accessKeyIds(IamService service, String userName) {
+        return service.listAccessKeys(userName).stream().map(AccessKey::getAccessKeyId).sorted().toList();
+    }
+
+    @Test
+    void seedingUnderAnotherAccessKeyIdDeletesTheKeySeededUnderTheEarlierOne() {
+        InMemoryStorage<String, IamUser> users = new InMemoryStorage<>();
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        startSeedingDeployerAs("floci", users, accessKeys);
+
+        IamService restarted = startSeedingDeployerAs("AKIAFLOCIDEPLOYER001", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER001"), accessKeyIds(restarted, "floci-deployer"));
+        assertTrue(restarted.findSecretKey("floci").isEmpty());
+
+        IamService restartedAgain = startSeedingDeployerAs("AKIAFLOCIDEPLOYER002", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER002"), accessKeyIds(restartedAgain, "floci-deployer"));
+    }
+
+    @Test
+    void seedingUnderAnotherAccessKeyIdKeepsTheKeysCreatedForTheDeployer() {
+        InMemoryStorage<String, IamUser> users = new InMemoryStorage<>();
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        String created = startSeedingDeployerAs("floci", users, accessKeys)
+                .createAccessKey("floci-deployer").getAccessKeyId();
+
+        IamService restarted = startSeedingDeployerAs("AKIAFLOCIDEPLOYER001", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER001", created).stream().sorted().toList(),
+                accessKeyIds(restarted, "floci-deployer"));
+    }
+
+    /**
+     * IAM takes an AccessKeyId of "Minimum length of 16. Maximum length of 128." matching
+     * {@code [\w]+} (IAM API Reference, AccessKey), so a key seeded under any other ID could never
+     * be deactivated or deleted. Only the legacy default is kept outside that format.
+     */
+    @Test
+    void seedingRefusesAnAccessKeyIdOutsideIamsFormat() {
+        for (String accessKeyId : List.of("AKIAFLOCIDEPLOY", "AKIA-FLOCI-DEPLOYER", "A".repeat(129), "test")) {
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                    () -> startSeedingDeployerAs(accessKeyId, new InMemoryStorage<>(), new InMemoryStorage<>()));
+            assertTrue(ex.getMessage().contains("floci.services.iam.seed-deployer-access-key-id"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void seedingAcceptsTheDefaultAccessKeyIdAndOnesInIamsFormat() {
+        for (String accessKeyId : List.of("floci", "AKIAFLOCIDEPLOYE", "A".repeat(128), "AKIA_FLOCI_DEPLOYER")) {
+            IamService seeded = startSeedingDeployerAs(accessKeyId, new InMemoryStorage<>(), new InMemoryStorage<>());
+            assertEquals(List.of(accessKeyId), accessKeyIds(seeded, "floci-deployer"));
+        }
+    }
+
     @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();
-        iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
+        iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         String policyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
         iamService.attachRolePolicy("LambdaExec", policyArn);
@@ -3011,7 +3183,7 @@ class IamServiceTest {
     @Test
     void attachSsmManagedInstanceCorePolicyToRole() {
         iamService.seedAwsManagedPolicies();
-        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+        iamService.createRole("Ec2Exec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         String policyArn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
         iamService.attachRolePolicy("Ec2Exec", policyArn);
@@ -3024,7 +3196,7 @@ class IamServiceTest {
     @Test
     void attachCloudWatchAgentServerPolicyToRole() {
         iamService.seedAwsManagedPolicies();
-        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+        iamService.createRole("Ec2Exec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         String policyArn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy";
         iamService.attachRolePolicy("Ec2Exec", policyArn);
@@ -3037,7 +3209,7 @@ class IamServiceTest {
     @Test
     void attachEcrReadOnlyPolicyToRole() {
         iamService.seedAwsManagedPolicies();
-        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+        iamService.createRole("Ec2Exec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         String policyArn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly";
         iamService.attachRolePolicy("Ec2Exec", policyArn);
@@ -3050,7 +3222,7 @@ class IamServiceTest {
     @Test
     void attachRdsEnhancedMonitoringRolePolicyToRole() {
         iamService.seedAwsManagedPolicies();
-        iamService.createRole("RdsMonitor", "/", "{}", null, 0, null);
+        iamService.createRole("RdsMonitor", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         String policyArn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole";
         iamService.attachRolePolicy("RdsMonitor", policyArn);
@@ -3072,7 +3244,7 @@ class IamServiceTest {
     void awsManagedPolicyCreateVersionRejected() {
         iamService.seedAwsManagedPolicies();
         String arn = "arn:aws:iam::aws:policy/AdministratorAccess";
-        assertThrows(AwsException.class, () -> iamService.createPolicyVersion(arn, "{}", false));
+        assertThrows(AwsException.class, () -> iamService.createPolicyVersion(arn, EMPTY_POLICY_DOCUMENT, false));
     }
 
     @Test
@@ -3099,7 +3271,7 @@ class IamServiceTest {
     @Test
     void listPoliciesScopeFiltering() {
         iamService.seedAwsManagedPolicies();
-        iamService.createPolicy("MyCustomPolicy", "/", null, "{}", null);
+        iamService.createPolicy("MyCustomPolicy", "/", null, EMPTY_POLICY_DOCUMENT, null);
 
         List<IamPolicy> awsOnly = iamService.listPolicies("AWS", "/");
         assertTrue(awsOnly.stream().allMatch(p -> p.getArn().startsWith("arn:aws:iam::aws:policy")));
@@ -3501,7 +3673,7 @@ class IamServiceTest {
         iamService.attachUserPolicy("aad-tally-user", arn);
         iamService.createGroup("aad-tally-group", "/");
         iamService.attachGroupPolicy("aad-tally-group", arn);
-        iamService.createRole("aad-tally-role", "/", "{}", null, 0, null);
+        iamService.createRole("aad-tally-role", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.attachRolePolicy("aad-tally-role", arn);
 
         IamService.AccountAuthorizationDetails details = iamService.getAccountAuthorizationDetails();
@@ -3516,7 +3688,7 @@ class IamServiceTest {
                 null);
         iamService.createUser("aad-boundary-user", "/");
         iamService.putUserPermissionsBoundary("aad-boundary-user", boundary.getArn());
-        iamService.createRole("aad-boundary-role", "/", "{}", null, 0, null);
+        iamService.createRole("aad-boundary-role", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePermissionsBoundary("aad-boundary-role", boundary.getArn());
 
         IamService.AccountAuthorizationDetails details = iamService.getAccountAuthorizationDetails();
@@ -3528,7 +3700,7 @@ class IamServiceTest {
     void accountAuthorizationDetailsListsEveryUserGroupAndRole() {
         iamService.createUser("aad-list-user", "/");
         iamService.createGroup("aad-list-group", "/");
-        iamService.createRole("aad-list-role", "/", "{}", null, 0, null);
+        iamService.createRole("aad-list-role", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
 
         IamService.AccountAuthorizationDetails details = iamService.getAccountAuthorizationDetails();
 
@@ -3662,17 +3834,21 @@ class IamServiceTest {
      * changes: otherwise a changed password would still report the original creation time.
      */
     @Test
-    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() throws InterruptedException {
-        iamService.createUser("cred-report-changed-user", "/");
-        iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
-        Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.createUser("cred-report-changed-user", "/");
+        service.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
+        LoginProfile created = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(clock.instant(), created.getCreateDate());
+        assertEquals(clock.instant(), created.getPasswordLastChanged());
 
-        Thread.sleep(20);
-        iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
-        Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+        clock.advance(Duration.ofDays(30));
+        service.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
 
-        assertTrue(changedAt.isAfter(createdAt),
-                "expected password_last_changed to move: created=" + createdAt + " changed=" + changedAt);
+        LoginProfile changed = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(Instant.parse("2026-03-31T00:00:00Z"), changed.getPasswordLastChanged());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), changed.getCreateDate());
     }
 
     /** Toggling only passwordResetRequired is not a password change, so the timestamp must not move. */
@@ -3688,33 +3864,60 @@ class IamServiceTest {
     }
 
     @Test
-    void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
-        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+    void getCredentialReportServesAReportUntilItIsOlderThanFourHours() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
 
-        AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofHours(4));
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, service::getCredentialReport);
         assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test
-    void generateCredentialReportOnAnExpiredReportStartsANewOne() {
+    void generateCredentialReportReusesAReportUntilItIsFourHoursOld() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+
+        clock.advance(Duration.ofHours(4).minusMillis(1));
+        IamService.CredentialReportGeneration reused = service.generateCredentialReport();
+        assertEquals("COMPLETE", reused.state());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        IamService.CredentialReportGeneration regenerated = service.generateCredentialReport();
+        assertEquals("STARTED", regenerated.state());
+        assertEquals("The previous report has expired. Starting a new report generation task",
+                regenerated.description());
+        assertEquals(Instant.parse("2026-03-01T04:00:00Z"), service.getCredentialReport().generatedTime());
+    }
+
+    @Test
+    void generateCredentialReportOnAnExpiredReportMakesItReadableAgain() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+        clock.advance(Duration.ofHours(4).plusMillis(1));
+        assertThrows(AwsException.class, service::getCredentialReport);
+
+        IamService.CredentialReportGeneration generation = service.generateCredentialReport();
+
+        assertEquals("STARTED", generation.state());
+        assertEquals(clock.instant(), service.getCredentialReport().generatedTime());
+    }
+
+    /** A report read back from storage ages on the service's clock like one it generated itself. */
+    @Test
+    void aStoredCredentialReportExpiresOnTheServicesClock() {
+        Instant start = Instant.parse("2026-03-01T00:00:00Z");
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
+        credentialReports.put("credential-report/aws", new CredentialReport("dGVzdA==", start));
+        ManualClock clock = new ManualClock(start.plus(Duration.ofHours(4)));
+        IamService withStoredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -3725,14 +3928,13 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
 
-        IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
+        assertEquals(start, withStoredReport.getCredentialReport().generatedTime());
 
-        assertEquals("STARTED", generation.state());
-        assertEquals("The previous report has expired. Starting a new report generation task",
-                generation.description());
-        assertDoesNotThrow(withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, withStoredReport::getCredentialReport);
+        assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test
@@ -3771,7 +3973,7 @@ class IamServiceTest {
 
     @Test
     void resolveCallerUserIdResolvesFromRoleArnWhenAssumedRoleIdNotExplicitlySet() {
-        IamRole role = iamService.createRole("UnsetAssumedRole", "/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("UnsetAssumedRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         iamService.registerSession(
                 "ASIAROLEARNKEY", "test-secret", "token", role.getArn(),
                 Instant.now().plusSeconds(3600), null, "000000000000",
@@ -3784,7 +3986,7 @@ class IamServiceTest {
 
     @Test
     void resolveCallerUserIdReturnsAssumedRoleIdForLambdaExecutionRole() {
-        IamRole role = iamService.createRole("LambdaFuncRole", "/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("LambdaFuncRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String assumedRoleId = role.getRoleId() + ":my-function";
         iamService.registerLambdaExecutionRoleSession(
                 "000000000000", "ASIALAMBDAKEY", "secret", "token", role.getArn(),
@@ -3797,7 +3999,7 @@ class IamServiceTest {
 
     @Test
     void resolveCallerUserIdRejectsTemporaryCredentialsWhenSessionTokenMismatchesOrMissing() {
-        IamRole role = iamService.createRole("TokenCheckRole", "/", "{}", null, 3600, null);
+        IamRole role = iamService.createRole("TokenCheckRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String assumedRoleId = role.getRoleId() + ":token-check-session";
         iamService.registerSession(
                 "ASIATOKENCHECKKEY", "test-secret", "correct-token", role.getArn(),

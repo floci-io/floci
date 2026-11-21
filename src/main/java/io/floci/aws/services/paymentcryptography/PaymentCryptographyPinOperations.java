@@ -17,10 +17,10 @@ import java.util.Map;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.materialHex;
-import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireEnabled;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireFamily;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireMode;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireUsage;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requiredKey;
 
 /**
  * The PIN operations, over the Visa PVV path.
@@ -105,7 +105,7 @@ public class PaymentCryptographyPinOperations {
         String encryptionKeyIdentifier = text(request, "EncryptionKeyIdentifier");
         String verificationKeyIdentifier = text(request, "VerificationKeyIdentifier");
         refuseWrappedKey(request, "EncryptionWrappedKey");
-        PinBlockFormat format = format(text(request, "PinBlockFormat"));
+        PinBlockFormat format = verificationFormat(text(request, "PinBlockFormat"));
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
                 "PrimaryAccountNumber is required for Visa PVV verification");
         requireVisaPinLength(request);
@@ -131,7 +131,7 @@ public class PaymentCryptographyPinOperations {
         requireNoDukptForAes(format, request.get("DukptAttributes"));
         requireKeyMatchesFormat(pek, format, "EncryptionKeyIdentifier");
 
-        PaymentCryptographyKey pvk = requiredKey(verificationKeyIdentifier, region);
+        PaymentCryptographyKey pvk = requiredKey(service, verificationKeyIdentifier, region);
         requireMode(pvk, "Verify", "verifying a PIN");
         requireUsage(pvk, VISA_VERIFICATION_USAGES, "verifying a PIN");
         // The Visa PVV is defined over Triple DES, so the key is one.
@@ -202,7 +202,7 @@ public class PaymentCryptographyPinOperations {
 
         PinLeg pek = resolvePinLeg(encryptionKeyIdentifier, null, region,
                 "Encrypt", "encrypting a PIN block");
-        PaymentCryptographyKey pvk = requiredKey(generationKeyIdentifier, region);
+        PaymentCryptographyKey pvk = requiredKey(service, generationKeyIdentifier, region);
         requireMode(pvk, "Generate", "generating a PIN verification value");
         requireUsage(pvk, VISA_VERIFICATION_USAGES, "generating a PIN verification value");
         // The Visa PVV is defined over Triple DES, so the key is one.
@@ -376,11 +376,7 @@ public class PaymentCryptographyPinOperations {
      */
     private PinLeg resolvePinLeg(String identifier, JsonNode dukptAttributes, String region,
                                   String mode, String what) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw notFound(identifier);
-        }
-        requireEnabled(key);
+        PaymentCryptographyKey key = requiredKey(service, identifier, region);
         if (dukptAttributes == null) {
             requireMode(key, mode, what);
             requireUsage(key, PIN_ENCRYPTION_USAGES, what);
@@ -452,15 +448,6 @@ public class PaymentCryptographyPinOperations {
 
     // ---- the helpers ---------------------------------------------------------
 
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw notFound(identifier);
-        }
-        requireEnabled(key);
-        return key;
-    }
-
     private static PaymentCryptographyKeyAlgorithm algorithmOf(PaymentCryptographyKey key) {
         PaymentCryptographyKeyAlgorithm algorithm =
                 PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
@@ -512,6 +499,27 @@ public class PaymentCryptographyPinOperations {
         if (format == null) {
             throw validation("PinBlockFormat '" + wireName + "' not supported by this service ("
                     + PinBlockFormat.supported() + ")");
+        }
+        return format;
+    }
+
+    /**
+     * The PIN block format a verification reads.
+     *
+     * <p>The reference names the formats it supports for this operation: "AWS Payment
+     * Cryptography supports {@code ISO_Format_0} and {@code ISO_Format_3}". The format 4
+     * block is an AES block, and the reference's verification reads the Triple DES blocks, so
+     * a request that names the format 4 is refused rather than answered as if the reference
+     * read it.
+     *
+     * @param wireName the name the request carries
+     * @return the format the block is in
+     */
+    private static PinBlockFormat verificationFormat(String wireName) {
+        PinBlockFormat format = PinBlockFormat.from(wireName);
+        if (format != PinBlockFormat.ISO_FORMAT_0 && format != PinBlockFormat.ISO_FORMAT_3) {
+            throw validation("PinBlockFormat '" + wireName + "' is not a format the reference "
+                    + "verifies (ISO_FORMAT_0, ISO_FORMAT_3)");
         }
         return format;
     }
@@ -592,10 +600,6 @@ public class PaymentCryptographyPinOperations {
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
-    }
-
-    private static AwsException notFound(String identifier) {
-        return new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
     }
 
     /**

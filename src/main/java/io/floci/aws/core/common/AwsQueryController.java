@@ -40,7 +40,6 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -145,8 +144,10 @@ public class AwsQueryController {
             @HeaderParam("Authorization") String authorization,
             @Context UriInfo uriInfo,
             MultivaluedMap<String, String> formParams) {
-        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, uriInfo.getQueryParameters()),
-                formParams);
+        // Reading the query parameters builds a map, so only a request without the header does it.
+        String auth = authorization != null
+                ? authorization : IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+        return dispatch(auth, formParams);
     }
 
     private Response dispatch(String authorization, MultivaluedMap<String, String> formParams) {
@@ -384,17 +385,8 @@ public class AwsQueryController {
         // Cognito is primarily JSON 1.1, but we provide a bridge for Query protocol if hit.
         // Convert MultivaluedMap to JsonNode if needed, but for now just return UnsupportedOperation 
         // with Cognito namespace.
-        String xml = new XmlBuilder()
-                .start("ErrorResponse")
-                  .start("Error")
-                    .elem("Type", "Sender")
-                    .elem("Code", "UnsupportedOperation")
-                    .elem("Message", "Operation " + action + " is not supported by Cognito via Query protocol.")
-                  .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
-                .end("ErrorResponse")
-                .build();
-        return Response.status(400).entity(xml).type(MediaType.APPLICATION_XML).build();
+        return xmlErrorResponse("UnsupportedOperation",
+                "Operation " + action + " is not supported by Cognito via Query protocol.", 400);
     }
 
     private static final String CLOUDWATCH_API_VERSION = "2010-08-01";
@@ -511,6 +503,8 @@ public class AwsQueryController {
             Map.entry("DescribeEventCategories", "redshift"),
             Map.entry("DescribeAccountAttributes", "ec2"),
             Map.entry("DescribeSnapshots", "ec2"),
+            // ElastiCache defines it too, but Floci's ElastiCache does not serve it.
+            Map.entry("CopySnapshot", "ec2"),
             Map.entry("DescribeAccountLimits", "elasticloadbalancing"),
             Map.entry("CreateIntegration", "redshift"),
             Map.entry("DeleteIntegration", "redshift"),
@@ -558,16 +552,6 @@ public class AwsQueryController {
     }
 
     private Response xmlErrorResponse(String code, String message, int status, String type) {
-        String xml = new XmlBuilder()
-                .start("ErrorResponse")
-                  .start("Error")
-                    .elem("Type", type)
-                    .elem("Code", code)
-                    .elem("Message", message)
-                  .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
-                .end("ErrorResponse")
-                .build();
-        return Response.status(status).entity(xml).type(MediaType.APPLICATION_XML).build();
+        return ProtocolErrorResponses.queryXml(code, message, status, type);
     }
 }

@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
@@ -16,17 +17,20 @@ import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * Component test for {@link EcsLoadBalancerRegistrar}: drives the register/deregister
@@ -47,9 +51,16 @@ class EcsLoadBalancerRegistrarTest {
     @InjectSpy
     EcsContainerManager containerManager;
 
+    @Inject
+    Ec2InstancePorts instancePorts;
+
     private String createTargetGroup(String name) {
+        return createTargetGroup(name, "ip");
+    }
+
+    private String createTargetGroup(String name, String targetType) {
         TargetGroup tg = elbV2Service.createTargetGroup(REGION, name, "HTTP", "HTTP1",
-                8080, "vpc-regtest", "ip",
+                8080, "vpc-regtest", targetType,
                 null, null, false, null, null, null, null, null, null, null, Map.of());
         return tg.getTargetGroupArn();
     }
@@ -94,6 +105,60 @@ class EcsLoadBalancerRegistrarTest {
         registrar.deregisterTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
                 "target should be deregistered");
+    }
+
+    @Test
+    void deregisterTaskReportsTheLongestDeregistrationDelayOfItsTargetGroups() {
+        String defaultTg = createTargetGroup("reg-tg-drain-default");
+        String shortTg = createTargetGroup("reg-tg-drain-short");
+        elbV2Service.modifyTargetGroupAttributes(REGION, shortTg, Map.of("deregistration_delay.timeout_seconds", "3"));
+        EcsTask task = taskWithContainer("web", 8080, 34600);
+
+        registrar.registerTask(task, serviceWithLb(shortTg, "web", 8080), REGION);
+        assertEquals(Duration.ofSeconds(3), registrar.deregisterTask(task, serviceWithLb(shortTg, "web", 8080), REGION));
+
+        EcsServiceModel both = serviceWithLb(shortTg, "web", 8080);
+        EcsLoadBalancer second = new EcsLoadBalancer();
+        second.setTargetGroupArn(defaultTg);
+        second.setContainerName("web");
+        second.setContainerPort(8080);
+        both.setLoadBalancers(List.of(both.getLoadBalancers().getFirst(), second));
+        registrar.registerTask(task, both, REGION);
+        assertEquals(Duration.ofSeconds(300), registrar.deregisterTask(task, both, REGION));
+        assertEquals(Duration.ZERO, registrar.deregisterTask(task, both, REGION), "nothing left to deregister");
+    }
+
+    @Test
+    void targetsHealthyIsFalseUntilEveryRecordedTargetPassesItsHealthCheck() {
+        String tgArn = createTargetGroup("reg-tg-health");
+        EcsTask task = taskWithContainer("web", 8080, 34700);
+        EcsTask unregistered = taskWithContainer("web", 8080, 34701);
+        registrar.registerTask(task, serviceWithLb(tgArn, "web", 8080), REGION);
+
+        assertTrue(registrar.targetsHealthy(unregistered), "a task that registered nothing has nothing to wait for");
+        assertFalse(registrar.targetsHealthy(task), "a freshly registered target is still in initial health");
+
+        TargetHealth healthy = new TargetHealth();
+        healthy.setState("healthy");
+        doReturn(List.of(healthy)).when(elbV2Service).describeTargetHealth(eq(REGION), eq(tgArn), any());
+        assertTrue(registrar.targetsHealthy(task));
+    }
+
+    @Test
+    void targetsHealthyIsFalseWhenTheTargetsFailedToRegisterOrTheirHealthCannotBeRead() {
+        String tgArn = createTargetGroup("reg-tg-health-unknown");
+        EcsTask failed = taskWithContainer("web", 8080, 34800);
+        doThrow(new IllegalStateException("registration refused"))
+                .when(elbV2Service).registerTargets(eq(REGION), eq(tgArn), any());
+        registrar.registerTask(failed, serviceWithLb(tgArn, "web", 8080), REGION);
+        assertFalse(registrar.targetsHealthy(failed), "a target that never registered never turns healthy");
+
+        String readTg = createTargetGroup("reg-tg-health-unread");
+        EcsTask unread = taskWithContainer("web", 8080, 34801);
+        registrar.registerTask(unread, serviceWithLb(readTg, "web", 8080), REGION);
+        doThrow(new IllegalStateException("health unavailable"))
+                .when(elbV2Service).describeTargetHealth(eq(REGION), eq(readTg), any());
+        assertFalse(registrar.targetsHealthy(unread));
     }
 
     @Test
@@ -293,6 +358,119 @@ class EcsLoadBalancerRegistrarTest {
 
         registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 42000), List.of(tgArn),
                 List.of(new EcsTaskAddress("172.19.0.9", 8080)), REGION);
+    }
+
+    @Test
+    void instanceTargetGroupGetsTheContainerInstanceIdOnTheHostPort() {
+        String tgArn = createTargetGroup("reg-tg-instance", "instance");
+        EcsTask task = taskWithContainer("web", 8080, 34800);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0abc1234def567890", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size());
+        assertEquals("i-0abc1234def567890", health.get(0).getTarget().getId());
+        assertEquals(34800, health.get(0).getTarget().getPort());
+        assertEquals(new Ec2InstancePorts.Endpoint("127.0.0.1", 34800),
+                instancePorts.find("000000000000", "i-0abc1234def567890", 34800).orElseThrow());
+
+        registrar.deregisterTask(task, svc, REGION);
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty());
+        assertTrue(instancePorts.isBound("000000000000", "i-0abc1234def567890", 34800),
+                "a draining task's container still runs, so it keeps its host port");
+
+        registrar.releaseInstancePorts(task.getTaskArn());
+        assertFalse(instancePorts.isBound("000000000000", "i-0abc1234def567890", 34800),
+                "the host port is free again once the task has stopped");
+    }
+
+    @Test
+    void replacementOnTheSameInstanceDoesNotTakeADrainingTasksHostPort() {
+        String tgArn = createTargetGroup("reg-tg-instance-drain", "instance");
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        EcsTask draining = taskWithContainer("web", 8080, 8080);
+        EcsTask replacement = taskWithContainer("web", 8080, 8080);
+        doReturn("172.19.0.21").when(containerManager).resolveContainerHost(draining.getContainers().getFirst());
+        doReturn("172.19.0.22").when(containerManager).resolveContainerHost(replacement.getContainers().getFirst());
+
+        registrar.registerTask(draining, svc, "i-0drain0000000000a", REGION);
+        registrar.deregisterTask(draining, svc, REGION);
+        registrar.registerTask(replacement, svc, "i-0drain0000000000a", REGION);
+
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.21", 8080),
+                instancePorts.find("000000000000", "i-0drain0000000000a", 8080).orElseThrow(),
+                "in-flight requests to the draining target still reach the draining task");
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size());
+        assertEquals(32768, health.get(0).getTarget().getPort());
+
+        registrar.releaseInstancePorts(draining.getTaskArn());
+        registrar.deregisterTask(replacement, svc, REGION);
+        registrar.releaseInstancePorts(replacement.getTaskArn());
+    }
+
+    @Test
+    void otherPublishedHostPortsOfTheContainerAreTakenOnTheInstance() {
+        String tgArn = createTargetGroup("reg-tg-instance-hc", "instance");
+        Container container = new Container();
+        container.setName("web");
+        container.setNetworkBindings(List.of(
+                new NetworkBinding("0.0.0.0", 8080, 35000, "tcp"),
+                new NetworkBinding("0.0.0.0", 8081, 35001, "tcp")));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/" + UUID.randomUUID());
+        task.setContainers(List.of(container));
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0healthport00000a", REGION);
+
+        assertEquals(new Ec2InstancePorts.Endpoint("127.0.0.1", 35001),
+                instancePorts.find("000000000000", "i-0healthport00000a", 35001).orElseThrow(),
+                "a health check on the container's other host port reaches the container");
+        registrar.deregisterTask(task, svc, REGION);
+        registrar.releaseInstancePorts(task.getTaskArn());
+        assertFalse(instancePorts.isBound("000000000000", "i-0healthport00000a", 35001));
+    }
+
+    @Test
+    void tasksSharingAnUnpublishedPortOnOneInstanceGetDistinctEphemeralHostPorts() {
+        String tgArn = createTargetGroup("reg-tg-instance-shared", "instance");
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        EcsTask first = taskWithContainer("web", 8080, 8080);
+        EcsTask second = taskWithContainer("web", 8080, 8080);
+        doReturn("172.19.0.5").when(containerManager).resolveContainerHost(first.getContainers().getFirst());
+        doReturn("172.19.0.6").when(containerManager).resolveContainerHost(second.getContainers().getFirst());
+
+        registrar.registerTask(first, svc, "i-0shared000000000a", REGION);
+        registrar.registerTask(second, svc, "i-0shared000000000a", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(2, health.size());
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.5", 8080),
+                instancePorts.find("000000000000", "i-0shared000000000a", 8080).orElseThrow());
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.6", 8080),
+                instancePorts.find("000000000000", "i-0shared000000000a", 32768).orElseThrow());
+        assertTrue(health.stream().anyMatch(th -> th.getTarget().getPort() == 32768));
+
+        registrar.deregisterTask(first, svc, REGION);
+        registrar.deregisterTask(second, svc, REGION);
+        registrar.releaseInstancePorts(first.getTaskArn());
+        registrar.releaseInstancePorts(second.getTaskArn());
+    }
+
+    @Test
+    void ipTargetGroupKeepsTheContainerAddressOnAContainerInstance() {
+        String tgArn = createTargetGroup("reg-tg-ip-on-instance");
+        EcsTask task = taskWithContainer("web", 8080, 34900);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0abc1234def567891", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals("127.0.0.1", health.get(0).getTarget().getId());
+        assertFalse(instancePorts.isBound("000000000000", "i-0abc1234def567891", 34900));
+        registrar.deregisterTask(task, svc, REGION);
     }
 
     /** Stands in for the process dying between the registration and anything after it. */

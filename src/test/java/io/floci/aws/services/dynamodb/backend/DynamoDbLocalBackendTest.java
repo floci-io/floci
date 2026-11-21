@@ -427,6 +427,31 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void storedTagsAreTheTagsHeldForTheTableTheArnNamesAndForAnIndexItHolds() throws Exception {
+        answer("DescribeTable", 200, "{\"Table\":{\"TableName\":\"orders\",\"TableArn\":\"" + LOCAL
+                + "table/orders\",\"TableStatus\":\"ACTIVE\","
+                + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"byCustomer\"}]}}");
+        backend.tagResource(SCOPE, ORDERS_ARN, Map.of("team", "data"));
+
+        assertEquals(Map.of("team", "data"), backend.storedTags(ORDERS_ARN));
+        assertEquals(Map.of("team", "data"), backend.storedTags(ORDERS_ARN + "/index/byCustomer"));
+        assertEquals(Map.of(), backend.storedTags(ORDERS_ARN + "/index/byStatus"));
+        assertEquals(Map.of(), backend.storedTags(PUBLIC + STREAM_RESOURCE));
+        assertEquals(Map.of(), backend.storedTags(ORDERS_ARN.replace(ACCOUNT, "111122223333")));
+        assertEquals(Map.of(), backend.storedTags(ORDERS_ARN.replace(REGION, "us-east-1")));
+        assertEquals(Map.of(), backend.storedTags("arn:aws-cn:dynamodb:" + REGION + ":" + ACCOUNT + ":table/orders"));
+    }
+
+    @Test
+    void storedTagsAreNoneForATableDynamoDbLocalNoLongerHas() throws Exception {
+        tags.putForAccount(ACCOUNT, REGION + "/orders", Map.of("team", "data"));
+        answer("DescribeTable", 400, "{\"__type\":\"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException\","
+                + "\"message\":\"Requested resource not found\"}");
+
+        assertEquals(Map.of(), backend.storedTags(ORDERS_ARN));
+    }
+
+    @Test
     void deleteTableDropsTags() throws Exception {
         tags.putForAccount(ACCOUNT, REGION + "/orders", Map.of("env", "dev"));
         answer("DeleteTable", 200, "{\"TableDescription\":{\"TableName\":\"orders\",\"TableStatus\":\"DELETING\"}}");

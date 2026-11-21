@@ -381,23 +381,49 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
                                        List<AttributeDefinition> attributeDefinitions, Long readCapacity,
                                        Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
                                        List<LocalSecondaryIndex> localSecondaryIndexes) {
+        CapacityUnits capacity = readCapacity != null && writeCapacity != null
+                ? new CapacityUnits(readCapacity, writeCapacity) : null;
+        return createLocalTable(scope, tableName, keySchema, attributeDefinitions, capacity, null,
+                globalSecondaryIndexes, localSecondaryIndexes);
+    }
+
+    @Override
+    public TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return createLocalTable(scope, tableName, keySchema, attributeDefinitions,
+                onDemand ? null : throughput.capacity(), throughput.warm(), globalSecondaryIndexes,
+                localSecondaryIndexes);
+    }
+
+    private TableDefinition createLocalTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                             List<AttributeDefinition> attributeDefinitions, CapacityUnits capacity,
+                                             WarmUnits warm, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                             List<LocalSecondaryIndex> localSecondaryIndexes) {
         ObjectNode body = body(tableName, "KeySchema", keySchema, "AttributeDefinitions", attributeDefinitions);
-        ObjectNode throughput = null;
-        if (readCapacity != null && writeCapacity != null) {
-            throughput = aws.createObjectNode()
-                    .put("ReadCapacityUnits", readCapacity)
-                    .put("WriteCapacityUnits", writeCapacity);
-            body.put("BillingMode", "PROVISIONED").set("ProvisionedThroughput", throughput);
+        if (capacity != null) {
+            body.put("BillingMode", "PROVISIONED").set("ProvisionedThroughput", capacity(capacity));
         } else {
             body.put("BillingMode", "PAY_PER_REQUEST");
+        }
+        if (warm != null) {
+            body.set("WarmThroughput", warm(warm));
         }
         if (globalSecondaryIndexes != null && !globalSecondaryIndexes.isEmpty()) {
             ArrayNode indexes = body.putArray("GlobalSecondaryIndexes");
             for (GlobalSecondaryIndex gsi : globalSecondaryIndexes) {
                 ObjectNode index = index(indexes, gsi.getIndexName(), gsi.getKeySchema(), gsi.getProjectionType(),
                         gsi.getNonKeyAttributes());
-                if (throughput != null) {
-                    index.set("ProvisionedThroughput", throughput.deepCopy());
+                if (capacity != null) {
+                    long read = gsi.getProvisionedThroughput().getReadCapacityUnits();
+                    long write = gsi.getProvisionedThroughput().getWriteCapacityUnits();
+                    index.set("ProvisionedThroughput",
+                            read > 0 && write > 0 ? capacity(new CapacityUnits(read, write)) : capacity(capacity));
+                }
+                if (gsi.getWarmReadUnitsPerSecond() != null || gsi.getWarmWriteUnitsPerSecond() != null) {
+                    index.set("WarmThroughput",
+                            warm(new WarmUnits(gsi.getWarmReadUnitsPerSecond(), gsi.getWarmWriteUnitsPerSecond())));
                 }
             }
         }
@@ -409,6 +435,56 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             }
         }
         return table(call(scope, "CreateTable", body).path("TableDescription"));
+    }
+
+    @Override
+    public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
+        ObjectNode body = body(tableName);
+        if (change.table().capacity() != null) {
+            body.set("ProvisionedThroughput", capacity(change.table().capacity()));
+        }
+        if (change.table().warm() != null) {
+            body.set("WarmThroughput", warm(change.table().warm()));
+        }
+        if (!change.indexes().isEmpty()) {
+            ArrayNode updates = body.putArray("GlobalSecondaryIndexUpdates");
+            change.indexes().forEach((indexName, spec) -> {
+                ObjectNode update = updates.addObject().putObject("Update").put("IndexName", indexName);
+                if (spec.capacity() != null) {
+                    update.set("ProvisionedThroughput", capacity(spec.capacity()));
+                }
+                if (spec.warm() != null) {
+                    update.set("WarmThroughput", warm(spec.warm()));
+                }
+            });
+        }
+        return table(call(scope, "UpdateTable", body).path("TableDescription"));
+    }
+
+    private ObjectNode capacity(CapacityUnits capacity) {
+        return aws.createObjectNode()
+                .put("ReadCapacityUnits", capacity.readCapacityUnits())
+                .put("WriteCapacityUnits", capacity.writeCapacityUnits());
+    }
+
+    private ObjectNode warm(WarmUnits warm) {
+        ObjectNode node = aws.createObjectNode();
+        if (warm.readUnitsPerSecond() != null) {
+            node.put("ReadUnitsPerSecond", warm.readUnitsPerSecond());
+        }
+        if (warm.writeUnitsPerSecond() != null) {
+            node.put("WriteUnitsPerSecond", warm.writeUnitsPerSecond());
+        }
+        return node;
+    }
+
+    @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return createTable(scope, tableName, keySchema, attributeDefinitions, null, null, globalSecondaryIndexes,
+                localSecondaryIndexes);
     }
 
     private ObjectNode index(ArrayNode indexes, String indexName, List<KeySchemaElement> keySchema,
@@ -532,6 +608,36 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             tagKeys.forEach(current::remove);
             tags.putForAccount(scope.accountId(), key, current);
         }
+    }
+
+    /**
+     * The tags Floci records for the table {@code arn} names in the account and Region it names, matched on the whole
+     * ARN, or for the table whose index it names, when DynamoDB Local describes that table, and for an index as
+     * holding it, as ListTagsOfResource asks it; none for a table DynamoDB Local no longer has.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "dynamodb")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        boolean index = parts.length == 4 && "index".equals(parts[2]);
+        if (!"table".equals(parts[0]) || parts.length != 2 && !index) {
+            return Map.of();
+        }
+        String tableArn = AwsArnUtils.Arn.of("dynamodb", parsed.region(), parsed.accountId(), "table/" + parts[1])
+                .toString();
+        if (!arn.equals(index ? tableArn + "/index/" + parts[3] : tableArn)) {
+            return Map.of();
+        }
+        Map<String, String> held = AccountAwareStorageBackend.readInAccount(tags, parsed.accountId(),
+                key(parsed.region(), parts[1])).orElse(Map.of());
+        if (held.isEmpty() || !findTable(new Scope(parsed.accountId(), parsed.region()), parts[1])
+                .map(table -> !index || table.holdsIndex(parts[3])).orElse(false)) {
+            return Map.of();
+        }
+        return held;
     }
 
     private String existingTableKey(Scope scope, String resourceArn) {

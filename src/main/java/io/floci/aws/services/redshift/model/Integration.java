@@ -34,6 +34,11 @@ public class Integration {
     private Map<String, String> shardSequenceNumbers = new ConcurrentHashMap<>();
     private String backfillLastEvaluatedKey;
     private boolean backfillCompleted;
+    /**
+     * Whether a backfill has filled the current-state table. False on an integration persisted before that table
+     * existed, which scans its source again at startup.
+     */
+    private boolean currentStateProjected;
     private int retryCount;
     private String lastError;
     private boolean pollingEnabled;
@@ -72,6 +77,8 @@ public class Integration {
     public void setBackfillLastEvaluatedKey(String backfillLastEvaluatedKey) { this.backfillLastEvaluatedKey = backfillLastEvaluatedKey; }
     public boolean isBackfillCompleted() { return backfillCompleted; }
     public void setBackfillCompleted(boolean backfillCompleted) { this.backfillCompleted = backfillCompleted; }
+    public boolean isCurrentStateProjected() { return currentStateProjected; }
+    public void setCurrentStateProjected(boolean currentStateProjected) { this.currentStateProjected = currentStateProjected; }
     public int getRetryCount() { return retryCount; }
     public void setRetryCount(int retryCount) { this.retryCount = retryCount; }
     public String getLastError() { return lastError; }

@@ -69,8 +69,7 @@ class CloudFormationAppConfigIntegrationTest {
                     "Properties":{"Name":"stack-original-application"}}}}
                     """));
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
-            String original = client.describeStackResource(request -> request.stackName(stack)
-                    .logicalResourceId("Application")).stackResourceDetail().physicalResourceId();
+            String original = CfnStackTestSupport.physicalId(client, stack, "Application");
             String other = appconfig().body(Map.of("Name", original)).post("/applications")
                     .then().statusCode(201).extract().path("Id");
             try (AutoCloseable applicationCleanup = () -> appconfig().delete("/applications/" + other)

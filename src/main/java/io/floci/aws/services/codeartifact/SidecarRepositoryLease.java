@@ -41,6 +41,7 @@ final class SidecarRepositoryLease {
                 throw new IllegalStateException(sidecarName + " sidecar is being released for repository "
                         + repositoryId);
             }
+            pool.beginUse(repositoryId);
             use.active++;
         }
     }
@@ -58,6 +59,7 @@ final class SidecarRepositoryLease {
             use.active--;
         }
         try {
+            pool.endUse(repositoryId);
             stopIfUnused(repositoryId, use);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not stop {0} sidecar for repository {1} after its last use; "

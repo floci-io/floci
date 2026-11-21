@@ -986,6 +986,67 @@ class KmsServiceTest {
     }
 
     @Test
+    void createAliasOnExistingNameThrowsAndKeepsTarget() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION);
+
+        AwsException sameTarget = assertThrows(AwsException.class, () ->
+                kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION));
+        AwsException otherTarget = assertThrows(AwsException.class, () ->
+                kmsService.createAlias("alias/dup", keyB.getKeyId(), REGION));
+
+        assertEquals("AlreadyExistsException", sameTarget.getErrorCode());
+        assertEquals("AlreadyExistsException", otherTarget.getErrorCode());
+        assertEquals(400, otherTarget.getHttpStatus());
+        assertEquals(keyA.getKeyId(), customerAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void createAliasWithSameNameInAnotherRegionSucceeds() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, "eu-west-1");
+        kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION);
+
+        kmsService.createAlias("alias/dup", keyB.getKeyId(), "eu-west-1");
+
+        assertEquals(1, customerAliases("eu-west-1").size());
+    }
+
+    @Test
+    void concurrentCreateAliasOnSameNameAdmitsExactlyOne() throws Exception {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (KmsKey key : List.of(keyA, keyB)) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        kmsService.createAlias("alias/race", key.getKeyId(), REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("AlreadyExistsException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int created = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(10, TimeUnit.SECONDS)) {
+                    created++;
+                }
+            }
+            assertEquals(1, created);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void createAliasWithoutPrefixThrows() {
         KmsKey key = kmsService.createKey(null, REGION);
         assertThrows(AwsException.class, () ->
@@ -2699,7 +2760,6 @@ class KmsServiceTest {
 
             assertEquals("Enabled", imported.getKeyState());
             assertTrue(imported.isEnabled());
-            assertNull(imported.getImportParameters());
             assertNotNull(kmsService.encrypt(key.getKeyId(), "hello".getBytes(StandardCharsets.UTF_8), REGION));
         }
 
@@ -2767,7 +2827,25 @@ class KmsServiceTest {
         }
 
         @Test
-        void anImportTokenIsSpentByTheImportThatUsedIt() throws Exception {
+        void reimportingOnADisabledKeyLeavesItDisabled() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrapOAEP(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 3));
+            kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+            kmsService.disableKey(key.getKeyId(), REGION);
+
+            KmsKey again = kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+
+            assertEquals("Disabled", again.getKeyState());
+            assertEquals("Disabled", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+            assertFalse(kmsService.describeKey(key.getKeyId(), REGION).isEnabled());
+        }
+
+        @Test
+        void anImportTokenStaysValidForIdenticalMaterialUntilItExpires() throws Exception {
             KmsKey key = externalSymmetricKey();
             KmsService.ImportParameters parameters =
                     kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
@@ -2775,11 +2853,44 @@ class KmsServiceTest {
             kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
                     "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
 
+            KmsKey again = kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+            assertEquals("Enabled", again.getKeyState());
+
+            byte[] other = wrapOAEP(parameters.publicKeyEncoded(), OAEP_SHA_256, material(32, (byte) 4));
             String keyId = key.getKeyId();
-            String spentToken = parameters.importToken();
+            String token = parameters.importToken();
             AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
-                    keyId, spentToken, wrapped, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
-            assertEquals("InvalidImportTokenException", ex.getErrorCode());
+                    keyId, token, other, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+        }
+
+        @Test
+        void concurrentImportsOfIdenticalMaterialAllSucceed() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), OAEP_SHA_256, "RSA_2048", REGION);
+            byte[] raw = material(32, (byte) 3);
+            int n = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(n);
+            try {
+                CountDownLatch go = new CountDownLatch(1);
+                List<Future<KmsKey>> results = new ArrayList<>();
+                for (int i = 0; i < n; i++) {
+                    byte[] wrapped = wrapOAEP(parameters.publicKeyEncoded(), OAEP_SHA_256, raw);
+                    results.add(pool.submit(() -> {
+                        go.await();
+                        return kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                                "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION);
+                    }));
+                }
+                go.countDown();
+                for (Future<KmsKey> r : results) {
+                    assertEquals("Enabled", r.get(10, TimeUnit.SECONDS).getKeyState());
+                }
+            } finally {
+                pool.shutdownNow();
+            }
         }
 
         /**

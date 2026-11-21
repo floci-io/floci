@@ -26,7 +26,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -362,6 +361,36 @@ class ApiGatewayV2CfnProvisionerTest {
             verify(apiGatewayV2Service).createAuthorizer(eq(REGION), eq(API_ID), argThat(request ->
                     "arn:aws:iam::000000000000:role/authorizer".equals(request.get("authorizerCredentialsArn"))));
         }
+    }
+
+    @Test
+    void bodyMapsIntegrationSubtypeAndRequestParameters() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("body-integration");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("body-route", "POST /send"));
+
+        StackResource resource = provision(body("""
+                {"paths":{"/send":{"post":{
+                  "x-amazon-apigateway-integration":{"type":"aws_proxy",
+                    "integrationSubtype":"SQS-SendMessage",
+                    "credentials":"arn:aws:iam::000000000000:role/integration",
+                    "payloadFormatVersion":"1.0",
+                    "requestParameters":{"QueueUrl":"http://localhost/000000000000/q",
+                      "MessageBody":"$request.body","DelaySeconds":5,
+                      "MessageAttributes":{"Authorization":{"DataType":"String",
+                        "StringValue":"${request.header.Authorization}"}}}}}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(request ->
+                "SQS-SendMessage".equals(request.get("integrationSubtype"))
+                        && Map.of("QueueUrl", "http://localhost/000000000000/q", "MessageBody", "$request.body",
+                                "DelaySeconds", "5",
+                                "MessageAttributes", "{\"Authorization\":{\"DataType\":\"String\","
+                                        + "\"StringValue\":\"${request.header.Authorization}\"}}")
+                        .equals(request.get("requestParameters"))));
     }
 
     @Test
@@ -912,7 +941,7 @@ class ApiGatewayV2CfnProvisionerTest {
                 """);
 
         assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
-        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null, null);
     }
 
     @Test
@@ -923,8 +952,27 @@ class ApiGatewayV2CfnProvisionerTest {
 
         verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY",
                 "${request.method}", 15000, Map.of("append:header.x-request-id", "$context.requestId",
-                        "overwrite:header.x-example", "static-value"),
+                        "overwrite:header.x-example", "static-value"), null,
                 Map.of("application/json", "{\"a\":1}"));
+    }
+
+    @Test
+    void integrationResponseParametersBecomeAMapOfDestinationToSource() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "ResponseParameters":{"500":{"ResponseParameters":[
+                           {"Destination":"overwrite:statuscode","Source":"403"},
+                           {"Destination":"append:header.x-stack","Source":{"Ref":"AWS::StackName"}}]}}}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("500", Map.of("overwrite:statuscode", "403", "append:header.x-stack", "test-stack"))
+                        .equals(req.get("responseParameters"))));
     }
 
     @Test
@@ -951,22 +999,26 @@ class ApiGatewayV2CfnProvisionerTest {
         prior.setTemplateSelectionExpression("${request.method}");
         prior.setTimeoutInMillis(15000);
         prior.setRequestParameters(Map.of("overwrite:header.x-example", "old"));
+        prior.setResponseParameters(Map.of("500", Map.of("overwrite:statuscode", "200")));
         prior.setRequestTemplates(Map.of("application/json", "{}"));
         stubIntegrationUpdate(prior);
         StackResource integration = provisionIntegration("""
                 {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
                  "ConnectionType":"VPC_LINK","ConnectionId":"vl-1","IntegrationMethod":"POST",
-                 "TimeoutInMillis":"3000","RequestParameters":{"overwrite:header.x-example":"new"}}
+                 "TimeoutInMillis":"3000","RequestParameters":{"overwrite:header.x-example":"new"},
+                 "ResponseParameters":{"404":{"ResponseParameters":[
+                   {"Destination":"overwrite:statuscode","Source":"200"}]}}}
                 """);
 
         assertTrue(provisioner.rollbackUpdate(integration));
 
         InOrder order = inOrder(apiGatewayV2Service);
         order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "POST", null, 3000,
-                Map.of("overwrite:header.x-example", "new"), null);
+                Map.of("overwrite:header.x-example", "new"), Map.of("404", Map.of("overwrite:statuscode", "200")),
+                null);
         order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "GET",
                 "${request.method}", 15000, Map.of("overwrite:header.x-example", "old"),
-                Map.of("application/json", "{}"));
+                Map.of("500", Map.of("overwrite:statuscode", "200")), Map.of("application/json", "{}"));
     }
 
     @Test
@@ -983,9 +1035,9 @@ class ApiGatewayV2CfnProvisionerTest {
                 """);
 
         assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
-        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null, null);
         verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0,
-                Map.of("overwrite:header.x-example", "old"), null);
+                Map.of("overwrite:header.x-example", "old"), null, null);
     }
 
     private static final String NO_VALUE_SETTINGS = """
@@ -1020,7 +1072,7 @@ class ApiGatewayV2CfnProvisionerTest {
                 "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
 
         assertTrue(resource.getStatus().endsWith("_COMPLETE"), resource.getStatus());
-        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null, null);
     }
 
     @Test
@@ -1032,7 +1084,7 @@ class ApiGatewayV2CfnProvisionerTest {
                 "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
 
         verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY", null, 15000,
-                null, null);
+                null, null, null);
     }
 
     @Test
@@ -1194,9 +1246,7 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine(Map<String, Boolean> conditions) {
-        return new CloudFormationTemplateEngine("000000000000", REGION, "test-stack", "stack/id",
-                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
-                (Function<String, String>) name -> null);
+        return CfnProvisionerFixture.engine(mapper, REGION, conditions);
     }
 
     private static Route route(String id, String routeKey) {

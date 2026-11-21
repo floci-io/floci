@@ -39,7 +39,7 @@ class AthenaGetWorkGroupIntegrationTest {
     }
 
     @Test
-    void getWorkGroupNamingNullReturnsPrimary() {
+    void getWorkGroupRejectsNullRequiredName() {
         given()
             .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
             .contentType(CONTENT_TYPE)
@@ -47,8 +47,9 @@ class AthenaGetWorkGroupIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("WorkGroup.Name", equalTo("primary"));
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("WorkGroup"));
     }
 
     @Test

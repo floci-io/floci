@@ -1,9 +1,11 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.configservice.AwsConfigService;
+import io.floci.aws.services.configservice.ConfigRequestShapes;
 import io.floci.aws.services.configservice.model.ConfigRule;
 import io.floci.aws.services.configservice.model.ConfigRuleSource;
 import io.floci.aws.services.configservice.model.CustomPolicyDetails;
@@ -22,6 +24,7 @@ import java.util.Set;
 public class ConfigCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(ConfigCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String CONFIG_RULE = "AWS::Config::ConfigRule";
 
     private final AwsConfigService configService;
@@ -49,11 +52,14 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
                     ? ctx.generatePhysicalName(resource.getLogicalId(), 128, false)
                     : previousName;
         }
-        ConfigRule rule = configService.putConfigRule(ctx.region(), new ConfigRule(
+        ConfigRule desired = new ConfigRule(
                 name, null, null, text(resolved, "Description"), scope(resolved.path("Scope")),
                 source(resolved.path("Source")), inputParameters(resolved.path("InputParameters")),
                 text(resolved, "MaximumExecutionFrequency"), null, null,
-                evaluationModes(resolved.path("EvaluationModes"))));
+                evaluationModes(resolved.path("EvaluationModes")));
+        ConfigRequestShapes.check("PutConfigRule",
+                MAPPER.createObjectNode().set("ConfigRule", MAPPER.valueToTree(desired)));
+        ConfigRule rule = configService.putConfigRule(ctx.region(), desired);
         resource.setPhysicalId(rule.configRuleName());
         resource.getAttributes().put("Arn", rule.configRuleArn());
         resource.getAttributes().put("ConfigRuleId", rule.configRuleId());

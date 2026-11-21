@@ -1369,4 +1369,51 @@ class SnsIntegrationTest {
             .body("attributes.DefaultSenderID", equalTo("Brand123"))
             .body("attributes.MonthlySpendLimit", equalTo("10"));
     }
+
+    @Test
+    @Order(151)
+    void publish_queryProtocol_rejectsPhoneNumberNotInE164Format() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("PhoneNumber", "+44 77777854943943")
+            .formParam("Message", "hi")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameter"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Invalid parameter: PhoneNumber Reason: +44 77777854943943 is not valid to publish to"));
+    }
+
+    @Test
+    @Order(152)
+    void publish_jsonProtocol_rejectsPhoneNumberNotInE164Format() {
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.Publish")
+            .body("{\"PhoneNumber\": \"not-a-number\", \"Message\": \"hi\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameter"))
+            .body("message", equalTo("Invalid parameter: PhoneNumber Reason: not-a-number is not valid to publish to"));
+    }
+
+    @Test
+    @Order(153)
+    void publish_queryProtocol_acceptsE164PhoneNumber() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("PhoneNumber", "+447700900123")
+            .formParam("Message", "hi")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+    }
 }

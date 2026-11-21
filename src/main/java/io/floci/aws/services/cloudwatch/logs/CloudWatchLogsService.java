@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.BoundedMaps;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -33,7 +34,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -106,13 +106,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     /** Cached Logs Insights queries keyed by queryId, bounded with LRU-style eviction. */
     private static final int MAX_STORED_QUERIES = 100;
-    private final Map<String, QueryRecord> insightsQueries = Collections.synchronizedMap(
-            new LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, QueryRecord> eldest) {
-                    return size() > MAX_STORED_QUERIES;
-                }
-            });
+    private final Map<String, QueryRecord> insightsQueries = BoundedMaps.leastRecentlyUsed(MAX_STORED_QUERIES);
 
     @Inject
     public CloudWatchLogsService(StorageFactory storageFactory,
@@ -460,18 +454,34 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         return LogGroupTagTarget.resolve(resourceArn, region, regionResolver.getAccountId(), regionResolver.getPartition());
     }
 
+    /**
+     * Gives the group a new map holding its tags and {@code tags}, under the lock creating and deleting a group take,
+     * so a tag call never puts back a group a delete has removed.
+     */
     public void tagLogGroup(String groupName, Map<String, String> tags, String region) {
-        String key = groupKey(region, groupName);
-        LogGroup group = requireNamedLogGroup(region, groupName);
-        group.getTags().putAll(tags);
-        groupStore.put(key, group);
+        synchronized (metricFilterStore) {
+            String key = groupKey(region, groupName);
+            LogGroup group = requireNamedLogGroup(region, groupName);
+            Map<String, String> merged = new HashMap<>(group.getTags() != null ? group.getTags() : Map.of());
+            merged.putAll(tags);
+            group.setTags(merged);
+            groupStore.put(key, group);
+        }
     }
 
+    /**
+     * Gives the group a new map holding its tags but {@code tagKeys}, under the lock creating and deleting a group
+     * take, so an untag call never puts back a group a delete has removed.
+     */
     public void untagLogGroup(String groupName, List<String> tagKeys, String region) {
-        String key = groupKey(region, groupName);
-        LogGroup group = requireNamedLogGroup(region, groupName);
-        tagKeys.forEach(group.getTags()::remove);
-        groupStore.put(key, group);
+        synchronized (metricFilterStore) {
+            String key = groupKey(region, groupName);
+            LogGroup group = requireNamedLogGroup(region, groupName);
+            Map<String, String> remaining = new HashMap<>(group.getTags() != null ? group.getTags() : Map.of());
+            tagKeys.forEach(remaining::remove);
+            group.setTags(remaining);
+            groupStore.put(key, group);
+        }
     }
 
     /**
@@ -503,6 +513,18 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public Map<String, String> listTagsLogGroup(String groupName, String region) {
         LogGroup group = requireNamedLogGroup(region, groupName);
         return group.getTags();
+    }
+
+    /**
+     * The tags of the log group named {@code name} in {@code region} of {@code accountId}, read in place where its tag
+     * handlers read; none when that account holds no such group. Tag calls give the group a new map one at a time, so
+     * the read is of one whole set.
+     */
+    Map<String, String> groupTagsInAccount(String accountId, String region, String name) {
+        return getForAccount(groupStore, accountId, groupKey(region, name))
+                .filter(stored -> name.equals(stored.getLogGroupName()))
+                .map(LogGroup::getTags)
+                .orElse(Map.of());
     }
 
     // ──────────────────────────── Log Streams ────────────────────────────
@@ -1151,6 +1173,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
      */
     public String startQuery(List<String> logGroupNames, long startTimeSeconds, long endTimeSeconds,
                              String queryString, Integer limit, String region) {
+        String tooLong = SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(
+                "queryString", queryString, 0, 10_000);
+        if (tooLong != null) {
+            throw SmithyValidationErrors.exception("InvalidParameterException", tooLong);
+        }
         long startMs = startTimeSeconds * 1000L;
         long endMs = endTimeSeconds * 1000L;
 

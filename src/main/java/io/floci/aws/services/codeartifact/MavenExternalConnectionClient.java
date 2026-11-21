@@ -1,16 +1,20 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -82,7 +86,75 @@ public class MavenExternalConnectionClient {
      * public repository {@code externalConnectionName} names.
      */
     public Optional<FetchedAsset> fetchAsset(String externalConnectionName, String gav) {
-        return send(externalConnectionName, gav, "GET").map(response -> new FetchedAsset(response.body()));
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        boolean fetched = fetchAsset(externalConnectionName, gav, in -> in.transferTo(buffer));
+        return fetched ? Optional.of(new FetchedAsset(buffer.toByteArray())) : Optional.empty();
+    }
+
+    /** One asset's real size, fetched straight to {@code destination} without ever being held whole in memory. */
+    public record FetchedFile(long size) {}
+
+    /**
+     * {@link #fetchAsset(String, String)}'s own streamed sibling, for a release asset too large to
+     * ever hold as one {@code byte[]} (~2 GiB, the JVM array limit): the confirmed-live response
+     * streamed straight to {@code destination} instead of into a resident array. Capped at {@code
+     * CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} during the copy itself, via {@link
+     * AssetDigestingInputStream}, rather than downloaded in full and checked only afterward: the
+     * real public repository's own file size is otherwise unbounded, so without this an oversized
+     * one would still be fully pulled across the network and written to local disk before ever
+     * being rejected.
+     */
+    public Optional<FetchedFile> fetchAsset(String externalConnectionName, String gav, Path destination) {
+        long[] size = new long[1];
+        boolean fetched = fetchAsset(externalConnectionName, gav,
+                in -> size[0] = AssetDigestingInputStream.copyCapped(in, destination,
+                        CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES));
+        return fetched ? Optional.of(new FetchedFile(size[0])) : Optional.empty();
+    }
+
+    private interface BodyConsumer {
+        void accept(InputStream body) throws IOException;
+    }
+
+    /** The one real fetch both {@link #fetchAsset(String, String)} and {@link #fetchAsset(String,
+     * String, Path)} share, as well as the small {@code maven-metadata.xml} fetch. Uses the
+     * worst-case download timeout: a release asset fetched here can be up to 5 GB, and its real
+     * size isn't known until the response itself arrives, so a flat 20 seconds would cancel a
+     * legitimately large, still-in-progress download (harmless for the small metadata fetch,
+     * which never takes anywhere near this long anyway).
+     */
+    private boolean fetchAsset(String externalConnectionName, String gav, BodyConsumer consumer) {
+        String baseUrl = baseUrls.get(externalConnectionName);
+        if (baseUrl == null) {
+            return false;
+        }
+        HttpResponse<InputStream> response;
+        try {
+            HttpRequest request = HttpRequest.newBuilder(requestUri(baseUrl, gav))
+                    .timeout(SidecarUriUtils.maxTransferTimeout())
+                    .GET()
+                    .build();
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            LOG.warnv("Could not fetch {0} from external connection {1}: {2}", gav, externalConnectionName,
+                    e.getMessage());
+            return false;
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            return false;
+        }
+        try (InputStream body = response.body()) {
+            consumer.accept(body);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Could not read {0} from external connection {1}: {2}", gav, externalConnectionName,
+                    e.getMessage());
+            return false;
+        }
     }
 
     /** Whether {@code gav} exists in the real public repository, without downloading it. */
@@ -104,28 +176,6 @@ public class MavenExternalConnectionClient {
             LOG.warnv("Could not check {0} in external connection {1}: {2}", gav, externalConnectionName,
                     e.getMessage());
             return false;
-        }
-    }
-
-    private Optional<HttpResponse<byte[]>> send(String externalConnectionName, String gav, String method) {
-        String baseUrl = baseUrls.get(externalConnectionName);
-        if (baseUrl == null) {
-            return Optional.empty();
-        }
-        try {
-            HttpRequest request = HttpRequest.newBuilder(requestUri(baseUrl, gav))
-                    .timeout(Duration.ofSeconds(20))
-                    .method(method, HttpRequest.BodyPublishers.noBody())
-                    .build();
-            HttpResponse<byte[]> response = httpClient.send(request, BodyHandlers.ofByteArray());
-            return response.statusCode() == 200 ? Optional.of(response) : Optional.empty();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return Optional.empty();
-        } catch (IOException e) {
-            LOG.warnv("Could not fetch {0} from external connection {1}: {2}", gav, externalConnectionName,
-                    e.getMessage());
-            return Optional.empty();
         }
     }
 

@@ -1,6 +1,8 @@
 package io.floci.aws.services.ecs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -9,11 +11,13 @@ import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackedMap;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
@@ -62,6 +66,7 @@ import io.floci.aws.services.ecs.model.RegisterContainerInstanceRequest;
 import io.floci.aws.services.ecs.model.RegisterTaskDefinitionRequest;
 import io.floci.aws.services.ecs.model.RunTaskRequest;
 import io.floci.aws.services.ecs.model.RuntimePlatform;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import io.floci.aws.services.ecs.model.ServiceEvent;
 import io.floci.aws.services.ecs.model.ServiceRevision;
@@ -112,6 +117,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
@@ -121,9 +127,11 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup {
+public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup,
+        StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
+    private static final ObjectMapper IDENTITY_DOCUMENT_JSON = new ObjectMapper();
     private static final String DEFAULT_CLUSTER = "default";
 
     private final RegionResolver regionResolver;
@@ -152,14 +160,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final int TASK_STOP_CONCURRENCY = 8;
     /** How long a container teardown waits for the launches it interrupted to land their tasks. */
     private static final long LAUNCHER_SHUTDOWN_SECONDS = 30;
+    private static final long RECONCILER_SHUTDOWN_SECONDS = 2;
     // Runs the service scheduler's Docker stops (see stopInBackground). A container teardown drains
     // and shuts it down, and afterReset() replaces it, as with the reconciler.
-    private volatile ExecutorService taskStopper = newTaskStopper();
+    private volatile ExecutorService taskStopper;
     // Runs RunTask's and StartTask's launches after the call has answered. A container teardown
     // interrupts and shuts it down, and afterReset() replaces it, as with the task stopper.
-    private volatile ExecutorService taskLauncher = newTaskLauncher();
+    private volatile ExecutorService taskLauncher;
     private final Object reconcilerLock = new Object();
-    private final Object reconciliationPassLock = new Object();
+    private final ReentrantLock reconciliationPassLock = new ReentrantLock();
     // False until a previous run's task containers are confirmed gone; no task starts before.
     private volatile boolean leftoverContainersRemoved = true;
     private volatile boolean leftoverTaskVolumesRemoved;
@@ -167,8 +176,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<EcsCluster> clustersStore;
     // region::family:revision → TaskDefinition (entries persisted before regions were keyed: family:revision)
     private Map<String, TaskDefinition> taskDefinitions = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<TaskDefinition> taskDefinitionsStore;
     // region::family → latest revision number
     private Map<String, Integer> latestRevisions = new ConcurrentHashMap<>();
     // taskArn → EcsTask
@@ -253,6 +264,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, ContainerInstance> containerInstances = new ConcurrentHashMap<>();
     // name → CapacityProvider (excludes built-ins FARGATE, FARGATE_SPOT)
     private Map<String, CapacityProvider> capacityProviders = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<CapacityProvider> capacityProvidersStore;
     // taskSetArn → TaskSet
     private final Map<String, TaskSet> taskSets = new ConcurrentHashMap<>();
     // Serializes create/update/delete of one service key (region, cluster, name). A fixed set of
@@ -290,13 +302,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 execSessions, discoveryRegistrar, cloudWatchMetricsService, Clock.systemUTC());
     }
 
-    /** With the clock for Container Insights samples and task protection deadlines. */
+    /** With the clock for Container Insights samples, task protection deadlines and target drains. */
     EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
                StorageFactory storageFactory, EcsEventPublisher eventPublisher,
                EcsExecSessionRegistry execSessions,
                EcsServiceDiscoveryRegistrar discoveryRegistrar,
                CloudWatchMetricsService cloudWatchMetricsService, Clock clock) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
+                execSessions, discoveryRegistrar, cloudWatchMetricsService, clock, newTaskLauncher(), newTaskStopper());
+    }
+
+    /** With explicit task executors for deterministic lifecycle tests. */
+    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+               EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+               StorageFactory storageFactory, EcsEventPublisher eventPublisher,
+               EcsExecSessionRegistry execSessions,
+               EcsServiceDiscoveryRegistrar discoveryRegistrar,
+               CloudWatchMetricsService cloudWatchMetricsService, Clock clock,
+               ExecutorService taskLauncher, ExecutorService taskStopper) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -312,6 +336,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.discoveryRegistrar = discoveryRegistrar;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.clock = clock;
+        this.taskLauncher = taskLauncher;
+        this.taskStopper = taskStopper;
     }
 
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -396,17 +422,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.clusters = storageBacked("ecs-clusters.json",
+        this.clustersStore = storageFactory.create("ecs", "ecs-clusters.json",
                 new TypeReference<Map<String, EcsCluster>>() {});
-        this.taskDefinitions = storageBacked("ecs-task-definitions.json",
+        this.clusters = new StorageBackedMap<>(this.clustersStore);
+        this.taskDefinitionsStore = storageFactory.create("ecs", "ecs-task-definitions.json",
                 new TypeReference<Map<String, TaskDefinition>>() {});
+        this.taskDefinitions = new StorageBackedMap<>(this.taskDefinitionsStore);
         this.latestRevisions = storageBacked("ecs-latest-revisions.json",
                 new TypeReference<Map<String, Integer>>() {});
         this.servicesStore = storageFactory.create("ecs", "ecs-services.json",
                 new TypeReference<Map<String, EcsServiceModel>>() {});
         this.services = new StorageBackedMap<>(this.servicesStore);
-        this.capacityProviders = storageBacked("ecs-capacity-providers.json",
+        this.capacityProvidersStore = storageFactory.create("ecs", "ecs-capacity-providers.json",
                 new TypeReference<Map<String, CapacityProvider>>() {});
+        this.capacityProviders = new StorageBackedMap<>(this.capacityProvidersStore);
         this.attributes = storageBacked("ecs-attributes.json",
                 new TypeReference<Map<String, List<Attribute>>>() {});
         this.accountSettings = storageBacked("ecs-account-settings.json",
@@ -447,22 +476,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         stopManagedContainers();
     }
 
-    /**
-     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
-     * state reset. Task state is transient (memory-only), so without this the containers
-     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
-     * tick awaited, so it cannot restart drained tasks between this teardown and the final
-     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
-     * interrupted and its launches awaited, so each lands its task before the sweep below. The
-     * stops the task stopper already has are let finish, since each owns its task's handle until
-     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
-     */
+    /** Stops task producers before any owner retires shared credentials or networking. */
     @Override
-    public void stopManagedContainers() {
-        ScheduledExecutorService current = reconciler;
-        current.shutdownNow();
+    public void beginTeardown() {
+        reconciler.shutdownNow();
         try {
-            current.awaitTermination(2, TimeUnit.SECONDS);
+            if (reconciliationPassLock.tryLock(RECONCILER_SHUTDOWN_SECONDS, TimeUnit.SECONDS)) {
+                reconciliationPassLock.unlock();
+            } else {
+                LOG.warnv("ECS reconciliation still running after {0} seconds of teardown; "
+                        + "shared resources will retire before the pass finishes", RECONCILER_SHUTDOWN_SECONDS);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -477,6 +501,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
+     * state reset. Task state is transient (memory-only), so without this the containers
+     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
+     * tick given a bounded wait, so cooperative passes land before this teardown and the final
+     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
+     * interrupted and its launches awaited, so each lands its task before the sweep below. The
+     * stops the task stopper already has are let finish, since each owns its task's handle until
+     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
+     */
+    @Override
+    public void stopManagedContainers() {
+        beginTeardown();
         drainTaskStopper();
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
             if (taskStops.containsKey(taskArn)) {
@@ -537,6 +576,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // wipes CloudWatch, so the Container Insights samples it held must be written again.
         launchFailures.clear();
         publishedInsights.clear();
+        taskSets.clear();
     }
 
     /**
@@ -1936,6 +1976,46 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return task;
     }
 
+    /**
+     * The container instance an EC2 replica task runs on: the ACTIVE instance of the cluster running
+     * the fewest tasks, among those registered for the placement's capacity provider when any are,
+     * otherwise among those registered for none. Null for a Fargate placement, and when the cluster
+     * has no instance to offer, which leaves the task running without one as before container
+     * instances were considered.
+     */
+    private String containerInstanceFor(EcsCluster cluster, Placement placement) {
+        if (placement.launchType() != LaunchType.EC2) {
+            return null;
+        }
+        String prefix = containerInstanceKey(cluster.getClusterArn(), "");
+        List<ContainerInstance> active = containerInstances.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(prefix))
+                .map(Map.Entry::getValue)
+                .filter(ci -> "ACTIVE".equals(ci.getStatus()))
+                .toList();
+        String provider = placement.capacityProviderName();
+        List<ContainerInstance> candidates = active;
+        if (provider != null) {
+            List<ContainerInstance> ofProvider = active.stream()
+                    .filter(ci -> provider.equals(ci.getCapacityProviderName()))
+                    .toList();
+            candidates = !ofProvider.isEmpty() ? ofProvider : active.stream()
+                    .filter(ci -> ci.getCapacityProviderName() == null || ci.getCapacityProviderName().isBlank())
+                    .toList();
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Map<String, Long> load = tasks.values().stream()
+                .filter(t -> t.getContainerInstanceArn() != null)
+                .filter(t -> !TaskStatus.STOPPED.name().equals(t.getLastStatus()))
+                .collect(Collectors.groupingBy(EcsTask::getContainerInstanceArn, Collectors.counting()));
+        return candidates.stream()
+                .min(Comparator.comparingLong(ci -> load.getOrDefault(ci.getContainerInstanceArn(), 0L)))
+                .map(ContainerInstance::getContainerInstanceArn)
+                .orElse(null);
+    }
+
     /** Where a task runs: a launch type, or the capacity provider that chose one for it. */
     private record Placement(LaunchType launchType, String capacityProviderName) {}
 
@@ -2255,15 +2335,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.bumpVersion();
             return task;
         }
-        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        boolean deactivating = TaskStatus.DEACTIVATING.name().equals(task.getLastStatus());
+        if (!deactivating && !TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
             task.setDesiredStatus(TaskStatus.STOPPED.name());
-            task.setLastStatus(TaskStatus.STOPPING.name());
-            task.setStoppingAt(Instant.now());
             task.setStoppedReason(reason != null ? reason : "Stopped by user");
             task.setStopCode(stopCode);
-            task.bumpVersion();
-            deregisterTaskFromLoadBalancers(task, region);
+            Duration drain = deregisterTaskFromLoadBalancers(task, region);
             deregisterTaskFromServiceDiscovery(task, region);
+            if (inBackground && !drain.isZero() && !STOP_CODE_ESSENTIAL_CONTAINER_EXITED.equals(stopCode)) {
+                // As on AWS, the task stays DEACTIVATING, serving its in-flight requests, until its
+                // targets have drained; the first reconciliation tick after that stops it.
+                task.setLastStatus(TaskStatus.DEACTIVATING.name());
+                task.setTargetsDrainedAt(clock.instant().plus(drain));
+                task.bumpVersion();
+                return task;
+            }
+        } else if (deactivating && inBackground && task.getTargetsDrainedAt() != null
+                && clock.instant().isBefore(task.getTargetsDrainedAt())) {
+            return task; // StopTask does not wait for the drain
+        }
+        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+            task.setLastStatus(TaskStatus.STOPPING.name());
+            task.setStoppingAt(Instant.now());
+            task.bumpVersion();
         }
 
         if (!dockerMode) {
@@ -2378,6 +2472,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.setExecutionStoppedAt(Instant.now());
         task.bumpVersion();
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(task.getTaskArn());
         if (task.getContainers() != null) {
             task.getContainers().forEach(c -> {
                 c.setLastStatus("STOPPED");
@@ -2407,7 +2502,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private void registerTaskWithLoadBalancers(EcsTask task, EcsCluster cluster, String region) {
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.registerTask(task, svc, region);
+            ContainerInstance instance = task.getContainerInstanceArn() == null ? null
+                    : resolveContainerInstance(cluster.getClusterArn(), task.getContainerInstanceArn());
+            lbRegistrar.registerTask(task, svc, instance != null ? instance.getEc2InstanceId() : null, region);
         }
     }
 
@@ -2537,21 +2634,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .orElse(null);
     }
 
-    /** Deregisters a stopping task's containers from any ELBv2 target groups its service declared. */
-    private void deregisterTaskFromLoadBalancers(EcsTask task, String region) {
+    /**
+     * Deregisters a stopping task's containers from any ELBv2 target groups its service declared.
+     *
+     * @return how long those targets drain, as {@link EcsLoadBalancerRegistrar#deregisterTask} reports
+     */
+    private Duration deregisterTaskFromLoadBalancers(EcsTask task, String region) {
         // Gated on dockerMode for symmetry with the register hook (inside launchTasks'
         // dockerMode branch): mock-mode tasks have no containers and never registered.
         if (!dockerMode || task.getOwningServiceArn() == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
         if (cluster == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.deregisterTask(task, svc, region);
+            return lbRegistrar.deregisterTask(task, svc, region);
         }
+        return Duration.ZERO;
     }
 
     /** Deregisters a stopping task from the Cloud Map services it actually joined. */
@@ -2804,7 +2906,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * @param defaultPageSize the page size when the request names none, which is not the same for
-     *                        every listing: ListServices answers with ten, the rest with a hundred.
+     *                        every listing: ListServices and ListServicesByNamespace answer with ten,
+     *                        the rest with a hundred.
      */
     private static ListPage paginate(List<String> arns, Integer maxResults, String nextToken,
                                       int defaultPageSize) {
@@ -2825,11 +2928,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (nextToken == null || nextToken.isBlank()) {
             return 0;
         }
+        int offset;
         try {
-            return Integer.parseInt(Base64Url.decode(nextToken));
+            offset = Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }
+        if (offset < 0) {
+            throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
+        }
+        return offset;
     }
 
     // ── Task Protection ───────────────────────────────────────────────────────
@@ -2882,6 +2990,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (task) {
             return isTaskProtected(task, clock.instant());
         }
+    }
+
+    /**
+     * Whether a task's load balancer targets pass their health checks, as ECS waits for before it
+     * stops the task a rolling deployment replaces. As on AWS, a replacement that never turns
+     * healthy holds the deployment.
+     */
+    private boolean loadBalancerTargetsHealthy(EcsTask task, EcsServiceModel svc) {
+        if (!dockerMode || lbRegistrar == null || svc.getLoadBalancers().isEmpty()) {
+            return true;
+        }
+        return lbRegistrar.targetsHealthy(task);
     }
 
     private boolean eligibleForServiceStop(EcsTask task) {
@@ -3014,6 +3134,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
                     ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
             svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+            svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc.getServiceConnectConfiguration(), cluster,
+                    region));
             svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
             svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
             svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
@@ -3034,6 +3156,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 svc.setTags(new LinkedHashMap<>(request.getTags()));
             }
 
+            // Last before the service is stored: a discovery name the namespace cannot take refuses
+            // the request with nothing created.
+            svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(),
+                    svc.getServiceConnectConfiguration(), svc.getServiceConnectNamespaceArn(), List.of(), region,
+                    "ClientException"));
+            if ("CODE_DEPLOY".equals(controller)) {
+                try {
+                    createInitialTaskSet(svc, cluster, region);
+                } catch (RuntimeException e) {
+                    // The service isn't stored, so neither are the endpoints just made for it.
+                    if (discoveryRegistrar != null) {
+                        discoveryRegistrar.deleteServiceConnectServices(svc.getServiceConnectResources());
+                    }
+                    throw e;
+                }
+            }
             services.put(key, svc);
             cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
             persistCluster(region, cluster);
@@ -3135,14 +3273,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 // launch fails without changing the service.
                 TaskDefinition resolved = request.getTaskDefinition() == null ? null
                         : resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
+                if (request.getDesiredCount() != null && request.getDesiredCount() < 0) {
+                    throw new AwsException("InvalidParameterException",
+                            "desiredCount cannot be a negative number.", 400);
+                }
+                // A Service Connect configuration's endpoints are taken last of the checks and before
+                // anything is applied, as nothing after them can refuse the request: one whose discovery
+                // names its namespace cannot take refuses it with the service unchanged.
+                Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
+                String namespaceArn = serviceConnectConfiguration == null ? null
+                        : serviceConnectNamespaceArn(serviceConnectConfiguration, cluster, region);
+                List<ServiceConnectServiceResource> serviceConnectResources = serviceConnectConfiguration == null
+                        ? null
+                        : syncServiceConnectResources(svc.getServiceArn(), serviceConnectConfiguration, namespaceArn,
+                                serviceConnectResourcesOf(svc), region, "InvalidParameterException");
                 // Settle the outgoing deployment against the service as it stands, before this request
                 // changes its desired count or task definition: one whose tasks are up has finished,
                 // whether or not anything read it. recordServiceDeployment stops it if it has not.
                 currentServiceDeployment(svc);
                 if (request.getDesiredCount() != null) {
-                    if (request.getDesiredCount() < 0) {
-                        throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
-                    }
                     svc.setDesiredCount(request.getDesiredCount());
                 }
                 // The members whose change starts new tasks, as UpdateService documents them: the network
@@ -3198,27 +3347,28 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
                 // triggers a new service deployment", so a real change rolls the deployment the way a
                 // task-definition change does. An omitted parameter is not a change and rolls nothing.
-                Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
                 boolean serviceConnectChanged = serviceConnectConfiguration != null
                         && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
                 if (serviceConnectConfiguration != null) {
                     svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+                    svc.setServiceConnectNamespaceArn(namespaceArn);
+                    svc.setServiceConnectResources(serviceConnectResources);
                 }
                 boolean taskDefChanged = false;
-                String platformVersionBefore = svc.getPlatformVersion();
+                String platformVersionBefore = resolvePlatformVersion(svc.getPlatformVersion());
                 if (resolved != null) {
                     taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
                     svc.setTaskDefinition(resolved.getTaskDefinitionArn());
                     applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
                             ? request.getPlatformVersion() : svc.getPlatformVersion());
                 } else if (request.getPlatformVersion() != null) {
-                    svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
-                            ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
+                    svc.setPlatformVersion(request.getPlatformVersion());
                 }
                 // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
                 // service deployment". Compared after resolution, so a request that asks for LATEST on a
                 // service already running the version LATEST resolves to is not a change.
-                rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
+                rollingChange |= !Objects.equals(platformVersionBefore,
+                        resolvePlatformVersion(svc.getPlatformVersion()));
                 if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
                     svc.setDeploymentId(newDeploymentId());
                     svc.setLastDeploymentAt(Instant.now());
@@ -3337,7 +3487,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return placementFor(strategy.getFirst().capacityProvider()).launchType();
     }
 
-    /** A Fargate service reports the platform its tasks run on; an EC2 service reports neither. */
+    /** A Fargate service retains its requested platform version; an EC2 service reports neither member. */
     private static void applyServicePlatform(EcsServiceModel svc, TaskDefinition taskDef, String platformVersion) {
         if (svc.getLaunchType() != LaunchType.FARGATE) {
             svc.setPlatformVersion(null);
@@ -3345,9 +3495,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return;
         }
         svc.setPlatformVersion(platformVersion == null || platformVersion.isBlank()
-                || PLATFORM_VERSION_LATEST.equals(platformVersion)
-                ? DEFAULT_PLATFORM_VERSION : platformVersion);
+                ? PLATFORM_VERSION_LATEST : platformVersion);
         svc.setPlatformFamily(platformFamilyOf(taskDef));
+    }
+
+    private static String resolvePlatformVersion(String platformVersion) {
+        return PLATFORM_VERSION_LATEST.equals(platformVersion) ? DEFAULT_PLATFORM_VERSION : platformVersion;
     }
 
     /**
@@ -3400,6 +3553,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             svc.setStatus("INACTIVE");
             svc.setDesiredCount(0);
+            // Under the service's monitor, which a rollback holds while it brings the endpoints back.
+            synchronized (svc) {
+                if (discoveryRegistrar != null) {
+                    discoveryRegistrar.deleteServiceConnectServices(serviceConnectResourcesOf(svc));
+                }
+                svc.setServiceConnectResources(new ArrayList<>());
+            }
             cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
             services.put(key, svc);
             persistCluster(region, cluster);
@@ -3423,6 +3583,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (serviceArn != null) {
                 serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
                 serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
+                taskSets.values().removeIf(ts -> serviceArn.equals(ts.getServiceArn()));
                 launchFailures.remove(serviceArn);
             }
             return svc;
@@ -3495,17 +3656,86 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
     }
 
-    public List<String> listServicesByNamespace(String namespace, String region) {
-        return services.values().stream()
-                .filter(s -> namespace.equals(s.getNamespace()))
-                .filter(s -> !"INACTIVE".equals(s.getStatus()))
+    /**
+     * Lists the Region's services whose Service Connect configuration joined the namespace a name or ARN gives, its
+     * own or, when it names none, its cluster's default. Pages ten at a time when the request names no
+     * {@code maxResults}, as ListServices does.
+     */
+    public ListPage listServicesByNamespace(String namespace, Integer maxResults, String nextToken, String region) {
+        if (namespace == null || namespace.isBlank()) {
+            throw new AwsException("InvalidParameterException", "namespace can not be blank.", 400);
+        }
+        if (AwsArnUtils.looksLikeArn(namespace) && !isNamespaceArn(namespace)) {
+            throw new AwsException("InvalidParameterException", "Namespace is not a valid namespace ARN.", 400);
+        }
+        String namespaceArn = discoveryRegistrar == null ? null : discoveryRegistrar.namespaceArn(namespace, region);
+        if (namespaceArn == null) {
+            throw new AwsException("NamespaceNotFoundException", "Failed to retrieve namespace for " + namespace, 400);
+        }
+        List<String> arns = services.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(region + "::"))
+                .map(Map.Entry::getValue)
+                .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> namespaceArn.equals(svc.getServiceConnectNamespaceArn()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
+        return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
+    }
+
+    private static boolean isNamespaceArn(String value) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+            return "servicediscovery".equals(arn.service()) && arn.resource().startsWith("namespace/");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The ARN of the namespace an enabled Service Connect configuration joins, its own or its cluster's default; null
+     * when it joins none.
+     */
+    private String serviceConnectNamespaceArn(Map<String, Object> config, EcsCluster cluster, String region) {
+        if (discoveryRegistrar == null || config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
+            return null;
+        }
+        Object namespace = config.get("namespace");
+        if (namespace == null || namespace.toString().isBlank()) {
+            Map<String, Object> defaults = cluster == null ? null : cluster.getServiceConnectDefaults();
+            namespace = defaults == null ? null : defaults.get("namespace");
+        }
+        return namespace == null || namespace.toString().isBlank()
+                ? null : discoveryRegistrar.namespaceArn(namespace.toString(), region);
+    }
+
+    /**
+     * Creates and deletes the Cloud Map services behind the Service Connect endpoints of the service
+     * {@code serviceArn}, which {@code current} holds, to match {@code configuration} in the namespace it joined,
+     * and returns them. A configuration ECS refuses is refused with {@code errorCode}: CreateService answers
+     * {@code ClientException} and UpdateService {@code InvalidParameterException} (measured on AWS).
+     */
+    private List<ServiceConnectServiceResource> syncServiceConnectResources(String serviceArn,
+                                                                            Map<String, Object> configuration,
+                                                                            String namespaceArn,
+                                                                            List<ServiceConnectServiceResource> current,
+                                                                            String region, String errorCode) {
+        EcsServiceDiscoveryRegistrar.validateDiscoveryNames(configuration, errorCode);
+        if (discoveryRegistrar == null) {
+            return new ArrayList<>();
+        }
+        return discoveryRegistrar.syncServiceConnectServices(current,
+                EcsServiceDiscoveryRegistrar.discoveryNames(configuration, serviceArn), namespaceArn, region,
+                serviceArn, errorCode);
+    }
+
+    /** A service stored before the field existed reads back with none. */
+    private static List<ServiceConnectServiceResource> serviceConnectResourcesOf(EcsServiceModel svc) {
+        return svc.getServiceConnectResources() != null ? svc.getServiceConnectResources() : List.of();
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
@@ -3513,7 +3743,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         mergeTagsOnResource(resource, tags);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
@@ -3527,6 +3757,65 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
         }
         return getTagsFromResource(resource);
+    }
+
+    /**
+     * The tags of the cluster, task definition, service, capacity provider, task set, task or container instance
+     * whose ARN is {@code arn}, among the resources of the request's account, where every ECS handler reads: an ARN
+     * of another account names none of them. Each is read under the key its ARN gives: a stored one in place, one
+     * saved before storage was account-aware or before a definition's key named its Region included, and matched on
+     * the whole ARN. Reads only.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ecs")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String resource = parsed.resource();
+        int slash = resource.indexOf('/');
+        if (!account.equals(regionResolver.getAccountId()) || slash < 0) {
+            return Map.of();
+        }
+        String region = parsed.region();
+        String id = resource.substring(slash + 1);
+        int idSlash = id.indexOf('/');
+        Optional<Map<String, String>> tags = switch (resource.substring(0, slash)) {
+            case "cluster" -> readStored(clustersStore, clusters, account, clusterKey(region, id))
+                    .filter(c -> arn.equals(c.getClusterArn())).map(EcsCluster::getTags);
+            // The key taskDefinitionKey builds from the family and revision the ARN ends in, then the one without the
+            // Region a definition was saved under before.
+            case "task-definition" -> readStored(taskDefinitionsStore, taskDefinitions, account, region + "::" + id)
+                    .or(() -> readStored(taskDefinitionsStore, taskDefinitions, account, id))
+                    .filter(td -> arn.equals(td.getTaskDefinitionArn())).map(TaskDefinition::getTags);
+            case "service" -> idSlash < 0 ? Optional.empty()
+                    : readStored(servicesStore, services, account,
+                            serviceKey(region, id.substring(0, idSlash), id.substring(idSlash + 1)))
+                    .filter(s -> arn.equals(s.getServiceArn())).map(EcsServiceModel::getTags);
+            case "capacity-provider" -> readStored(capacityProvidersStore, capacityProviders, account, id)
+                    .filter(cp -> arn.equals(cp.getCapacityProviderArn())).map(CapacityProvider::getTags);
+            case "task" -> Optional.ofNullable(tasks.get(arn)).map(EcsTask::getTags);
+            case "task-set" -> Optional.ofNullable(taskSets.get(arn))
+                    .filter(ts -> arn.equals(ts.getTaskSetArn())).map(TaskSet::getTags);
+            // Kept under its cluster's ARN, which the instance's names: the cluster's name, in the same coordinates.
+            case "container-instance" -> idSlash < 0 ? Optional.empty()
+                    : Optional.ofNullable(containerInstances.get(containerInstanceKey(new AwsArnUtils.Arn(
+                            parsed.partition(), "ecs", region, account, "cluster/" + id.substring(0, idSlash))
+                            .toString(), arn))).map(ContainerInstance::getTags);
+            default -> Optional.empty();
+        };
+        return new LinkedHashMap<>(tags.orElse(Map.of()));
+    }
+
+    /**
+     * The value under {@code key} in {@code account}, a pre-account-aware one of the default account included, read
+     * in place; the map's when the service runs without storage.
+     */
+    private static <V> Optional<V> readStored(StorageBackend<String, V> store, Map<String, V> map, String account,
+                                              String key) {
+        return store == null ? Optional.ofNullable(map.get(key))
+                : AccountAwareStorageBackend.readInAccount(store, account, key);
     }
 
     private Object findByArn(String arn) {
@@ -3551,24 +3840,38 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return null;
     }
 
+    /** Gives the resource a new map, its tags with {@code tags} added, so a reader holds one whole set of tags. */
     private void mergeTagsOnResource(Object resource, Map<String, String> tags) {
-        if (resource instanceof EcsCluster c) { c.getTags().putAll(tags); }
-        else if (resource instanceof TaskDefinition td) { td.getTags().putAll(tags); }
-        else if (resource instanceof EcsTask t) { t.getTags().putAll(tags); }
-        else if (resource instanceof EcsServiceModel s) { s.getTags().putAll(tags); }
-        else if (resource instanceof ContainerInstance ci) { ci.getTags().putAll(tags); }
-        else if (resource instanceof CapacityProvider cp) { cp.getTags().putAll(tags); }
+        Map<String, String> merged = new LinkedHashMap<>(tagsOf(resource));
+        merged.putAll(tags);
+        setTagsOnResource(resource, merged);
         persistTaggedResource(resource);
     }
 
+    /** Gives the resource a new map, its tags without {@code tagKeys}, so a reader holds one whole set of tags. */
     private void removeTagsFromResource(Object resource, List<String> tagKeys) {
-        if (resource instanceof EcsCluster c) { tagKeys.forEach(c.getTags()::remove); }
-        else if (resource instanceof TaskDefinition td) { tagKeys.forEach(td.getTags()::remove); }
-        else if (resource instanceof EcsTask t) { tagKeys.forEach(t.getTags()::remove); }
-        else if (resource instanceof EcsServiceModel s) { tagKeys.forEach(s.getTags()::remove); }
-        else if (resource instanceof ContainerInstance ci) { tagKeys.forEach(ci.getTags()::remove); }
-        else if (resource instanceof CapacityProvider cp) { tagKeys.forEach(cp.getTags()::remove); }
+        Map<String, String> kept = new LinkedHashMap<>(tagsOf(resource));
+        tagKeys.forEach(kept::remove);
+        setTagsOnResource(resource, kept);
         persistTaggedResource(resource);
+    }
+
+    private static void setTagsOnResource(Object resource, Map<String, String> tags) {
+        switch (resource) {
+            case EcsCluster c -> c.setTags(tags);
+            case TaskDefinition td -> td.setTags(tags);
+            case EcsTask t -> t.setTags(tags);
+            case EcsServiceModel s -> s.setTags(tags);
+            case ContainerInstance ci -> ci.setTags(tags);
+            case CapacityProvider cp -> cp.setTags(tags);
+            default -> throw new IllegalArgumentException("Not a taggable ECS resource: " + resource);
+        }
+    }
+
+    /** The resource's tags, none when a stored record holds no map. */
+    private Map<String, String> tagsOf(Object resource) {
+        Map<String, String> tags = getTagsFromResource(resource);
+        return tags == null ? Map.of() : tags;
     }
 
     /** Writes back a tag mutation to the owning durable map. Tasks and container instances are
@@ -3904,8 +4207,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public ContainerInstance registerContainerInstance(RegisterContainerInstanceRequest request,
                                                         String region) {
+        String instanceId = identityDocumentInstanceId(request.getInstanceIdentityDocument())
+                .orElseGet(() -> "i-floci-" + UUID.randomUUID().toString().substring(0, 8));
         EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
-        String instanceId = "i-floci-" + UUID.randomUUID().toString().substring(0, 8);
         String instanceArn = request.getContainerInstanceArn() != null
                 ? request.getContainerInstanceArn()
                 : regionResolver.buildArn("ecs", region,
@@ -3934,6 +4238,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         refreshRegisteredInstanceCount(cluster, region);
         LOG.infov("Registered container instance: {0} in cluster {1}", instanceArn, cluster.getClusterName());
         return instance;
+    }
+
+    /**
+     * The {@code instanceId} of the EC2 instance identity document the ECS agent registers with, which
+     * is the EC2 instance AWS records the container instance as. Empty when the caller sent no
+     * document. A document that is not JSON, or names no instance, is rejected rather than replaced
+     * by a generated id, so a registration never silently stands for some other instance.
+     */
+    static Optional<String> identityDocumentInstanceId(String identityDocument) {
+        if (identityDocument == null || identityDocument.isBlank()) {
+            return Optional.empty();
+        }
+        String instanceId;
+        try {
+            instanceId = IDENTITY_DOCUMENT_JSON.readTree(identityDocument).path("instanceId").asText("");
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument is not a valid instance identity document.", 400);
+        }
+        if (instanceId.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument does not name an instanceId.", 400);
+        }
+        return Optional.of(instanceId);
     }
 
     /**
@@ -4379,16 +4707,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "Invalid scale unit: " + request.getScaleUnit(), 400);
         }
 
-        String setId = "ecs-svc/" + UUID.randomUUID().toString().replace("-", "");
-        String taskSetArn = regionResolver.buildArn("ecs", region, "task-set/"
-                + cluster.getClusterName() + "/" + svc.getServiceName() + "/" + setId);
-
-        TaskSet ts = new TaskSet();
-        ts.setId(setId);
-        ts.setTaskSetArn(taskSetArn);
-        ts.setServiceArn(svc.getServiceArn());
-        ts.setClusterArn(cluster.getClusterArn());
-        ts.setTaskDefinition(taskDef.getTaskDefinitionArn());
+        TaskSet ts = newTaskSet(newDeploymentId(), svc, cluster, taskDef.getTaskDefinitionArn(), region);
         ts.setStatus(STATUS_ACTIVE);
         ts.setScaleValue(request.getScaleValue() != null ? request.getScaleValue() : 100.0);
         ts.setScaleUnit(SCALE_UNIT_PERCENT);
@@ -4413,8 +4732,69 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         ts.setUpdatedAt(Instant.now());
         applyTaskSetScale(ts, svc);
 
-        taskSets.put(taskSetArn, ts);
+        taskSets.put(ts.getTaskSetArn(), ts);
         return ts;
+    }
+
+    private TaskSet newTaskSet(String id, EcsServiceModel svc, EcsCluster cluster,
+                               String taskDefinition, String region) {
+        TaskSet ts = new TaskSet();
+        ts.setId(id);
+        ts.setTaskSetArn(regionResolver.buildArn("ecs", region, "task-set/"
+                + cluster.getClusterName() + "/" + svc.getServiceName() + "/" + id));
+        ts.setServiceArn(svc.getServiceArn());
+        ts.setClusterArn(cluster.getClusterArn());
+        ts.setTaskDefinition(taskDefinition);
+        return ts;
+    }
+
+    private void createInitialTaskSet(EcsServiceModel svc, EcsCluster cluster, String region) {
+        // The service scheduler already starts these tasks under this deployment ID.
+        TaskSet ts = newTaskSet(svc.getDeploymentId(), svc, cluster, svc.getTaskDefinition(), region);
+        ts.setStatus("PRIMARY");
+        ts.setScaleUnit(SCALE_UNIT_PERCENT);
+        ts.setScaleValue(100.0);
+        ts.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
+        ts.setLaunchType(svc.getLaunchType());
+        ts.setNetworkConfiguration(svc.getNetworkConfiguration());
+        ts.setLoadBalancers(svc.getLoadBalancers());
+        ts.setServiceRegistries(svc.getServiceRegistries());
+        if (svc.getLaunchType() == LaunchType.FARGATE) {
+            ts.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
+            ts.setPlatformFamily(svc.getPlatformFamily());
+        }
+        ts.setCreatedAt(svc.getCreatedAt());
+        ts.setUpdatedAt(svc.getCreatedAt());
+        refreshScheduledTaskSet(ts, svc);
+        taskSets.put(ts.getTaskSetArn(), ts);
+    }
+
+    private void refreshScheduledTaskSet(TaskSet ts, EcsServiceModel svc) {
+        if (!"CODE_DEPLOY".equals(svc.getDeploymentController()) || !ts.getId().equals(deploymentId(svc))) {
+            return;
+        }
+        int running = 0;
+        int pending = 0;
+        for (EcsTask task : tasks.values()) {
+            if (!ts.getId().equals(task.getStartedBy())
+                    || !ts.getServiceArn().equals(task.getOwningServiceArn())) {
+                continue;
+            }
+            if (TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                running++;
+            } else if (PENDING_TASK_STATUSES.contains(task.getLastStatus())) {
+                pending++;
+            }
+        }
+        int desired = (int) Math.ceil(svc.getDesiredCount() * ts.getScaleValue() / 100.0);
+        ts.setComputedDesiredCount(desired);
+        ts.setRunningCount(running);
+        ts.setPendingCount(pending);
+        String stability = running == desired && pending == 0 ? STABILITY_STATUS_STEADY_STATE : "STABILIZING";
+        if (!stability.equals(ts.getStabilityStatus())) {
+            ts.setStabilityStatus(stability);
+            ts.setStabilityStatusAt(Instant.now());
+        }
     }
 
     /**
@@ -4441,10 +4821,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * Stamps {@code computedDesiredCount}, which AWS derives from the service's desired count and
      * the task set's scale percentage, always rounding up: a computed 1.2 becomes 2 tasks.
      *
-     * <p>Floci places no tasks for a task set, so its running and pending counts stay at zero. A
-     * stability status derived from them would leave every set on a service with a desired count
-     * above zero in {@code STABILIZING} for ever, hanging anything that waits for the set to
-     * stabilise, so the set is reported {@code STEADY_STATE} until Floci tracks tasks for it.
+     * <p>Explicitly created task sets simulate scheduling and report {@code STEADY_STATE}.
+     * The initial CodeDeploy task set uses the service scheduler's real task counts.
      */
     private void applyTaskSetScale(TaskSet ts, EcsServiceModel svc) {
         ts.setComputedDesiredCount(
@@ -4466,6 +4844,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         ts.setScaleUnit(SCALE_UNIT_PERCENT);
         ts.setUpdatedAt(Instant.now());
         applyTaskSetScale(ts, svc);
+        refreshScheduledTaskSet(ts, svc);
         return ts;
     }
 
@@ -4504,11 +4883,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc == null) {
             return List.of();
         }
-        return taskSets.values().stream()
+        List<TaskSet> result = taskSets.values().stream()
                 .filter(ts -> svc.getServiceArn().equals(ts.getServiceArn()))
                 .sorted(Comparator.comparing(TaskSet::getCreatedAt,
                         Comparator.nullsLast(Comparator.naturalOrder())))
                 .toList();
+        result.forEach(ts -> refreshScheduledTaskSet(ts, svc));
+        return result;
     }
 
     public record DescribeTaskSetsResult(List<TaskSet> taskSets, List<Failure> failures) {}
@@ -4518,9 +4899,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                                            List<String> taskSetRefs, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         EcsServiceModel svc = resolveServiceOrThrow(cluster.getClusterName(), serviceRef, region);
-        List<TaskSet> ofService = taskSets.values().stream()
-                .filter(ts -> ts.getServiceArn().equals(svc.getServiceArn()))
-                .toList();
+        List<TaskSet> ofService = taskSetsFor(svc);
         if (taskSetRefs == null || taskSetRefs.isEmpty()) {
             return new DescribeTaskSetsResult(ofService, List.of());
         }
@@ -4602,10 +4981,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      *
      * <p>A task-definition change is applied in place rather than draining a previous
      * deployment, so there is never a second ACTIVE entry beside the PRIMARY one. An INACTIVE
-     * service has no deployments.
+     * service has no deployments. CodeDeploy services report their rollout in taskSets.
      */
     public List<Deployment> deploymentsFor(EcsServiceModel svc) {
-        if (svc == null || !"ACTIVE".equals(svc.getStatus())) {
+        if (svc == null || !"ACTIVE".equals(svc.getStatus())
+                || "CODE_DEPLOY".equals(svc.getDeploymentController())) {
             return List.of();
         }
 
@@ -4644,10 +5024,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } else {
             d.setLaunchType(svc.getLaunchType());
         }
-        d.setPlatformVersion(svc.getPlatformVersion());
+        d.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
         d.setPlatformFamily(svc.getPlatformFamily());
         d.setNetworkConfiguration(svc.getNetworkConfiguration());
         d.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
+        d.setServiceConnectResources(serviceConnectResourcesOf(svc));
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
         // persisted services predate the field and fall back to the service creation time.
@@ -4772,6 +5153,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * The task set id a service revision's ARN ends in, its last segment, whether it is under its service
+     * ({@code service-revision/<cluster>/<service>/<id>}) or was minted before it was ({@code service-revision/<id>}).
+     */
+    private static String revisionTaskSetId(String revisionArn) {
+        return revisionArn.substring(revisionArn.lastIndexOf('/') + 1);
+    }
+
+    /**
      * Records the deployment and the revision it targets. The revision is the snapshot of the
      * service's configuration, so it is copied out of the service rather than read back from it
      * later; the deployment links to it, which is how a caller gets from
@@ -4780,16 +5169,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * <p>The revision ARN ends in the deployment's task set id, the {@code <id>} of
      * {@code ecs-svc/<id>}, as AWS's does. The Terraform AWS provider's
      * {@code wait_for_steady_state} finds the deployment to poll by looking for that id in each
-     * deployment's {@code targetServiceRevisionArn}. The ARN built here is
-     * {@code service-revision/<id>}; AWS's is {@code service-revision/<cluster>/<service>/<id>}.
+     * deployment's {@code targetServiceRevisionArn}. Both ARNs are under the service's cluster and name, as AWS's
+     * are and as IAM checks them: {@code service-revision/<cluster>/<service>/<id>}.
      */
+    /**
+     * The ARN of a deployment or a revision of the service, {@code <type>/<cluster>/<service>/<id>}, as AWS mints them
+     * and as the Service Authorization Reference gives their formats.
+     */
+    private String underService(EcsServiceModel svc, String type, String id, String region) {
+        String cluster = svc.getClusterArn().substring(svc.getClusterArn().lastIndexOf('/') + 1);
+        return regionResolver.buildArn("ecs", region, type + "/" + cluster + "/" + svc.getServiceName() + "/" + id);
+    }
+
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         svc.setFailedDeploymentId(null);
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
-        String deploymentArn = regionResolver.buildArn("ecs", region,
-                "service-deployment/" + deploymentId);
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + taskSetId(svc));
+        String deploymentArn = underService(svc, "service-deployment", deploymentId, region);
+        String revisionArn = underService(svc, "service-revision", taskSetId(svc), region);
         Instant now = Instant.now();
 
         List<String> priorRevisions = serviceRevisions.values().stream()
@@ -4819,7 +5215,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setTaskDefinition(taskDefinition);
         revision.setLaunchType(svc.getLaunchType());
         revision.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
-        revision.setPlatformVersion(svc.getPlatformVersion());
+        revision.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
+        revision.setRequestedPlatformVersion(svc.getPlatformVersion());
         revision.setPlatformFamily(svc.getPlatformFamily());
         revision.setLoadBalancers(svc.getLoadBalancers());
         revision.setServiceRegistries(svc.getServiceRegistries());
@@ -5037,16 +5434,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void restoreServiceRevision(EcsServiceModel svc, ServiceRevision revision) {
         String revisionArn = revision.getServiceRevisionArn();
-        String taskSetId = taskSetId(revisionArn);
+        String taskSetId = revisionTaskSetId(revisionArn);
         svc.setTaskDefinition(revision.getTaskDefinition());
         svc.setLaunchType(revision.getLaunchType());
         svc.setCapacityProviderStrategy(revision.getCapacityProviderStrategy());
-        svc.setPlatformVersion(revision.getPlatformVersion());
+        svc.setPlatformVersion(revision.getRequestedPlatformVersion() != null
+                ? revision.getRequestedPlatformVersion() : revision.getPlatformVersion());
         svc.setPlatformFamily(revision.getPlatformFamily());
         svc.setLoadBalancers(revision.getLoadBalancers());
         svc.setServiceRegistries(revision.getServiceRegistries());
         svc.setNetworkConfiguration(revision.getNetworkConfiguration());
         svc.setServiceConnectConfiguration(revision.getServiceConnectConfiguration());
+        String region = serviceRegion(svc);
+        svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc.getServiceConnectConfiguration(),
+                resolveClusterByArn(svc.getClusterArn()), region));
+        if (!STATUS_INACTIVE.equals(svc.getStatus())) {
+            try {
+                svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(),
+                        svc.getServiceConnectConfiguration(), svc.getServiceConnectNamespaceArn(),
+                        serviceConnectResourcesOf(svc), region, "InvalidParameterException"));
+            } catch (AwsException e) {
+                // A rollback cannot be refused: when a discovery name was taken meanwhile, the service
+                // goes back without endpoints rather than keep the failed deployment's.
+                LOG.warnv("Service {0} rolled back without its Service Connect endpoints: {1}",
+                        svc.getServiceArn(), e.getMessage());
+                svc.setServiceConnectResources(syncServiceConnectResources(svc.getServiceArn(), null, null,
+                        serviceConnectResourcesOf(svc), region, "InvalidParameterException"));
+            }
+        }
         svc.setDeploymentId("ecs-svc/" + taskSetId);
         svc.setLastDeploymentAt(revision.getCreatedAt());
         svc.setLastCompletedDeploymentId(null);
@@ -5091,7 +5506,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (targetRevisionArn == null) {
             return false;
         }
-        String failedTaskSetId = taskSetId(targetRevisionArn);
+        String failedTaskSetId = revisionTaskSetId(targetRevisionArn);
         String failedDeploymentId = "ecs-svc/" + failedTaskSetId;
         EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
         if (cluster == null) {
@@ -5255,7 +5670,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        synchronized (reconciliationPassLock) {
+        reconciliationPassLock.lock();
+        try {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             try {
                 retryPreviousRunTaskVolumes();
             } catch (Exception e) {
@@ -5276,6 +5695,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 });
             }
+        } finally {
+            reconciliationPassLock.unlock();
         }
     }
 
@@ -5365,7 +5786,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void reconcileTaskLocked(String taskArn, EcsTask task) {
-        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())
+                || TaskStatus.DEACTIVATING.name().equals(task.getLastStatus())) {
             // Never stopTask(...), which waits for a stop already running: that stop lands under
             // this task's monitor, held here.
             stopTaskLocked(task, task.getStoppedReason(), task.getStopCode(), taskRegion(task), true);
@@ -5388,20 +5810,49 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         updateHealth(task, handle);
 
-        // Inspect every container; abort if any are still running. A container that exited on its
-        // own has a finish time of its own, read here while the daemon still remembers it.
+        // Keep inspecting after a live container: an exited essential sibling stops the task.
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
         Map<String, Instant> finishedAt = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
-            Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
+            String name = entry.getKey();
+            Integer code = handle.getRecordedExitCode(name);
             if (code == null) {
+                code = containerManager.getExitCodeIfStopped(entry.getValue());
+            }
+            if (code == null) {
+                continue;
+            }
+            handle.recordExitCode(name, code);
+            exitCodes.put(name, code);
+            Instant finished = handle.getFinishedAt().get(name);
+            if (finished == null) {
+                finished = containerManager.getFinishedAtIfStopped(entry.getValue());
+                handle.recordFinishedAt(name, finished);
+            }
+            if (finished != null) {
+                finishedAt.put(name, finished);
+            }
+        }
+
+        boolean containersChanged = updateStoppedContainers(task, exitCodes, finishedAt);
+        if (exitCodes.size() != handle.getContainerIds().size()) {
+            if (exitCodes.isEmpty()) {
                 return;
             }
-            exitCodes.put(entry.getKey(), code);
-            Instant finished = containerManager.getFinishedAtIfStopped(entry.getValue());
-            if (finished != null) {
-                finishedAt.put(entry.getKey(), finished);
+            String region = taskRegion(task);
+            TaskDefinition definition = findTaskDefinition(task.getTaskDefinitionArn(), region);
+            boolean essentialExited = definition != null && definition.getContainerDefinitions().stream()
+                    .anyMatch(container -> container.isEssential() && exitCodes.containsKey(container.getName()));
+            if (essentialExited) {
+                stopTaskLocked(task, "Essential container in task exited", STOP_CODE_ESSENTIAL_CONTAINER_EXITED,
+                        region, true);
+            } else if (containersChanged) {
+                task.bumpVersion();
+                if (eventPublisher != null) {
+                    eventPublisher.emitTaskStateChange(task, region);
+                }
             }
+            return;
         }
 
         // All containers have exited. Atomically claim the handle to avoid
@@ -5414,20 +5865,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // Close log streams and remove the stopped Docker containers without re-inspecting.
         containerManager.cleanupStoppedTask(claimed);
         retainPendingCleanupHandle(taskArn, claimed);
-
-        if (task.getContainers() != null) {
-            task.getContainers().forEach(c -> {
-                c.setLastStatus("STOPPED");
-                Integer code = exitCodes.get(c.getName());
-                if (code != null) {
-                    c.setExitCode(code);
-                }
-                Instant finished = finishedAt.get(c.getName());
-                if (finished != null) {
-                    c.setFinishedAt(finished);
-                }
-            });
-        }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
         task.setDesiredStatus(TaskStatus.STOPPED.name());
@@ -5446,9 +5883,35 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
         String region = taskRegion(task);
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(taskArn);
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
         }
+    }
+
+    /** Updates observed container exits even when another container keeps the task running. */
+    private boolean updateStoppedContainers(EcsTask task, Map<String, Integer> exitCodes,
+                                            Map<String, Instant> finishedAt) {
+        boolean changed = false;
+        if (task.getContainers() == null) {
+            return false;
+        }
+        for (Container container : task.getContainers()) {
+            Integer code = exitCodes.get(container.getName());
+            if (code == null) {
+                continue;
+            }
+            Instant finished = finishedAt.get(container.getName());
+            changed |= !TaskStatus.STOPPED.name().equals(container.getLastStatus())
+                    || !Objects.equals(code, container.getExitCode())
+                    || (finished != null && !finished.equals(container.getFinishedAt()));
+            container.setLastStatus(TaskStatus.STOPPED.name());
+            container.setExitCode(code);
+            if (finished != null) {
+                container.setFinishedAt(finished);
+            }
+        }
+        return changed;
     }
 
     /**
@@ -5528,7 +5991,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void retainPendingCleanupHandle(String taskArn, EcsTaskHandle handle) {
         if (handle != null && (handle.hasOpenLogStreams() || handle.hasTaskVolumes()
-                || !handle.allContainersRemoved())) {
+                || !handle.allContainersRemoved() || handle.isNamespaceHelperPending())) {
             taskHandles.put(taskArn, handle);
         } else {
             shutdownCleanupTasks.remove(taskArn);
@@ -5719,7 +6182,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void reconcileServices() {
-        synchronized (reconciliationPassLock) {
+        reconciliationPassLock.lock();
+        try {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
                 try {
                     reconcileService(entry.getKey(), entry.getValue());
@@ -5732,6 +6199,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     LOG.warnv(e, "Could not publish Container Insights task counts for ECS service {0}", entry.getKey());
                 }
             }
+        } finally {
+            reconciliationPassLock.unlock();
         }
     }
 
@@ -5931,7 +6400,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     .toList();
             for (Placement placement : serviceTaskPlacements(svc, currentTasks, toStart)) {
                 try {
-                    EcsTask launched = launchServiceTask(cluster, svc, placement, null, region);
+                    EcsTask launched = launchServiceTask(cluster, svc, placement,
+                            containerInstanceFor(cluster, placement), region);
                     recordLaunchFailure(svc, null, null);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
@@ -5945,11 +6415,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
         } else if (running > svc.getDesiredCount()) {
-            // Drain stale tasks first: once their replacements are RUNNING this is the second
-            // half of the rolling deployment. Protected stale tasks cannot displace the
-            // desired number of current-revision tasks.
+            // Drain stale tasks first: once their replacements are RUNNING, and healthy behind
+            // the service's load balancers, this is the second half of the rolling deployment.
+            // Protected stale tasks cannot displace the desired number of current-revision tasks.
             int currentToStop = Math.max(0, (int) current - svc.getDesiredCount());
-            Stream.concat(staleTasks.stream().filter(this::eligibleForServiceStop),
+            boolean replacementsHealthy = runningTasks.stream()
+                    .filter(t -> !staleTasks.contains(t))
+                    .allMatch(t -> loadBalancerTargetsHealthy(t, svc));
+            Stream.concat(staleTasks.stream()
+                                    .filter(t -> replacementsHealthy)
+                                    .filter(this::eligibleForServiceStop),
                             runningTasks.stream()
                                     .filter(t -> !staleTasks.contains(t))
                                     .filter(this::eligibleForServiceStop)
@@ -6014,15 +6489,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         Instant createdAt = svc.getLastDeploymentAt() != null ? svc.getLastDeploymentAt() : svc.getCreatedAt();
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + taskSetId(svc));
+        String revisionArn = underService(svc, "service-revision", taskSetId(svc), region);
         ServiceRevision revision = newServiceRevision(svc, pinnedTaskDefinitionArn(svc, key, region),
                 revisionArn, createdAt, region);
         serviceRevisions.putIfAbsent(revisionArn, revision);
 
         ServiceDeployment recovered = newServiceDeployment(svc, revision.getTaskDefinition(),
-                regionResolver.buildArn("ecs", region,
-                        "service-deployment/" + UUID.randomUUID().toString().replace("-", "")),
+                underService(svc, "service-deployment", UUID.randomUUID().toString().replace("-", ""), region),
                 revisionArn, createdAt);
         recovered.setSourceServiceRevisionArns(List.of());
         ServiceDeployment existing = serviceDeployments.putIfAbsent(
@@ -6156,6 +6629,39 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return td;
     }
 
+    /** The ARN of the definition {@code ref} names, the revision a task started from it runs. Reads only. */
+    public Optional<String> taskDefinitionArn(String ref, String region) {
+        return Optional.ofNullable(findTaskDefinition(ref, region)).map(TaskDefinition::getTaskDefinitionArn);
+    }
+
+    @Override
+    public String namespace() {
+        return "ecs";
+    }
+
+    /** ECS stores no resource under a name a request fills an ARN with: a family a create names is a new revision. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The revision a task definition reference a request names resolves to, as {@code RunTask} resolves it (a family
+     * alone is its latest revision), for a request the table finds its task definition for ({@code find}). Reads only.
+     */
+    @Override
+    public Optional<String> findByMembers(String type, List<String> names, String region) {
+        return "task-definition".equals(type) && names.size() == 1
+                ? taskDefinitionArn(names.getFirst(), region) : Optional.empty();
+    }
+
+    /** The cluster ECS acts on for a request naming none, {@code default}, which every account has. */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "cluster".equals(type)
+                ? Optional.of(regionResolver.buildArn("ecs", region, "cluster/" + DEFAULT_CLUSTER)) : Optional.empty();
+    }
+
     /** The roles a task started from the definition runs with, for the {@code iam:PassRole} check of RunTask and the rest. */
     @Override
     public List<String> taskDefinitionRoles(String reference, String region) {
@@ -6200,7 +6706,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
      */
     private String regionOf(TaskDefinition td) {
-        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(td.getTaskDefinitionArn());
     }
 
     /**
@@ -6234,12 +6740,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return task;
     }
 
+    /**
+     * ECS services are cluster and Region specific: a name resolves only in the request's cluster
+     * and Region, and an ARN only when it is that service's own ARN, so an ARN naming another
+     * cluster or Region resolves to nothing rather than to a service elsewhere.
+     */
     private EcsServiceModel resolveService(String clusterName, String serviceId, String region) {
-        EcsServiceModel svc = services.get(serviceKey(region, clusterName, serviceId));
-        if (svc != null) { return svc; }
-        return services.values().stream()
-                .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
-                .findFirst().orElse(null);
+        if (serviceId == null) {
+            return null;
+        }
+        if (AwsArnUtils.looksLikeArn(serviceId)) {
+            EcsServiceModel svc = services.get(serviceKey(region, clusterName, extractServiceName(serviceId)));
+            return svc != null && serviceId.equals(svc.getServiceArn()) ? svc : null;
+        }
+        return services.get(serviceKey(region, clusterName, serviceId));
     }
 
     private EcsServiceModel resolveServiceOrThrow(String clusterName, String serviceId, String region) {
@@ -6295,6 +6809,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (ts == null) {
             throw new AwsException("TaskSetNotFoundException", "Task set not found: " + ref, 400);
         }
+        refreshScheduledTaskSet(ts, svc);
         return ts;
     }
 

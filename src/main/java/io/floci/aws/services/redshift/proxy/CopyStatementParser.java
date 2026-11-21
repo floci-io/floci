@@ -14,10 +14,22 @@ import java.util.regex.Pattern;
  */
 public final class CopyStatementParser {
 
-    public sealed interface S3Statement permits S3CopyFrom, S3Unload {
+    public sealed interface S3Statement permits S3CopyFrom, S3Unload, S3CopyJobRun {
         String iamRoleArn();
 
         boolean defaultIamRoleRequested();
+    }
+
+    public record S3CopyJobRun(String name) implements S3Statement {
+        @Override
+        public String iamRoleArn() {
+            return null;
+        }
+
+        @Override
+        public boolean defaultIamRoleRequested() {
+            return false;
+        }
     }
 
     /** Access keys a COPY names, as {@code CREDENTIALS 'aws_access_key_id=...'} or {@code ACCESS_KEY_ID}. */
@@ -41,9 +53,20 @@ public final class CopyStatementParser {
             boolean acceptAnyDate,
             boolean fillRecord,
             int maxError,
-            boolean trimBlanks) {
+            boolean trimBlanks,
+            boolean ignoreBlankLines,
+            boolean roundDecimal,
+            boolean ignoreAllErrors) {
 
         public static final CopyTransforms NONE = new CopyTransforms(false, false, false, false, null);
+
+        public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
+                              boolean truncateColumns, Character invalidCharReplacement,
+                              CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
+                              boolean acceptAnyDate, boolean fillRecord, int maxError, boolean trimBlanks) {
+            this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
+                    dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks, false, false, false);
+        }
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
                               boolean truncateColumns, Character invalidCharReplacement) {
@@ -80,12 +103,12 @@ public final class CopyStatementParser {
          * the COPY at the first error, which is how it runs without the option.
          */
         public boolean toleratesErrors() {
-            return maxError > 1;
+            return ignoreAllErrors || maxError > 1;
         }
 
         /** Whether the options depend on the type of each column, which only the catalog can tell. */
         public boolean needsColumnTypes() {
-            return temporal() || fillRecord || trimBlanks;
+            return temporal() || fillRecord || trimBlanks || roundDecimal;
         }
 
         /** Whether date or timestamp fields are read with a format other than PostgreSQL's own. */
@@ -95,7 +118,7 @@ public final class CopyStatementParser {
 
         public boolean fieldLevel() {
             return blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || temporal() || fillRecord
-                    || trimBlanks;
+                    || trimBlanks || ignoreBlankLines || roundDecimal;
         }
 
         public boolean any() {
@@ -364,6 +387,9 @@ public final class CopyStatementParser {
     private static final Pattern ACCEPTANYDATE_PATTERN = Pattern.compile("(?i)\\bACCEPTANYDATE\\b");
     private static final Pattern FILLRECORD_PATTERN = Pattern.compile("(?i)\\bFILLRECORD\\b");
     private static final Pattern MAXERROR_PATTERN = Pattern.compile("(?i)\\bMAXERROR\\s+(?:AS\\s+)?(\\d{1,9})\\b");
+    private static final Pattern IGNOREBLANKLINES_PATTERN = Pattern.compile("(?i)\\bIGNOREBLANKLINES\\b");
+    private static final Pattern ROUNDEC_PATTERN = Pattern.compile("(?i)\\bROUNDEC\\b");
+    private static final Pattern IGNOREALLERRORS_PATTERN = Pattern.compile("(?i)\\bIGNOREALLERRORS\\b");
     private static final int MAX_MAXERROR = 100_000;
     private static final Pattern CREDENTIALS_PATTERN = Pattern.compile(
             "(?i)\\bCREDENTIALS\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
@@ -405,8 +431,8 @@ public final class CopyStatementParser {
             "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD"
                     + "|ENCRYPTED|ENCODING"
                     + "|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
-                    + "|IGNOREBLANKLINES|ESCAPE|EXPLICIT_IDS"
-                    + "|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
+                    + "|ESCAPE|EXPLICIT_IDS"
+                    + "|NOLOAD|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
 
     /** A {@code ;} followed by another statement: only a lone trailing {@code ;} is tolerated. */
     private static final Pattern TRAILING_STATEMENT = Pattern.compile(";\\s*\\S");
@@ -419,6 +445,10 @@ public final class CopyStatementParser {
     }
 
     public static S3Statement parse(String sql, String defaultIamRoleArn) {
+        String job = CopyJobSql.runName(sql);
+        if (job != null) {
+            return new S3CopyJobRun(job);
+        }
         if (sql == null || sql.isBlank()) {
             return null;
         }
@@ -739,6 +769,9 @@ public final class CopyStatementParser {
         boolean fillRecord = false;
         int maxError = 0;
         boolean seenMaxError = false;
+        boolean ignoreBlankLines = false;
+        boolean roundDecimal = false;
+        boolean ignoreAllErrors = false;
         boolean trimBlanks = false;
         boolean seenCompupdate = false;
         boolean seenStatupdate = false;
@@ -777,6 +810,9 @@ public final class CopyStatementParser {
         Matcher acceptAnyDateMatcher = ACCEPTANYDATE_PATTERN.matcher(options);
         Matcher fillRecordMatcher = FILLRECORD_PATTERN.matcher(options);
         Matcher maxErrorMatcher = MAXERROR_PATTERN.matcher(options);
+        Matcher ignoreBlankLinesMatcher = IGNOREBLANKLINES_PATTERN.matcher(options);
+        Matcher roundDecimalMatcher = ROUNDEC_PATTERN.matcher(options);
+        Matcher ignoreAllErrorsMatcher = IGNOREALLERRORS_PATTERN.matcher(options);
         Matcher compupdateMatcher = COMPUPDATE_PATTERN.matcher(options);
         Matcher statupdateMatcher = STATUPDATE_PATTERN.matcher(options);
         Matcher trimBlanksMatcher = TRIMBLANKS_PATTERN.matcher(options);
@@ -913,7 +949,28 @@ public final class CopyStatementParser {
                 }
                 fillRecord = true;
                 offset = fillRecordMatcher.end();
+            } else if (matchClause(ignoreBlankLinesMatcher, offset, len)) {
+                if (ignoreBlankLines) {
+                    return null;
+                }
+                ignoreBlankLines = true;
+                offset = ignoreBlankLinesMatcher.end();
+            } else if (matchClause(roundDecimalMatcher, offset, len)) {
+                if (roundDecimal) {
+                    return null;
+                }
+                roundDecimal = true;
+                offset = roundDecimalMatcher.end();
+            } else if (matchClause(ignoreAllErrorsMatcher, offset, len)) {
+                if (ignoreAllErrors || seenMaxError) {
+                    return null;
+                }
+                ignoreAllErrors = true;
+                offset = ignoreAllErrorsMatcher.end();
             } else if (matchClause(maxErrorMatcher, offset, len)) {
+                if (ignoreAllErrors) {
+                    return null;
+                }
                 int parsed = seenMaxError ? -1 : Integer.parseInt(maxErrorMatcher.group(1));
                 if (parsed < 0 || parsed > MAX_MAXERROR) {
                     return null;
@@ -968,8 +1025,10 @@ public final class CopyStatementParser {
         }
         CopyTransforms transforms = new CopyTransforms(
                 blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar,
-                dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks);
-        if (transforms.any() && jsonAuto) {
+                dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks,
+                ignoreBlankLines, roundDecimal, ignoreAllErrors);
+        if (jsonAuto && (blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || invalidChar != null
+                || transforms.temporal() || fillRecord || trimBlanks)) {
             return null;
         }
         if (transforms.removeQuotes() && csv) {

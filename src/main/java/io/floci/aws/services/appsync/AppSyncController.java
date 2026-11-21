@@ -7,8 +7,6 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.appsync.model.*;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
-import jakarta.ws.rs.core.Context;
-import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -42,8 +40,8 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis")
-    public Response createGraphqlApi(@Context HttpHeaders headers, String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+    public Response createGraphqlApi(String body) throws IOException {
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         GraphqlApi api = service.createGraphqlApi(request, region);
@@ -63,10 +61,9 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis/{apiId}")
-    public Response updateGraphqlApi(@Context HttpHeaders headers,
-                                      @PathParam("apiId") String apiId,
+    public Response updateGraphqlApi(@PathParam("apiId") String apiId,
                                       String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         GraphqlApi api = service.updateGraphqlApi(apiId, request, region);
@@ -137,10 +134,9 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis/{apiId}/datasources")
-    public Response createDataSource(@Context HttpHeaders headers,
-                                      @PathParam("apiId") String apiId,
+    public Response createDataSource(@PathParam("apiId") String apiId,
                                       String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         DataSource ds = service.createDataSource(apiId, request, region);
@@ -200,11 +196,10 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis/{apiId}/types/{typeName}/resolvers")
-    public Response createResolver(@Context HttpHeaders headers,
-                                    @PathParam("apiId") String apiId,
+    public Response createResolver(@PathParam("apiId") String apiId,
                                     @PathParam("typeName") String typeName,
                                     String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         request.put("typeName", typeName);
@@ -288,9 +283,8 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis/{apiId}/functions")
-    public Response createFunction(@Context HttpHeaders headers,
-                                   @PathParam("apiId") String apiId, String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+    public Response createFunction(@PathParam("apiId") String apiId, String body) throws IOException {
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         FunctionConfiguration fn = service.createFunction(apiId, request, region);
@@ -637,10 +631,9 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/sourceApis/{sourceApiIdentifier}/mergedApiAssociations")
-    public Response associateMergedGraphqlApi(@Context HttpHeaders headers,
-                                                @PathParam("sourceApiIdentifier") String sourceApiIdentifier,
+    public Response associateMergedGraphqlApi(@PathParam("sourceApiIdentifier") String sourceApiIdentifier,
                                                 String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         SourceApiAssociation assoc = service.createMergedApiAssociation(sourceApiIdentifier, request, region);
@@ -651,10 +644,9 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/mergedApis/{mergedApiIdentifier}/sourceApiAssociations")
-    public Response associateSourceGraphqlApi(@Context HttpHeaders headers,
-                                                @PathParam("mergedApiIdentifier") String mergedApiIdentifier,
+    public Response associateSourceGraphqlApi(@PathParam("mergedApiIdentifier") String mergedApiIdentifier,
                                                 String body) throws IOException {
-        String region = regionResolver.resolveRegion(headers);
+        String region = regionResolver.getRegion();
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         SourceApiAssociation assoc = service.createSourceApiAssociation(mergedApiIdentifier, request, region);

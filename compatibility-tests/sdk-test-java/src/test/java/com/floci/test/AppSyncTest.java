@@ -552,6 +552,7 @@ class AppSyncTest {
         CreateTypeResponse resp = client.createType(CreateTypeRequest.builder()
                 .apiId(apiId)
                 .definition("type Item { id: ID!, name: String }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         assertThat(resp.type()).isNotNull();
@@ -588,6 +589,7 @@ class AppSyncTest {
                 .apiId(apiId)
                 .typeName("Item")
                 .definition("type Item { id: ID!, name: String, description: String }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         assertThat(resp.type()).isNotNull();
@@ -600,6 +602,7 @@ class AppSyncTest {
         client.createType(CreateTypeRequest.builder()
                 .apiId(apiId)
                 .definition("type TempType { id: ID }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         DeleteTypeResponse resp = client.deleteType(DeleteTypeRequest.builder()
@@ -1357,7 +1360,8 @@ class AppSyncTest {
         String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/schemacreation";
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/" + TestFixtures.region().id()
+                        + "/appsync/aws4_request")
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();

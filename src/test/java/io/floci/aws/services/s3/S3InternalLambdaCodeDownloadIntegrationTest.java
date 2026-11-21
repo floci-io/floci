@@ -2,6 +2,7 @@ package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,16 +11,12 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -88,13 +85,7 @@ class S3InternalLambdaCodeDownloadIntegrationTest {
         }
     }
 
-    private static byte[] archive(String marker) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(("exports.handler = async () => '" + marker + "';").getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+    private static byte[] archive(String marker) {
+        return LambdaCodeFixtures.nodeJsZip("exports.handler = async () => '" + marker + "';");
     }
 }

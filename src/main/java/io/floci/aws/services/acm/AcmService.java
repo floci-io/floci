@@ -9,9 +9,11 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.DomainNames;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.acm.model.Certificate;
@@ -64,7 +66,7 @@ import java.util.stream.Collectors;
  * @see <a href="https://docs.aws.amazon.com/acm/latest/APIReference/Welcome.html">AWS ACM API Reference</a>
  */
 @ApplicationScoped
-public class AcmService implements ResourceProvider {
+public class AcmService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(AcmService.class);
     private static final int MAX_TAGS = 50;
@@ -478,7 +480,7 @@ public class AcmService implements ResourceProvider {
             cert.setCertificateBody(certificatePem);
             cert.setPrivateKey(privateKeyPem);
             cert.setCertificateChain(chainPem);
-            cert.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
+            cert.setTags(existing != null ? existing.getTags() : tags);
 
             String storageKey = regionKey(region, certId);
             if (existing != null && existing.getInUseBy() != null) {
@@ -570,6 +572,40 @@ public class AcmService implements ResourceProvider {
 
         cert.setTags(currentTags);
         store.put(regionKey(region, cert.extractCertificateId()), cert);
+    }
+
+    @Override
+    public String namespace() {
+        return "acm";
+    }
+
+    /** A request names a certificate by its ARN, whose id ACM minted, so there is nothing to find by name. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the certificate whose ARN is {@code arn}, read in place under its key in the Region the ARN names,
+     * in the request's account, where the handlers read: an ARN of another account names none. Tagging stores a new
+     * map under the service's lock, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "acm")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId())
+                || !parsed.resource().startsWith("certificate/")) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(store, parsed.accountId(),
+                        regionKey(parsed.region(), Certificate.idFromArn(arn)))
+                .filter(cert -> arn.equals(cert.getArn()))
+                .map(Certificate::getTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     // ============ Account Configuration ============

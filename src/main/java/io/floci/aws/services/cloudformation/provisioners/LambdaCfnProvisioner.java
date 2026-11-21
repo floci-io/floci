@@ -411,8 +411,12 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                                                 StackResource r) {
         LambdaFunction current = existing;
         if (lambdaConfigurationChanged(current, desired.configRequest())) {
+            Map<String, Object> configuration = new HashMap<>(desired.configRequest());
+            if (Objects.equals(current.getEnvironment(), environmentVariables(configuration.get("Environment")))) {
+                configuration.remove("Environment");
+            }
             current = lambdaService.updateFunctionConfiguration(region, current.getFunctionName(),
-                    desired.configRequest());
+                    configuration);
         }
         if (lambdaCodeChanged(current, desired.code(), r.getAttributes().get(LAMBDA_CODE_IDENTITY_ATTR))) {
             current = lambdaService.updateFunctionCode(region, current.getFunctionName(), desired.code().request());
@@ -796,7 +800,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private Map<String, String> resolveLambdaEnvironment(CfnPropertyTypes.Reader types, JsonNode props) {
-        JsonNode envNode = readTyped(types, FUNCTION, props, "Environment");
+        JsonNode envNode = types.readProperty(FUNCTION, props, "Environment");
         JsonNode variables = envNode == null ? null : envNode.get("Variables");
         if (variables == null) {
             return Map.of();
@@ -808,7 +812,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private static List<String> resolveStringListOrEmpty(CfnPropertyTypes.Reader types, String resourceType,
                                                          JsonNode props, String source) {
-        JsonNode values = readTyped(types, resourceType, props, source);
+        JsonNode values = types.readProperty(resourceType, props, source);
         return values == null ? List.of() : texts(values);
     }
 
@@ -819,7 +823,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private List<Object> resolveObjectListOrEmpty(CfnPropertyTypes.Reader types, JsonNode props, String source) {
-        JsonNode resolved = readTyped(types, FUNCTION, props, source);
+        JsonNode resolved = types.readProperty(FUNCTION, props, source);
         if (resolved == null) {
             return List.of();
         }
@@ -831,22 +835,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     /** The object property {@code source}, or {@code defaultValue} when the template leaves it out. */
     private Map<String, Object> resolveMapOrDefault(CfnPropertyTypes.Reader types, JsonNode props, String source,
                                                     Map<String, Object> defaultValue) {
-        JsonNode resolved = readTyped(types, FUNCTION, props, source);
+        JsonNode resolved = types.readProperty(FUNCTION, props, source);
         return resolved == null ? defaultValue : jsonObjectToMap(resolved);
-    }
-
-    /**
-     * The property {@code source} of {@code resourceType} read against the type its resource schema
-     * declares, or null when the template leaves it out, {@code Ref: AWS::NoValue} directly or
-     * through {@code Fn::If} included. A value of another type is refused before the function is
-     * touched; see {@link CfnPropertyTypes}.
-     */
-    private static JsonNode readTyped(CfnPropertyTypes.Reader types, String resourceType, JsonNode props,
-                                      String source) {
-        if (props == null || !props.has(source)) {
-            return null;
-        }
-        return types.read(source, props.get(source), CfnPropertyTypes.propertyShape(resourceType, source));
     }
 
     private static Map<String, Object> mapWithNullValue(String key) {
@@ -857,7 +847,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private void putStringListIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
                                         JsonNode props, String source) {
-        JsonNode values = readTyped(types, FUNCTION, props, source);
+        JsonNode values = types.readProperty(FUNCTION, props, source);
         if (values != null) {
             request.put(source, texts(values));
         }
@@ -865,7 +855,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private void putResolvedMapIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
                                          JsonNode props, String source) {
-        JsonNode resolved = readTyped(types, FUNCTION, props, source);
+        JsonNode resolved = types.readProperty(FUNCTION, props, source);
         if (resolved != null) {
             request.put(source, jsonObjectToMap(resolved));
         }

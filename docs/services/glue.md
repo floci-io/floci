@@ -31,7 +31,7 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateDatabase | Creates a database in the local Glue Data Catalog. |
 | GetDatabase | Returns a stored Data Catalog database. |
-| GetDatabases | Lists databases in the local Glue Data Catalog. |
+| GetDatabases | Lists databases in pages using `MaxResults` and `NextToken`. |
 | DeleteDatabase | Deletes a database from the local Glue Data Catalog. |
 
 #### Tables
@@ -40,22 +40,26 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateTable | Creates a table definition in the local Glue Data Catalog. |
 | GetTable | Returns a stored table definition and resolves schema references when possible. |
-| GetTables | Lists table definitions for a database. |
+| GetTables | Lists table definitions for a database in pages using `MaxResults` and `NextToken`. |
 | UpdateTable | Replaces a table definition; the previous version is archived unless `SkipArchive` is set. |
 | DeleteTable | Deletes a table definition from a database. |
 | BatchDeleteTable | Deletes several tables of a database, reporting the missing ones in `Errors`. |
-| GetTableVersions | Lists the current and archived versions of a table, newest first. |
+| GetTableVersions | Lists the current and archived versions of a table, newest first, in pages using `MaxResults` and `NextToken`. |
 | GetTableVersion | Returns one version by `VersionId`, or the current version when none is given. |
 | DeleteTableVersion | Deletes an archived version; the current version cannot be deleted, as on AWS. |
 | BatchDeleteTableVersion | Deletes several archived versions, reporting the ones not deleted in `Errors`. |
 | SearchTables | Searches every table of the catalog by `SearchText` (substring, or exact when quoted), property `Filters` (string keys use the tokenised match of the API reference, time keys honour `Comparator`, other keys read table parameters) and `SortCriteria`, paged by `MaxResults` and `NextToken`. |
+
+`BatchDeleteTable` requires `TablesToDelete` with 0 to 100 names. Missing or oversized lists
+fail with `InvalidInputException` before any table is deleted. Valid batches keep their per-table
+`Errors` response.
 
 #### Partitions
 
 | Action | Description |
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
-| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
+| GetPartitions | Lists partitions stored for a Data Catalog table in pages using `MaxResults` and `NextToken`. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
 | BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
 | CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
@@ -165,7 +169,7 @@ retroactively.
 | GetJobRuns | Lists a job's runs, newest first. |
 | BatchStopJobRun | Stops running runs of a job and reports the rest in `Errors`. |
 
-Job runs do not execute the job's script. A run follows Glue's state machine and response shape: it
+By default job runs do not execute the job's script (see [Running Spark job scripts](#running-spark-job-scripts)). A run follows Glue's state machine and response shape: it
 takes the job's worker type, worker count, timeout and Glue version unless the request overrides them,
 and `MaxConcurrentRuns` (1 when unset) rejects a start with `ConcurrentRunsExceededException` unless
 `JobRunQueuingEnabled` is set. With the default `job-run-duration-seconds` of 0 a run is `SUCCEEDED` as
@@ -173,6 +177,22 @@ soon as it starts. A positive value keeps each run `RUNNING` for that many secon
 `BatchStopJobRun` (the run ends `STOPPED`) and the concurrency limit; a run whose duration exceeds the job
 timeout ends `TIMEOUT` when the timeout is reached. Queued runs are admitted straight away rather than
 waiting in `WAITING`.
+
+#### Running Spark job scripts
+
+With `FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`, `StartJobRun` runs the script of a Spark job (`Command.Name` `glueetl`) whose
+`ScriptLocation` is in S3, with `spark-submit` in a container of AWS's Glue 5.0 image, which holds the Glue ETL library. The
+script gets the job's `DefaultArguments` with the run's `Arguments` over them, plus `--JOB_NAME` and `--JOB_RUN_ID`, so
+`awsglue.utils.getResolvedOptions` reads them. Its AWS calls reach Floci with the credentials of the job's `Role`.
+
+The run is `RUNNING` while the script runs (or `WAITING` while `JobRunQueuingEnabled` is set and `MaxConcurrentRuns` is in use,
+starting once a slot frees), then `SUCCEEDED` when it exits with 0 or `FAILED` with an `ErrorMessage` when it does not or cannot
+start; `TIMEOUT` when the job's `Timeout` passes; `STOPPED` after `BatchStopJobRun`. Python shell, streaming and Ray jobs, and
+jobs whose script is not in S3, keep the simulation above. The image is large (AWS asks for at least 7 GB of disk) and needs a
+Docker daemon (explicitly mount `/var/run/docker.sock` when running Floci in a container or Testcontainers wrapper with
+`FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`), which is why the mode is off by default. When the Docker daemon is unreachable at
+start, runs fall back to the simulation above; if Docker fails mid-run or Floci restarts while a run is executing or waiting,
+the run is `FAILED`.
 
 #### Crawlers
 
@@ -328,12 +348,50 @@ ARN `arn:aws:glue:<region>:<account>:dataQualityRuleset/<name>`.
 
 Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 
+## Iceberg REST endpoint
+
+Floci serves AWS Glue's [Iceberg REST endpoint](https://docs.aws.amazon.com/glue/latest/dg/connect-glu-iceberg-rest.html) at `/iceberg` on the Floci endpoint (`https://glue.<region>.amazonaws.com/iceberg` on AWS), signed for the `glue` service. An Iceberg REST catalog client (Spark's `SparkCatalog` with `type=rest`, PyIceberg, Trino) uses it as it uses AWS's: the warehouse is the account id, and the path prefix is `/v1/catalogs/{catalog}`, where `{catalog}` is `:` (the caller's default catalog) or the caller's account id.
+
+```python
+spark = (SparkSession.builder
+    .config("spark.sql.catalog.glue", "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.glue.type", "rest")
+    .config("spark.sql.catalog.glue.uri", "http://localhost:4566/iceberg")
+    .config("spark.sql.catalog.glue.warehouse", "000000000000")
+    .config("spark.sql.catalog.glue.rest.sigv4-enabled", "true")
+    .config("spark.sql.catalog.glue.rest.signing-name", "glue")
+    .getOrCreate())
+```
+
+The operations are the twelve AWS lists: `GetConfig`, `ListNamespaces`, `CreateNamespace`, `LoadNamespaceMetadata`, `UpdateNamespaceProperties`, `DeleteNamespace`, `ListTables`, `CreateTable`, `LoadTable`, `TableExists`, `UpdateTable` and `DeleteTable`. A namespace is a Glue database (single-level, as on AWS); its `location` and `comment` properties are the database's `LocationUri` and `Description`. A table is a Glue table whose `Parameters.table_type` is `ICEBERG` and whose `Parameters.metadata_location` names its current metadata file in S3. The writer writes data files and manifests itself. Each commit checks the request's requirements, applies its updates, writes the next metadata file beside the last one (`<location>/metadata/00001-<uuid>.metadata.json`), and moves `metadata_location` to it, with `previous_metadata_location` set to the old one. If the Glue table changed since the commit's base, the commit is refused with `CommitFailedException` (409). A commit that fails after writing its metadata file (Glue refuses it, or it was not the last commit) removes that file again. Because every commit lands on the Glue table, Spark's `GlueCatalog` and Athena read each committed snapshot. A staged create (`stage-create`) creates nothing until its commit (`assert-create`), the way Spark and DuckDB create tables. A table with no location takes its namespace's location plus its name. `DeleteTable` drops the Glue table and leaves its files in S3.
+
+[Athena](athena.md#iceberg-tables) creates and writes Iceberg tables through this endpoint: its query engine attaches it with a bearer token Floci issues for one statement, acting as the calling account in its Region.
+
+A table bucket federated from Amazon S3 Tables (see [Catalogs and Amazon S3 Tables](#catalogs-and-amazon-s3-tables)) is a catalog of this endpoint too: the warehouse `<account>:s3tablescatalog/<bucket>` configures the prefix `catalogs/<account>:s3tablescatalog:<bucket>` (levels joined by `:`, as AWS's route table writes nested catalogs; `s3tablescatalog:<bucket>` names the caller's own). Its namespaces and tables are the bucket's: S3 Tables decides where a table lives, so a create names no location (a staged create already creates the table, empty, at its warehouse location), namespaces take no properties (Spark's `owner` is let go), no commit moves a table out of its warehouse, each commit moves the table's metadata location with S3 Tables' version token (a stale one answering `CommitFailedException`), a table a staged create holds is listed only once committed, and dropping a table deletes its warehouse, data and all, as S3 Tables' `DeleteTable` does.
+
+Under IAM enforcement, each route is checked as the Glue operation AWS's [Glue Developer Guide](https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html) documents it as, its IAM action and CloudTrail event: `GetConfig` as `glue:GetCatalog`, `ListNamespaces` and `LoadNamespaceMetadata` as `glue:GetDatabase`, `CreateNamespace` as `glue:CreateDatabase`, `UpdateNamespaceProperties` as `glue:UpdateDatabase`, `DeleteNamespace` as `glue:DeleteDatabase`, `ListTables` as `glue:GetTables`, `CreateTable` as `glue:CreateTable`, `LoadTable` and `TableExists` as `glue:GetTable`, `UpdateTable` as `glue:UpdateTable`, and `DeleteTable` as `glue:DeleteTable`. Each is checked on the account's Data Catalog, `arn:aws:glue:<region>:<account>:catalog`, whichever catalog the prefix names: nothing AWS publishes says which Glue member an Iceberg path's prefix, namespace or table fills, so a grant or a deny scoped to a federated catalog, a database or a table does not apply on this endpoint. A Glue member a caller adds to an Iceberg request's body, such as `DatabaseInput` or `Tags`, is not read either: it names no resource and gives no condition key a value. Lake Formation permissions are not checked. The token Floci's own query engine attaches with is not checked again, Athena having checked its caller.
+
+Not yet: Other accounts' catalogs are not served. DuckDB signs SigV4 catalog requests only over HTTPS, so DuckDB attaches this endpoint with SigV4 only when Floci serves TLS (`floci.tls.enabled`).
+
+## Catalogs and Amazon S3 Tables
+
+`CreateCatalog`, `GetCatalog`, `GetCatalogs`, `UpdateCatalog` and `DeleteCatalog` manage catalogs beside the account's default one. Integrating table buckets with AWS analytics services creates the federated catalog `s3tablescatalog`:
+
+```bash
+aws glue create-catalog --cli-input-json '{"Name":"s3tablescatalog","CatalogInput":{"FederatedCatalog":{"Identifier":"arn:aws:s3tables:us-east-1:000000000000:bucket/*","ConnectionName":"aws:s3tables"},"AllowFullTableExternalDataAccess":"True"}}'
+```
+
+Each table bucket of the account is then a child catalog, `s3tablescatalog/<bucket>` (or `<account>:s3tablescatalog/<bucket>`), listed by `GetCatalogs` with `ParentCatalogId` `s3tablescatalog`, whose `FederatedCatalog.Identifier` is the bucket's ARN. With that `CatalogId`, `GetDatabases` and `GetDatabase` answer the bucket's namespaces, and `GetTables` and `GetTable` its tables, read from S3 Tables: Iceberg tables whose `metadata_location` and columns come from the table's current metadata file. A table without metadata yet has neither. Catalog ids answer as `<account>:<catalog>[/<child>]`. Writing through a federated catalog with Glue's own API (`CreateDatabase`, `CreateTable` with its `CatalogId`) and a federated catalog's IAM resources are not served yet; the [Iceberg REST endpoint](#iceberg-rest-endpoint) writes to its tables.
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_GLUE_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_GLUE_JOB_RUN_DURATION_SECONDS` | `0` | Seconds a job run stays `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
+| `FLOCI_SERVICES_GLUE_RUNNER_MODE` | `immediate` | `docker` runs the script of a `glueetl` job in a container; `immediate` runs no script |
+| `FLOCI_SERVICES_GLUE_IMAGE` | `public.ecr.aws/glue/aws-glue-libs:5` | The image a `docker` job run uses |
+| `FLOCI_SERVICES_GLUE_DOCKER_NETWORK` | | Docker network for the job containers; unset uses the global default |
 | `FLOCI_SERVICES_GLUE_CRAWLER_RUN_DURATION_SECONDS` | `0` | Seconds a crawl keeps the crawler `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
 
 ## Integration with Athena
@@ -437,3 +495,5 @@ aws glue list-schema-versions \
   --schema-id RegistryName=local-registry,SchemaName=orders \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+Catalog pagination for GetDatabases, GetTables, GetPartitions and GetTableVersions uses opaque continuation cursors ordered by database name, table name, partition values and descending version number respectively. Removing the last returned item or inserting items before its cursor does not invalidate continuation. Table schema references are resolved for the selected page.

@@ -9,7 +9,7 @@ import java.util.Map;
 
 /** WAF v2 IP set. {@code ipAddressVersion} is IPV4 or IPV6; {@code addresses} are CIDRs. */
 @RegisterForReflection
-public class IpSet {
+public class IpSet implements WafV2Resource {
 
     private String id;
     private String name;

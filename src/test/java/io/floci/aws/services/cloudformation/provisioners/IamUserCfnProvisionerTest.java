@@ -19,11 +19,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -44,6 +47,7 @@ class IamUserCfnProvisionerTest {
     @BeforeEach
     void configureInlinePolicyChanges() {
         IamInlinePolicyMock.configure(iam);
+        when(iam.canonicalPolicyArn(anyString())).thenAnswer(returnsFirstArg());
     }
 
     private ProvisionContext ctx() {
@@ -391,11 +395,12 @@ class IamUserCfnProvisionerTest {
         JsonNode original = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
                 + "{\"PolicyName\":\"old\",\"PolicyDocument\":" + policy + "}]}");
         realProvisioner.provision(r, original, ctx());
-        realIam.putUserPolicy("app-user", "untracked", "{}");
+        realIam.putUserPolicy("app-user", "untracked", EMPTY_POLICY_DOCUMENT);
         JsonNode renamed = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
                 + "{\"PolicyName\":\"new\",\"PolicyDocument\":" + policy + "}]}");
         realProvisioner.provision(r, renamed, updateCtx("app-user"));
-        assertEquals(Map.of("new", policy, "untracked", "{}"), realIam.getUser("app-user").getInlinePolicies());
+        assertEquals(Map.of("new", policy, "untracked", EMPTY_POLICY_DOCUMENT),
+                realIam.getUser("app-user").getInlinePolicies());
 
         JsonNode overflow = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
                 + "{\"PolicyName\":\"replacement\",\"PolicyDocument\":" + policy + "},"
@@ -404,7 +409,8 @@ class IamUserCfnProvisionerTest {
                 () -> realProvisioner.provision(r, overflow, updateCtx("app-user")));
         assertEquals("LimitExceeded", failure.getErrorCode());
         assertEquals(0, failure.getSuppressed().length);
-        assertEquals(Map.of("new", policy, "untracked", "{}"), realIam.getUser("app-user").getInlinePolicies());
+        assertEquals(Map.of("new", policy, "untracked", EMPTY_POLICY_DOCUMENT),
+                realIam.getUser("app-user").getInlinePolicies());
     }
 
     @Test

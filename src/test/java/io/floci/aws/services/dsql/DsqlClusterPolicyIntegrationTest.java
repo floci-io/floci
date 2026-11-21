@@ -3,6 +3,7 @@ package io.floci.aws.services.dsql;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -40,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the decision to the caller's own policies.
  */
 @QuarkusTest
-@TestProfile(DsqlEnforcementProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlClusterPolicyIntegrationTest {
@@ -147,12 +148,13 @@ class DsqlClusterPolicyIntegrationTest {
         as(user).urlEncodingEnabled(false).body(Map.of("tags", Map.of("team", "data"))).post(tagsPath)
                 .then().statusCode(403);
         as(user).urlEncodingEnabled(false).get(tagsPath).then().statusCode(403);
-        // The same tagging is served at /tags, naming the ARN in the query or the body.
+        // The bare /tags is no route of DSQL's model, as AWS gives it none: it is refused as an ARN that path does
+        // not serve, naming the ARN in the query or the body.
         as(user).body(Map.of("resourceArn", cluster.arn(), "tags", Map.of("team", "data"))).post("/tags")
-                .then().statusCode(403);
-        as(user).queryParam("resourceArn", cluster.arn()).get("/tags").then().statusCode(403);
+                .then().statusCode(400).body("message", equalTo("Invalid resource ARN: " + cluster.arn()));
+        as(user).queryParam("resourceArn", cluster.arn()).get("/tags").then().statusCode(400);
         as(user).queryParam("resourceArn", cluster.arn()).queryParam("tagKeys", "team").delete("/tags")
-                .then().statusCode(403);
+                .then().statusCode(400);
         as(user).get(vpcEndpointPath).then().statusCode(403);
         // The calls the policy does not name answer.
         as(user).get(clusterPath + "/policy").then().statusCode(200);

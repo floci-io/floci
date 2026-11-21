@@ -640,7 +640,7 @@ class SesBulkV2IntegrationTest {
                     {"FromEmailAddress": "bulk@example.com",
                      "DefaultContent": {"Template": {"TemplateContent": {}}},
                      "BulkEmailEntries": [%s]}
-                    """.formatted(entries(51)), "Template must have at least a subject, text, or html part."));
+                    """.formatted(entries(51)), "Template is missing required fields."));
     }
 
     // An entry with no recipient beside one with a recipient fails on its own (probed 2026-10-25).

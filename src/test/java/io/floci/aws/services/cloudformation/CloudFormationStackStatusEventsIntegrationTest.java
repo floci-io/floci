@@ -124,9 +124,10 @@ class CloudFormationStackStatusEventsIntegrationTest {
             executeChangeSet(root, "update", "b");
             CfnStackWaits.awaitStatus(root, "UPDATE_COMPLETE");
 
+            // A delete that lands before the update's execution has ended waits for it, so the stack can still show
+            // UPDATE_COMPLETE: the wait is for the delete's own DELETE_COMPLETE event.
             CfnRequests.cfn("DeleteStack", root).formParam("ClientRequestToken", "c")
                     .when().post("/").then().statusCode(200);
-            CfnStackWaits.awaitStatus(rootId, "DELETE_COMPLETE");
 
             List<JsonNode> events = awaitEvents(queue, rootId, "DELETE_COMPLETE");
             List<JsonNode> rootEvents = naming(events, rootId);
@@ -164,8 +165,9 @@ class CloudFormationStackStatusEventsIntegrationTest {
             CfnRequests.cfn("DeleteStack", stack).formParam("ClientRequestToken", "delete-token")
                     .when().post("/").then().statusCode(200);
             heldCreate.release();
-            CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
 
+            // The delete starts once the create ends, so the stack shows CREATE_COMPLETE in between: the wait is for
+            // the delete's own DELETE_COMPLETE event, not a status a poll could catch at CREATE_COMPLETE.
             List<JsonNode> events = naming(awaitEvents(queue, stackId, "DELETE_COMPLETE"), stackId);
             Map<String, Set<String>> tokens = tokensByStatus(events);
             assertEquals(Set.of("create-token"), tokens.get("CREATE_IN_PROGRESS"));

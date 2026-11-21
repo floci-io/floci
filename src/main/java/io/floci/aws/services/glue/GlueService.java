@@ -10,10 +10,14 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.glue.model.Classifier;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.Connection;
@@ -62,6 +66,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -69,6 +74,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -80,6 +86,7 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final int MAX_BATCH_DELETE_TABLES = 100;
     private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_DESCRIPTION_LENGTH = 2048;
@@ -219,29 +226,42 @@ public class GlueService {
                        RegionResolver regionResolver,
                        ResourceGroupsTaggingService resourceGroupsTaggingService,
                        KmsService kmsService) {
-        this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
-        this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
-        this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
-        this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
-        this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
-        this.partitionIndexStore = storageFactory.create(
+        this.databaseStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "databases.json", new TypeReference<>() {});
+        this.tableStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "tables.json", new TypeReference<>() {});
+        this.tableVersionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "table_versions.json", new TypeReference<>() {});
+        this.columnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "column_statistics.json", new TypeReference<>() {});
+        this.partitionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "partitions.json", new TypeReference<>() {});
+        this.partitionIndexStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_indexes.json", new TypeReference<>() {});
-        this.partitionColumnStatisticsStore = storageFactory.create(
+        this.partitionColumnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
-        this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
-        this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
-        this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
-        this.classifierStore = storageFactory.create("glue", "classifiers.json", new TypeReference<>() {});
-        this.connectionStore = storageFactory.create("glue", "connections.json", new TypeReference<>() {});
-        this.resourcePolicyStore = storageFactory.create("glue", "resource_policy.json", new TypeReference<>() {});
-        this.encryptionSettingsStore = storageFactory.create(
+        this.functionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "functions.json", new TypeReference<>() {});
+        this.jobStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "jobs.json", new TypeReference<>() {});
+        this.crawlerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "crawlers.json", new TypeReference<>() {});
+        this.classifierStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "classifiers.json", new TypeReference<>() {});
+        this.connectionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "connections.json", new TypeReference<>() {});
+        this.resourcePolicyStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "resource_policy.json", new TypeReference<>() {});
+        this.encryptionSettingsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
         this.dataQualityRulesetStore = storageFactory.create(
                 "glue", "data_quality_rulesets.json", new TypeReference<>() {});
-        this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
-        this.workflowStore = storageFactory.create("glue", "workflows.json", new TypeReference<>() {});
+        this.triggerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "triggers.json", new TypeReference<>() {});
+        this.workflowStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "workflows.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -358,10 +378,10 @@ public class GlueService {
     }
 
     public void createDatabase(Database database) {
-        createDatabase(database, null, regionResolver.getDefaultRegion());
+        createDatabase(database, null, regionResolver.getRegion());
     }
 
-    public void createDatabase(Database database, Map<String, String> tags, String region) {
+    public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
         String databaseName = normalizeName(database.getName());
         if (databaseStore.get(databaseName).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Database already exists: " + database.getName(), 400);
@@ -388,6 +408,12 @@ public class GlueService {
         return databases;
     }
 
+    public Page<Database> getDatabases(Integer maxResults, String nextToken) {
+        return paginate(() -> getDatabases().stream()
+                .sorted(Comparator.comparing(Database::getName)).toList(), maxResults, nextToken, 100,
+                Database::getName, "glue-databases");
+    }
+
     /**
      * Heals a database persisted before CatalogId was modelled. The store is namespaced by
      * account, so the reader is always the owning account and the healed value is stable —
@@ -399,7 +425,7 @@ public class GlueService {
         }
     }
 
-    public void updateDatabase(String name, Database database) {
+    public synchronized void updateDatabase(String name, Database database) {
         Database existing = getDatabase(name);
         String databaseName = normalizeName(database.getName());
         if (!existing.getName().equals(databaseName)) {
@@ -417,22 +443,29 @@ public class GlueService {
     }
 
     public void deleteDatabase(String name) {
-        deleteDatabase(name, regionResolver.getDefaultRegion());
+        deleteDatabase(name, regionResolver.getRegion());
     }
 
-    public void deleteDatabase(String name, String region) {
+    public synchronized void deleteDatabase(String name, String region) {
         String databaseName = getDatabase(name).getName();
         List<String> tableNames = tableStore.scan(k -> true).stream()
                 .filter(table -> databaseName.equals(table.getDatabaseName()))
                 .map(Table::getName)
                 .toList();
         tableNames.forEach(tableName -> deleteTable(name, tableName));
+        List<String> functionArns = functionStore.scan(k -> true).stream()
+                .filter(function -> databaseName.equals(function.getDatabaseName()))
+                .map(function -> userDefinedFunctionArn(region, databaseName, function.getFunctionName()))
+                .toList();
+        StorageOperations.deleteMatchingAtomically(functionStore,
+                function -> databaseName.equals(function.getDatabaseName()));
+        resourceGroupsTaggingService.deleteResources(functionArns, region);
         databaseStore.delete(databaseName);
         resourceGroupsTaggingService.deleteResources(List.of(databaseArn(region, databaseName)), region);
         LOG.infov("Deleted Glue Database: {0}", name);
     }
 
-    public void createTable(String databaseName, Table table) {
+    public synchronized void createTable(String databaseName, Table table) {
         requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
@@ -464,6 +497,13 @@ public class GlueService {
             resolved.add(withResolvedSchemaReference(table));
         }
         return resolved;
+    }
+
+    public Page<Table> getTables(String databaseName, Integer maxResults, String nextToken) {
+        String prefix = normalizeName(databaseName) + ":";
+        Page<Table> page = paginate(() -> tableStore.scan(key -> key.startsWith(prefix)),
+                maxResults, nextToken, 100, Table::getName, "glue-tables:" + prefix);
+        return new Page<>(page.items().stream().map(this::withResolvedSchemaReference).toList(), page.nextToken());
     }
 
     /**
@@ -698,6 +738,13 @@ public class GlueService {
                 .toList();
     }
 
+    public Page<Map<String, Object>> getTableVersions(String databaseName, String tableName,
+                                                    Integer maxResults, String nextToken) {
+        return paginate(() -> getTableVersions(databaseName, tableName), maxResults, nextToken, 100,
+                version -> String.format("%019d", Long.MAX_VALUE - versionIdAsLong((Table) version.get("Table"))),
+                "glue-versions:" + tableKey(databaseName, tableName));
+    }
+
     /** One archived version, or the current table when no VersionId is given, as AWS answers. */
     public Map<String, Object> getTableVersion(String databaseName, String tableName, String versionId) {
         Table current = getTable(databaseName, tableName);
@@ -763,10 +810,13 @@ public class GlueService {
         }
     }
 
-    public void deleteTable(String databaseName, String tableName) {
-        getTable(databaseName, tableName);
+    public synchronized void deleteTable(String databaseName, String tableName) {
+        Table table = getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
+        String region = regionResolver.getRegion();
+        resourceGroupsTaggingService.deleteResources(
+                List.of(tableArn(region, table.getDatabaseName(), table.getName())), region);
         tableVersionStore.keys().stream()
                 .filter(versionKey -> versionKey.startsWith(key + ":"))
                 .forEach(tableVersionStore::delete);
@@ -786,20 +836,27 @@ public class GlueService {
     }
 
     public List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
-        getDatabase(databaseName);
-        List<BatchDeleteTableError> errors = new ArrayList<>();
-        for (String tableName : tableNames) {
-            String key = tableKey(databaseName, tableName);
-            Optional<Table> table = tableStore.get(key);
-            if (table.isEmpty()) {
-                errors.add(new BatchDeleteTableError(
-                        tableName,
-                        new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
-                continue;
-            }
-            deleteTable(databaseName, tableName);
+        validateRequired(tableNames, "TablesToDelete");
+        if (tableNames.size() > MAX_BATCH_DELETE_TABLES) {
+            throw new AwsException("InvalidInputException",
+                    "TablesToDelete must have at most " + MAX_BATCH_DELETE_TABLES + " items.", 400);
         }
-        return errors;
+        synchronized (this) {
+            getDatabase(databaseName);
+            List<BatchDeleteTableError> errors = new ArrayList<>();
+            for (String tableName : tableNames) {
+                String key = tableKey(databaseName, tableName);
+                Optional<Table> table = tableStore.get(key);
+                if (table.isEmpty()) {
+                    errors.add(new BatchDeleteTableError(
+                            tableName,
+                            new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
+                    continue;
+                }
+                deleteTable(databaseName, tableName);
+            }
+            return errors;
+        }
     }
 
     public void updateColumnStatisticsForTable(
@@ -845,10 +902,13 @@ public class GlueService {
         columnStatisticsStore.delete(columnStatisticsKey(databaseName, tableName, columnName));
     }
 
-    public void createPartition(String databaseName, String tableName, Partition partition) {
+    public synchronized void createPartition(String databaseName, String tableName, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
+        if (partitionStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
+        }
         partition.setDatabaseName(table.getDatabaseName());
         partition.setTableName(table.getName());
         if (partition.getCreationTime() == null) {
@@ -857,7 +917,7 @@ public class GlueService {
         partitionStore.put(key, partition);
     }
 
-    public List<BatchCreatePartitionError> batchCreatePartitions(
+    public synchronized List<BatchCreatePartitionError> batchCreatePartitions(
             String databaseName,
             String tableName,
             List<Partition> partitions) {
@@ -951,6 +1011,29 @@ public class GlueService {
                 .filter(partition -> matchesPartitionExpression(table, partition, expression))
                 .sorted(GlueService::comparePartitionValues)
                 .toList();
+    }
+
+    public Page<Partition> getPartitions(String databaseName, String tableName, String expression,
+                                         Segment segment, Integer maxResults, String nextToken) {
+        return paginate(() -> getPartitions(databaseName, tableName, expression, segment),
+                maxResults, nextToken, 1000, GlueService::partitionCursor,
+                "glue-partitions:" + tableKey(databaseName, tableName));
+    }
+
+    /** Fixed-width UTF-16 digits and terminators preserve the null-first tuple ordering. */
+    private static String partitionCursor(Partition partition) {
+        StringBuilder cursor = new StringBuilder();
+        List<String> values = partition.getValues() == null ? List.of() : partition.getValues();
+        for (String value : values) {
+            cursor.append(value == null ? '0' : '1');
+            if (value != null) {
+                for (int index = 0; index < value.length(); index++) {
+                    cursor.append(HexFormat.of().toHexDigits(value.charAt(index)));
+                }
+            }
+            cursor.append('/');
+        }
+        return cursor.toString();
     }
 
     private static void validateSegment(Segment segment) {
@@ -1230,7 +1313,7 @@ public class GlueService {
         partitionColumnStatisticsStore.delete(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName));
     }
 
-    public void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
+    public synchronized void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
         Database database = getDatabase(databaseName);
         String key = functionKey(databaseName, function.getFunctionName());
         if (functionStore.get(key).isPresent()) {
@@ -1243,7 +1326,7 @@ public class GlueService {
         functionStore.put(key, function);
     }
 
-    public UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
+    public synchronized UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
         getDatabase(databaseName);
         return functionStore.get(functionKey(databaseName, functionName))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
@@ -1285,7 +1368,8 @@ public class GlueService {
         return new UserDefinedFunctionPage(functions.subList(offset, end), newNextToken);
     }
 
-    public void updateUserDefinedFunction(String databaseName, String functionName, UserDefinedFunction function) {
+    public synchronized void updateUserDefinedFunction(
+            String databaseName, String functionName, UserDefinedFunction function) {
         UserDefinedFunction existing = getUserDefinedFunction(databaseName, functionName);
         function.setDatabaseName(existing.getDatabaseName());
         function.setFunctionName(existing.getFunctionName());
@@ -1293,9 +1377,12 @@ public class GlueService {
         functionStore.put(functionKey(databaseName, functionName), function);
     }
 
-    public void deleteUserDefinedFunction(String databaseName, String functionName) {
-        getUserDefinedFunction(databaseName, functionName);
+    public synchronized void deleteUserDefinedFunction(String databaseName, String functionName) {
+        UserDefinedFunction function = getUserDefinedFunction(databaseName, functionName);
         functionStore.delete(functionKey(databaseName, functionName));
+        String region = regionResolver.getRegion();
+        resourceGroupsTaggingService.deleteResources(List.of(
+                userDefinedFunctionArn(region, function.getDatabaseName(), function.getFunctionName())), region);
     }
 
     private void validateSchemaReference(Table table) {
@@ -1332,7 +1419,7 @@ public class GlueService {
         boolean latest = ref.getSchemaVersionId() == null && ref.getSchemaVersionNumber() == null;
         return schemaRegistryService.getSchemaVersion(
                 ref.getSchemaId(), ref.getSchemaVersionId(),
-                ref.getSchemaVersionNumber(), latest, regionResolver.getDefaultRegion());
+                ref.getSchemaVersionNumber(), latest, regionResolver.getRegion());
     }
 
     private static SchemaReference schemaReferenceOf(Table table) {
@@ -1433,7 +1520,8 @@ public class GlueService {
         return value;
     }
 
-    private static String normalizeName(String name) {
+    /** A database, table or function name as Glue stores it and names it in an ARN: lowercase. */
+    public static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
     }
 
@@ -1633,6 +1721,14 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "database/" + databaseName);
     }
 
+    private String tableArn(String region, String databaseName, String tableName) {
+        return regionResolver.buildArn("glue", region, "table/" + databaseName + "/" + tableName);
+    }
+
+    private String userDefinedFunctionArn(String region, String databaseName, String functionName) {
+        return regionResolver.buildArn("glue", region, "userDefinedFunction/" + databaseName + "/" + functionName);
+    }
+
     private String jobArn(String region, String jobName) {
         return regionResolver.buildArn("glue", region, "job/" + jobName);
     }
@@ -1729,6 +1825,7 @@ public class GlueService {
         Table copy = new Table();
         copy.setName(source.getName());
         copy.setDatabaseName(source.getDatabaseName());
+        copy.setCatalogId(source.getCatalogId());
         copy.setDescription(source.getDescription());
         copy.setOwner(source.getOwner());
         copy.setCreateTime(source.getCreateTime());
@@ -1963,7 +2060,7 @@ public class GlueService {
     }
 
     public void createJob(Job job) {
-        createJob(job, null, regionResolver.getDefaultRegion());
+        createJob(job, null, regionResolver.getRegion());
     }
 
     public void createJob(Job job, Map<String, String> tags, String region) {
@@ -2269,7 +2366,7 @@ public class GlueService {
     }
 
     public void createCrawler(Crawler crawler) {
-        createCrawler(crawler, null, regionResolver.getDefaultRegion());
+        createCrawler(crawler, null, regionResolver.getRegion());
     }
 
     public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {
@@ -3134,7 +3231,7 @@ public class GlueService {
     public void tagResource(String arn, Map<String, String> tags, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.tagResource(arn, tags);
+            schemaRegistryService.tagResource(arn, tags, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
@@ -3144,7 +3241,7 @@ public class GlueService {
     public void untagResource(String arn, List<String> tagKeys, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.untagResource(arn, tagKeys);
+            schemaRegistryService.untagResource(arn, tagKeys, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
@@ -3154,11 +3251,35 @@ public class GlueService {
     public Map<String, String> getTags(String arn, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            return schemaRegistryService.getTags(arn);
+            return schemaRegistryService.getTags(arn, region);
         } else {
             validateResourceExists(arn);
             return resourceGroupsTaggingService.getTagsForResource(region, arn);
         }
+    }
+
+    /**
+     * The tags of the resource stored under {@code arn}, in the account and Region it names: a registry's or a schema's
+     * from the schema registry, any other resource's from the tags applied to its ARN, which Glue drops when it deletes
+     * the resource; read in place and empty for an ARN naming nothing tagged. Only string values are tags: TagResource
+     * keeps the request's map as given.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "glue")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        Map<String, ?> applied = resource.startsWith("registry/") || resource.startsWith("schema/")
+                ? schemaRegistryService.storedTags(arn)
+                : resourceGroupsTaggingService.storedTags(parsed.accountId(), parsed.region(), arn);
+        Map<String, String> tags = new LinkedHashMap<>();
+        applied.forEach((key, value) -> {
+            if (value instanceof String text) {
+                tags.put(key, text);
+            }
+        });
+        return tags;
     }
 
     private void validateArn(String arn) {
@@ -3430,12 +3551,18 @@ public class GlueService {
         return paginate(() -> all, maxResults, nextToken, 1000);
     }
 
+    private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum,
+                                  Function<T, String> cursorOf, String namespace) {
+        int limit = pageLimit(maxResults, maximum);
+        PaginatedResult<T> page = Pagination.paginate(items.get(), cursorOf,
+                limit, nextToken, namespace,
+                token -> new AwsException("InvalidInputException", "Invalid NextToken", 400));
+        return new Page<>(page.items(), page.nextToken());
+    }
+
     private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum) {
-        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
-            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
-        }
+        int limit = pageLimit(maxResults, maximum);
         List<T> all = items.get();
-        int limit = maxResults == null ? 100 : maxResults;
         int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {
             try {
@@ -3450,5 +3577,12 @@ public class GlueService {
         int end = Math.min(start + limit, all.size());
         String newToken = end < all.size() ? String.valueOf(end) : null;
         return new Page<>(List.copyOf(all.subList(start, end)), newToken);
+    }
+
+    private static int pageLimit(Integer maxResults, int maximum) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
+        }
+        return maxResults == null ? 100 : maxResults;
     }
 }

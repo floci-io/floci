@@ -1,9 +1,12 @@
 package io.floci.aws.services.redshift.proxy;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.function.IntConsumer;
 
 /**
@@ -35,6 +38,7 @@ final class CopyRecordTransformer {
     private final List<Integer> columnMaxBytes;
     private final List<ColumnKind> columnKinds;
     private final boolean emptyNullString;
+    private final List<Integer> columnScales;
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
         this(spec, columnMaxBytes, null);
@@ -42,6 +46,12 @@ final class CopyRecordTransformer {
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                           List<ColumnKind> columnKinds) {
+        this(spec, columnMaxBytes, columnKinds, null);
+    }
+
+    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
+                          List<ColumnKind> columnKinds, List<Integer> columnScales) {
+        this.columnScales = columnScales;
         this.columnKinds = columnKinds;
         this.emptyNullString = spec.nullAs() != null && spec.nullAs().isEmpty();
         this.transforms = spec.transforms();
@@ -61,7 +71,7 @@ final class CopyRecordTransformer {
         byte[] data = transforms.invalidCharReplacement() != null
                 ? sanitizeUtf8(input, (byte) transforms.invalidCharReplacement().charValue())
                 : input;
-        if (!transforms.fieldLevel()) {
+        if (!transforms.fieldLevel() && (columnScales == null || columnScales.stream().allMatch(scale -> scale == null))) {
             if (onOutputBytes != null) {
                 onOutputBytes.accept(data.length);
             }
@@ -76,7 +86,7 @@ final class CopyRecordTransformer {
         ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 16);
         int position = 0;
         while (position < data.length) {
-            position = transformRecord(data, position, out);
+            position = transformRecord(data, position, out, onOutputBytes);
             if (onOutputBytes != null) {
                 onOutputBytes.accept(out.size());
             }
@@ -131,12 +141,29 @@ final class CopyRecordTransformer {
         return overlongOrOutOfRange ? 0 : length;
     }
 
-    private int transformRecord(byte[] data, int start, ByteArrayOutputStream out) {
+    private int transformRecord(byte[] data, int start, ByteArrayOutputStream out, IntConsumer onOutputBytes) {
+        if (transforms.ignoreBlankLines()) {
+            if (data[start] == NEWLINE) {
+                return start + 1;
+            }
+            if (isCrlfAt(data, start)) {
+                return Math.min(start + 2, data.length);
+            }
+        }
         int position = start;
         int column = 0;
         while (true) {
             Field field = scanField(data, position);
-            writeField(field, column, out);
+            try {
+                writeField(field, column, out);
+            } catch (S3CopySimulator.S3TransferException error) {
+                throw new S3CopySimulator.S3TransferException(error.sqlState(), error.getMessage(), error,
+                        Map.of('c', Integer.toString(column + 1), 'd',
+                                new String(field.value(), 0, Math.min(field.value().length, 1024), StandardCharsets.UTF_8)));
+            }
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(out.size());
+            }
             position = field.tokenEnd();
             if (position >= data.length) {
                 fillMissingColumns(column + 1, out);
@@ -202,15 +229,35 @@ final class CopyRecordTransformer {
         int j = start;
         while (j < length && data[j] != delimiter && data[j] != NEWLINE) {
             if (!csv && data[j] == BACKSLASH && j + 1 < length) {
+                j = textEscapeEnd(data, j);
+            } else {
                 j++;
             }
-            j++;
         }
         int valueEnd = j;
         if (j < length && data[j] == NEWLINE && j > start && data[j - 1] == CARRIAGE_RETURN) {
             valueEnd = j - 1;
         }
         return new Field(j, Arrays.copyOfRange(data, start, valueEnd), false);
+    }
+
+    private static int textEscapeEnd(byte[] data, int position) {
+        int next = position + 1;
+        if (data[next] >= '0' && data[next] <= '7') {
+            int end = next;
+            while (end < data.length && end < next + 3 && data[end] >= '0' && data[end] <= '7') {
+                end++;
+            }
+            return end;
+        }
+        if (data[next] == 'x' && next + 1 < data.length && Character.digit(data[next + 1], 16) >= 0) {
+            int end = next + 2;
+            if (end < data.length && Character.digit(data[end], 16) >= 0) {
+                end++;
+            }
+            return end;
+        }
+        return next + 1;
     }
 
     /** A carriage return that ends the record: followed by a newline or by the end of the data. */
@@ -248,7 +295,12 @@ final class CopyRecordTransformer {
         // A field that already is the NULL marker must not be cut or reformatted: that would turn NULL into data.
         boolean nullMarkerField = !field.quoted() && Arrays.equals(value, nullMarker);
         boolean converted = false;
+        boolean decimalConverted = false;
         if (!nullMarkerField) {
+            byte[] decimal = convertDecimal(value, column);
+            decimalConverted = decimal != value;
+            converted = decimalConverted;
+            value = decimal;
             byte[] temporal = convertTemporal(value, column);
             if (temporal == null) {
                 out.writeBytes(nullMarker);
@@ -260,7 +312,12 @@ final class CopyRecordTransformer {
             }
         }
         byte[] limited = nullMarkerField ? value : truncate(value, column);
-        boolean needsEscaping = field.quoted() || (converted && containsDelimiter(limited));
+        if (decimalConverted && !csv) {
+            writeDecimalText(limited, out);
+            return;
+        }
+        boolean needsEscaping = field.quoted() || (converted && containsDelimiter(limited))
+                || (decimalConverted && Arrays.equals(limited, nullMarker));
         if (!needsEscaping) {
             out.writeBytes(limited);
         } else if (csv) {
@@ -268,6 +325,77 @@ final class CopyRecordTransformer {
         } else {
             out.writeBytes(escapeTextField(limited));
         }
+    }
+
+    private byte[] convertDecimal(byte[] value, int column) {
+        if (columnScales == null || column >= columnScales.size() || columnScales.get(column) == null || value.length == 0) {
+            return value;
+        }
+        try {
+            byte[] decoded = csv ? value : decodeTextEscapes(value);
+            BigDecimal decimal = new BigDecimal(trimNumericWhitespace(new String(decoded, StandardCharsets.UTF_8)));
+            if (decimal.precision() - (long) decimal.scale() > 1000) {
+                throw new ArithmeticException("Numeric value exceeds the supported precision");
+            }
+            RoundingMode rounding = transforms.roundDecimal() ? RoundingMode.HALF_UP : RoundingMode.DOWN;
+            if (decimal.scale() - (long) decimal.precision() > columnScales.get(column) + 1L) {
+                decimal = BigDecimal.ZERO;
+            }
+            return decimal.setScale(columnScales.get(column), rounding).toPlainString().getBytes(StandardCharsets.UTF_8);
+        } catch (NumberFormatException ignored) {
+            // Let PostgreSQL report invalid numeric text with its normal SQLSTATE and column context.
+            return value;
+        } catch (ArithmeticException exception) {
+            throw new S3CopySimulator.S3TransferException("22003", "COPY numeric value out of range", exception);
+        }
+    }
+
+    private static String trimNumericWhitespace(String text) {
+        int start = 0;
+        int end = text.length();
+        while (start < end && isNumericWhitespace(text.charAt(start))) {
+            start++;
+        }
+        while (end > start && isNumericWhitespace(text.charAt(end - 1))) {
+            end--;
+        }
+        return text.substring(start, end);
+    }
+
+    private static boolean isNumericWhitespace(char character) {
+        return character == ' ' || (character >= '\t' && character <= '\r');
+    }
+
+    private void writeDecimalText(byte[] value, ByteArrayOutputStream out) {
+        byte[] encoded = encodeDecimalText(value, false);
+        out.writeBytes(Arrays.equals(encoded, nullMarker) ? encodeDecimalText(value, true) : encoded);
+    }
+
+    private byte[] encodeDecimalText(byte[] value, boolean escapeFirst) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(value.length + 4);
+        for (int i = 0; i < value.length; i++) {
+            byte b = value[i];
+            if (i == 0 && escapeFirst && b == delimiter && b >= '0' && b <= '7') {
+                // The default encoding already uses octal here; hex gives the marker a different spelling.
+                out.write(BACKSLASH);
+                out.write('x');
+                out.write(Character.forDigit((b >>> 4) & 15, 16));
+                out.write(Character.forDigit(b & 15, 16));
+            } else if (b == delimiter || (i == 0 && escapeFirst)) {
+                out.write(BACKSLASH);
+                // An escaped octal digit consumes following digits, so always emit all three octal digits.
+                if ((b >= '0' && b <= '7') || (i == 0 && escapeFirst)) {
+                    out.write('0' + ((b >>> 6) & 7));
+                    out.write('0' + ((b >>> 3) & 7));
+                    out.write('0' + (b & 7));
+                } else {
+                    out.write(b);
+                }
+            } else {
+                out.write(b);
+            }
+        }
+        return out.toByteArray();
     }
 
     private static byte[] trimTrailingSpaces(byte[] value, boolean csv) {

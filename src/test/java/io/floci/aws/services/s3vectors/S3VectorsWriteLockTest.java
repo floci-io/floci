@@ -150,6 +150,48 @@ class S3VectorsWriteLockTest {
         assertEquals(Map.of("new", "tag"), service.getVectorBucket("bucket", REGION).getTags());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bucketPolicyDoesNotOverwriteConcurrentIndexCreation(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        overlap(() -> service.putVectorBucketPolicy("bucket", null, policy, REGION), this::createIndex);
+        assertEquals(policy, service.getVectorBucketPolicy("bucket", null, REGION));
+        assertEquals("index", service.getIndex("bucket", "index", REGION).getIndexName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bucketPolicyUpdateCannotResurrectADeletedOrRecreatedBucket(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        overlap(() -> service.putVectorBucketPolicy("bucket", null, policy, REGION),
+                () -> service.deleteVectorBucket("bucket", REGION));
+        assertThrows(AwsException.class, () -> service.getVectorBucket("bucket", REGION));
+
+        service.createVectorBucket("bucket", null, REGION);
+        overlap(() -> service.putVectorBucketPolicy("bucket", null, policy, REGION), () -> {
+            service.deleteVectorBucket("bucket", REGION);
+            service.createVectorBucket("bucket", null, Map.of("new", "tag"), REGION);
+        });
+        assertEquals(Map.of("new", "tag"), service.getVectorBucket("bucket", REGION).getTags());
+        assertThrows(AwsException.class, () -> service.getVectorBucketPolicy("bucket", null, REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void resourceTagMergesPreserveConcurrentTagsAndVectors(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        createIndex();
+        String arn = service.getIndex("bucket", "index", REGION).getIndexArn();
+        overlap(() -> service.tagResource(arn, Map.of("first", "value"), REGION),
+                () -> service.tagResource(arn, Map.of("second", "value"), REGION));
+        assertEquals(Map.of("first", "value", "second", "value"), service.listTagsForResource(arn, REGION));
+        overlap(() -> service.untagResource(arn, List.of("first"), REGION), () -> putVector("stored"));
+        assertEquals(Map.of("second", "value"), service.listTagsForResource(arn, REGION));
+        assertEquals(1, service.getVectors("bucket", "index", List.of("stored"), REGION).size());
+    }
+
     private void putVector(String key) {
         service.putVectors("bucket", "index", List.of(new VectorData(key, List.of(1.0f), Map.of())), REGION);
     }

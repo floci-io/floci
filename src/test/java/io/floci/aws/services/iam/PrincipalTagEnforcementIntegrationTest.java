@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.EnforcementFixtures.MfaDevice;
 import io.floci.aws.testing.EnforcementFixtures.UserCredentials;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -11,10 +12,8 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.Tag;
@@ -75,7 +74,9 @@ class PrincipalTagEnforcementIntegrationTest {
              StsClient sts = AwsTestClients.create(StsClient.builder(), keys.accessKeyId(), keys.secretAccessKey(),
                      Region.US_EAST_1)) {
             admin.tagUser(r -> r.userName(name).tags(tag("Team", "platform")));
-            Credentials session = sts.getSessionToken().credentials();
+            // A session token reaches an IAM operation only where a device minted it, so the
+            // device is what makes this probe reachable; what decides it is still the user's tags.
+            Credentials session = sessionBehindADevice(sts, name);
             try (IamClient caller = sessionClient(session)) {
                 caller.listUsers();
                 admin.untagUser(r -> r.userName(name).tagKeys("Team"));
@@ -125,8 +126,8 @@ class PrincipalTagEnforcementIntegrationTest {
             Credentials session = sts.assumeRole(r -> r.roleArn(target).roleSessionName("matching")).credentials();
             // A chained request sees the assumed role's tags, not the original user's tags.
             admin.tagUser(r -> r.userName(source).tags(tag("Team", "other")));
-            try (StsClient chained = StsClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                    .httpClientBuilder(UrlConnectionHttpClient.builder()).credentialsProvider(provider(session)).build()) {
+            try (StsClient chained = AwsTestClients.create(StsClient.builder(),
+                    sessionCredentials(session), Region.US_EAST_1, baseUri)) {
                 chained.assumeRole(r -> r.roleArn(target).roleSessionName("chain"));
                 admin.untagRole(r -> r.roleName(name).tagKeys("Team"));
                 denied(() -> chained.assumeRole(r -> r.roleArn(target).roleSessionName("untagged")));
@@ -207,14 +208,19 @@ class PrincipalTagEnforcementIntegrationTest {
         return AwsTestClients.create(IamClient.builder(), keys.accessKeyId(), keys.secretAccessKey(), Region.US_EAST_1);
     }
 
-    private IamClient sessionClient(Credentials session) {
-        return IamClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).credentialsProvider(provider(session)).build();
+    /** A session minted behind a virtual device enabled for the user, the way a client sets one up. */
+    private Credentials sessionBehindADevice(StsClient sts, String userName) {
+        MfaDevice device = EnforcementFixtures.enableMfaDevice(baseUri.getPort(), auth(ACCOUNT, "iam"), userName);
+        return sts.getSessionToken(r -> r.serialNumber(device.serialNumber())
+                .tokenCode(device.codeNow())).credentials();
     }
 
-    private static StaticCredentialsProvider provider(Credentials session) {
-        return StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                session.accessKeyId(), session.secretAccessKey(), session.sessionToken()));
+    private IamClient sessionClient(Credentials session) {
+        return AwsTestClients.create(IamClient.builder(), sessionCredentials(session), Region.US_EAST_1, baseUri);
+    }
+
+    private static AwsSessionCredentials sessionCredentials(Credentials session) {
+        return AwsSessionCredentials.create(session.accessKeyId(), session.secretAccessKey(), session.sessionToken());
     }
 
     private static void denied(Runnable operation) {

@@ -1,13 +1,13 @@
 package io.floci.aws.services.iot;
 
-import io.floci.aws.testing.IotSettingsProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static io.floci.aws.testing.IotSettingsProfile.ENDPOINT_ADDRESS;
+import static io.floci.aws.testing.SidecarContainersProfile.IOT_ENDPOINT_ADDRESS;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -17,11 +17,11 @@ import static org.hamcrest.Matchers.equalTo;
  * own port. {@link IotIntegrationTest} and {@link IotEndpointHostnameIntegrationTest} keep
  * guarding the unset case, the host and port of the base URL.
  *
- * <p>The address comes from {@link IotSettingsProfile}, which this class shares with the other IoT
+ * <p>The address comes from {@link SidecarContainersProfile}, which this class shares with the other IoT
  * class that changes a default.
  */
 @QuarkusTest
-@TestProfile(IotSettingsProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class IotDescribeEndpointOverrideIntegrationTest {
 
     @Test
@@ -31,7 +31,7 @@ class IotDescribeEndpointOverrideIntegrationTest {
             .get("/endpoint")
         .then()
             .statusCode(200)
-            .body("endpointAddress", equalTo(ENDPOINT_ADDRESS));
+            .body("endpointAddress", equalTo(IOT_ENDPOINT_ADDRESS));
     }
 
     @ParameterizedTest
@@ -43,7 +43,7 @@ class IotDescribeEndpointOverrideIntegrationTest {
             .get("/endpoint")
         .then()
             .statusCode(200)
-            .body("endpointAddress", equalTo(ENDPOINT_ADDRESS));
+            .body("endpointAddress", equalTo(IOT_ENDPOINT_ADDRESS));
     }
 
     @Test
@@ -66,6 +66,6 @@ class IotDescribeEndpointOverrideIntegrationTest {
         .then()
             .statusCode(200)
             .body("domainType", equalTo("AWS_MANAGED"))
-            .body("domainName", equalTo(ENDPOINT_ADDRESS));
+            .body("domainName", equalTo(IOT_ENDPOINT_ADDRESS));
     }
 }

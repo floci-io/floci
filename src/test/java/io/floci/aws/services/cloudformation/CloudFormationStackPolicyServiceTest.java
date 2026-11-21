@@ -50,8 +50,11 @@ class CloudFormationStackPolicyServiceTest {
     @BeforeEach
     void setUp() {
         provisioner = mock(CfnResourceDispatcher.class);
+        // The last two arguments are the permissions boundary a delegation registered for the caller,
+        // which a stack deployed by an ordinary caller carries as null, and the previous deployment's
+        // engine, which only an update has.
         when(provisioner.provision(anyString(), anyString(), any(), any(), anyString(), anyString(), anyString(),
-                any(), any(), any(), any())).thenAnswer(invocation -> {
+                any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
                     StackResource resource = new StackResource();
                     resource.setLogicalId(invocation.getArgument(0));
                     resource.setResourceType(invocation.getArgument(1));

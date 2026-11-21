@@ -37,6 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -52,9 +54,40 @@ class BatchServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void aJobRunsInTheFirstSubnetOfTheFirstComputeEnvironmentOfItsQueueThatNamesAny() throws Exception {
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class)))
+                .thenReturn(new BatchRunResult(0, null, "log-stream", 1L, 2L, false));
+        BatchService service = dockerService(runner);
+        String unmanaged = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"unmanaged-ce","type":"UNMANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String fargate = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"fargate-ce","type":"MANAGED",
+                 "computeResources":{"type":"FARGATE","maxvCpus":4,"subnets":["subnet-a","subnet-b"],
+                  "securityGroupIds":["sg-1"]}}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String queueArn = service.createJobQueue(json("""
+                {"jobQueueName":"vpc-queue","priority":1,"computeEnvironmentOrder":[
+                  {"order":2,"computeEnvironment":"%s"},{"order":1,"computeEnvironment":"%s"}]}
+                """.formatted(fargate, unmanaged)), REGION).path("jobQueueArn").asText();
+        String definitionArn = service.registerJobDefinition(json("""
+                {"jobDefinitionName":"vpc-job","type":"container",
+                 "containerProperties":{"image":"public.ecr.aws/example/job:latest"}}
+                """), REGION).path("jobDefinitionArn").asText();
+
+        String jobId = service.submitJob(json("""
+                {"jobName":"vpc-submit","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        assertNotNull(waitForJobStatus(service, jobId, "SUCCEEDED"));
+        verify(runner).run(any(BatchJob.class), eq(1), eq("subnet-a"));
+    }
+
+    @Test
     void dockerTimeoutFailsWithoutRetryingRemainingAttempts() throws Exception {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
-        when(runner.run(any(BatchJob.class), anyInt()))
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class)))
                 .thenReturn(new BatchRunResult(137, "Job timed out", "log-stream", 1L, 2L, true));
         BatchService service = dockerService(runner);
 
@@ -90,13 +123,13 @@ class BatchServiceTest {
         assertNotNull(job);
         assertEquals("Job timed out", job.path("statusReason").asText());
         assertEquals(1, job.path("attempts").size());
-        verify(runner, times(1)).run(any(BatchJob.class), anyInt());
+        verify(runner, times(1)).run(any(BatchJob.class), anyInt(), nullable(String.class));
     }
 
     @Test
     void dockerRetriesFailedAttemptAndCanSucceed() throws Exception {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
-        when(runner.run(any(BatchJob.class), anyInt()))
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class)))
                 .thenReturn(new BatchRunResult(1, "first failed", "log-1", 1L, 2L, false))
                 .thenReturn(new BatchRunResult(0, null, "log-2", 3L, 4L, false));
         BatchService service = dockerService(runner);
@@ -128,13 +161,13 @@ class BatchServiceTest {
         assertNotNull(job);
         assertEquals(2, job.path("attempts").size());
         assertEquals(0, job.path("attempts").get(1).path("container").path("exitCode").asInt());
-        verify(runner, times(2)).run(any(BatchJob.class), anyInt());
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), nullable(String.class));
     }
 
     @Test
     void dockerRetryExhaustionFailsJobAndKeepsAttempts() throws Exception {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
-        when(runner.run(any(BatchJob.class), anyInt()))
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class)))
                 .thenReturn(new BatchRunResult(1, "failed once", "log-1", 1L, 2L, false))
                 .thenReturn(new BatchRunResult(2, "failed twice", "log-2", 3L, 4L, false));
         BatchService service = dockerService(runner);
@@ -167,7 +200,7 @@ class BatchServiceTest {
         assertEquals("failed twice", job.path("statusReason").asText());
         assertEquals(2, job.path("attempts").size());
         assertEquals(2, job.path("attempts").get(1).path("container").path("exitCode").asInt());
-        verify(runner, times(2)).run(any(BatchJob.class), anyInt());
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), nullable(String.class));
     }
 
     @Test
@@ -647,7 +680,7 @@ class BatchServiceTest {
     void submitMultiNodeJobSucceedsWhenOnlyAChildNodeFails() throws Exception {
         // AWS determines the job's outcome solely from the main node, per the MNP user guide.
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
-        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class), nullable(String.class)))
                 .thenAnswer(invocation -> {
                     BatchNodeExecution node = invocation.getArgument(2);
                     return node.getNodeIndex() == 1
@@ -674,7 +707,7 @@ class BatchServiceTest {
 
         JsonNode job = waitForJobStatus(service, jobId, "SUCCEEDED");
         assertNotNull(job);
-        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class));
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class), nullable(String.class));
 
         JsonNode nodes = service.listJobs(json("""
                 {"multiNodeJobId":"%s"}
@@ -685,7 +718,7 @@ class BatchServiceTest {
     @Test
     void submitMultiNodeJobFailsWhenTheMainNodeFails() throws Exception {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
-        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class), nullable(String.class)))
                 .thenAnswer(invocation -> {
                     BatchNodeExecution node = invocation.getArgument(2);
                     return node.isMainNode()
@@ -713,7 +746,7 @@ class BatchServiceTest {
         JsonNode job = waitForJobStatus(service, jobId, "FAILED");
         assertNotNull(job);
         assertEquals("main crashed", job.path("statusReason").asText());
-        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class));
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class), nullable(String.class));
     }
 
     @Test
@@ -812,7 +845,7 @@ class BatchServiceTest {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
         CountDownLatch runStarted = new CountDownLatch(1);
         CountDownLatch releaseRun = new CountDownLatch(1);
-        when(runner.run(any(BatchJob.class), anyInt())).thenAnswer(invocation -> {
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class))).thenAnswer(invocation -> {
             runStarted.countDown();
             assertTrue(releaseRun.await(2, TimeUnit.SECONDS));
             return new BatchRunResult(0, null, "log-stream", 1L, 2L, false);
@@ -852,7 +885,7 @@ class BatchServiceTest {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
         CountDownLatch runStarted = new CountDownLatch(1);
         CountDownLatch stopRequested = new CountDownLatch(1);
-        when(runner.run(any(BatchJob.class), anyInt())).thenAnswer(invocation -> {
+        when(runner.run(any(BatchJob.class), anyInt(), nullable(String.class))).thenAnswer(invocation -> {
             runStarted.countDown();
             assertTrue(stopRequested.await(2, TimeUnit.SECONDS));
             return new BatchRunResult(137, "Job terminated", "log-stream", 1L, 2L, false);
@@ -967,7 +1000,7 @@ class BatchServiceTest {
         BatchDockerRunner runner = mock(BatchDockerRunner.class);
         CountDownLatch nodesStarted = new CountDownLatch(2);
         CountDownLatch stopRequested = new CountDownLatch(1);
-        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class), nullable(String.class)))
                 .thenAnswer(invocation -> {
                     BatchNodeExecution node = invocation.getArgument(2);
                     nodesStarted.countDown();

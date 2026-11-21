@@ -3,6 +3,7 @@ package io.floci.aws.services.elbv2;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.concurrent.SocketDeadline;
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
@@ -19,13 +20,16 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
@@ -39,6 +43,7 @@ public class ElbV2HealthChecker implements Resettable {
     private final WorkerExecutor probeWorkers;
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
+    private final Ec2InstancePorts instancePorts;
     private final SSLSocketFactory backendTls = backendTls();
 
     // tgArn → (targetKey → TargetState)
@@ -47,11 +52,17 @@ public class ElbV2HealthChecker implements Resettable {
     private final Map<String, Long> timers = new ConcurrentHashMap<>();
     private final Semaphore probeSlots = new Semaphore(MAX_CONCURRENT_PROBES);
 
+    ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
+        this(vertx, config, ec2Service, new Ec2InstancePorts());
+    }
+
     @Inject
-    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
+    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service,
+                              Ec2InstancePorts instancePorts) {
         this.vertx = vertx;
         this.config = config;
         this.ec2Service = ec2Service;
+        this.instancePorts = instancePorts;
         this.probeWorkers = vertx.createSharedWorkerExecutor("floci-elbv2-health-probes", MAX_CONCURRENT_PROBES);
     }
 
@@ -63,6 +74,14 @@ public class ElbV2HealthChecker implements Resettable {
             return tg.getPort();
         }
         return 80;
+    }
+
+    /**
+     * Whether {@code a} and {@code b} are the same registration in {@code tg}: the same Id on the same
+     * effective port, which is how RegisterTargets and DeregisterTargets tell registrations apart.
+     */
+    public static boolean sameTarget(TargetDescription a, TargetDescription b, TargetGroup tg) {
+        return Objects.equals(a.getId(), b.getId()) && effectivePort(a, tg) == effectivePort(b, tg);
     }
 
     public void startMonitoring(TargetGroup tg) {
@@ -145,8 +164,7 @@ public class ElbV2HealthChecker implements Resettable {
     }
 
     public boolean isHealthy(String tgArn, TargetDescription target, int port) {
-        String state = getState(tgArn, target.getId(), port);
-        return "healthy".equals(state) || "initial".equals(state);
+        return "healthy".equals(getState(tgArn, target.getId(), port));
     }
 
     void probeAll(String tgArn, TargetGroup tg) {
@@ -169,6 +187,7 @@ public class ElbV2HealthChecker implements Resettable {
                 continue;
             }
             String protocol = tg.getHealthCheckProtocol();
+            boolean tcpCheck = "TCP".equals(protocol);
             String path = tg.getHealthCheckPath() != null ? tg.getHealthCheckPath() : "/";
             String matcher = tg.getMatcher() != null ? tg.getMatcher() : "200";
             int timeout = tg.getHealthCheckTimeoutSeconds() != null ? tg.getHealthCheckTimeoutSeconds() : 5;
@@ -192,8 +211,11 @@ public class ElbV2HealthChecker implements Resettable {
                         state.workerRunning = true;
                     }
                     return SocketDeadline.call(timeout, () -> {
-                        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
-                        return probeOnce(host, probePort, path, timeout, protocol);
+                        Ec2InstancePorts.Endpoint endpoint = ElbV2TargetResolver.resolve(ec2Service,
+                                instancePorts, tg, targetId, probePort);
+                        return tcpCheck
+                                ? connectOnce(endpoint.host(), endpoint.port(), timeout)
+                                : probeOnce(endpoint.host(), endpoint.port(), path, timeout, protocol);
                     }, () -> {
                         synchronized (state) {
                             state.workerRunning = false;
@@ -223,7 +245,7 @@ public class ElbV2HealthChecker implements Resettable {
                                         targetId, port, outcome.cause().getMessage());
                             } else if (outcome.result() != null) {
                                 int statusCode = outcome.result();
-                                if (matchesStatusCode(statusCode, matcher)) {
+                                if (tcpCheck || matchesStatusCode(statusCode, matcher)) {
                                     state.consecutiveFailures = 0;
                                     state.consecutiveSuccesses++;
                                     boolean initialApplicationTarget = "initial".equals(state.status)
@@ -258,6 +280,15 @@ public class ElbV2HealthChecker implements Resettable {
                 }
                 throw error;
             }
+        }
+    }
+
+    /** A TCP health check passes once the connection opens; nothing is sent. */
+    private static int connectOnce(String host, int port, int timeoutSeconds) throws IOException {
+        try (Socket socket = new Socket(Proxy.NO_PROXY)) {
+            socket.connect(new InetSocketAddress(ElbV2TargetResolver.resolveCheckedAddress(host), port),
+                    timeoutSeconds * 1000);
+            return 0;
         }
     }
 

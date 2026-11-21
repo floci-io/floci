@@ -14,6 +14,9 @@ import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.apigatewayv2.model.*;
+import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
+import io.floci.aws.services.apigatewayv2.proxy.PinnedHttpClient;
+import io.floci.aws.services.apigatewayv2.proxy.ResponseParameterMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -493,6 +496,26 @@ public class ApiGatewayV2Service {
         return auth;
     }
 
+    /**
+     * Sets the URI, payload format version, JWT configuration, result TTL and simple-responses flag
+     * exactly as given, null included. UpdateAuthorizer keeps a field the request leaves out, so it
+     * cannot remove one that CloudFormation dropped.
+     */
+    public Authorizer replaceAuthorizerSettings(String region, String apiId, String authorizerId,
+                                                String authorizerUri, String authorizerPayloadFormatVersion,
+                                                Authorizer.JwtConfiguration jwtConfiguration,
+                                                Integer authorizerResultTtlInSeconds,
+                                                Boolean enableSimpleResponses) {
+        Authorizer auth = getAuthorizer(region, apiId, authorizerId);
+        auth.setAuthorizerUri(authorizerUri);
+        auth.setAuthorizerPayloadFormatVersion(authorizerPayloadFormatVersion);
+        auth.setJwtConfiguration(jwtConfiguration);
+        auth.setAuthorizerResultTtlInSeconds(authorizerResultTtlInSeconds);
+        auth.setEnableSimpleResponses(enableSimpleResponses);
+        authorizerStore.put(authorizerKey(region, apiId, authorizerId), auth);
+        return auth;
+    }
+
     // AuthorizerResultTtlInSeconds is modeled as an integer in [0, 3600]. doubleValue() keeps the
     // bounds check exact for a Long or BigInteger body value that intValue() would wrap into range.
     static Integer authorizerResultTtl(Object value) {
@@ -604,6 +627,19 @@ public class ApiGatewayV2Service {
             route.setRouteResponseSelectionExpression((String) request.get("routeResponseSelectionExpression"));
         }
 
+        routeStore.put(routeKey(region, apiId, routeId), route);
+        return route;
+    }
+
+    /**
+     * Sets the authorizer id and the target exactly as given, null included. UpdateRoute keeps a
+     * field the request leaves out, so it cannot remove one that CloudFormation dropped.
+     */
+    public Route replaceRouteLinks(String region, String apiId, String routeId, String authorizerId,
+                                   String target) {
+        Route route = getRoute(region, apiId, routeId);
+        route.setAuthorizerId(authorizerId);
+        route.setTarget(target);
         routeStore.put(routeKey(region, apiId, routeId), route);
         return route;
     }
@@ -749,14 +785,25 @@ public class ApiGatewayV2Service {
     // ──────────────────────────── Integration CRUD ────────────────────────────
 
     public Integration createIntegration(String region, String apiId, Map<String, Object> request) {
-        getApi(region, apiId);
+        Api api = getApi(region, apiId);
+        String integrationSubtype = (String) request.get("integrationSubtype");
+        String payloadFormatVersion = request.get("payloadFormatVersion") != null
+                ? (String) request.get("payloadFormatVersion")
+                : defaultPayloadFormatVersion(integrationSubtype);
+        Map<String, String> requestParameters = stringParameters(request.get("requestParameters"), "RequestParameters");
+        validateIntegrationSubtype(api.getProtocolType(), (String) request.get("integrationType"),
+                integrationSubtype, payloadFormatVersion, requestParameters);
+        Map<String, Map<String, String>> responseParameters = responseParameters(request.get("responseParameters"));
+
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
+        integration.setDescription(integrationDescription(request));
         integration.setIntegrationType((String) request.get("integrationType"));
+        integration.setIntegrationSubtype(integrationSubtype);
         integration.setCredentialsArn((String) request.get("credentialsArn"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
         integration.setConnectionType((String) request.get("connectionType"));
-        integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
+        integration.setPayloadFormatVersion(payloadFormatVersion);
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
 
@@ -772,9 +819,8 @@ public class ApiGatewayV2Service {
         Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
         integration.setResponseTemplates(responseTemplates);
 
-        @SuppressWarnings("unchecked")
-        Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
         integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
 
         integration.setConnectionId((String) request.get("connectionId"));
 
@@ -808,12 +854,34 @@ public class ApiGatewayV2Service {
     public Integration updateIntegration(String region, String apiId, String integrationId,
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
+        Map<String, String> requestParameters = mergedParameters(integration.getRequestParameters(),
+                stringParameters(request.get("requestParameters"), "RequestParameters"));
+        Map<String, Map<String, String>> responseParameters = mergedResponseParameters(
+                integration.getResponseParameters(), responseParameters(request.get("responseParameters")));
+        String payloadFormatVersion = (String) request.get("payloadFormatVersion");
+        if (payloadFormatVersion == null) {
+            payloadFormatVersion = request.get("integrationSubtype") != null
+                    && integration.getIntegrationSubtype() == null
+                    ? defaultPayloadFormatVersion((String) request.get("integrationSubtype"))
+                    : integration.getPayloadFormatVersion();
+        }
+        validateIntegrationSubtype(getApi(region, apiId).getProtocolType(),
+                updatedValue(request, "integrationType", integration.getIntegrationType()),
+                updatedValue(request, "integrationSubtype", integration.getIntegrationSubtype()),
+                payloadFormatVersion, requestParameters);
 
+        String description = integrationDescription(request);
+        if (description != null) {
+            integration.setDescription(description);
+        }
         if (request.get("credentialsArn") != null) {
             integration.setCredentialsArn((String) request.get("credentialsArn"));
         }
         if (request.containsKey("integrationType") && request.get("integrationType") != null) {
             integration.setIntegrationType((String) request.get("integrationType"));
+        }
+        if (request.get("integrationSubtype") != null) {
+            integration.setIntegrationSubtype((String) request.get("integrationSubtype"));
         }
         if (request.containsKey("integrationUri") && request.get("integrationUri") != null) {
             integration.setIntegrationUri((String) request.get("integrationUri"));
@@ -821,9 +889,7 @@ public class ApiGatewayV2Service {
         if (request.containsKey("connectionType") && request.get("connectionType") != null) {
             integration.setConnectionType((String) request.get("connectionType"));
         }
-        if (request.containsKey("payloadFormatVersion") && request.get("payloadFormatVersion") != null) {
-            integration.setPayloadFormatVersion((String) request.get("payloadFormatVersion"));
-        }
+        integration.setPayloadFormatVersion(payloadFormatVersion);
         if (request.containsKey("integrationMethod") && request.get("integrationMethod") != null) {
             integration.setIntegrationMethod((String) request.get("integrationMethod"));
         }
@@ -843,15 +909,217 @@ public class ApiGatewayV2Service {
             Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
             integration.setResponseTemplates(responseTemplates);
         }
-        if (request.containsKey("requestParameters") && request.get("requestParameters") != null) {
-            @SuppressWarnings("unchecked")
-            Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
-            integration.setRequestParameters(requestParameters);
-        }
+        integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
         if (request.containsKey("connectionId") && request.get("connectionId") != null) {
             integration.setConnectionId((String) request.get("connectionId"));
         }
 
+        integrationStore.put(integrationKey(region, apiId, integrationId), integration);
+        return integration;
+    }
+
+    private static String integrationDescription(Map<String, Object> request) {
+        Object description = request.get("description");
+        if (description != null && !(description instanceof String)) {
+            throw new AwsException("BadRequestException", "Description must be a string.", 400);
+        }
+        return (String) description;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T updatedValue(Map<String, Object> request, String key, T stored) {
+        Object value = request.get(key);
+        return value != null ? (T) value : stored;
+    }
+
+    /**
+     * The payload format version an integration gets when the request leaves it out: 1.0 for an
+     * integration with a subtype, which supports only 1.0, and 2.0 otherwise.
+     */
+    public static String defaultPayloadFormatVersion(String integrationSubtype) {
+        return integrationSubtype != null ? "1.0" : "2.0";
+    }
+
+    /**
+     * The stored RequestParameters with the update's entries merged in, as UpdateIntegration applies
+     * them: an entry whose value is the empty string removes that key, and every other entry adds or
+     * replaces it. An update without RequestParameters keeps the stored map, and a merge that removes
+     * every key leaves none.
+     */
+    private static Map<String, String> mergedParameters(Map<String, String> stored, Map<String, String> update) {
+        if (update == null) {
+            return stored;
+        }
+        Map<String, String> merged = stored != null ? new LinkedHashMap<>(stored) : new LinkedHashMap<>();
+        update.forEach((key, value) -> {
+            if ("".equals(value)) {
+                merged.remove(key);
+            } else {
+                merged.put(key, value);
+            }
+        });
+        return merged.isEmpty() ? null : merged;
+    }
+
+    /**
+     * The stored ResponseParameters with the update's status codes merged in: a status code whose
+     * mappings are empty is removed, and any other replaces that status code's mappings. An update
+     * without ResponseParameters keeps the stored map, and a merge that removes every status code
+     * leaves none.
+     */
+    private static Map<String, Map<String, String>> mergedResponseParameters(
+            Map<String, Map<String, String>> stored, Map<String, Map<String, String>> update) {
+        if (update == null) {
+            return stored;
+        }
+        Map<String, Map<String, String>> merged = stored != null ? new LinkedHashMap<>(stored) : new LinkedHashMap<>();
+        update.forEach((statusCode, mappings) -> {
+            if (mappings.isEmpty()) {
+                merged.remove(statusCode);
+            } else {
+                merged.put(statusCode, mappings);
+            }
+        });
+        return merged.isEmpty() ? null : merged;
+    }
+
+    /**
+     * Parameters with every number or boolean value read as its text. An object or array value is a
+     * {@code BadRequestException} naming {@code member}.
+     */
+    private static Map<String, String> stringParameters(Object parameters, String member) {
+        if (!(parameters instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Map<String, String> strings = new LinkedHashMap<>();
+        map.forEach((key, value) -> {
+            if (value instanceof Map<?, ?> || value instanceof Collection<?>) {
+                throw new AwsException("BadRequestException",
+                        member + " value for " + key + " must be a string.", 400);
+            }
+            strings.put(String.valueOf(key), value == null ? null : String.valueOf(value));
+        });
+        return strings;
+    }
+
+    private static final Pattern RESPONSE_STATUS_CODE = Pattern.compile("[2-5][0-9]{2}");
+    private static final String STATUS_CODE_OVERWRITE = "overwrite:statuscode";
+    private static final Pattern RESPONSE_HEADER_KEY = Pattern.compile("(?:append|overwrite|remove):header\\.(.+)");
+
+    /**
+     * ResponseParameters as CreateIntegration and UpdateIntegration accept them: a map whose keys
+     * are status codes from 200 to 599, and each of its mappings {@code overwrite:statuscode} or an
+     * {@code append}, {@code overwrite} or {@code remove} of {@code header.<name>} with a valid
+     * header name. A static {@code overwrite:statuscode} value must be a status code from 100 to
+     * 599. Anything else is a {@code BadRequestException}.
+     */
+    static Map<String, Map<String, String>> responseParameters(Object responseParameters) {
+        if (responseParameters == null) {
+            return null;
+        }
+        if (!(responseParameters instanceof Map<?, ?> map)) {
+            throw new AwsException("BadRequestException", "ResponseParameters must be a map.", 400);
+        }
+        Map<String, Map<String, String>> parsed = new LinkedHashMap<>();
+        map.forEach((key, value) -> {
+            String statusCode = String.valueOf(key);
+            if (!RESPONSE_STATUS_CODE.matcher(statusCode).matches()) {
+                throw new AwsException("BadRequestException",
+                        "The selection key must be a valid HTTP status code within the range of 200-599.", 400);
+            }
+            if (!(value instanceof Map<?, ?>)) {
+                throw new AwsException("BadRequestException",
+                        "ResponseParameters value for " + statusCode + " must be a map.", 400);
+            }
+            Map<String, String> mappings = stringParameters(value, "ResponseParameters");
+            mappings.forEach((mapping, source) -> {
+                if (STATUS_CODE_OVERWRITE.equals(mapping)) {
+                    if ((source == null || !source.startsWith("$")) && ResponseParameterMapper.statusCode(source) == null) {
+                        throw new AwsException("BadRequestException",
+                                "ResponseParameters overwrite:statuscode value for status code " + statusCode
+                                        + " must be a status code from 100 to 599.", 400);
+                    }
+                    return;
+                }
+                Matcher header = RESPONSE_HEADER_KEY.matcher(mapping);
+                if (!header.matches() || !PinnedHttpClient.isValidHeaderName(header.group(1))) {
+                    throw new AwsException("BadRequestException",
+                            "ResponseParameters key " + mapping + " for status code " + statusCode
+                                    + " must be overwrite:statuscode or append, overwrite or remove of header.<name>.",
+                            400);
+                }
+            });
+            parsed.put(statusCode, mappings);
+        });
+        return parsed;
+    }
+
+    /**
+     * Rejects an integration subtype the way CreateIntegration does: only on an HTTP API
+     * {@code AWS_PROXY} integration with payload format 1.0, a subtype AWS defines, every required
+     * parameter mapped to a non-empty value, every JSON parameter either a source expression or a
+     * JSON object, every source expression one the gateway reads, and no parameter the subtype's
+     * action does not take. OpenAPI import runs it over every integration before it changes anything.
+     */
+    static void validateIntegrationSubtype(String protocolType, String integrationType, String integrationSubtype,
+                                           String payloadFormatVersion, Map<String, String> requestParameters) {
+        if (integrationSubtype == null) {
+            return;
+        }
+        if ("WEBSOCKET".equals(protocolType)) {
+            throw new AwsException("BadRequestException",
+                    "IntegrationSubtype is supported only for HTTP APIs.", 400);
+        }
+        if (!"AWS_PROXY".equals(integrationType)) {
+            throw new AwsException("BadRequestException",
+                    "IntegrationSubtype is supported only for AWS_PROXY integrations.", 400);
+        }
+        IntegrationSubtype subtype = IntegrationSubtype.fromName(integrationSubtype)
+                .orElseThrow(() -> new AwsException("BadRequestException",
+                        "Unsupported IntegrationSubtype: " + integrationSubtype, 400));
+        if (!"1.0".equals(payloadFormatVersion)) {
+            throw new AwsException("BadRequestException",
+                    "PayloadFormatVersion must be 1.0 for an integration with an IntegrationSubtype.", 400);
+        }
+        Map<String, String> parameters = requestParameters != null ? requestParameters : Map.of();
+        for (String required : subtype.requiredParameters()) {
+            String value = parameters.get(required);
+            if (value == null || value.isEmpty()) {
+                throw new AwsException("BadRequestException",
+                        "Missing required parameter " + required + " for IntegrationSubtype "
+                                + subtype.subtypeName() + ".", 400);
+            }
+        }
+        for (Map.Entry<String, String> parameter : parameters.entrySet()) {
+            if (!subtype.accepts(parameter.getKey())) {
+                throw new AwsException("BadRequestException",
+                        "Parameter " + parameter.getKey() + " is not supported for IntegrationSubtype "
+                                + subtype.subtypeName() + ".", 400);
+            }
+            if (subtype.isJsonParameter(parameter.getKey())
+                    && !AwsServiceIntegrationMapper.isValidJsonParameter(parameter.getValue())) {
+                throw new AwsException("BadRequestException",
+                        "Parameter " + parameter.getKey() + " must be a JSON object or a source expression.", 400);
+            }
+            String unsupported = AwsServiceIntegrationMapper.unsupportedExpression(parameter.getValue(),
+                    subtype.isJsonParameter(parameter.getKey()));
+            if (unsupported != null) {
+                throw new AwsException("BadRequestException",
+                        "Parameter " + parameter.getKey() + " has an unsupported source expression: "
+                                + unsupported + ".", 400);
+            }
+        }
+    }
+
+    /**
+     * Sets the integration subtype exactly as given, null included. UpdateIntegration keeps a field
+     * the request leaves out, so it cannot remove a subtype that CloudFormation dropped.
+     */
+    public Integration replaceIntegrationSubtype(String region, String apiId, String integrationId,
+                                                 String integrationSubtype) {
+        Integration integration = getIntegration(region, apiId, integrationId);
+        integration.setIntegrationSubtype(integrationSubtype);
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;
     }
@@ -870,19 +1138,21 @@ public class ApiGatewayV2Service {
     }
 
     /**
-     * Sets the method, template selection expression, timeout and the two mapping tables exactly as
+     * Sets the method, template selection expression, timeout and the three mapping tables exactly as
      * given, null included. A timeout of 0 is the unset value. UpdateIntegration keeps a field the
      * request leaves out, so it cannot remove one that CloudFormation dropped.
      */
     public Integration replaceIntegrationSettings(String region, String apiId, String integrationId,
                                                   String integrationMethod, String templateSelectionExpression,
                                                   int timeoutInMillis, Map<String, String> requestParameters,
+                                                  Map<String, Map<String, String>> responseParameters,
                                                   Map<String, String> requestTemplates) {
         Integration integration = getIntegration(region, apiId, integrationId);
         integration.setIntegrationMethod(integrationMethod);
         integration.setTemplateSelectionExpression(templateSelectionExpression);
         integration.setTimeoutInMillis(timeoutInMillis);
         integration.setRequestParameters(requestParameters);
+        integration.setResponseParameters(responseParameters);
         integration.setRequestTemplates(requestTemplates);
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;

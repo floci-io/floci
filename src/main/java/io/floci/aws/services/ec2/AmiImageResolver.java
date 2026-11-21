@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -60,12 +61,8 @@ public class AmiImageResolver {
                 dockerPlatform(image.architecture));
     }
 
+    // EC2's i386, which Docker runs as linux/386, beside the two architectures every service names.
     private static String dockerPlatform(String architecture) {
-        return switch (architecture) {
-            case "arm64" -> "linux/arm64";
-            case "x86_64" -> "linux/amd64";
-            case "i386" -> "linux/386";
-            default -> null;
-        };
+        return "i386".equals(architecture) ? "linux/386" : DockerPlatforms.forArchitecture(architecture);
     }
 }

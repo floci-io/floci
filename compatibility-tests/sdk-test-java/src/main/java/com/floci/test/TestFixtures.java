@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
 import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
@@ -65,6 +66,7 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.emrcontainers.EmrContainersClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
@@ -84,6 +86,7 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.lambda.LambdaAsyncClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
@@ -175,6 +178,7 @@ import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClie
 import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
+import software.amazon.awssdk.services.xray.XRayClient;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -199,6 +203,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -550,10 +555,14 @@ public final class TestFixtures {
     }
 
     public static AccountClient accountClient() {
+        return accountClient("test");
+    }
+
+    public static AccountClient accountClient(String accountId) {
         return AccountClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 
@@ -941,6 +950,16 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static LambdaAsyncClient lambdaAsyncClient() {
+        return LambdaAsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .httpClientBuilder(NettyNioAsyncHttpClient.builder()
+                        .protocol(Protocol.HTTP1_1))
+                .build();
+    }
+
     public static LambdaWebClient lambdaWebClient() {
         return LambdaWebClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1269,6 +1288,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static EmrContainersClient emrContainersClient() {
+        return EmrContainersClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static EmrServerlessClient emrServerlessClient() {
         return EmrServerlessClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1589,6 +1616,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static ApplicationAutoScalingClient applicationAutoScalingClient() {
+        return ApplicationAutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AutoScalingClient autoScalingClient() {
         return AutoScalingClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1615,6 +1650,14 @@ public final class TestFixtures {
 
     public static AppIntegrationsClient appIntegrationsClient() {
         return AppIntegrationsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static XRayClient xrayClient() {
+        return XRayClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1688,10 +1731,18 @@ public final class TestFixtures {
     }
 
     public static IotClient iotClient() {
+        return iotClient(CREDENTIALS);
+    }
+
+    public static IotClient iotClient(String accountId) {
+        return iotClient(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")));
+    }
+
+    private static IotClient iotClient(StaticCredentialsProvider credentials) {
         return IotClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(credentials)
                 .build();
     }
 
@@ -1878,6 +1929,37 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    public static RedshiftClient redshiftClient(String accountId) {
+        return RedshiftClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
+    /** Connects to the PostgreSQL database {@code dev} behind a Redshift cluster, retrying for up to a minute while it starts. */
+    public static Connection awaitRedshiftConnection(String host, int port, String username, String password)
+            throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
+        SQLException lastFailure = null;
+        while (Instant.now().isBefore(deadline)) {
+            try {
+                Properties properties = new Properties();
+                properties.setProperty("user", username);
+                properties.setProperty("password", password);
+                properties.setProperty("sslmode", "disable");
+                properties.setProperty("connectTimeout", "5");
+                return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/dev", properties);
+            } catch (SQLException e) {
+                lastFailure = e;
+                Thread.sleep(1000);
+            }
+        }
+        throw lastFailure != null
+                ? lastFailure
+                : new SQLException("Timed out waiting for Redshift connection at " + host + ":" + port);
     }
 
     public static RedshiftDataClient redshiftDataClient() {

@@ -16,7 +16,9 @@ import io.floci.aws.services.eventbridge.model.Target;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
@@ -125,6 +127,81 @@ class EventsCfnProvisionerTest {
         assertEquals("orders", r.getPhysicalId());
         assertEquals(RULE_ARN, r.getAttributes().get("Arn"));
         assertEquals("orders", r.getAttributes().get("RuleName"));
+    }
+
+    // ── the physical id names a custom bus the way CloudFormation's does ─────
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(nullValues = "-", value = {
+            "no bus, -, orders",
+            "a blank bus, ' ', orders",
+            "the default bus by name, default, orders",
+            "the default bus by ARN, arn:aws:events:us-east-1:000000000000:event-bus/default, orders",
+            "a custom bus by name, orders-bus, orders-bus|orders",
+            "a custom bus by ARN, arn:aws:events:us-east-1:000000000000:event-bus/orders-bus, orders-bus|orders",
+            "a custom bus by ARN in another partition,"
+                    + " arn:aws-us-gov:events:us-gov-west-1:000000000000:event-bus/orders-bus, orders-bus|orders",
+            "a bus of another account, arn:aws:events:us-east-1:111122223333:event-bus/orders-bus,"
+                    + " arn:aws:events:us-east-1:111122223333:event-bus/orders-bus|orders",
+            "a bus of another account in another partition,"
+                    + " arn:aws-us-gov:events:us-gov-west-1:111122223333:event-bus/orders-bus,"
+                    + " arn:aws-us-gov:events:us-gov-west-1:111122223333:event-bus/orders-bus|orders"})
+    void aRulesPhysicalIdNamesItsBusUnlessItIsTheDefaultBus(String label, String bus, String physicalId) {
+        stubPutRule();
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        if (bus != null) {
+            props.put("EventBusName", bus);
+        }
+
+        provisioner.provision(r, props, ctx(null));
+
+        assertEquals(physicalId, r.getPhysicalId());
+    }
+
+    @Test
+    void anUnnamedRuleOnACustomBusKeepsItsNameAcrossUpdates() {
+        stubPutRule();
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+
+        provisioner.provision(r, mapper.createObjectNode().put("EventBusName", "orders-bus"),
+                ctx("orders-bus|my-stack-Rule-ab12cd"));
+
+        assertEquals("orders-bus|my-stack-Rule-ab12cd", r.getPhysicalId());
+        verify(events).putRule(eq("my-stack-Rule-ab12cd"), eq("orders-bus"), any(), any(), any(), any(), any(),
+                any(), anyString());
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(nullValues = "-", value = {
+            "a custom bus in the id, orders-bus|orders, -, orders-bus",
+            "a bus ARN in the id, arn:aws:events:us-east-1:111122223333:event-bus/orders-bus|orders, -,"
+                    + " arn:aws:events:us-east-1:111122223333:event-bus/orders-bus",
+            "a bare id and the stored bus, orders, orders-bus, orders-bus"})
+    void deletingARuleTakesItsBusFromTheIdOrFromTheBusItStored(String label, String physicalId, String storedBus,
+                                                               String bus) {
+        when(events.ruleExists("orders", bus, REGION)).thenReturn(true);
+        when(events.listTargetsByRule("orders", bus, REGION)).thenReturn(List.of(storedTarget("t1")));
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        r.setPhysicalId(physicalId);
+        if (storedBus != null) {
+            r.getAttributes().put("EventBusName", storedBus);
+        }
+
+        provisioner.delete(r, REGION);
+
+        verify(events).removeTargets("orders", bus, List.of("t1"), REGION);
+        verify(events).deleteRule("orders", bus, REGION);
+    }
+
+    @Test
+    void deletingByTheIdAloneFindsTheCustomBusInTheId() {
+        when(events.ruleExists("orders", "orders-bus", REGION)).thenReturn(true);
+        when(events.listTargetsByRule("orders", "orders-bus", REGION)).thenReturn(List.of());
+
+        provisioner.delete("AWS::Events::Rule", "orders-bus|orders", REGION);
+
+        verify(events).deleteRule("orders", "orders-bus", REGION);
     }
 
     // ── targets are driven to the template's desired state ───────────────────
@@ -493,6 +570,34 @@ class EventsCfnProvisionerTest {
                 r, mapper.createObjectNode().put("Name", "renamed"), ctx("orders-bus")));
 
         assertTrue(thrown.getMessage().contains("requires resource replacement"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws.partner/example.com", "partner/example.com/orders", "aws.partner/example.com/x y"})
+    void aMalformedEventSourceNameIsAValidationError(String eventSourceName) {
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"),
+                mapper.createObjectNode().put("Name", eventSourceName).put("EventSourceName", eventSourceName),
+                ctx(null)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Invalid AWS::Events::EventBus EventSourceName"));
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aPolicyOnAPartnerEventBusIsAValidationError() {
+        String name = "aws.partner/example.com/orders";
+        ObjectNode props = mapper.createObjectNode().put("Name", name).put("EventSourceName", name);
+        props.putObject("Policy").put("Version", "2012-10-17");
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"), props, ctx(null)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Policy is not supported on a partner event bus"));
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
     }
 
     // ── the policy statement id is held to the modeled pattern ────────────────

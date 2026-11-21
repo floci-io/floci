@@ -13,6 +13,7 @@ import org.jboss.logging.Logger;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -663,7 +664,7 @@ public class CloudFrontController {
     }
 
     @PUT
-    @Path("/origin-access-control/{Id}")
+    @Path("/origin-access-control/{Id}/config")
     public Response updateOriginAccessControl(@PathParam("Id") String id,
                                               @HeaderParam("If-Match") String ifMatch,
                                               String body) {
@@ -981,10 +982,11 @@ public class CloudFrontController {
                         .elem("Status", fn.getStatus())
                         .start("FunctionConfig")
                         .elem("Comment", fn.getComment() != null ? fn.getComment() : "")
-                        .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
-                        .end("FunctionConfig")
+                        .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0");
+                appendKeyValueStoreAssociations(xml, fn);
+                xml.end("FunctionConfig")
                         .start("FunctionMetadata")
-                        .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                        .elem("FunctionARN", service.functionArn(fn.getName()))
                         .elem("Stage", fn.getStage())
                         .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                         .elem("LastModifiedTime",
@@ -994,6 +996,95 @@ public class CloudFrontController {
             }
             xml.end("Items").end("FunctionList");
             return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    // ── Key Value Stores ──────────────────────────────────────────────────────
+
+    @POST
+    @Path("/key-value-store")
+    public Response createKeyValueStore(String body) {
+        try {
+            String name = XmlParser.extractFirst(body, "Name", null);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            boolean hasImportSource = XmlParser.extractElementTree(body, "ImportSource") != null;
+            KeyValueStore kvs = service.createKeyValueStore(name, comment, hasImportSource);
+            Map<String, String> tags = parseTags(body);
+            if (!tags.isEmpty()) {
+                service.tagResource(kvs.getArn(), tags);
+            }
+            return Response.created(URI.create("/2020-05-31/key-value-store/" + kvs.getName()))
+                    .type(XML)
+                    .header("ETag", kvs.getEtag())
+                    .entity(xmlKeyValueStore(kvs))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/key-value-store/{Name}")
+    public Response describeKeyValueStore(@PathParam("Name") String name) {
+        try {
+            KeyValueStore kvs = service.describeKeyValueStore(name);
+            return Response.ok(xmlKeyValueStore(kvs), XML)
+                    .header("ETag", kvs.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/key-value-store")
+    public Response listKeyValueStores(@QueryParam("Marker") String marker,
+                                       @QueryParam("Status") String status,
+                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
+        try {
+            Page<KeyValueStore> page = page(
+                    service.listKeyValueStores(marker, paginationFetchLimit(maxItems), status),
+                    maxItems, KeyValueStore::getName);
+            XmlBuilder xml = new XmlBuilder()
+                    .start("KeyValueStoreList", NS)
+                    .elem("NextMarker", page.nextMarker())
+                    .elem("MaxItems", maxItems)
+                    .elem("Quantity", page.items().size())
+                    .start("Items");
+            for (KeyValueStore kvs : page.items()) {
+                appendKeyValueStoreFields(xml.start("KeyValueStore"), kvs).end("KeyValueStore");
+            }
+            xml.end("Items").end("KeyValueStoreList");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/key-value-store/{Name}")
+    public Response updateKeyValueStore(@PathParam("Name") String name,
+                                        @HeaderParam("If-Match") String ifMatch,
+                                        String body) {
+        try {
+            KeyValueStore kvs = service.updateKeyValueStore(name, ifMatch, XmlParser.extractFirst(body, "Comment", null));
+            return Response.ok(xmlKeyValueStore(kvs), XML)
+                    .header("ETag", kvs.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/key-value-store/{Name}")
+    public Response deleteKeyValueStore(@PathParam("Name") String name,
+                                        @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteKeyValueStore(name, ifMatch);
+            return Response.noContent().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -1810,7 +1901,7 @@ public class CloudFrontController {
                 .elem("HttpVersion", cfg.getHttpVersion() != null ? cfg.getHttpVersion() : "http2")
                 .elem("PriceClass", cfg.getPriceClass() != null ? cfg.getPriceClass() : "PriceClass_All")
                 .elem("IsIPV6Enabled", cfg.isIPV6Enabled())
-                .elem("WebAclId", cfg.getWebAclId() != null ? cfg.getWebAclId() : "");
+                .elem("WebACLId", cfg.getWebAclId() != null ? cfg.getWebAclId() : "");
 
         List<Origin> origins = cfg.getOrigins();
         xml.raw(xmlQuantityItems("Origins", "Origin", origins != null ? origins.size() : 0,
@@ -1873,6 +1964,9 @@ public class CloudFrontController {
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
         xml.raw(xmlLogging(cfg.getLogging()));
+        if (cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         return xml.build();
     }
@@ -2253,6 +2347,14 @@ public class CloudFrontController {
         return xml.end("ActiveTrustedKeyGroups").build();
     }
 
+    /**
+     * A config carrying no viewer certificate reads as the certificate CloudFront serves its own
+     * domain name with, and the security policy that comes with it is
+     * {@code TLSv1}: {@code MinimumProtocolVersion}'s entry says CloudFront "automatically sets the
+     * security policy to TLSv1 regardless of the value that you set here" when
+     * {@code CloudFrontDefaultCertificate} is true, and {@link CloudFrontService} stores that same
+     * value for a request that sets the member itself.
+     */
     private String xmlViewerCertificate(Map<String, String> vc) {
         XmlBuilder xml = new XmlBuilder().start("ViewerCertificate");
         if (vc != null && !vc.isEmpty()) {
@@ -2261,13 +2363,15 @@ public class CloudFrontController {
             }
         } else {
             xml.elem("CloudFrontDefaultCertificate", "true")
-                    .elem("MinimumProtocolVersion", "TLSv1.2_2021");
+                    .elem("MinimumProtocolVersion",
+                            CloudFrontService.DEFAULT_CERTIFICATE_PROTOCOL_VERSION);
         }
         xml.end("ViewerCertificate");
         return xml.build();
     }
 
     private String xmlDistributionSummary(Distribution d) {
+        DistributionConfig cfg = d.getConfig();
         XmlBuilder xml = new XmlBuilder()
                 .start("DistributionSummary")
                 .elem("Id", d.getId())
@@ -2284,9 +2388,9 @@ public class CloudFrontController {
                 .elem("PriceClass", d.getConfig() != null && d.getConfig().getPriceClass() != null
                         ? d.getConfig().getPriceClass() : "PriceClass_All")
                 .elem("IsIPV6Enabled", d.getConfig() != null && d.getConfig().isIPV6Enabled())
-                .elem("WebAclId", "");
+                .elem("WebACLId", cfg != null && cfg.getWebAclId() != null
+                        ? cfg.getWebAclId() : "");
 
-        DistributionConfig cfg = d.getConfig();
         List<Origin> origins = cfg != null ? cfg.getOrigins() : null;
         xml.raw(xmlQuantityItems("Origins", "Origin",
                 origins != null ? origins.size() : 0,
@@ -2308,6 +2412,9 @@ public class CloudFrontController {
 
         xml.raw(xmlViewerCertificate(cfg != null ? cfg.getViewerCertificate() : null));
         xml.raw(xmlRestrictions(cfg != null ? cfg.getGeoRestriction() : null));
+        if (cfg != null && cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         xml.end("DistributionSummary");
         return xml.build();
@@ -2424,16 +2531,17 @@ public class CloudFrontController {
     }
 
     private String xmlFunctionResponse(CloudFrontFunction fn) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("FunctionSummary")
                 .elem("Name", fn.getName())
                 .elem("Status", fn.getStatus())
                 .start("FunctionConfig")
                 .elem("Comment", fn.getComment() != null ? fn.getComment() : "")
-                .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
-                .end("FunctionConfig")
+                .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0");
+        appendKeyValueStoreAssociations(xml, fn);
+        return xml.end("FunctionConfig")
                 .start("FunctionMetadata")
-                .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                .elem("FunctionARN", service.functionArn(fn.getName()))
                 .elem("Stage", fn.getStage())
                 .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                 .elem("LastModifiedTime",
@@ -2441,6 +2549,34 @@ public class CloudFrontController {
                 .end("FunctionMetadata")
                 .end("FunctionSummary")
                 .build();
+    }
+
+    private static void appendKeyValueStoreAssociations(XmlBuilder xml, CloudFrontFunction fn) {
+        List<String> arns = fn.getKeyValueStoreArns();
+        if (arns == null || arns.isEmpty()) {
+            return;
+        }
+        xml.start("KeyValueStoreAssociations").elem("Quantity", arns.size()).start("Items");
+        for (String arn : arns) {
+            xml.start("KeyValueStoreAssociation").elem("KeyValueStoreARN", arn).end("KeyValueStoreAssociation");
+        }
+        xml.end("Items").end("KeyValueStoreAssociations");
+    }
+
+    private String xmlKeyValueStore(KeyValueStore kvs) {
+        return appendKeyValueStoreFields(new XmlBuilder().start("KeyValueStore", NS), kvs)
+                .end("KeyValueStore")
+                .build();
+    }
+
+    private static XmlBuilder appendKeyValueStoreFields(XmlBuilder xml, KeyValueStore kvs) {
+        return xml.elem("Name", kvs.getName())
+                .elem("Id", kvs.getId())
+                .elem("Comment", kvs.getComment() != null ? kvs.getComment() : "")
+                .elem("ARN", kvs.getArn())
+                .elem("Status", kvs.getStatus())
+                .elem("LastModifiedTime",
+                        kvs.getLastModifiedTime() != null ? kvs.getLastModifiedTime().toString() : "");
     }
 
     /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
@@ -2537,11 +2673,13 @@ public class CloudFrontController {
                 values.getOrDefault("PriceClass", "PriceClass_All"));
         cfg.setIPV6Enabled("true".equalsIgnoreCase(
                 values.getOrDefault("IsIPV6Enabled", "true")));
-        cfg.setWebAclId(values.get("WebAclId"));
+        cfg.setWebAclId(values.containsKey("WebACLId")
+                ? values.get("WebACLId") : values.get("WebAclId"));
         cfg.setContinuousDeploymentPolicyId(
                 values.get("ContinuousDeploymentPolicyId"));
         cfg.setStaging("true".equalsIgnoreCase(
                 values.getOrDefault("Staging", "false")));
+        cfg.setConnectionMode(values.get("ConnectionMode"));
 
         cfg.setOrigins(parseOrigins(body));
         cfg.setDefaultCacheBehavior(parseDefaultCacheBehavior(body));
@@ -2616,9 +2754,11 @@ public class CloudFrontController {
                     "HttpVersion",
                     "PriceClass",
                     "IsIPV6Enabled",
+                    "WebACLId",
                     "WebAclId",
                     "ContinuousDeploymentPolicyId",
-                    "Staging" -> true;
+                    "Staging",
+                    "ConnectionMode" -> true;
             default -> false;
         };
     }
@@ -3589,6 +3729,7 @@ public class CloudFrontController {
         fn.setComment(XmlParser.extractFirst(body, "Comment", null));
         fn.setRuntime(XmlParser.extractFirst(body, "Runtime", "cloudfront-js-2.0"));
         fn.setFunctionCode(XmlParser.extractFirst(body, "FunctionCode", null));
+        fn.setKeyValueStoreArns(new ArrayList<>(XmlParser.extractAll(body, "KeyValueStoreARN")));
         return fn;
     }
 

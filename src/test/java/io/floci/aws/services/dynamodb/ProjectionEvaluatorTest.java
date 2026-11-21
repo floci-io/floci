@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Set;
 
@@ -147,10 +150,10 @@ class ProjectionEvaluatorTest {
     @Test
     void rejectsFirstListIndexPastTheAllowableRange() {
         AwsException ex = assertThrows(AwsException.class,
-                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[4294967295]", null));
+                () -> ProjectionEvaluator.project(mapper.createObjectNode(), "l[2147483648]", null));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ProjectionExpression: List index is not within the allowable range; "
-                + "index: [4294967295]", ex.getMessage());
+                + "index: [2147483648]", ex.getMessage());
     }
 
     @Test
@@ -180,9 +183,58 @@ class ProjectionEvaluatorTest {
                 ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            pk, _x                | Syntax error; token: "_", near: ", _x"
+            a._x                  | Syntax error; token: "_", near: "._x"
+            ,a                    | Syntax error; token: ",", near: ",a"
+            a,                    | Syntax error; token: "<EOF>", near: ","
+            a b                   | Syntax error; token: "b", near: "a b"
+            a..b                  | Syntax error; token: ".", near: "..b"
+            a[], b                | Syntax error; token: "]", near: "[],"
+            a[01]                 | Syntax error; token: "1", near: "01]"
+            [0]                   | Syntax error; token: "[", near: "[0"
+            a.[0]                 | Syntax error; token: "[", near: ".[0"
+            a[0]b                 | Syntax error; token: "b", near: "]b"
+            a[1                   | Syntax error; token: "<EOF>", near: "1"
+            a, and                | Syntax error; token: "and", near: ", and"
+            size(a)               | Syntax error; token: "(", near: "size(a"
+            a#b                   | Syntax error; token: "#b", near: "a#b"
+            :v                    | Syntax error; token: ":v", near: ":v"
+            a.1                   | Syntax error; token: "1", near: ".1"
+            aé                    | Syntax error; token: "é", near: "aé"
+            a[4294967295], ,      | Syntax error; token: ",", near: ", ,"
+            a[2147483648], #u     | List index is not within the allowable range; index: [2147483648]
+            '#u, a[2147483648]'   | An expression attribute name used in the document path is not defined; attribute name: #u
+            name, a[2147483648]   | Attribute name is a reserved keyword; reserved keyword: name
+            a, a, b[2147483648]   | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [a], path two: [a]
+            """)
+    void readsTheExpressionWithTheLexerOfTheOtherExpressions(String expression, String message) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression(expression, null));
+        assertEquals("Invalid ProjectionExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"a[ 1 ]", "a . b", " a", "a,\tb", "contains, begins_with, attribute_exists", "a[2147483647]"})
+    void acceptsWhatDynamoDbReads(String expression) {
+        assertDoesNotThrow(() -> ProjectionEvaluator.validateExpression(expression, null));
+    }
+
+    @Test
+    void readsSpacesInsideAPath() {
+        ObjectNode result = ProjectionEvaluator.project(listItem(), "l [ 0 ]", null);
+        assertEquals(1, result.get("l").get("L").size());
+    }
+
+    @Test
+    void acceptsSizeAsAnAttributeName() {
+        assertDoesNotThrow(() -> ProjectionEvaluator.validateExpression("size, a.SIZE", null));
+    }
+
     @Test
     void allowableIndexBeyondTheListJustDropsTheAttribute() {
-        ObjectNode result = ProjectionEvaluator.project(listItem(), "l[4294967294]", null);
+        ObjectNode result = ProjectionEvaluator.project(listItem(), "l[2147483647]", null);
         assertNull(result.get("l"), "an in-range index past the list end matches nothing");
     }
 
@@ -323,6 +375,24 @@ class ProjectionEvaluatorTest {
         assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
                 + "must remove or rewrite one of these paths; path one: [a, b], path two: [a]",
                 ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            '#u, name'     | An expression attribute name used in the document path is not defined; attribute name: #u
+            name, #u       | Attribute name is a reserved keyword; reserved keyword: name
+            a[0].name      | Attribute name is a reserved keyword; reserved keyword: name
+            STATUS         | Attribute name is a reserved keyword; reserved keyword: STATUS
+            true           | Attribute name is a reserved keyword; reserved keyword: true
+            a, a.b, name   | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [a], path two: [a, b]
+            a, name, a.b   | Attribute name is a reserved keyword; reserved keyword: name
+            a, a.b, #u     | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [a], path two: [a, b]
+            a.b, c.d, c, a | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [c, d], path two: [c]
+            """)
+    void checksEachPathInWrittenOrder(String expression, String message) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression(expression, null));
+        assertEquals("Invalid ProjectionExpression: " + message, ex.getMessage());
     }
 
     @Test

@@ -877,6 +877,8 @@ class ExpressionEvaluatorTest {
                 a = :v \uD83D\uDE00         | \uD83D\uDE00    | :v \uD83D\uDE00
                 `a\u3000= :v`               | `\u3000`        | `a\u3000=`
                 a = :v AND $ = = b          | $               | AND $ =
+                a[01] = :v                  | 1               | 01]
+                a[007] = :v                 | 0               | 007
                 """)
         void syntaxErrorsNameTheTokenAndTheTextAroundIt(String expression, String token, String near) {
             AwsException e = assertThrows(AwsException.class,
@@ -888,6 +890,12 @@ class ExpressionEvaluatorTest {
         @ParameterizedTest
         @ValueSource(strings = {"a[ 1 ] = :v", "a [1] = :v", "a_b = :v"})
         void spacesInAListIndexAndUnderscoresInsideANameAreAccepted(String expression) {
+            assertDoesNotThrow(() -> ExpressionEvaluator.validateSyntax(expression, "ConditionExpression"));
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"a[0] = :v", "a[10] = :v"})
+        void aListIndexWithoutALeadingZeroIsAccepted(String expression) {
             assertDoesNotThrow(() -> ExpressionEvaluator.validateSyntax(expression, "ConditionExpression"));
         }
 

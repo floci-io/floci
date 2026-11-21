@@ -3,7 +3,9 @@ package io.floci.aws.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -53,26 +55,37 @@ public class SesConfigurationSetService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetService.class);
 
-    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_CONFIG_SET_NAME_LENGTH = 64;
     private static final Set<String> VDM_FEATURE_STATES = Set.of("ENABLED", "DISABLED");
 
-    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
+    private static final String INVALID_SNS_DESTINATION = "InvalidSNSDestination";
+    private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
+    private static final String DEFAULT_EVENT_BUS_RESOURCE = EVENT_BUS_RESOURCE_PREFIX + "default";
+    private static final Pattern SNS_TOPIC_NAME = Pattern.compile("[A-Za-z0-9_-]{1,256}(\\.fifo)?");
+    // The pattern SES declares for the stored value, quoted in the violation it answers on v2.
+    private static final Pattern STORED_SNS_TOPIC_ARN = Pattern.compile(
+            "arn:aws[^:]*:sns:[a-zA-Z0-9\\-]*:\\d{12}:[a-zA-Z_0-9+=,.@\\-_/:]+"); // partition-literal: AWS's fixed wording
     private static final List<String> VALID_EVENT_TYPES = List.of(
             "SEND", "REJECT", "BOUNCE", "COMPLAINT", "DELIVERY", "OPEN", "CLICK",
             "RENDERING_FAILURE", "DELIVERY_DELAY", "SUBSCRIPTION");
 
     private final StorageBackend<String, ConfigurationSet> configSetStore;
 
+    private final SesEventPublisher eventPublisher;
+
+    private final RegionResolver regionResolver;
+
     @Inject
-    public SesConfigurationSetService(StorageFactory storageFactory) {
+    public SesConfigurationSetService(StorageFactory storageFactory, SesEventPublisher eventPublisher,
+                                      RegionResolver regionResolver) {
         this(storageFactory.create("ses", "ses-config-sets.json",
-                new TypeReference<Map<String, ConfigurationSet>>() {}));
+                new TypeReference<Map<String, ConfigurationSet>>() {}), eventPublisher, regionResolver);
     }
 
-    SesConfigurationSetService(StorageBackend<String, ConfigurationSet> configSetStore) {
+    SesConfigurationSetService(StorageBackend<String, ConfigurationSet> configSetStore,
+                               SesEventPublisher eventPublisher, RegionResolver regionResolver) {
         this.configSetStore = configSetStore;
+        this.eventPublisher = eventPublisher;
+        this.regionResolver = regionResolver;
     }
 
     /**
@@ -387,7 +400,7 @@ public class SesConfigurationSetService implements SesTaggable {
 
     /** For guards that must not trip the key derivation's name validation (the tenant gate). */
     static boolean isValidName(String name) {
-        return name != null && name.length() <= MAX_CONFIG_SET_NAME_LENGTH && CONFIG_SET_NAME.matcher(name).matches();
+        return name != null && SesNames.isValid(name);
     }
 
     // ──────────────────────── Domain-pure option setters ────────────────────────
@@ -524,15 +537,26 @@ public class SesConfigurationSetService implements SesTaggable {
 
     // ──────────────────────────── Event destinations ────────────────────────────
 
+    /**
+     * @param v2 whether the call came through the v2 API. Probed: v2 create checks the SNS topic
+     *           before it looks up the configuration set, while v1 create and both updates
+     *           look up the set and the destination name first.
+     */
     public void createEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String accountId, String region) {
+                                       EventDestination dest, String accountId, String region, boolean v2) {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest, accountId, region);
+        if (v2) {
+            validateSnsTopic(dest, configSetName, accountId, region, true);
+        }
         ConfigurationSet cs = get(configSetName, region);
         if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
             throw new AwsException("AlreadyExists",
                     "An event destination with name <" + eventDestinationName
                             + "> already exists for configuration set <" + configSetName + ">.", 400);
+        }
+        if (!v2) {
+            validateSnsTopic(dest, configSetName, accountId, region, false);
         }
         dest.setName(eventDestinationName);
         cs.getEventDestinations().add(dest);
@@ -546,7 +570,7 @@ public class SesConfigurationSetService implements SesTaggable {
     }
 
     public void updateEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String accountId, String region) {
+                                       EventDestination dest, String accountId, String region, boolean v2) {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest, accountId, region);
         ConfigurationSet cs = get(configSetName, region);
@@ -556,6 +580,7 @@ public class SesConfigurationSetService implements SesTaggable {
                     "An event destination with name <" + eventDestinationName
                             + "> does not exist for configuration set <" + configSetName + ">.", 404);
         }
+        validateSnsTopic(dest, configSetName, accountId, region, v2);
         dest.setName(eventDestinationName);
         cs.getEventDestinations().set(index, dest);
         configSetStore.put(configSetKey(region, configSetName), cs);
@@ -590,15 +615,8 @@ public class SesConfigurationSetService implements SesTaggable {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
         }
-        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
-        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Event destination name cannot exceed 64 characters.", 400);
-        }
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid event destination name");
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Event destination name");
     }
 
     static void validateEventDestination(EventDestination dest, String accountId, String region) {
@@ -623,12 +641,6 @@ public class SesConfigurationSetService implements SesTaggable {
             throw new AwsException("InvalidParameterValue",
                     "Please provide only one destination with each request. Either a Firehose Destination "
                             + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
-        }
-        if (dest.getSnsDestination() != null
-                && (dest.getSnsDestination().getTopicArn() == null
-                || dest.getSnsDestination().getTopicArn().isBlank())) {
-            throw new AwsException("InvalidParameterValue",
-                    "SnsDestination requires a non-blank TopicArn.", 400);
         }
         if (dest.getKinesisFirehoseDestination() != null
                 && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
@@ -673,9 +685,68 @@ public class SesConfigurationSetService implements SesTaggable {
         }
     }
 
-    // SES publishes email events only to the default EventBridge bus, so the
-    // EventBusArn member must name event-bus/default of the events service in the
-    // configuration set's account and region. All supported AWS partitions are accepted.
+    // Probed against SES: each way a topic can be unusable has its own message, the same on
+    // v1 and v2 except for a missing or empty value, and a disabled destination is checked too.
+    // AWS answers a topic of an unknown account with "No account can be found for SNS topic";
+    // Floci cannot tell an unknown account from a missing topic and answers "not found".
+    private void validateSnsTopic(EventDestination dest, String configSetName, String accountId,
+                                  String region, boolean v2) {
+        if (dest.getSnsDestination() == null) {
+            return;
+        }
+        String given = dest.getSnsDestination().getTopicArn();
+        if (given == null || given.isEmpty()) {
+            throw new AwsException(INVALID_SNS_DESTINATION, v2
+                    ? "Invalid topic ARN provided: " + given + "."
+                    : "Invalid ARN provided: topic ARN = .", 400);
+        }
+        // Probed: SES judges the value without its padding, and refuses the padding itself last.
+        String topicArn = given.strip();
+        AwsArnUtils.Arn arn = snsTopicArn(topicArn);
+        if (!arn.partition().equals(regionResolver.partitionForRegion(region))
+                || !SNS_TOPIC_NAME.matcher(arn.resource()).matches()) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "Invalid parameter for SNS topic <" + topicArn
+                    + ">. Verify the SNS topic configuration is correct.", 400);
+        }
+        if (!arn.region().equals(region)) {
+            throw new AwsException(INVALID_SNS_DESTINATION,
+                    "SNS topic must be located in same region as SES <" + region + ">", 400);
+        }
+        SesEventPublisher.TopicAccess access =
+                eventPublisher.eventDestinationTopicAccess(topicArn, configSetName, accountId, region);
+        if (access == SesEventPublisher.TopicAccess.NOT_FOUND) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "SNS topic <" + topicArn + "> not found.", 400);
+        }
+        if (access == SesEventPublisher.TopicAccess.DENIED) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "Access denied to SNS topic <" + topicArn
+                    + ">. Verify the SNS topic policy grants Amazon SES the sns:Publish permission.", 400);
+        }
+        if (!STORED_SNS_TOPIC_ARN.matcher(given).matches()) {
+            throw v2
+                    ? SmithyValidationErrors.badRequest(SmithyValidationErrors.pattern(
+                            "destinations.1.member.snsTopicArn", given, STORED_SNS_TOPIC_ARN.pattern()))
+                    : new AwsException(INVALID_SNS_DESTINATION, "Invalid SNSDestination", 400);
+        }
+    }
+
+    private static AwsArnUtils.Arn snsTopicArn(String topicArn) {
+        if (AwsArnUtils.isArnFor(topicArn, "sns")) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(topicArn);
+            if (AwsPartitions.find(arn.partition()).isPresent()
+                    && arn.region().matches("[a-z0-9-]*")
+                    && arn.accountId().matches("[0-9]{12}")) {
+                return arn;
+            }
+        }
+        throw new AwsException(INVALID_SNS_DESTINATION, "Invalid SNS topic ARN <" + topicArn
+                + "> should have the form <arn:aws:sns:region:[account-id]:[topic-name]>", 400); // partition-literal: AWS's fixed wording
+    }
+
+    // SES publishes email events only to the default EventBridge bus of the configuration set's
+    // account and region. Probed 2026-11-18: each way the ARN can miss that has its own message.
+    // The probe broke one thing per call, so the order of the checks is Floci's. "Wrongly formatted"
+    // was seen for an SNS topic ARN only; the other shapes it answers here are Floci's reading. A
+    // missing or blank value never reached SES (the AWS CLI refuses it), so that message is Floci's.
     private static void validateEventBridgeDestination(
             EventBridgeDestination eventBridge, String accountId, String region) {
         String busArn = eventBridge.getEventBusArn();
@@ -687,23 +758,28 @@ public class SesConfigurationSetService implements SesTaggable {
         try {
             arn = AwsArnUtils.parse(busArn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn is not a valid ARN: " + busArn + ".", 400);
+            throw new AwsException("InvalidParameterValue", "Invalid event bus ARN provided.", 400);
         }
         if (!arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
                 || arn.region().isBlank()
                 || !arn.accountId().matches("[0-9]{12}")
                 || !"events".equals(arn.service())
-                || !"event-bus/default".equals(arn.resource())) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must be a valid default event bus ARN: "
-                            + busArn + ".", 400);
+                || !arn.resource().startsWith(EVENT_BUS_RESOURCE_PREFIX)) {
+            throw invalidEventBridgeDestination("event-bus ARN is wrongly formatted");
         }
-        if (!arn.accountId().equals(accountId) || !arn.region().equals(region)) {
-            throw new AwsException("InvalidParameterValue",
-                    "EventBridgeDestination EventBusArn must match the configuration set's account and Region: "
-                            + busArn + ".", 400);
+        if (!arn.accountId().equals(accountId)) {
+            throw invalidEventBridgeDestination("cross account is not supported.");
         }
+        if (!arn.region().equals(region)) {
+            throw invalidEventBridgeDestination("must be in region <" + region + ">.");
+        }
+        if (!DEFAULT_EVENT_BUS_RESOURCE.equals(arn.resource())) {
+            throw invalidEventBridgeDestination("must be default bus.");
+        }
+    }
+
+    private static AwsException invalidEventBridgeDestination(String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid Event Bridge destination, " + reason, 400);
     }
 
     private static int countDestinations(EventDestination dest) {
@@ -731,15 +807,8 @@ public class SesConfigurationSetService implements SesTaggable {
             throw new AwsException("InvalidParameterValue",
                     "The configuration set name must be specified.", 400);
         }
-        if (name.length() > MAX_CONFIG_SET_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Configuration set name cannot exceed " + MAX_CONFIG_SET_NAME_LENGTH + " characters.", 400);
-        }
-        if (!CONFIG_SET_NAME.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid configuration set name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Configuration set name");
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid configuration set name");
     }
 
     private static String configSetKey(String region, String name) {

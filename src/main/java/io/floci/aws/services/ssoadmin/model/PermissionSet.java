@@ -11,10 +11,13 @@ public record PermissionSet(String arn, String name, String description, String 
                             Map<String, CustomerManagedPolicyReference> customerManagedPolicies,
                             String inlinePolicy,
                             PermissionsBoundary permissionsBoundary,
-                            Map<String, String> tags) {
+                            Map<String, String> tags,
+                            Long createdDateEpochMillis) {
     public PermissionSet {
         managedPolicies = managedPolicies == null ? new LinkedHashMap<>() : managedPolicies;
         customerManagedPolicies = customerManagedPolicies == null ? new LinkedHashMap<>() : customerManagedPolicies;
         tags = tags == null ? new LinkedHashMap<>() : tags;
+        // createdDateEpochMillis is null for permission sets persisted before it was recorded; see
+        // SsoAdminService#createdDateEpochMillis for the date they report.
     }
 }

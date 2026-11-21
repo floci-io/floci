@@ -3,7 +3,9 @@ package io.floci.aws.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.eks.model.Cluster;
-import io.floci.aws.testing.RealEksProfile;
+import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksTestNode;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -13,24 +15,22 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
+import java.time.Duration;
 import java.util.UUID;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Docker integration test verifying that freshly created clusters start with no StorageClass,
  * no bundled local-path provisioner, and that CoreDNS remains functional.
  *
  * <p>The cluster is started through {@link EksClusterManager} directly, which runs a k3s container
- * whether or not EKS is mocked. The class runs on {@link RealEksProfile} with the other classes
+ * whether or not EKS is mocked. The class runs on {@link RdsMockProfile} with the other classes
  * that run a real cluster.
  */
 @QuarkusTest
-@TestProfile(RealEksProfile.class)
+@TestProfile(RdsMockProfile.class)
 class EksStorageClassDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksStorageClassDockerIntegrationTest.class);
@@ -46,7 +46,7 @@ class EksStorageClassDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        boolean dockerAvailable = isDockerAvailable();
+        boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
             LOG.warn("Docker daemon is not available; skipping EksStorageClassDockerIntegrationTest");
         }
@@ -65,80 +65,28 @@ class EksStorageClassDockerIntegrationTest {
     }
 
     @Test
-    void clusterStartsWithoutStorageClassAndCoreDnsRemainsAvailable() throws Exception {
-        String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String clusterName = "sc-dock-" + suffix;
-
-        cluster = new Cluster();
-        cluster.setName(clusterName);
-        cluster.setAccountId(ACCOUNT);
-        cluster.setArn("arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/" + clusterName);
-        cluster.setCreatedAt(Instant.now());
-        cluster.setRoleArn("arn:aws:iam::" + ACCOUNT + ":role/eks-service-role");
-
-        eksClusterManager.startCluster(cluster);
-        assertNotNull(cluster.getContainerId(), "Container ID must not be null");
-
-        // Wait for k3s API server readiness (up to 60s)
-        long deadline = System.currentTimeMillis() + 60000;
-        boolean ready = false;
-        while (System.currentTimeMillis() < deadline) {
-            if (eksClusterManager.isReady(cluster)) {
-                ready = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        assertTrue(ready, "k3s API server must become ready within 60 seconds");
-        eksClusterManager.finalizeCluster(cluster);
-
-        String containerId = cluster.getContainerId();
+    void clusterStartsWithoutStorageClassAndCoreDnsRemainsAvailable() {
+        cluster = EksTestNode.cluster(ACCOUNT, "sc-dock-" + UUID.randomUUID().toString().substring(0, 8));
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(60));
 
         // 1. Verify CoreDNS deployment is present and healthy in kube-system
-        long corednsDeadline = System.currentTimeMillis() + 60000;
-        boolean corednsRolledOut = false;
-        while (System.currentTimeMillis() < corednsDeadline) {
-            ContainerExec.Result rolloutResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=10s"});
-            if (rolloutResult.exitCode() == 0) {
-                corednsRolledOut = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        assertTrue(corednsRolledOut, "CoreDNS deployment must be successfully rolled out");
+        await("CoreDNS rolled out").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .until(() -> node.kubectl("rollout", "status", "deployment/coredns", "-n", "kube-system",
+                        "--timeout=10s").exitCode() == 0);
 
         // 2. Verify CoreDNS pods are running and ready
-        ContainerExec.Result podsResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "pods", "-n", "kube-system", "-l", "k8s-app=kube-dns",
-                        "-o", "jsonpath={.items[*].status.phase}"});
-        assertEquals(0, podsResult.exitCode(), "kubectl get pods failed: " + podsResult.stderr());
-        assertTrue(podsResult.stdout().contains("Running"),
-                "CoreDNS pod must be in Running phase, but got: " + podsResult.stdout());
+        assertEquals("Running", node.kubectlOutput("get", "pods", "-n", "kube-system", "-l", "k8s-app=kube-dns",
+                        "-o", "jsonpath={.items[*].status.phase}"),
+                "CoreDNS pod must be in Running phase");
 
         // 3. Verify no StorageClass exists in the cluster after manifests settle
-        ContainerExec.Result scResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "storageclass", "-o", "jsonpath={.items[*].metadata.name}"});
-        assertEquals(0, scResult.exitCode(), "kubectl get storageclass failed: " + scResult.stderr());
-        assertTrue(scResult.stdout().trim().isEmpty(),
-                "No StorageClass should exist in newly created cluster, but found: " + scResult.stdout());
+        assertEquals("", node.kubectlOutput("get", "storageclass", "-o", "jsonpath={.items[*].metadata.name}"),
+                "No StorageClass should exist in newly created cluster");
 
         // 4. Explicitly verify local-path StorageClass is absent
-        ContainerExec.Result localPathResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "storageclass", "local-path"});
-        assertNotEquals(0, localPathResult.exitCode(), "local-path StorageClass must not exist");
-    }
-
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
-        return ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
+        ContainerExec.Result localPath = node.kubectl("get", "storageclass", "local-path");
+        assertEquals(1, localPath.exitCode(), localPath.summary());
+        assertEquals("Error from server (NotFound): storageclasses.storage.k8s.io \"local-path\" not found",
+                localPath.stderr().trim(), "local-path StorageClass must not exist");
     }
 }

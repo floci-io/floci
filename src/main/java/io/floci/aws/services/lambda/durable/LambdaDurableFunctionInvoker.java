@@ -30,7 +30,8 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
         return new ResolvedDurableTarget(accountId, region, fn.getFunctionName(), qualifiedArn, version,
                 fn.isDurable(),
                 fn.getDurableExecutionTimeout() != null ? fn.getDurableExecutionTimeout() : 0,
-                fn.getDurableRetentionPeriodInDays() != null ? fn.getDurableRetentionPeriodInDays() : 0);
+                fn.getDurableRetentionPeriodInDays() != null ? fn.getDurableRetentionPeriodInDays() : 0,
+                "Active".equals(fn.getTracingMode()));
     }
 
     /**
@@ -38,11 +39,21 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
      * {@code $LATEST} execution resumes on whatever code $LATEST holds now, as on AWS.
      */
     @Override
-    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
+        return invoke(target, payload, requestId, traceId, false);
+    }
+
+    @Override
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                          String traceId, boolean logTail) {
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(target.accountId(), target.region(),
                 target.functionName(), target.version());
         InvokeResult result = RequestScopes.callAs(target.accountId(),
-                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId));
-        return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError());
+                () -> logTail
+                        ? executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId, traceId, true)
+                        : executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId, traceId));
+        return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError(),
+                result.getLogResult());
     }
 }

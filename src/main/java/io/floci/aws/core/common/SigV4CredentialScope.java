@@ -103,12 +103,12 @@ public final class SigV4CredentialScope {
         if (authorization == null) {
             return Optional.empty();
         }
+        if (!hasCredential(authorization)) {
+            return Optional.empty();
+        }
         String service = segment(authorization, Segment.SERVICE);
         if (service != null) {
             return Optional.of(service.toLowerCase(Locale.ROOT));
-        }
-        if (!hasCredential(authorization)) {
-            return Optional.empty();
         }
         Matcher matcher = SERVICE_PATTERN.matcher(authorization);
         if (matcher.find()) {

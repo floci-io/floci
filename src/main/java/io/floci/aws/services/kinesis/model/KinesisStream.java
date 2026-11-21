@@ -1,6 +1,8 @@
 package io.floci.aws.services.kinesis.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -18,11 +20,13 @@ public class KinesisStream {
     private String streamName;
     private String streamArn;
     private String accountId;
+    @JsonProperty("streamStatus")
     private String streamStatus;
+    private Instant statusTransitionDeadline;
     private volatile List<KinesisShard> shards = new CopyOnWriteArrayList<>();
     private int retentionPeriodHours = 24;
     private Instant streamCreationTimestamp;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private String encryptionType = "NONE";
     private String keyId;
     private String streamMode = "PROVISIONED";
@@ -53,8 +57,23 @@ public class KinesisStream {
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
-    public String getStreamStatus() { return streamStatus; }
-    public void setStreamStatus(String streamStatus) { this.streamStatus = streamStatus; }
+    @JsonIgnore
+    public String getStreamStatus() { return getStreamStatus(Instant.now()); }
+    public synchronized String getStreamStatus(Instant now) {
+        return statusTransitionDeadline != null && !now.isBefore(statusTransitionDeadline)
+                ? "ACTIVE" : streamStatus;
+    }
+    public synchronized void setStreamStatus(String streamStatus) { this.streamStatus = streamStatus; }
+
+    public synchronized Instant getStatusTransitionDeadline() { return statusTransitionDeadline; }
+    public synchronized void setStatusTransitionDeadline(Instant statusTransitionDeadline) {
+        this.statusTransitionDeadline = statusTransitionDeadline;
+    }
+
+    public synchronized void setStatusWindow(String status, Instant deadline) {
+        this.streamStatus = status;
+        this.statusTransitionDeadline = deadline;
+    }
 
     public List<KinesisShard> getShards() { return shards; }
     public void setShards(List<KinesisShard> shards) {

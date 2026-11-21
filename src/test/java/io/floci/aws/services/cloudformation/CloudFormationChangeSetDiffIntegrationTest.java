@@ -1,17 +1,22 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -28,6 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class CloudFormationChangeSetDiffIntegrationTest {
 
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
+
+    @Inject
+    SesReceiptRuleService ses;
 
     private final List<String> stacksToDelete = new ArrayList<>();
 
@@ -486,6 +494,70 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .body(containsString("<Replacement>True</Replacement>"));
     }
 
+    /**
+     * Registry schema aws-cognito-userpooluser.json (CloudformationSchema.zip, us-east-1) lists
+     * /properties/UserPoolId in createOnlyProperties; the resource page
+     * aws-resource-cognito-userpooluser says "Update requires: Replacement" for UserPoolId.
+     */
+    @Test
+    void createOnlyPropertyChange_reportsReplacementTrue() {
+        String stackName = "cs-diff-create-only-stack";
+        stacksToDelete.add(stackName);
+
+        String initialTemplate = userPoolUserTemplate("PoolA");
+        String changedTemplate = userPoolUserTemplate("PoolB");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", changedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>U</LogicalResourceId>"))
+            .body(containsString("<Replacement>True</Replacement>"));
+    }
+
+    private static String userPoolUserTemplate(String poolLogicalId) {
+        return """
+            {
+              "Resources": {
+                "PoolA": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-a"}},
+                "PoolB": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-b"}},
+                "U": {
+                  "Type": "AWS::Cognito::UserPoolUser",
+                  "Properties": {"UserPoolId": {"Ref": "%s"}, "Username": "cs-diff-user"}
+                }
+              }
+            }
+            """.formatted(poolLogicalId);
+    }
+
     @Test
     void ssmParameterValueDrift_isReportedAsAChange() {
         String stackName = "cs-diff-ssm-drift-stack";
@@ -877,5 +949,306 @@ class CloudFormationChangeSetDiffIntegrationTest {
         boolean unchangedQueueIncluded = changes.stream()
                 .anyMatch(m -> "UnchangedQueue".equals(m.get("LogicalResourceId")));
         assertFalse(unchangedQueueIncluded);
+    }
+
+    /**
+     * Registry schema aws-route53-healthcheck.json lists only /properties/HealthCheckConfig/Type,
+     * /MeasureLatency and /RequestInterval in createOnlyProperties, so editing the Port inside
+     * HealthCheckConfig is an in-place update and editing its Type is a replacement.
+     */
+    @Test
+    void nestedCreateOnlyPointer_replacesOnlyWhenTheNestedValueChanges() {
+        String stackName = "cs-diff-nested-hc-stack";
+        stacksToDelete.add(stackName);
+
+        createStack(stackName, healthCheckTemplate("HTTP", 80));
+
+        assertEquals("False", previewReplacement(stackName, "hc-port-cs", healthCheckTemplate("HTTP", 8080)).get("Check"));
+        assertEquals("True", previewReplacement(stackName, "hc-type-cs", healthCheckTemplate("HTTPS", 80)).get("Check"));
+    }
+
+    private static String healthCheckTemplate(String type, int port) {
+        return """
+            {
+              "Resources": {
+                "Check": {
+                  "Type": "AWS::Route53::HealthCheck",
+                  "Properties": {
+                    "HealthCheckConfig": {
+                      "Type": "%s", "IPAddress": "192.0.2.10", "Port": %d, "ResourcePath": "/x"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(type, port);
+    }
+
+    /**
+     * Registry schema aws-ses-receiptrule.json lists /properties/Rule/Name and /properties/RuleSetName
+     * in createOnlyProperties, but not Rule/Enabled: toggling Enabled is in place, renaming is not.
+     */
+    @Test
+    void sesReceiptRule_replacesOnRuleNameButNotOnEnabled() {
+        String stackName = "cs-diff-nested-ses-stack";
+        String ruleSet = "cs-diff-nested-ses-set";
+        stacksToDelete.add(stackName);
+        ses.createReceiptRuleSet(ruleSet, "us-east-1");
+        try {
+            createStack(stackName, receiptRuleTemplate(ruleSet, "rule-a", true));
+
+            assertEquals("False", previewReplacement(stackName, "ses-enabled-cs",
+                    receiptRuleTemplate(ruleSet, "rule-a", false)).get("Rule"));
+            assertEquals("True", previewReplacement(stackName, "ses-name-cs",
+                    receiptRuleTemplate(ruleSet, "rule-b", true)).get("Rule"));
+        } finally {
+            deleteStackNow(stackName);
+            ses.deleteReceiptRuleSet(ruleSet, "us-east-1");
+        }
+    }
+
+    private static String receiptRuleTemplate(String ruleSet, String name, boolean enabled) {
+        return """
+            {
+              "Resources": {
+                "Rule": {
+                  "Type": "AWS::SES::ReceiptRule",
+                  "Properties": {
+                    "RuleSetName": "%s",
+                    "Rule": {"Name": "%s", "Enabled": %s, "Recipients": ["example.com"]}
+                  }
+                }
+              }
+            }
+            """.formatted(ruleSet, name, enabled);
+    }
+
+    /**
+     * Registry schema aws-batch-computeenvironment.json lists /properties/ComputeResources/SpotIamFleetRole
+     * in createOnlyProperties and does not list ComputeResources/InstanceRole. AWS::IAM::Role RoleName is
+     * create-only (aws-iam-role.json), so renaming the role replaces it. A compute environment that
+     * references the replaced role under SpotIamFleetRole is replaced with it; one that references it only
+     * under InstanceRole (same parent, not create-only) is updated in place.
+     */
+    @Test
+    void dependentIsReplacedOnlyWhenTheReferenceSitsUnderANestedCreateOnlyPointer() {
+        String stackName = "cs-diff-nested-dep-stack";
+        stacksToDelete.add(stackName);
+
+        createStack(stackName, roleAndComputeTemplate("cs-diff-nested-role-a"));
+
+        Map<String, String> replacement = previewReplacement(stackName, "dep-cs",
+                roleAndComputeTemplate("cs-diff-nested-role-b"));
+        assertEquals("True", replacement.get("Role"));
+        assertEquals("True", replacement.get("CreateOnlyRef"));
+        assertEquals("False", replacement.get("SiblingRef"));
+    }
+
+    private static String roleAndComputeTemplate(String roleName) {
+        return """
+            {
+              "Resources": {
+                "Role": {
+                  "Type": "AWS::IAM::Role",
+                  "Properties": {
+                    "RoleName": "%s",
+                    "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [
+                      {"Effect": "Allow", "Principal": {"Service": "batch.amazonaws.com"}, "Action": "sts:AssumeRole"}]}
+                  }
+                },
+                "CreateOnlyRef": {
+                  "Type": "AWS::Batch::ComputeEnvironment",
+                  "Properties": {
+                    "ComputeEnvironmentName": "cs-diff-nested-ce-1",
+                    "Type": "MANAGED",
+                    "ComputeResources": {"Type": "FARGATE", "MaxvCpus": 4, "Subnets": ["subnet-local"],
+                      "SecurityGroupIds": ["sg-local"], "SpotIamFleetRole": {"Ref": "Role"}}
+                  }
+                },
+                "SiblingRef": {
+                  "Type": "AWS::Batch::ComputeEnvironment",
+                  "Properties": {
+                    "ComputeEnvironmentName": "cs-diff-nested-ce-2",
+                    "Type": "MANAGED",
+                    "ComputeResources": {"Type": "FARGATE", "MaxvCpus": 4, "Subnets": ["subnet-local"],
+                      "SecurityGroupIds": ["sg-local"], "InstanceRole": {"Ref": "Role"}}
+                  }
+                }
+              }
+            }
+            """.formatted(roleName);
+    }
+
+    private void createStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+    }
+
+    private void deleteStackNow(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/");
+    }
+
+    /** Creates an UPDATE change set and returns the Replacement value per logical id. */
+    private Map<String, String> previewReplacement(String stackName, String changeSetName, String template) {
+        Map<String, String> result = new HashMap<>();
+        for (Map<String, String> change : XmlParser.extractGroups(
+                describeChangeSet(stackName, changeSetName, template, null), "ResourceChange")) {
+            result.put(change.get("LogicalResourceId"), change.get("Replacement"));
+        }
+        return result;
+    }
+
+    /** Creates an UPDATE change set (with one "Name=value" parameter when given) and returns the DescribeChangeSet body. */
+    private String describeChangeSet(String stackName, String changeSetName, String template, String param) {
+        RequestSpecification create = cfn("CreateChangeSet", stackName)
+            .formParam("ChangeSetName", changeSetName)
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template);
+        if (param != null) {
+            create.formParam("Parameters.member.1.ParameterKey", param.split("=")[0])
+                  .formParam("Parameters.member.1.ParameterValue", param.split("=")[1]);
+        }
+        create.when().post("/").then().statusCode(200);
+
+        return cfn("DescribeChangeSet", stackName)
+            .formParam("ChangeSetName", changeSetName)
+            .when().post("/")
+            .then().statusCode(200)
+            .extract().body().asString();
+    }
+
+    private record DetailsRow(String name, String type, String oldProps, String newProps, String newParam,
+            List<String> scope, List<String> details, String replacement, boolean exact) { }
+
+    /** Details are "Attribute|Name|RequiresRecreation|ChangeSource|Evaluation|CausingEntity", empty when absent. */
+    private static String template(String type, String props, String... extraResources) {
+        return "{\"Parameters\":{\"P\":{\"Type\":\"String\",\"Default\":\"v1\"},\"Env\":{\"Type\":\"String\",\"Default\":\"prod\"}},\"Conditions\":{\"C\":{\"Fn::Equals\":[{\"Ref\":\"Env\"},\"prod\"]}},\"Resources\":{\"R\":{\"Type\":\""
+                + type + "\",\"Properties\":{" + props + "}}" + String.join("", extraResources) + "}}";
+    }
+
+    private static String healthCheck(String type) {
+        return "\"HealthCheckConfig\":{\"Type\":\"" + type + "\",\"IPAddress\":\"192.0.2.10\",\"Port\":80}";
+    }
+
+    private static String text(XmlParser.XmlElement parent, String child) {
+        XmlParser.XmlElement e = parent == null ? null : parent.child(child);
+        return e == null ? "" : e.text();
+    }
+
+    private static XmlParser.XmlElement resourceChange(String body, String logicalId) {
+        for (XmlParser.XmlElement member : XmlParser.parseDocumentElementTree(body)
+                .child("DescribeChangeSetResult").child("Changes").children()) {
+            XmlParser.XmlElement rc = member.child("ResourceChange");
+            if (logicalId.equals(text(rc, "LogicalResourceId"))) {
+                return rc;
+            }
+        }
+        return null;
+    }
+
+    private static List<String> detailsOf(XmlParser.XmlElement rc) {
+        List<String> result = new ArrayList<>();
+        for (XmlParser.XmlElement d : rc.child("Details").children()) {
+            XmlParser.XmlElement t = d.child("Target");
+            result.add(String.join("|", text(t, "Attribute"), text(t, "Name"), text(t, "RequiresRecreation"),
+                    text(d, "ChangeSource"), text(d, "Evaluation"), text(d, "CausingEntity")));
+        }
+        return result.stream().sorted().toList();
+    }
+
+    /**
+     * Expected values: AWS DescribeChangeSet samples (direct Tags edit, parameter change giving a
+     * DirectModification/Dynamic and a ParameterReference/Static detail) and the ResourceChangeDetail
+     * reference (Name only for Properties; Replacement is the most intrusive RequiresRecreation).
+     */
+    @Test
+    void modifiedResource_reportsScopeAndDetails() {
+        String direct = "|DirectModification|Static|";
+        String ifSet = "{\"Fn::If\":[\"C\",5,{\"Ref\":\"AWS::NoValue\"}]}";
+        List<DetailsRow> rows = List.of(
+            new DetailsRow("changed", "AWS::SNS::Topic", "\"DisplayName\":\"a\"", "\"DisplayName\":\"b\"", null,
+                List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
+            new DetailsRow("added", "AWS::SNS::Topic", "\"TopicName\":\"cs-det-added\"",
+                "\"TopicName\":\"cs-det-added\",\"DisplayName\":\"b\"", null,
+                List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
+            new DetailsRow("dropped", "AWS::SNS::Topic", "\"TopicName\":\"cs-det-dropped\",\"DisplayName\":\"a\"",
+                "\"TopicName\":\"cs-det-dropped\"", null,
+                List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
+            new DetailsRow("create-only", "AWS::SQS::Queue", "\"QueueName\":\"cs-det-q-a\"", "\"QueueName\":\"cs-det-q-b\"",
+                null, List.of("Properties"), List.of("Properties|QueueName|Always" + direct), "True", true),
+            new DetailsRow("tags", "AWS::SQS::Queue",
+                "\"QueueName\":\"cs-det-tags\",\"Tags\":[{\"Key\":\"k\",\"Value\":\"v1\"}]",
+                "\"QueueName\":\"cs-det-tags\",\"Tags\":[{\"Key\":\"k\",\"Value\":\"v2\"}]", null,
+                List.of("Tags"), List.of("Tags||Never" + direct), "False", true),
+            new DetailsRow("parameter", "AWS::SNS::Topic", "\"DisplayName\":{\"Ref\":\"P\"}",
+                "\"DisplayName\":{\"Ref\":\"P\"}", "P=v2", List.of("Properties"),
+                List.of("Properties|DisplayName|Never|DirectModification|Dynamic|",
+                        "Properties|DisplayName|Never|ParameterReference|Static|P"), "False", true),
+            new DetailsRow("no-value", "AWS::SNS::Topic", "\"DisplayName\":\"a\"",
+                "\"DisplayName\":\"b\",\"KmsMasterKeyId\":{\"Ref\":\"AWS::NoValue\"}", null,
+                List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
+            new DetailsRow("edited-and-parameter", "AWS::SQS::Queue",
+                "\"QueueName\":\"cs-det-both\",\"Tags\":[{\"Key\":\"k\",\"Value\":{\"Ref\":\"P\"}}]",
+                "\"QueueName\":\"cs-det-both\",\"Tags\":[{\"Key\":\"k2\",\"Value\":{\"Ref\":\"P\"}}]", "P=v2",
+                List.of("Tags"), List.of("Tags||Never" + direct, "Tags||Never|ParameterReference|Static|P"), "False", true),
+            new DetailsRow("nested-create-only", "AWS::Route53::HealthCheck", healthCheck("HTTP"), healthCheck("HTTPS"), null,
+                List.of("Properties"), List.of("Properties|HealthCheckConfig|Always" + direct), "True", true),
+            new DetailsRow("condition", "AWS::SQS::Queue", "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet,
+                "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet, "Env=dev", List.of("Properties"),
+                List.of("Properties|DelaySeconds|Never|DirectModification|Dynamic|"), "False", false));
+
+        List<String> failures = new ArrayList<>();
+        for (DetailsRow row : rows) {
+            String stackName = "cs-details-" + row.name();
+            stacksToDelete.add(stackName);
+            createStack(stackName, template(row.type(), row.oldProps()));
+            XmlParser.XmlElement rc = resourceChange(describeChangeSet(stackName, row.name() + "-cs",
+                    template(row.type(), row.newProps()), row.newParam()), "R");
+            List<String> scope = rc.child("Scope").children().stream().map(XmlParser.XmlElement::text).sorted().toList();
+            List<String> details = detailsOf(rc);
+            boolean recreates = row.details().stream().anyMatch(d -> d.contains("|Always|"));
+            boolean staticDirect = details.stream().anyMatch(d -> d.endsWith("|DirectModification|Static|"));
+            boolean detailsOk = row.exact() ? details.equals(row.details().stream().sorted().toList())
+                    : details.containsAll(row.details()) && !staticDirect;
+            if (!scope.equals(row.scope()) || !detailsOk
+                    || !row.replacement().equals(text(rc, "Replacement")) || recreates != "True".equals(row.replacement())) {
+                failures.add(row.name() + ": scope=" + scope + " details=" + details + " replacement=" + text(rc, "Replacement"));
+            }
+        }
+        assertEquals(List.of(), failures);
+    }
+
+    /** ResourceChange.Scope and Details are documented "for the Modify action" only. */
+    @Test
+    void addedAndRemovedResources_haveNoScopeAndNoDetails() {
+        String stackName = "cs-details-add-remove";
+        stacksToDelete.add(stackName);
+        String gone = ",\"Gone\":{\"Type\":\"AWS::SNS::Topic\",\"Properties\":{\"TopicName\":\"cs-det-gone\"}}";
+        String fresh = ",\"Fresh\":{\"Type\":\"AWS::SNS::Topic\",\"Properties\":{\"TopicName\":\"cs-det-fresh\"}}";
+        createStack(stackName, template("AWS::SNS::Topic", "\"TopicName\":\"cs-det-keep\"", gone));
+
+        String body = describeChangeSet(stackName, "add-remove-cs",
+                template("AWS::SNS::Topic", "\"TopicName\":\"cs-det-keep\"", fresh), null);
+        XmlParser.XmlElement removed = resourceChange(body, "Gone");
+        XmlParser.XmlElement added = resourceChange(body, "Fresh");
+        assertEquals("Remove", text(removed, "Action"));
+        assertEquals("Add", text(added, "Action"));
+        for (XmlParser.XmlElement rc : List.of(removed, added)) {
+            assertEquals(0, rc.child("Scope") == null ? 0 : rc.child("Scope").children().size());
+            assertEquals(0, rc.child("Details") == null ? 0 : rc.child("Details").children().size());
+        }
     }
 }

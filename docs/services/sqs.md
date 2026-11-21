@@ -101,9 +101,13 @@ aws sqs set-queue-attributes \
 
 `GetQueueAttributes` with `--attribute-names All` returns the set AWS returns for a standard queue: `QueueArn`, `CreatedTimestamp`, `LastModifiedTimestamp`, `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible`, `ApproximateNumberOfMessagesDelayed`, `VisibilityTimeout`, `MaximumMessageSize`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds` and `SqsManagedSseEnabled`. `Policy`, `RedrivePolicy` and `KmsMasterKeyId` appear only once set, and FIFO queues also report `FifoQueue` and `ContentBasedDeduplication`.
 
+A standard queue has no `FifoQueue` attribute: `CreateQueue` refuses one, even `FifoQueue=false`, with `InvalidAttributeName` (`Unknown Attribute FifoQueue.`), as AWS does. An `AWS::SQS::Queue` declaring `FifoQueue: false` fails its stack the same way; leave the property out for a standard queue.
+
 `MaximumMessageSize` defaults to `1048576` bytes, the AWS default and maximum since August 2025, when AWS raised both from `262144`. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 1048576 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 1048576 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `1048576` explicitly.
 
 `DelaySeconds` must be 0 to 900, both on a message and as a queue attribute: `SendMessage` rejects other values with `InvalidParameterValue` (in `SendMessageBatch` only that entry fails), and `CreateQueue` and `SetQueueAttributes` reject them with `InvalidAttributeValue`.
+
+A message attribute with no `DataType`, with a `DataType` whose base type (the part before the first `.`) is not `String`, `Number` or `Binary`, with no value, with an empty `StringValue` or `BinaryValue`, or with a `BinaryValue` that is not base64 is rejected by `SendMessage` with `InvalidParameterValue` on both the JSON and query protocols. The base type match is case-sensitive, so `Number.int` is accepted while `number` is not, and a `DataType` such as `.` that starts with a period is rejected because its base type is empty. In `SendMessageBatch` only the entry carrying that attribute fails; the other entries are sent. The entry still counts toward the batch payload total, so a batch over the batch payload limit fails whole with `BatchRequestTooLong` even when the excess comes from that entry.
 
 `SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one. `CreateQueue` on an existing name compares requested attributes against these reported values, so asking for `SqsManagedSseEnabled=false` on a queue that reports `true` fails with `QueueAlreadyExists` (`QueueNameExists` over JSON).
 
@@ -239,3 +243,12 @@ does not begin a new delay or visibility period.
 Older stored messages without these fields still load as visible messages. Delivery state
 that an older version did not save cannot be reconstructed. Hybrid mode retains its
 configured flush window; this does not add synchronous durability to hybrid storage.
+
+### IAM resource tags
+
+With IAM enforcement enabled, queue operations use the exact queue's stored tags
+for `aws:ResourceTag` conditions. The lookup reads the ARN's account, Region and
+partition and observes tag changes immediately, including for cross-account
+requests. A matching tag does not replace the queue policy grant required for
+cross-account access; another queue's tags cannot satisfy the target queue's
+condition.

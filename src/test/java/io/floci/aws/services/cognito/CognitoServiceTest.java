@@ -38,6 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
@@ -66,6 +67,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
@@ -78,6 +80,19 @@ import static org.mockito.Mockito.*;
 
 @Execution(ExecutionMode.CONCURRENT)
 class CognitoServiceTest {
+
+    @Test
+    void adminUpdateUserAttributesRejectsUndeclaredCustomAttribute() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "CustomAttributeValidation"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(), "TempPass1!");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.adminUpdateUserAttributes(
+                pool.getId(), "alice", Map.of("custom:undeclared", "x")));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Attribute does not exist in the schema"));
+        assertFalse(service.adminGetUser(pool.getId(), "alice").getAttributes().containsKey("custom:undeclared"));
+    }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** What AWS's DescribeUserPool reports for a pool created without a SignInPolicy. */
@@ -620,6 +635,52 @@ class CognitoServiceTest {
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
 
         assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"USER_PASSWORD_AUTH", "ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH"})
+    void passwordAuthHidesUnknownUsersWhenPreventUserExistenceErrorsIsEnabled(String flow) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "hidden-password-client", false);
+        client.setPreventUserExistenceErrors("ENABLED");
+
+        AwsException wrongPassword = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "alice", "wrong"));
+        AwsException unknownUser = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "nobody", "wrong"));
+
+        assertEquals("NotAuthorizedException", wrongPassword.getErrorCode());
+        assertEquals("Incorrect username or password", wrongPassword.getMessage());
+        assertEquals(wrongPassword.getErrorCode(), unknownUser.getErrorCode());
+        assertEquals(wrongPassword.getMessage(), unknownUser.getMessage());
+        assertEquals(wrongPassword.getHttpStatus(), unknownUser.getHttpStatus());
+        assertNotNull(passwordAuth(pool, client, flow, "alice", "Perm1234!").get("AuthenticationResult"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "USER_PASSWORD_AUTH, LEGACY", "USER_PASSWORD_AUTH,",
+            "ADMIN_USER_PASSWORD_AUTH, LEGACY", "ADMIN_USER_PASSWORD_AUTH,",
+            "ADMIN_NO_SRP_AUTH, LEGACY", "ADMIN_NO_SRP_AUTH,"
+    })
+    void passwordAuthPreservesUnknownUserErrorsForLegacyClients(String flow, String prevention) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "legacy-password-client", false);
+        client.setPreventUserExistenceErrors(prevention);
+
+        AwsException unknownUser = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "nobody", "wrong"));
+
+        assertEquals("UserNotFoundException", unknownUser.getErrorCode());
+        assertEquals("User not found", unknownUser.getMessage());
+    }
+
+    private Map<String, Object> passwordAuth(UserPool pool, UserPoolClient client, String flow,
+                                            String username, String password) {
+        Map<String, String> parameters = Map.of("USERNAME", username, "PASSWORD", password);
+        return "USER_PASSWORD_AUTH".equals(flow)
+                ? service.initiateAuth(client.getClientId(), flow, parameters)
+                : service.adminInitiateAuth(pool.getId(), client.getClientId(), flow, parameters);
     }
 
     private static final List<String> ALL_AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
@@ -1808,6 +1869,26 @@ class CognitoServiceTest {
         assertEquals(Map.of("env", "test", "team", "platform"), service.listTagsForResource(pool.getArn()));
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the user pool whose ARN it is given, as tag calls leave them; nothing for an
+     * ARN of another account or Region, or of no pool.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheUserPoolTheArnNames() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "dev")),
+                "us-east-1"
+        );
+        service.tagResource(pool.getArn(), Map.of("team", "data"));
+        service.untagResource(pool.getArn(), List.of("env"));
+
+        assertEquals(Map.of("team", "data"), service.storedTags(pool.getArn()));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":us-east-1:", ":eu-west-1:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn() + "x"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::pool"));
+    }
+
     @Test
     void tagResourceRejectsReservedKey() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");
@@ -2356,7 +2437,8 @@ class CognitoServiceTest {
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("123456");
         doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
-                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any());
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any(),
+                        ArgumentMatchers.<Supplier<String>>any());
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),
@@ -2704,6 +2786,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class));
         UserPool pool = serviceWithVerification.createUserPool(Map.of(
                 "PoolName", "AdminPendingContactPool",
+                "Schema", List.of(Map.of("Name", "note", "AttributeDataType", "String", "Mutable", true)),
                 "AutoVerifiedAttributes", List.of("email", "phone_number"),
                 "UserAttributeUpdateSettings", Map.of(
                         "AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))),
@@ -7410,5 +7493,92 @@ class CognitoServiceTest {
             assertEquals("true", after.getAttributes().get("email_verified"));
             assertEquals(holder.getUsername(), svc.adminGetUser(pool.getId(), "alice@example.com").getUsername());
         }
+    }
+
+    // --- replaceGroupDescription: a service method that does not exist on main ---
+
+    private UserPool poolWithGroup(String groupName, String description) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "replace-pool-" + groupName), "us-east-1");
+        service.createGroup(pool.getId(), groupName, description, 7, "arn:aws:iam::000000000000:role/admins");
+        return pool;
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheGivenValueAndReturnsTheUpdatedGroup() {
+        UserPool pool = poolWithGroup("set", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "set", "new");
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.getGroup(pool.getId(), "set").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionWithNullClearsTheStoredValue() {
+        UserPool pool = poolWithGroup("nulled", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "nulled", null);
+
+        assertNull(returned.getDescription());
+        assertNull(service.getGroup(pool.getId(), "nulled").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheEmptyStringAsGiven() {
+        UserPool pool = poolWithGroup("blank", "old");
+
+        service.replaceGroupDescription(pool.getId(), "blank", "");
+
+        assertEquals("", service.getGroup(pool.getId(), "blank").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionLeavesPrecedenceAndRoleArnUntouched() {
+        UserPool pool = poolWithGroup("others", "old");
+
+        service.replaceGroupDescription(pool.getId(), "others", null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "others");
+        assertEquals(Integer.valueOf(7), stored.getPrecedence());
+        assertEquals("arn:aws:iam::000000000000:role/admins", stored.getRoleArn());
+    }
+
+    @Test
+    void replaceGroupDescriptionOnAnUnknownGroupThrowsWhatUpdateGroupThrows() {
+        UserPool pool = poolWithGroup("known", "old");
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateGroup(pool.getId(), "absent", "x", null, null));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceGroupDescription(pool.getId(), "absent", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceGroupDescriptionKeepsTheBookkeepingOfUpdateGroup() {
+        UserPool pool = poolWithGroup("books", "old");
+        long longAgo = 1_000L;
+        service.getGroup(pool.getId(), "books").setLastModifiedDate(longAgo);
+        assertEquals(longAgo, service.getGroup(pool.getId(), "books").getLastModifiedDate());
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "books", null);
+
+        assertTrue(returned.getLastModifiedDate() > longAgo);
+        assertTrue(service.getGroup(pool.getId(), "books").getLastModifiedDate() > longAgo);
+    }
+
+    // --- direct UpdateGroup without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateGroupWithoutADescriptionKeepsTheStoredDescription() {
+        UserPool pool = poolWithGroup("update-keeps", "kept");
+
+        service.updateGroup(pool.getId(), "update-keeps", null, 3, null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "update-keeps");
+        assertEquals("kept", stored.getDescription());
+        assertEquals(Integer.valueOf(3), stored.getPrecedence());
     }
 }

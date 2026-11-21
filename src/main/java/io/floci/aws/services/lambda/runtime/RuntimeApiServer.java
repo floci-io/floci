@@ -4,6 +4,8 @@ import io.floci.aws.services.lambda.model.ExtensionEvent;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.PendingInvocation;
 import io.floci.aws.services.lambda.model.RegisteredExtension;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -18,6 +20,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,6 +84,10 @@ public class RuntimeApiServer {
     private static final String RESPONSE_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/response";
     private static final String ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/error";
     private static final String INIT_ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/init/error";
+
+    private static final String RESPONSE_MODE_HEADER = "Lambda-Runtime-Function-Response-Mode";
+    private static final String FUNCTION_ERROR_TYPE_TRAILER = "Lambda-Runtime-Function-Error-Type";
+    private static final String FUNCTION_ERROR_BODY_TRAILER = "Lambda-Runtime-Function-Error-Body";
 
     private static final String EXTENSIONS_API_VERSION = "2020-01-01";
     private static final String EXTENSION_REGISTER_PATH = "/" + EXTENSIONS_API_VERSION + "/extension/register";
@@ -406,6 +413,8 @@ public class RuntimeApiServer {
         CompletableFuture<Void> started = new CompletableFuture<>();
 
         Router router = Router.router(vertx);
+        // Registered ahead of the BodyHandler so that a streamed response is read as it arrives.
+        router.post(RESPONSE_PATH).handler(this::handleStreamedResponse);
         router.route().handler(BodyHandler.create());
 
         // GET /runtime/invocation/next — AWS Runtime API contract: blocks until an invocation
@@ -636,6 +645,7 @@ public class RuntimeApiServer {
                 // automatically (no client-side change needed) and matches AWS's actual wire
                 // protocol.
                 .setHttp2ClearTextEnabled(false));
+        httpServer.connectionHandler(RequestTrailers::install);
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
                 LOG.infov("RuntimeApiServer started on port {0}", String.valueOf(port));
@@ -1004,6 +1014,57 @@ public class RuntimeApiServer {
         sendStatusOk(ctx);
     }
 
+    /**
+     * Hands a streamed response to the invocation's {@link ResponseStreamListener} chunk by chunk and
+     * completes the invocation only when the stream ends, so the function's timeout and its
+     * container stay held for the whole stream. A response that is not streamed, or one for an
+     * invocation without a listener, goes on to the buffered handler.
+     */
+    private void handleStreamedResponse(RoutingContext ctx) {
+        String requestId = ctx.pathParam("requestId");
+        PendingInvocation invocation = inFlight.get(requestId);
+        ResponseStreamListener listener = invocation == null ? null : invocation.getResponseStreamListener();
+        if (listener == null || !"streaming".equalsIgnoreCase(ctx.request().getHeader(RESPONSE_MODE_HEADER))) {
+            ctx.next();
+            return;
+        }
+        listener.onStart(ctx.request().getHeader("Content-Type"));
+        ctx.request().handler(chunk -> listener.onChunk(chunk.getBytes()));
+        ctx.request().exceptionHandler(e -> {
+            LOG.warnv("Streamed response of invocation {0} broke off: {1}", requestId, e.getMessage());
+            listener.onFailure("Runtime.TruncatedResponse", null);
+            completeStreamedResponse(requestId);
+        });
+        ctx.request().endHandler(v -> {
+            HttpHeaders trailers = RequestTrailers.take(ctx.request().connection());
+            if (trailers != null && trailers.contains(FUNCTION_ERROR_TYPE_TRAILER)) {
+                listener.onFailure(trailers.get(FUNCTION_ERROR_TYPE_TRAILER),
+                        decodeErrorBody(requestId, trailers.get(FUNCTION_ERROR_BODY_TRAILER)));
+            }
+            completeStreamedResponse(requestId);
+            sendStatusOk(ctx);
+        });
+    }
+
+    private String decodeErrorBody(String requestId, String encoded) {
+        if (encoded == null) {
+            return null;
+        }
+        try {
+            return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Error body trailer of invocation {0} is not base64: {1}", requestId, e.getMessage());
+            return null;
+        }
+    }
+
+    private void completeStreamedResponse(String requestId) {
+        PendingInvocation invocation = inFlight.remove(requestId);
+        if (invocation != null) {
+            invocation.getResultFuture().complete(new InvokeResult(200, null, new byte[0], null, requestId));
+        }
+    }
+
     private void sendStatusOk(RoutingContext ctx) {
         ctx.response()
                 .setStatusCode(202)
@@ -1033,6 +1094,9 @@ public class RuntimeApiServer {
                     .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()));
             if (invocation.getClientContext() != null) {
                 response.putHeader("Lambda-Runtime-Client-Context", invocation.getClientContext());
+            }
+            if (invocation.getTraceId() != null) {
+                response.putHeader("Lambda-Runtime-Trace-Id", invocation.getTraceId());
             }
             write = response.end(body);
         } catch (IllegalStateException alreadyEnded) {

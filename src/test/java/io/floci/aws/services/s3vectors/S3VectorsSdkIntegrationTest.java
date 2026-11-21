@@ -16,6 +16,7 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 import software.amazon.awssdk.services.s3vectors.model.Index;
+import software.amazon.awssdk.services.s3vectors.model.NotFoundException;
 import software.amazon.awssdk.services.s3vectors.model.PutInputVector;
 import software.amazon.awssdk.services.s3vectors.model.QueryVectorsResponse;
 import software.amazon.awssdk.services.s3vectors.model.ValidationException;
@@ -235,6 +236,47 @@ class S3VectorsSdkIntegrationTest {
                 for (VectorIndex index : service.listIndexes(name, "us-east-1")) {
                     vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.getIndexName()));
                 }
+                vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
+            }
+        }
+    }
+
+    @Test
+    void vectorBucketPolicyLifecycleAndValidationThroughTheSdk() {
+        String name = "policy-vectors-" + UUID.randomUUID().toString().substring(0, 8);
+        String policyV1 = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Read\",\"Effect\":\"Allow\"}]}";
+        String policyV2 = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Write\",\"Effect\":\"Deny\"}]}";
+        try (S3VectorsClient vectors = vectors("us-east-1")) {
+            String bucketArn = vectors.createVectorBucket(request -> request.vectorBucketName(name)).vectorBucketArn();
+            try {
+                NotFoundException initialMissing = assertThrows(NotFoundException.class,
+                        () -> vectors.getVectorBucketPolicy(request -> request.vectorBucketName(name)));
+                assertEquals(404, initialMissing.statusCode());
+
+                vectors.putVectorBucketPolicy(request -> request.vectorBucketName(name).policy(policyV1));
+                assertEquals(policyV1,
+                        vectors.getVectorBucketPolicy(request -> request.vectorBucketName(name)).policy());
+                assertEquals(policyV1,
+                        vectors.getVectorBucketPolicy(request -> request.vectorBucketArn(bucketArn)).policy());
+
+                vectors.putVectorBucketPolicy(request -> request.vectorBucketArn(bucketArn).policy(policyV2));
+                assertEquals(policyV2,
+                        vectors.getVectorBucketPolicy(request -> request.vectorBucketName(name)).policy());
+
+                ValidationException invalidJson = assertThrows(ValidationException.class,
+                        () -> vectors.putVectorBucketPolicy(request -> request.vectorBucketName(name).policy("not-json")));
+                assertEquals(400, invalidJson.statusCode());
+
+                ValidationException bothIdentifiers = assertThrows(ValidationException.class,
+                        () -> vectors.getVectorBucketPolicy(request -> request
+                                .vectorBucketName(name).vectorBucketArn(bucketArn)));
+                assertEquals(400, bothIdentifiers.statusCode());
+
+                vectors.deleteVectorBucketPolicy(request -> request.vectorBucketArn(bucketArn));
+                NotFoundException deletedMissing = assertThrows(NotFoundException.class,
+                        () -> vectors.getVectorBucketPolicy(request -> request.vectorBucketName(name)));
+                assertEquals(404, deletedMissing.statusCode());
+            } finally {
                 vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
             }
         }

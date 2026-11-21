@@ -3,9 +3,9 @@ package io.floci.aws.services.ec2;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.autoscaling.AutoScalingReconciler;
 import io.floci.aws.services.autoscaling.AutoScalingService;
+import io.floci.aws.testing.DynamoDbPartitionedWalStorageProfile;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -17,7 +17,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.restassured.RestAssured.given;
@@ -27,8 +26,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Mock instances due an automatic address take one from 203.0.113.0/24, as
+ * {@link DynamoDbPartitionedWalStorageProfile} sets.
+ */
 @QuarkusTest
-@TestProfile(Ec2MockPublicAddressIntegrationTest.DocumentationAddresses.class)
+@TestProfile(DynamoDbPartitionedWalStorageProfile.class)
 class Ec2MockPublicAddressIntegrationTest {
     private static final AtomicLong ACCOUNTS = new AtomicLong(722000000000L);
     private static final String DOCUMENTATION_ADDRESS = "203\\.0\\.113\\.([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])";
@@ -729,13 +732,5 @@ class Ec2MockPublicAddressIntegrationTest {
     private RequestSpecification request(String action, String owner) {
         String service = action.contains("AutoScaling") ? "autoscaling" : "ec2";
         return given().formParam("Action", action).header("Authorization", EnforcementFixtures.auth(owner, service));
-    }
-
-    /** Mock instances due an automatic address take one from 203.0.113.0/24. */
-    public static class DocumentationAddresses implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ec2.mock-public-addresses", "documentation");
-        }
     }
 }

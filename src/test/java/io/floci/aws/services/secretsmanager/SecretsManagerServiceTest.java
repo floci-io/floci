@@ -21,9 +21,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.IntStream;
 
@@ -38,6 +40,21 @@ class SecretsManagerServiceTest {
     @BeforeEach
     void setUp() {
         service = new SecretsManagerService(new InMemoryStorage<>(), 30);
+    }
+
+    @Test
+    void storedTagsUseExactIndexedArnWithoutScanningOrReadingValues() {
+        InMemoryStorage<String, Secret> storage = Mockito.spy(new InMemoryStorage<>());
+        SecretsManagerService indexed = new SecretsManagerService(storage, 30);
+        Secret secret = indexed.createSecret("path/name-ABCDEF", "value", null, null, null,
+                List.of(new Secret.Tag("Access", "allowed")), REGION);
+        Mockito.clearInvocations(storage);
+        assertEquals(Map.of("Access", "allowed"), indexed.storedTags(secret.getArn()));
+        assertNull(secret.getLastAccessedDate());
+        assertEquals(Map.of(), indexed.storedTags(secret.getArn().substring(0, secret.getArn().length() - 7)));
+        assertEquals(Map.of(), indexed.storedTags(secret.getArn() + "x"));
+        assertEquals(Map.of(), indexed.storedTags("not-an-arn"));
+        Mockito.verify(storage, Mockito.never()).scan(ArgumentMatchers.any());
     }
 
     @Test
@@ -584,6 +601,38 @@ class SecretsManagerServiceTest {
         // the ARN as, before it looks in the account the ARN names.
         Secret callers = svc.createSecret("app/core-AbCdEf", "value", null, null, null, null, REGION);
         assertEquals(callers.getArn(), svc.findArn("000000000000", otherAccount.getArn(), REGION).orElseThrow());
+        assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
+    }
+
+    @Test
+    void anArnResolvesToTheSecretTheOperationsReadItAsTheCallersBeforeTheOneItsAccountHolds() {
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+        Secret otherAccount = new Secret();
+        otherAccount.setName("app/core");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::app/core", otherAccount);
+        String partialArn = "arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core";
+        Secret west = svc.createSecret("app/west", "value", null, null, null, null, "eu-west-1");
+
+        assertEquals(Optional.of(otherAccount.getArn()), svc.resolveStoredArn(otherAccount.getArn()));
+        // The caller's own secret, a partial ARN of it in another Region included.
+        assertEquals(Optional.of(west.getArn()), svc.resolveStoredArn(west.getArn()));
+        assertEquals(Optional.of(west.getArn()),
+                svc.resolveStoredArn("arn:aws:secretsmanager:eu-west-1:000000000000:secret:app/west"));
+        assertEquals(west.getArn(), svc.describeSecret(
+                "arn:aws:secretsmanager:eu-west-1:000000000000:secret:app/west", REGION).getArn());
+        // The operations read a partial ARN, or a suffix that account holds nothing under, in the caller's account.
+        assertTrue(svc.resolveStoredArn(partialArn).isEmpty());
+        assertTrue(svc.resolveStoredArn(otherAccount.getArn().replace("AbCdEf", "XyZ789")).isEmpty());
+        // A name or an ARN of no secret resolves nothing.
+        assertTrue(svc.resolveStoredArn("app/west").isEmpty());
+        assertTrue(svc.resolveStoredArn("arn:aws:s3:::app/west").isEmpty());
+
+        // A secret of the caller's own named like the ARN's resource is the one the operations read the ARN as.
+        Secret callers = svc.createSecret("app/core-AbCdEf", "value", null, null, null, null, REGION);
+        assertEquals(Optional.of(callers.getArn()), svc.resolveStoredArn(otherAccount.getArn()));
         assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
     }
 
@@ -1626,5 +1675,199 @@ class SecretsManagerServiceTest {
 
         assertEquals(1, service.listSecrets(REGION, null, false).size());
         assertEquals(2, service.listSecrets(REGION, null, true).size());
+    }
+
+    // --- replaceSecretDescription: a service method that does not exist on main ---
+
+    @Test
+    void replaceSecretDescriptionStoresTheGivenValueAndReturnsTheUpdatedSecret() {
+        service.createSecret("replace-set", "v1", null, "old", null, null, REGION);
+
+        Secret returned = service.replaceSecretDescription("replace-set", "new", REGION);
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.describeSecret("replace-set", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionWithNullClearsTheStoredValue() {
+        service.createSecret("replace-null", "v1", null, "old", null, null, REGION);
+
+        Secret returned = service.replaceSecretDescription("replace-null", null, REGION);
+
+        assertNull(returned.getDescription());
+        assertNull(service.describeSecret("replace-null", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionStoresTheEmptyStringAsGiven() {
+        service.createSecret("replace-empty", "v1", null, "old", null, null, REGION);
+
+        service.replaceSecretDescription("replace-empty", "", REGION);
+
+        assertEquals("", service.describeSecret("replace-empty", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionLeavesTheValueAndTheKmsKeyUntouched() {
+        service.createSecret("replace-others", "the-value", null, "old", "alias/app", null, REGION);
+
+        service.replaceSecretDescription("replace-others", null, REGION);
+
+        assertEquals("the-value", service.getSecretValue("replace-others", null, null, REGION).getSecretString());
+        assertEquals("alias/app", service.describeSecret("replace-others", REGION).getKmsKeyId());
+    }
+
+    @Test
+    void replaceSecretDescriptionOnAnUnknownSecretThrowsWhatUpdateSecretThrows() {
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("no-such-secret", "x", null, REGION));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("no-such-secret", "x", REGION));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceSecretDescriptionKeepsTheBookkeepingOfUpdateSecret() {
+        service.createSecret("replace-books", "v1", null, "old", null, null, REGION);
+        Instant longAgo = Instant.parse("2000-01-01T00:00:00Z");
+        service.describeSecret("replace-books", REGION).setLastChangedDate(longAgo);
+        assertEquals(longAgo, service.describeSecret("replace-books", REGION).getLastChangedDate());
+
+        Secret returned = service.replaceSecretDescription("replace-books", null, REGION);
+
+        assertTrue(returned.getLastChangedDate().isAfter(longAgo));
+        assertTrue(service.describeSecret("replace-books", REGION).getLastChangedDate().isAfter(longAgo));
+    }
+
+    @Test
+    void replaceSecretDescriptionRefusesASecretPendingDeletionWhatUpdateSecretRefuses() {
+        service.createSecret("replace-pending", "v1", null, "old", null, null, REGION);
+        service.deleteSecret("replace-pending", 7, false, REGION);
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("replace-pending", "x", null, REGION));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("replace-pending", null, REGION));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+        assertEquals("InvalidRequestException", fromReplace.getErrorCode());
+    }
+
+    @Test
+    void replaceSecretDescriptionRefusesAReplicaWhatUpdateSecretRefuses() {
+        service.createSecret("replace-replica", "v1", null, "old", null, null, REGION);
+        service.replicateSecretToRegions("replace-replica",
+                List.of(new SecretsManagerService.ReplicaRegion("eu-west-1", null)), false, REGION);
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("replace-replica", "x", null, "eu-west-1"));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("replace-replica", null, "eu-west-1"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+        assertEquals("old", service.describeSecret("replace-replica", REGION).getDescription());
+    }
+
+    // --- direct UpdateSecret without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateSecretWithoutADescriptionKeepsTheStoredDescription() {
+        service.createSecret("update-keeps", "v1", null, "kept", null, null, REGION);
+
+        service.updateSecret("update-keeps", null, "alias/app", REGION);
+
+        Secret stored = service.describeSecret("update-keeps", REGION);
+        assertEquals("kept", stored.getDescription());
+        assertEquals("alias/app", stored.getKmsKeyId());
+    }
+
+    @Test
+    void aRefusedUpdateSecretVersionStageLeavesTheStagingLabelsInPlace() {
+        Secret created = service.createSecret("staged", "v1", null, null, null, null, REGION);
+        String current = created.getCurrentVersionId();
+        String missing = "0".repeat(36);
+
+        AwsException refused = assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("staged", missing, current, "AWSCURRENT", REGION));
+
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
+        Secret after = service.describeSecret("staged", REGION);
+        assertEquals(List.of("AWSCURRENT"), after.getVersions().get(current).getVersionStages());
+        assertEquals(current, after.getCurrentVersionId());
+    }
+
+    @Test
+    void listSecretsAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v", null, "nothing here", null, null, REGION);
+        List<SecretsManagerService.Filter> filters =
+                List.of(new SecretsManagerService.Filter("all", List.of("Database PRODUCTION")));
+
+        List<Secret> found = service.listSecrets(REGION, filters);
+
+        assertEquals(List.of("database"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void listSecretsAllFilterMatchesWordPrefixInTagsAndNegates() {
+        service.createSecret("alpha", "v", null, null, null, List.of(new Secret.Tag("Team", "Platform")), REGION);
+        service.createSecret("beta", "v", null, null, null, null, REGION);
+
+        List<Secret> tagged = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("zzz plat"))));
+        List<Secret> others = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("!plat zzz"))));
+
+        assertEquals(List.of("alpha"), tagged.stream().map(Secret::getName).toList());
+        assertEquals(List.of("beta"), others.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void batchGetSecretValueByFiltersAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v1", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v2", null, "nothing here", null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> found = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of("database production"))), REGION);
+
+        assertEquals(List.of("database"), found.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+    }
+
+    @Test
+    void allFilterKeepsANumberFollowedByLettersAsOneWord() {
+        service.createSecret("db2prod", "v1", null, null, null, null, REGION);
+        service.createSecret("prod2db", "v2", null, null, null, null, REGION);
+
+        List<Secret> found = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("prod"))));
+
+        assertEquals(List.of("prod2db"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void allFilterWithEmptyValueMatchesEverySecretAndItsNegationMatchesNone() {
+        service.createSecret("alpha", "v1", null, null, null, null, REGION);
+        service.createSecret("beta", "v2", null, "some description", null, null, REGION);
+
+        List<Secret> listedEmpty = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of(""))));
+        List<Secret> listedNegated = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("!"))));
+        List<SecretsManagerService.BatchSecretValue> batchEmpty = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of(""))), REGION);
+        List<SecretsManagerService.BatchSecretValue> batchNegated = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of("!"))), REGION);
+
+        assertEquals(List.of("alpha", "beta"), listedEmpty.stream().map(Secret::getName).sorted().toList());
+        assertEquals(List.of(), listedNegated.stream().map(Secret::getName).toList());
+        assertEquals(List.of("alpha", "beta"),
+                batchEmpty.stream().map(SecretsManagerService.BatchSecretValue::name).sorted().toList());
+        assertEquals(List.of(), batchNegated.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
     }
 }

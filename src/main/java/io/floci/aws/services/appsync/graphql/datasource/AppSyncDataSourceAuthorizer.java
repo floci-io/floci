@@ -50,7 +50,8 @@ public class AppSyncDataSourceAuthorizer {
     }
 
     public void authorize(DataSource dataSource, Object request, String region) {
-        if (dataSource.getType() == DataSourceType.NONE
+        // HTTP authorization depends on its optional signing configuration and is handled by its invoker.
+        if (dataSource.getType() == DataSourceType.NONE || dataSource.getType() == DataSourceType.HTTP
                 || !config.services().iam().enforcementEnabled()) {
             return;
         }

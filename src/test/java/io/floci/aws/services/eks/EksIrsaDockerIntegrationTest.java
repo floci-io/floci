@@ -1,12 +1,13 @@
 package io.floci.aws.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.OidcIdentity;
+import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksTestNode;
+import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -15,8 +16,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
-import java.util.Map;
+import java.time.Duration;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Docker integration test for EKS IRSA: verifies that k3s signs projected service account tokens
@@ -36,9 +35,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * trust policy pinning the cluster's OIDC provider and subject, and asserts real temporary
  * credentials and claims are returned. Also asserts rejection when the subject is mismatched
  * or the cluster issuer is untrusted under IAM enforcement.
+ *
+ * <p>The real cluster, the OIDC signing key and IAM enforcement come from
+ * {@link S3IamEnforcementProfile}.
  */
 @QuarkusTest
-@TestProfile(EksIrsaDockerIntegrationTest.Profile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class EksIrsaDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksIrsaDockerIntegrationTest.class);
@@ -54,17 +56,8 @@ class EksIrsaDockerIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/iam/aws4_request, "
                     + "SignedHeaders=host, Signature=setup";
     private static final String ACCOUNT = "000000000000";
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.mock", "false",
-                    "floci.services.eks.irsa-signing-key", "true",
-                    "floci.services.iam.enforcement-enabled", "true"
-            );
-        }
-    }
+    private static final String POD = "irsa-workload-pod";
+    private static final Duration API_SERVER_TIMEOUT = Duration.ofSeconds(60);
 
     @Inject
     DockerClient dockerClient;
@@ -82,7 +75,7 @@ class EksIrsaDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        boolean dockerAvailable = isDockerAvailable();
+        boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
             LOG.warn("Docker daemon is not available; skipping EksIrsaDockerIntegrationTest");
         }
@@ -110,63 +103,27 @@ class EksIrsaDockerIntegrationTest {
     }
 
     @Test
-    void projectedServiceAccountTokenAssumesRoleAndEnforcesPolicy() throws Exception {
+    void projectedServiceAccountTokenAssumesRoleAndEnforcesPolicy() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String clusterName = "irsa-dock-" + suffix;
         roleName = "irsa-dock-role-" + suffix;
         wrongSubjectRoleName = "irsa-dock-wrong-sub-" + suffix;
         wrongClusterRoleName = "irsa-dock-wrong-clus-" + suffix;
 
-        cluster = new Cluster();
-        cluster.setName(clusterName);
-        cluster.setAccountId(ACCOUNT);
-        cluster.setArn("arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/" + clusterName);
-        cluster.setCreatedAt(Instant.now());
-        cluster.setRoleArn("arn:aws:iam::" + ACCOUNT + ":role/eks-service-role");
-
+        cluster = EksTestNode.cluster(ACCOUNT, clusterName);
         String issuer = oidcService.newIssuerUrl("us-east-1");
         cluster.setIdentity(new ClusterIdentity(
                 new OidcIdentity(issuer)));
-        oidcService.ensureKeyForAccount(ACCOUNT, clusterName, issuer);
+        oidcService.ensureKeyForAccount(ACCOUNT, EksService.clusterKey("us-east-1", clusterName), issuer);
 
-        eksClusterManager.startCluster(cluster);
-        assertNotNull(cluster.getContainerId(), "Container ID must not be null");
-
-        // Wait for k3s API server readiness (up to 60s)
-        long deadline = System.currentTimeMillis() + 60000;
-        boolean ready = false;
-        while (System.currentTimeMillis() < deadline) {
-            if (eksClusterManager.isReady(cluster)) {
-                ready = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        assertTrue(ready, "k3s API server must become ready within 60 seconds");
-        eksClusterManager.finalizeCluster(cluster);
-
-        String containerId = cluster.getContainerId();
-
-        // Wait for default serviceaccount to be created by controller manager (up to 30s)
-        long saDeadline = System.currentTimeMillis() + 30000;
-        boolean saReady = false;
-        while (System.currentTimeMillis() < saDeadline) {
-            ContainerExec.Result saResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "get", "serviceaccount", "default"});
-            if (saResult.exitCode() == 0) {
-                saReady = true;
-                break;
-            }
-            Thread.sleep(1000);
-        }
-        assertTrue(saReady, "default serviceaccount must be created within 30 seconds");
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, API_SERVER_TIMEOUT);
 
         // Create a pod with a projected service account token with audience sts.amazonaws.com
-        String podYaml = """
+        node.apply("""
                 apiVersion: v1
                 kind: Pod
                 metadata:
-                  name: irsa-workload-pod
+                  name: %s
                   namespace: default
                 spec:
                   containers:
@@ -185,57 +142,28 @@ class EksIrsaDockerIntegrationTest {
                           path: token
                           expirationSeconds: 86400
                           audience: sts.amazonaws.com
-                """;
-
-        execInContainer(containerId, new String[]{"sh", "-c",
-                "cat << 'EOF' | kubectl apply -f -\n" + podYaml + "\nEOF"});
-
-        // Wait for the pod to be running (up to 45s)
-        long podDeadline = System.currentTimeMillis() + 45000;
-        boolean podRunning = false;
-        while (System.currentTimeMillis() < podDeadline) {
-            ContainerExec.Result statusResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "get", "pod", "irsa-workload-pod", "-o", "jsonpath={.status.phase}"});
-            if ("Running".equalsIgnoreCase(statusResult.stdout().trim())) {
-                podRunning = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        assertTrue(podRunning, "irsa-workload-pod must reach Running state");
+                """.formatted(POD));
+        node.awaitPodRunning(POD, Duration.ofSeconds(45));
 
         // The pod is Running, so it was scheduled onto the node, which the kubelet
         // registered with its provider ID: the node is guaranteed to exist here.
-        ContainerExec.Result nodeResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].spec.providerID}"});
-        assertEquals(0, nodeResult.exitCode(), "kubectl get nodes failed");
-        assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
+        assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster),
+                node.kubectlOutput("get", "nodes", "-o", "jsonpath={.items[0].spec.providerID}"),
                 "Node providerID must match the derived AWS provider ID");
-
-        ContainerExec.Result nodeNameResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"});
-        assertEquals(0, nodeNameResult.exitCode(), "kubectl get nodes failed");
-        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), nodeNameResult.stdout().trim(),
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster),
+                node.kubectlOutput("get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"),
                 "Node name must match the derived cluster node private DNS name");
-
-        ContainerExec.Result zoneResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "nodes", "-o",
-                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"});
-        assertEquals(0, zoneResult.exitCode(), "kubectl get nodes failed");
-        assertEquals(eksClusterManager.deriveClusterNodeAvailabilityZone(cluster), zoneResult.stdout().trim(),
+        assertEquals(eksClusterManager.deriveClusterNodeAvailabilityZone(cluster),
+                node.kubectlOutput("get", "nodes", "-o",
+                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"),
                 "Node topology zone label must match the derived availability zone");
-
-        ContainerExec.Result regionResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "nodes", "-o",
-                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/region}"});
-        assertEquals(0, regionResult.exitCode(), "kubectl get nodes failed");
-        assertEquals(eksClusterManager.clusterRegion(cluster), regionResult.stdout().trim(),
+        assertEquals(eksClusterManager.clusterRegion(cluster),
+                node.kubectlOutput("get", "nodes", "-o",
+                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/region}"),
                 "Node topology region label must match the cluster region");
 
         // Extract the projected token from the pod volume
-        String token = execInContainer(containerId,
-                new String[]{"kubectl", "exec", "irsa-workload-pod", "--", "cat", "/var/run/secrets/tokens/token"}).trim();
-        assertNotNull(token);
+        String token = node.kubectlOutput("exec", POD, "--", "cat", "/var/run/secrets/tokens/token");
         assertFalse(token.isBlank(), "Projected service account token must not be blank");
 
         // Create IAM role with federated trust policy matching cluster issuer and subject
@@ -330,30 +258,14 @@ class EksIrsaDockerIntegrationTest {
 
         // 5. Container recreation: recreate the cluster container and verify that k3s
         // reuses the same node name on the existing data volume without duplicate or stale nodes
+        String containerId = node.containerId();
         dockerClient.stopContainerCmd(containerId).exec();
         dockerClient.removeContainerCmd(containerId).exec();
 
-        eksClusterManager.startCluster(cluster);
-        String recreatedContainerId = cluster.getContainerId();
-        assertNotNull(recreatedContainerId);
-        assertNotEquals(containerId, recreatedContainerId);
-
-        long recreateDeadline = System.currentTimeMillis() + 60000;
-        boolean recreateReady = false;
-        while (System.currentTimeMillis() < recreateDeadline) {
-            if (eksClusterManager.isReady(cluster)) {
-                recreateReady = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        assertTrue(recreateReady, "k3s API server must become ready after container recreation");
-        eksClusterManager.finalizeCluster(cluster);
-
-        ContainerExec.Result recreatedNodeResult = execInContainerWithExitCode(recreatedContainerId,
-                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"});
-        assertEquals(0, recreatedNodeResult.exitCode(), "kubectl get nodes failed on recreated cluster");
-        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), recreatedNodeResult.stdout().trim(),
+        EksTestNode recreated = EksTestNode.start(dockerClient, eksClusterManager, cluster, API_SERVER_TIMEOUT);
+        assertNotEquals(containerId, recreated.containerId());
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster),
+                recreated.kubectlOutput("get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"),
                 "Recreated cluster must keep the same node name without leaving duplicate or stale nodes");
     }
 
@@ -384,26 +296,5 @@ class EksIrsaDockerIntegrationTest {
                 .post("/");
         } catch (Exception ignored) {
         }
-    }
-
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
-        return ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
-    }
-
-    private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ContainerExec.Result result = execInContainerWithExitCode(containerId, cmd);
-        if (result.exitCode() != 0) {
-            throw new RuntimeException("exec failed with code " + result.exitCode() + ": " + result.stderr());
-        }
-        return result.stdout();
     }
 }

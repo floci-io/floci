@@ -1,9 +1,15 @@
 package io.floci.aws.services.s3vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3vectors.model.VectorBucket;
@@ -13,6 +19,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -20,15 +27,40 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class S3VectorsService {
+public class S3VectorsService implements StoredResourceArns {
+
+    /**
+     * S3 Vectors' naming rules, the same for a bucket and an index (measured on AWS): labels of lowercase letters,
+     * numbers and hyphens that begin and end with a letter or number, joined by single dots; not an IPv4 address, and
+     * without S3's reserved prefix {@code sthree-} or suffixes {@code -s3alias} and {@code --x-s3}.
+     */
+    private static final Pattern NAME =
+            Pattern.compile("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*");
+    private static final Pattern IPV4_ADDRESS = Pattern.compile("[0-9]{1,3}(\\.[0-9]{1,3}){3}");
+    /** S3 Vectors' not-found messages (measured on AWS). */
+    private static final String NO_SUCH_BUCKET = "The specified vector bucket could not be found";
+    private static final String NO_SUCH_INDEX = "The specified index could not be found";
+    /** S3 Vectors' messages for a create under a name already taken (measured on AWS). */
+    private static final String BUCKET_EXISTS = "A vector bucket with the specified name already exists";
+    private static final String INDEX_EXISTS = "An index with the specified name already exists";
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
+    private static final Pattern TAG_CHARACTERS = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*");
+    private static final ObjectReader STRICT_JSON_READER =
+            new ObjectMapper().reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    /** What a vector bucket's ARN resource starts with, its name following. */
+    private static final String BUCKET_RESOURCE = "bucket/";
+    /** What follows a bucket's ARN in the ARN of one of its indexes, the index's name following. */
+    private static final String INDEX_SEGMENT = "/index/";
 
     private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
@@ -61,11 +93,11 @@ public class S3VectorsService {
     }
 
     private String buildBucketArn(String region, String bucketName) {
-        return AwsArnUtils.Arn.of("s3vectors", region, regionResolver.getAccountId(), "bucket/" + bucketName).toString();
+        return regionResolver.buildArn("s3vectors", region, BUCKET_RESOURCE + bucketName);
     }
 
     private String buildIndexArn(String region, String bucketName, String indexName) {
-        return buildBucketArn(region, bucketName) + "/index/" + indexName;
+        return buildBucketArn(region, bucketName) + INDEX_SEGMENT + indexName;
     }
 
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration, String region) {
@@ -74,10 +106,12 @@ public class S3VectorsService {
 
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration,
                                           Map<String, String> tags, String region) {
+        requireValidName(bucketName, "vectorBucketName", "Invalid vector bucket name");
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             String key = buildStorageKey(region, bucketName);
             if (store.get(key).isPresent()) {
-                throw new AwsException("ConflictException", "The vector bucket " + bucketName + " already exists.", 409);
+                throw new AwsException("ConflictException", BUCKET_EXISTS, 409);
             }
             String arn = buildBucketArn(region, bucketName);
             VectorBucket bucket = new VectorBucket(bucketName, arn,
@@ -92,7 +126,7 @@ public class S3VectorsService {
 
     public VectorBucket getVectorBucket(String bucketName, String region) {
         return findVectorBucket(bucketName, region).orElseThrow(() ->
-                new AwsException("NotFoundException", "The vector bucket " + bucketName + " does not exist.", 404));
+                new AwsException("NotFoundException", NO_SUCH_BUCKET, 404));
     }
 
     public List<VectorBucket> listVectorBuckets(String region) {
@@ -143,7 +177,7 @@ public class S3VectorsService {
         synchronized (lockFor(bucketName, region)) {
             String key = buildStorageKey(region, bucketName);
             VectorBucket bucket = store.get(key).orElseThrow(() ->
-                    new AwsException("NotFoundException", "The vector bucket " + bucketName + " does not exist.", 404));
+                    new AwsException("NotFoundException", NO_SUCH_BUCKET, 404));
 
             if (!bucket.getIndexes().isEmpty()) {
                 throw new AwsException("ConflictException", "The vector bucket " + bucketName + " is not empty.", 409);
@@ -152,6 +186,216 @@ public class S3VectorsService {
             LOG.infov("Deleted Vector Bucket: {0}", bucketName);
         }
     }
+
+    public void putVectorBucketPolicy(String bucketName, String bucketArn, String policy, String region) {
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
+        validatePolicyDocument(policy);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            bucket.setPolicy(policy);
+            store.put(buildStorageKey(target.region(), target.bucketName()), bucket);
+            LOG.infov("Put policy on Vector Bucket: {0} in region {1}", target.bucketName(), target.region());
+        }
+    }
+
+    public String getVectorBucketPolicy(String bucketName, String bucketArn, String region) {
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            String policy = bucket.getPolicy();
+            if (policy == null) {
+                throw new AwsException("NotFoundException",
+                        "The vector bucket policy for " + target.bucketName() + " does not exist.", 404);
+            }
+            return policy;
+        }
+    }
+
+    public void deleteVectorBucketPolicy(String bucketName, String bucketArn, String region) {
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            if (bucket.getPolicy() != null) {
+                bucket.setPolicy(null);
+                store.put(buildStorageKey(target.region(), target.bucketName()), bucket);
+            }
+            LOG.infov("Deleted policy from Vector Bucket: {0} in region {1}", target.bucketName(), target.region());
+        }
+    }
+
+    /**
+     * As {@link #bucketTarget}, for the policy calls, which have always checked the bucket's name, first: by name or
+     * in its ARN.
+     */
+    private ResolvedBucket resolvePolicyBucket(String bucketName, String bucketArn, String region) {
+        String name = given(bucketName);
+        String arn = given(bucketArn);
+        requireBucketChoice(name, arn);
+        return inRequestScope(resolveBucket(name, arn, region, regionResolver::partitionForRegion, "ValidationException"),
+                region);
+    }
+
+    /**
+     * The vector bucket a request names, by {@code vectorBucketName} or by {@code vectorBucketArn}, refused as S3
+     * Vectors refuses a request that gives neither or both. The name is read as given, as CreateVectorBucket takes
+     * it, so a bucket it made stays reachable by its name and by the ARN it was given. An ARN outside the request's
+     * partition, Region or account is refused ({@link #inRequestScope}).
+     */
+    public ResolvedBucket bucketTarget(String bucketName, String bucketArn, String region) {
+        String name = given(bucketName);
+        String arn = given(bucketArn);
+        requireBucketChoice(name, arn);
+        if (arn == null) {
+            return new ResolvedBucket(name, region, null);
+        }
+        return inRequestScope(bucketOfArn(arn, arnParts(arn, false, "ValidationException"),
+                regionResolver::partitionForRegion, "ValidationException"), region);
+    }
+
+    /** S3 Vectors' refusal of a request that names a bucket by neither its name nor its ARN, or by both. */
+    private static void requireBucketChoice(String name, String arn) {
+        if ((name == null) == (arn == null)) {
+            throw new AwsException("ValidationException",
+                    "Must specify either vectorBucketName or vectorBucketArn but not both", 400);
+        }
+    }
+
+    /**
+     * Refuses, as S3 Vectors does (measured on AWS), a bucket an ARN names outside the request's partition, Region or
+     * account: another partition or Region with a ValidationException, the partition first, and another account with
+     * an AccessDeniedException that carries no message. A bucket named by its name is the request's own.
+     */
+    private ResolvedBucket inRequestScope(ResolvedBucket resolved, String region) {
+        if (resolved.accountId() == null) {
+            return resolved;
+        }
+        if (!regionResolver.partitionForRegion(resolved.region()).equals(regionResolver.partitionForRegion(region))) {
+            throw new AwsException("ValidationException", "Unexpected value for ARN partition component", 400);
+        }
+        if (!region.equals(resolved.region())) {
+            throw new AwsException("ValidationException", "Unexpected value for ARN region component", 400);
+        }
+        if (!store.accountId().equals(resolved.accountId())) {
+            throw new AwsException("AccessDeniedException", "", 403);
+        }
+        return resolved;
+    }
+
+    /**
+     * Refuses, on create, a name S3 Vectors refuses (measured on AWS): one of fewer than 3 or more than 63 characters
+     * with its length message, any other outside its naming rules with {@code invalidMessage}, "Invalid vector bucket
+     * name" or "Invalid index name". A name left out is taken as before.
+     */
+    private static void requireValidName(String name, String member, String invalidMessage) {
+        if (name == null) {
+            return;
+        }
+        if (!hasValidLength(name)) {
+            throw new AwsException("ValidationException", "1 validation error detected. Value with length "
+                    + name.length() + " at '/" + member
+                    + "' failed to satisfy constraint: Member must have length between 3 and 63, inclusive", 400);
+        }
+        if (!followsNamingRules(name)) {
+            throw new AwsException("ValidationException", invalidMessage, 400);
+        }
+    }
+
+    private static boolean hasValidLength(String name) {
+        return name.length() >= 3 && name.length() <= 63;
+    }
+
+    private static boolean followsNamingRules(String name) {
+        return NAME.matcher(name).matches() && !IPV4_ADDRESS.matcher(name).matches() && !name.startsWith("sthree-")
+                && !name.endsWith("-s3alias") && !name.endsWith("--x-s3");
+    }
+
+    /** A member's value, or null when the request left it out or empty. */
+    private static String given(String member) {
+        return member == null || member.isBlank() ? null : member;
+    }
+
+    public static ResolvedBucket resolveBucket(String bucketName, String bucketArn,
+                                               String defaultRegion, Function<String, String> partitionForRegion,
+                                               String errorCode) {
+        if ((bucketName == null) == (bucketArn == null)) {
+            throw new AwsException(errorCode,
+                    "Specify exactly one of VectorBucketName or VectorBucketArn.", 400);
+        }
+        if (bucketArn == null) {
+            return new ResolvedBucket(checkName(bucketName, "VectorBucketName", errorCode, false),
+                    defaultRegion, null);
+        }
+        String[] parts = arnParts(bucketArn, false, errorCode);
+        checkName(parts[1], "VectorBucketArn bucket name", errorCode, false);
+        return bucketOfArn(bucketArn, parts, partitionForRegion, errorCode);
+    }
+
+    /**
+     * The bucket an S3 Vectors ARN names, a bucket's or an index's, given its {@link #arnParts}: the ARN must name a
+     * Region and an account, in the Region's partition.
+     */
+    private static ResolvedBucket bucketOfArn(String arn, String[] parts, Function<String, String> partitionForRegion,
+                                              String errorCode) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (parsed.region().isEmpty() || parsed.accountId().isEmpty()
+                || !partitionForRegion.apply(parsed.region()).equals(parsed.partition())) {
+            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
+        }
+        return new ResolvedBucket(parts[1], parsed.region(), parsed.accountId());
+    }
+
+    /** A name a CloudFormation resource creates its bucket or index under, checked by the naming rules. */
+    public static String validateName(String name, String property, String errorCode) {
+        return checkName(name, property, errorCode, true);
+    }
+
+    /**
+     * A name of 3 to 63 characters made of dot-joined labels. One that names a new bucket or index must also follow the
+     * rest of the naming rules ({@code creates}); one that refers to a bucket need not, so a bucket an older Floci took
+     * under a reserved name, such as {@code sthree-logs}, stays reachable.
+     */
+    private static String checkName(String name, String property, String errorCode, boolean creates) {
+        if (name == null || !hasValidLength(name)
+                || !(creates ? followsNamingRules(name) : NAME.matcher(name).matches())) {
+            throw new AwsException(errorCode,
+                    property + " must be a valid lowercase name of 3 to 63 characters.", 400);
+        }
+        return name;
+    }
+
+    public static String[] arnParts(String arn, boolean index, String errorCode) {
+        try {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            String[] parts = parsed.resource().split("/", -1);
+            if (!"s3vectors".equals(parsed.service()) || parts.length != (index ? 4 : 2)
+                    || !"bucket".equals(parts[0]) || parts[1].isBlank()
+                    || (index && (!"index".equals(parts[2]) || parts[3].isBlank()))) {
+                throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
+            }
+            return parts;
+        } catch (IllegalArgumentException e) {
+            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
+        }
+    }
+
+    private static void validatePolicyDocument(String policy) {
+        if (policy == null || policy.isBlank()) {
+            throw new AwsException("ValidationException", "Policy must be a non-empty JSON object.", 400);
+        }
+        try {
+            JsonNode parsed = STRICT_JSON_READER.readTree(policy);
+            if (parsed == null || !parsed.isObject()) {
+                throw new AwsException("ValidationException", "Policy must be a valid JSON object.", 400);
+            }
+        } catch (IOException e) {
+            throw new AwsException("ValidationException", "Policy must be a valid JSON object.", 400);
+        }
+    }
+
+    public record ResolvedBucket(String bucketName, String region, String accountId) {}
+
+    /** An index a request names: its bucket's name, its own name and the Region it is in. */
+    public record ResolvedIndex(String bucketName, String indexName, String region) {}
 
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys, String region) {
@@ -162,6 +406,8 @@ public class S3VectorsService {
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys,
                                    Object encryptionConfiguration, Map<String, String> tags, String region) {
+        requireValidName(indexName, "indexName", "Invalid index name");
+        validateTags(tags);
         if (dimension < 1 || dimension > 4096) {
             throw new AwsException("ValidationException", "Dimension must be between 1 and 4096.", 400);
         }
@@ -181,7 +427,7 @@ public class S3VectorsService {
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             if (bucket.getIndexes().containsKey(indexName)) {
-                throw new AwsException("ConflictException", "The index " + indexName + " already exists.", 409);
+                throw new AwsException("ConflictException", INDEX_EXISTS, 409);
             }
 
             String arn = buildIndexArn(region, bucketName, indexName);
@@ -205,8 +451,7 @@ public class S3VectorsService {
     private VectorIndex getIndex(VectorBucket bucket, String indexName) {
         VectorIndex index = bucket.getIndexes().get(indexName);
         if (index == null) {
-            throw new AwsException("NotFoundException",
-                    "The index " + indexName + " does not exist in bucket " + bucket.getVectorBucketName() + ".", 404);
+            throw new AwsException("NotFoundException", NO_SUCH_INDEX, 404);
         }
         return index;
     }
@@ -222,7 +467,7 @@ public class S3VectorsService {
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             if (!bucket.getIndexes().containsKey(indexName)) {
-                throw new AwsException("NotFoundException", "The index " + indexName + " does not exist.", 404);
+                throw new AwsException("NotFoundException", NO_SUCH_INDEX, 404);
             }
             bucket.getIndexes().remove(indexName);
             store.put(buildStorageKey(region, bucketName), bucket);
@@ -231,6 +476,7 @@ public class S3VectorsService {
     }
 
     public void replaceBucketTags(String bucketName, Map<String, String> tags, String region) {
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             bucket.setTags(new ConcurrentHashMap<>(tags));
@@ -239,6 +485,7 @@ public class S3VectorsService {
     }
 
     public void replaceIndexTags(String bucketName, String indexName, Map<String, String> tags, String region) {
+        validateTags(tags);
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             VectorIndex index = getIndex(bucket, indexName);
@@ -246,6 +493,163 @@ public class S3VectorsService {
             store.put(buildStorageKey(region, bucketName), bucket);
         }
     }
+
+    @Override
+    public String namespace() {
+        return "s3vectors";
+    }
+
+    /** A request names a vector bucket or an index by its name, which its ARN carries whole: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the vector bucket or the index whose ARN is {@code arn}, in the request's account, where the handlers
+     * read: an ARN of another account names none, and an index's ARN names the index's own tags, not its bucket's.
+     * The bucket is read in place under the Region the ARN names and its name, a bucket stored before storage was
+     * account-aware included, and the bucket or the index matched on the whole ARN. Tags are only ever replaced by a
+     * new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "s3vectors")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(store.accountId()) || !parsed.resource().startsWith(BUCKET_RESOURCE)) {
+            return Map.of();
+        }
+        String path = parsed.resource().substring(BUCKET_RESOURCE.length());
+        int segment = path.indexOf(INDEX_SEGMENT);
+        String bucketName = segment < 0 ? path : path.substring(0, segment);
+        Optional<VectorBucket> bucket = AccountAwareStorageBackend.readInAccount(store, parsed.accountId(),
+                buildStorageKey(parsed.region(), bucketName));
+        Map<String, String> tags = segment < 0
+                ? bucket.filter(held -> arn.equals(held.getVectorBucketArn())).map(VectorBucket::getTags)
+                        .orElse(Map.of())
+                : bucket.map(held -> held.getIndexes().get(path.substring(segment + INDEX_SEGMENT.length())))
+                        .filter(index -> arn.equals(index.getIndexArn())).map(VectorIndex::getTags)
+                        .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
+    }
+
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        TaggedResource resource = taggedResource(resourceArn, region);
+        synchronized (lockFor(resource.bucketName(), resource.region())) {
+            VectorBucket bucket = taggedBucket(resource, resourceArn);
+            return Map.copyOf(resourceTags(bucket, resource));
+        }
+    }
+
+    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        validateTags(tags);
+        TaggedResource resource = taggedResource(resourceArn, region);
+        synchronized (lockFor(resource.bucketName(), resource.region())) {
+            VectorBucket bucket = taggedBucket(resource, resourceArn);
+            Map<String, String> merged = new LinkedHashMap<>(resourceTags(bucket, resource));
+            merged.putAll(tags);
+            validateTagCount(merged);
+            setResourceTags(bucket, resource, merged);
+            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        if (tagKeys == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tagKeys"));
+        }
+        tagKeys.forEach(key -> validateTagKey(key, "tagKeys"));
+        TaggedResource resource = taggedResource(resourceArn, region);
+        synchronized (lockFor(resource.bucketName(), resource.region())) {
+            VectorBucket bucket = taggedBucket(resource, resourceArn);
+            Map<String, String> remaining = new LinkedHashMap<>(resourceTags(bucket, resource));
+            tagKeys.forEach(remaining::remove);
+            setResourceTags(bucket, resource, remaining);
+            store.put(buildStorageKey(resource.region(), resource.bucketName()), bucket);
+        }
+    }
+
+    private void validateTags(Map<String, String> tags) {
+        if (tags == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("tags"));
+        }
+        validateTagCount(tags);
+        tags.forEach((key, value) -> {
+            validateTagKey(key, "tags.key");
+            validateTagString(value, "tags.value", 0, 256);
+        });
+    }
+
+    private void validateTagCount(Map<String, String> tags) {
+        String violation = SmithyValidationErrors.sizeOutOfRange("tags", tags.size(), 0, 50);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+    }
+
+    private void validateTagKey(String key, String path) {
+        validateTagString(key, path, 1, 128);
+        if (key.regionMatches(true, 0, "aws:", 0, 4)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.Violations.QUOTED
+                    .constraint(path, key, "Member must not start with aws:"));
+        }
+    }
+
+    private void validateTagString(String value, String path, int minLength, int maxLength) {
+        if (value == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
+        }
+        String violation = SmithyValidationErrors.lengthOutOfRange(path, value, minLength, maxLength);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+        if (!TAG_CHARACTERS.matcher(value).matches()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.pattern(path, value, TAG_CHARACTERS.pattern()));
+        }
+    }
+
+    private TaggedResource taggedResource(String resourceArn, String region) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Invalid S3 Vectors resource ARN.", 400);
+        }
+        boolean index = arn.resource().contains(INDEX_SEGMENT);
+        String[] parts = arnParts(resourceArn, index, "ValidationException");
+        ResolvedBucket bucket = inRequestScope(bucketOfArn(resourceArn, parts,
+                regionResolver::partitionForRegion, "ValidationException"), region);
+        return new TaggedResource(bucket.region(), bucket.bucketName(), index ? parts[3] : null);
+    }
+
+    private VectorBucket taggedBucket(TaggedResource resource, String resourceArn) {
+        VectorBucket bucket = getVectorBucket(resource.bucketName(), resource.region());
+        String storedArn = resource.indexName() == null ? bucket.getVectorBucketArn()
+                : getIndex(bucket, resource.indexName()).getIndexArn();
+        if (!resourceArn.equals(storedArn)) {
+            throw new AwsException("NotFoundException", resource.indexName() == null ? NO_SUCH_BUCKET : NO_SUCH_INDEX, 404);
+        }
+        return bucket;
+    }
+
+    private Map<String, String> resourceTags(VectorBucket bucket, TaggedResource resource) {
+        Map<String, String> tags = resource.indexName() == null ? bucket.getTags()
+                : getIndex(bucket, resource.indexName()).getTags();
+        return tags == null ? Map.of() : tags;
+    }
+
+    private void setResourceTags(VectorBucket bucket, TaggedResource resource, Map<String, String> tags) {
+        if (resource.indexName() == null) {
+            bucket.setTags(new ConcurrentHashMap<>(tags));
+        } else {
+            getIndex(bucket, resource.indexName()).setTags(new ConcurrentHashMap<>(tags));
+        }
+    }
+
+    private record TaggedResource(String region, String bucketName, String indexName) {}
 
     public void putVectors(String bucketName, String indexName, List<VectorData> vectors, String region) {
         synchronized (lockFor(bucketName, region)) {
@@ -322,32 +726,32 @@ public class S3VectorsService {
      * ListVectors' "vectorBucketName + indexName, or indexArn alone" input contract.
      */
     private VectorIndex resolveIndex(String bucketName, String indexName, String indexArn, String region) {
-        if (indexName != null && !indexName.isBlank()) {
-            return getIndex(bucketName, indexName, region);
+        ResolvedIndex target = resolveIndexTarget(bucketName, indexName, indexArn, region);
+        return getIndex(target.bucketName(), target.indexName(), target.region());
+    }
+
+    /**
+     * The index a request names, by its {@code vectorBucketName} and {@code indexName} or by its {@code indexArn},
+     * refused as S3 Vectors refuses a request that gives neither or mixes them. The ARN's bucket is checked as a bucket
+     * ARN is ({@link #inRequestScope}).
+     */
+    public ResolvedIndex resolveIndexTarget(String bucketName, String indexName, String indexArn, String region) {
+        String bucket = given(bucketName);
+        String index = given(indexName);
+        String arn = given(indexArn);
+        boolean byArn = arn != null && bucket == null && index == null;
+        boolean byName = arn == null && bucket != null && index != null;
+        if (!byArn && !byName) {
+            throw new AwsException("ValidationException",
+                    "Must specify either indexArn or both vectorBucketName and indexName", 400);
         }
-        if (indexArn == null || indexArn.isBlank()) {
-            throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
+        if (byName) {
+            return new ResolvedIndex(bucket, index, region);
         }
-        AwsArnUtils.Arn parsed;
-        try {
-            parsed = AwsArnUtils.parse(indexArn);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
-        }
-        if (!"s3vectors".equals(parsed.service())) {
-            throw new AwsException("ValidationException", "Not an S3 Vectors indexArn: " + indexArn, 400);
-        }
-        String resource = parsed.resource();
-        int marker = resource.lastIndexOf("/index/");
-        if (marker < 0 || !resource.startsWith("bucket/")) {
-            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
-        }
-        String bucketNameFromArn = resource.substring("bucket/".length(), marker);
-        String indexNameFromArn = resource.substring(marker + "/index/".length());
-        // The ARN carries its own region — an index in one region must resolve there regardless
-        // of which region the ListVectors request itself was signed for.
-        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
-        return getIndex(bucketNameFromArn, indexNameFromArn, arnRegion);
+        String[] parts = arnParts(arn, true, "ValidationException");
+        ResolvedBucket owner = inRequestScope(bucketOfArn(arn, parts, regionResolver::partitionForRegion,
+                "ValidationException"), region);
+        return new ResolvedIndex(owner.bucketName(), parts[3], owner.region());
     }
 
     /**

@@ -22,6 +22,7 @@
 | `PutTargets` | Add targets to a rule |
 | `RemoveTargets` | Remove targets from a rule |
 | `ListTargetsByRule` | List targets for a rule |
+| `ListRuleNamesByTarget` | Find rule names whose targets contain an exact ARN, with bus selection and pagination |
 | `PutEvents` | Publish custom events to an event bus |
 | `TestEventPattern` | Test whether a sample event matches a given pattern (no targets fired) |
 | `ListTagsForResource` | - |
@@ -53,6 +54,57 @@
 `ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
 characters. Empty or overlong tokens return `ValidationException`; unrecognized
 cursors within those bounds return `InvalidToken`.
+
+## Find rules by target
+
+`ListRuleNamesByTarget` returns each matching rule name once when a target has the
+exact supplied `TargetArn`. Select an event bus by name or ARN; omitting
+`EventBusName` selects the default bus. The bus and rules belong to the caller's
+account, Region and partition. As with `ListRules`, Floci resolves a supplied bus
+ARN to its name in the caller's account and Region. A target ARN is a filter and can name a resource
+in another account or Region.
+
+`Limit` accepts 1 to 100 names and defaults to 100. Keep every other request
+argument unchanged when sending a returned `NextToken`. Floci sorts matching
+names lexically before pagination and binds its cursor to the caller scope and
+request arguments; AWS does not specify that ordering. Tokens have no timed
+expiry in Floci. Empty or overlong tokens fail validation, and invalid cursors
+return `InvalidToken`. An empty or final page has no `NextToken`.
+
+With IAM enforcement enabled, grant `events:ListRuleNamesByTarget` on `*`.
+This action has no resource type or resource-tag condition entitlement; a grant
+on an event bus ARN alone does not allow it. Existing global IAM conditions,
+permission boundaries and explicit denies still apply.
+
+The lookup reads existing bus, rule and target stores without writing rows or
+creating the logical default bus. Unprefixed legacy records are read in place
+only for the configured default account. Rules are checked against their stored
+key, bus, account and ARN. Explicit account records take precedence. Persisted legacy rule names
+remain discoverable even if they no longer pass creation-time validation. The lookup does not provide
+an atomic snapshot across concurrent rule and target updates.
+
+## Numeric event patterns
+
+`TestEventPattern` and `PutEvents` rule routing support `numeric` comparisons on
+JSON number fields using `=`, `>`, `>=`, `<`, and `<=`. Both bounds of a range
+must match. For example,
+`{"detail":{"severity":[{"numeric":[">=",7,"<",9]}]}}` matches severity `7` or `8`,
+but excludes `6`, `9`, the string `"7"`, and missing or null values.
+
+For array-valued fields, a numeric filter matches when at least one number in the
+array satisfies all comparisons. The range above matches `[3,8]` but excludes
+`[3,9]`; separate elements cannot satisfy separate bounds of the same range.
+
+`PutRule` and `TestEventPattern` reject malformed numeric filters with
+`InvalidEventPatternException` (HTTP 400), independently of the supplied event.
+The comparison array must contain either one operator/number pair or a lower bound
+(`>` or `>=`) followed by an upper bound (`<` or `<=`). Equality (`=`) must stand
+alone. Range endpoints must be strictly increasing, even when both bounds are
+inclusive. Repeated bounds, reversed bounds, and extra comparisons are rejected.
+Nested patterns and every `$or` branch are validated before a rule is saved;
+rejected updates preserve the existing rule.
+
+See [AWS numeric matching](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-pattern-operators.html#filtering-numeric-matching).
 
 ## Configuration
 
@@ -126,6 +178,43 @@ aws events list-rules --endpoint-url $AWS_ENDPOINT_URL
 # Send to default bus
 aws events put-events \
   --entries '[{"Source":"myapp","DetailType":"test","Detail":"{}"}]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+## Partner Event Buses
+
+`CreateEventBus` with `EventSourceName` creates a partner event bus. As in AWS, the bus takes the
+source's name, so `Name` must equal `EventSourceName`, and the name must match
+`aws.partner/<partner>/<source>`. Floci does not model partner event sources, so any well-formed
+source name is accepted without one being created or activated first. Once created, the bus works
+like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN. A rule name
+can't contain a slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer
+than 64 characters with `ValidationException`, as AWS does.
+
+Two calls differ from a custom bus. `PutPermission` and `RemovePermission` reject a partner bus
+with `ValidationException`, since the API types their `EventBusName` as a non-partner bus name.
+`PutEvents` to a partner bus is accepted and fans out to its rules, where AWS reserves that bus for
+the partner's own events; this lets a test publish an event a partner would send.
+
+When upgrading, a rule persisted by an earlier Floci version under a name `PutRule` now rejects,
+such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
+name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One with a slash in its
+name is also no longer listed by `ListRules` or matched by `PutEvents`. On a custom bus it can still
+be tagged by its ARN, but on the default bus it cannot: an ARN such as `rule/team/rule-1` reads as
+rule `rule-1` on bus `team`, so that rule is reachable by its exact name for the rule and target
+operations only. On a custom bus named `aws.partner`, a rule such as `example.com/orders/r1` shares
+its storage key and ARN with rule `r1` on partner bus `aws.partner/example.com/orders`. That partner
+bus does not list, match or manage the legacy rule, and `PutRule` of `r1` on it fails with
+`ValidationException` until the legacy rule is deleted. A CloudFormation stack holding any of these legacy rules can still be deleted, but
+an `UpdateStack` that touches the rule fails, since `PutRule` rejects its name. Remove its targets,
+delete it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`,
+`DisableRule`, `PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid
+rule name as `PutRule` does.
+
+```bash
+aws events create-event-bus \
+  --name aws.partner/example.com/123/orders \
+  --event-source-name aws.partner/example.com/123/orders \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
@@ -373,9 +462,19 @@ refuses it. Across accounts the bus policy and the caller's identity policies bo
 
 ## Current Behavior
 
+- `PutRule` validates schedule expressions before creating or updating a rule, including disabled rules and rules with an event pattern. Rate values must be positive integers, with singular `minute`, `hour` or `day` for 1 and plural units for larger values. Invalid expressions return `ValidationException` without changing an existing rule or its timer.
+- An event pattern's `wildcard` filter matches a string value, each `*` covering any run of characters, an empty one included, with `\*` and `\\` standing for a literal `*` and `\`, as EventBridge's comparison operators page describes it. A `wildcard` inside `anything-but` is not evaluated and matches nothing.
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.
 - A `PutEvents` entry for an event bus that does not exist is answered as AWS answers it: with an event id, not counted in `FailedEntryCount`, and dropped, as no rule matches it. Floci logs the drop at `INFO`. Floci's own deliveries to a bus, for a rule, a pipe or a schedule, are unchanged: an entry for a bus that does not exist fails there.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
 - An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.
+
+### IAM resource tags
+
+With IAM enforcement enabled, event bus and rule operations that support
+`aws:ResourceTag` conditions read the exact target's stored tags. Tag changes take
+immediate effect. Request tags and another bus or rule's tags do not satisfy an
+existing-resource tag condition. The lookup validates the ARN's account, Region
+and partition before reading tags.

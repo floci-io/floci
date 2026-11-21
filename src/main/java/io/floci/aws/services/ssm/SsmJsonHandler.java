@@ -31,6 +31,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -163,7 +164,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParameter(JsonNode request, String region, String authorization) {
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(List.of(name), withDecryption, region, authorization);
         Parameter param = ssmService.getParameter(name, withDecryption, region);
@@ -174,9 +175,30 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private String normalizeParameterName(String name, String region) {
+        String normalized = SsmService.withoutSurroundingSpaces(name);
+        if (normalized.indexOf(' ') >= 0 && !ssmService.hasStoredParameter(normalized, region)) {
+            throw parameterNameSpaceError();
+        }
+        return normalized;
+    }
+
+    private String normalizeParameterPath(String path, String region) {
+        String normalized = SsmService.withoutSurroundingSpaces(path);
+        if (normalized.indexOf(' ') >= 0 && !ssmService.hasStoredParametersUnderPath(normalized, region)) {
+            throw parameterNameSpaceError();
+        }
+        return normalized;
+    }
+
+    private static AwsException parameterNameSpaceError() {
+        return new AwsException("ValidationException",
+                "Parameter names cannot contain spaces between characters.", 400);
+    }
+
     private Response handleGetParameters(JsonNode request, String region, String authorization) {
         List<String> names = new ArrayList<>();
-        request.path("Names").forEach(n -> names.add(n.asText()));
+        request.path("Names").forEach(n -> names.add(normalizeParameterName(n.asText(), region)));
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(names, withDecryption, region, authorization);
 
@@ -185,7 +207,8 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        List<Parameter> orderedParameters = params.stream().sorted(Comparator.comparing(Parameter::getName)).toList();
+        for (Parameter p : orderedParameters) {
             parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
@@ -236,8 +259,11 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParametersByPath(JsonNode request, String region) {
+        if (!request.path("Path").isTextual()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("path"));
+        }
         PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
-        String path = request.path("Path").asText();
+        String path = normalizeParameterPath(request.path("Path").asText(), region);
         boolean recursive = request.path("Recursive").asBoolean(false);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
 
@@ -298,7 +324,7 @@ public class SsmJsonHandler {
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
         PageRequest pageRequest = pageRequest(request, GET_PARAMETER_HISTORY_MAX_RESULTS);
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
@@ -657,7 +683,7 @@ public class SsmJsonHandler {
         String content = requireDocumentContent(request);
         String documentType = requireDocumentType(request);
 
-        SsmDocument document = ssmService.createDocument(name, content, documentType, region);
+        SsmDocument document = ssmService.createDocument(name, content, documentType, requestTags(request), region);
         return Response.ok(documentDescriptionResponse(document)).build();
     }
 
@@ -695,6 +721,7 @@ public class SsmJsonHandler {
         description.put("Status", document.getStatus());
         description.put("LatestVersion", String.valueOf(document.getDocumentVersion()));
         description.put("DefaultVersion", String.valueOf(document.getDocumentVersion()));
+        description.set("Tags", tagList(document.getTags()));
         response.set("DocumentDescription", description);
         return response;
     }
@@ -794,6 +821,7 @@ public class SsmJsonHandler {
             if (d.getDocumentFormat() != null) {
                 docNode.put("DocumentFormat", d.getDocumentFormat());
             }
+            docNode.set("Tags", tagList(d.getTags()));
             docArray.add(docNode);
         }
         response.set("DocumentIdentifiers", docArray);
@@ -863,7 +891,7 @@ public class SsmJsonHandler {
 
         SsmAssociation assoc = ssmService.createAssociation(
                 name, associationName, documentVersion, instanceId, targets, parameters, scheduleExpression,
-                maxErrors, maxConcurrency, complianceSeverity, region);
+                maxErrors, maxConcurrency, complianceSeverity, requestTags(request), region);
 
         return Response.ok(associationDescriptionResponse(assoc)).build();
     }
@@ -1147,7 +1175,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         Long parameterVersion = request.hasNonNull("ParameterVersion")
                 ? request.path("ParameterVersion").asLong()
                 : null;
@@ -1200,39 +1228,65 @@ public class SsmJsonHandler {
     }
 
     private Response handleAddTagsToResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
-        Map<String, String> tags = new LinkedHashMap<>();
-        request.path("Tags").forEach(t ->
-                tags.put(t.path("Key").asText(), t.path("Value").asText()));
-
-        ssmService.addTagsToResource(resourceId, tags, region);
+        requireTaggedResourceType(request);
+        ssmService.addTagsToResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
+                requestTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
-        Map<String, String> tags = ssmService.listTagsForResource(resourceId, region);
-
+        requireTaggedResourceType(request);
+        Map<String, String> tags = ssmService.listTagsForResource(request.path("ResourceType").asText(),
+                request.path("ResourceId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode tagsArray = objectMapper.createArrayNode();
-        for (Map.Entry<String, String> entry : tags.entrySet()) {
-            ObjectNode tagNode = objectMapper.createObjectNode();
-            tagNode.put("Key", entry.getKey());
-            tagNode.put("Value", entry.getValue());
-            tagsArray.add(tagNode);
-        }
-        response.set("TagList", tagsArray);
+        response.set("TagList", tagList(tags));
         return Response.ok(response).build();
     }
 
     private Response handleRemoveTagsFromResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
+        requireTaggedResourceType(request);
         List<String> tagKeys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
-
-        ssmService.removeTagsFromResource(resourceId, tagKeys, region);
+        ssmService.removeTagsFromResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
+                tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
+
+    /** A request's {@code Tags} list as a map; empty when it has none. */
+    private static Map<String, String> requestTags(JsonNode request) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        request.path("Tags").forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
+        return tags;
+    }
+
+    private ArrayNode tagList(Map<String, String> tags) {
+        ArrayNode list = objectMapper.createArrayNode();
+        tags.forEach((key, value) -> list.addObject().put("Key", key).put("Value", value));
+        return list;
+    }
+
+    /**
+     * Refuses a tagging request whose {@code ResourceType} is missing, outside the model's enum, or a type whose tags
+     * this service does not keep, so the request acts on the type IAM checked.
+     */
+    private static void requireTaggedResourceType(JsonNode request) {
+        JsonNode resourceType = request.path("ResourceType");
+        if (!resourceType.isTextual()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("resourceType"));
+        }
+        if (!RESOURCE_TYPES_FOR_TAGGING.contains(resourceType.asText())) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(resourceType.asText(),
+                    "resourceType", RESOURCE_TYPES_FOR_TAGGING));
+        }
+        if (!TAGGED_RESOURCE_TYPES.contains(resourceType.asText())) {
+            throw new AwsException("InvalidResourceType", "The resource type isn't valid.", 400);
+        }
+    }
+
+    private static final List<String> RESOURCE_TYPES_FOR_TAGGING = List.of("Document", "ManagedInstance",
+            "MaintenanceWindow", "Parameter", "PatchBaseline", "OpsItem", "OpsMetadata", "Automation", "Association",
+            "CloudConnector");
+    private static final Set<String> TAGGED_RESOURCE_TYPES = Set.of("Parameter", "Document", "Association");
 
     private static final int GET_RESOURCE_POLICIES_MAX_RESULTS = 50;
     private static final String GET_RESOURCE_POLICIES_TOKEN = "GetResourcePolicies:";
@@ -1602,8 +1656,9 @@ public class SsmJsonHandler {
         documentNode.put("Content", effectiveContent);
         documentNode.put("Status", document.getStatus());
         if (document.getCreatedDate() != null) {
-            documentNode.put("CreatedDate", document.getCreatedDate().toString());
+            documentNode.put("CreatedDate", EpochSeconds.fromInstant(document.getCreatedDate()));
         }
+        documentNode.set("Tags", tagList(document.getTags()));
         response.set("Document", documentNode);
         return Response.ok(response).build();
     }

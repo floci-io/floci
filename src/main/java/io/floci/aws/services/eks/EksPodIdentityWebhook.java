@@ -30,8 +30,9 @@ import java.util.function.Supplier;
  * SDK at Floci with {@code AWS_ENDPOINT_URL} and {@code AWS_ENDPOINT_URL_STS}, as it does for every
  * container it launches itself: otherwise the pod's calls, signed with Floci credentials, go to AWS.
  *
- * <p>Nothing answers {@link #CREDENTIALS_FULL_URI} yet: this class injects the plumbing only, so an
- * injected pod still cannot obtain credentials.
+ * <p>This class injects the plumbing only. {@link #CREDENTIALS_FULL_URI} answers while the addon is
+ * installed: {@link EksClusterManager} forwards its address in the node to
+ * {@link EksPodIdentityCredentialsController}, which hands the pod its association's credentials.
  *
  * <p>Every path here admits the pod. A cluster that is gone, an addon that is not installed, a
  * malformed review and an internal error all return {@code allowed: true} with no patch, which is
@@ -94,12 +95,22 @@ public class EksPodIdentityWebhook {
      * the cluster would only ever be looked up in the default account.
      */
     public Map<String, Object> review(String clusterName, String accountId, Map<String, Object> admissionReview) {
+        return review(clusterName, accountId, null, admissionReview);
+    }
+
+    /**
+     * As {@link #review(String, String, Map)}, for the cluster in {@code region}: cluster names are
+     * unique only within a Region. A null Region, from a route registered before the Region was
+     * part of it, resolves the cluster created before Regional names that registered it.
+     */
+    public Map<String, Object> review(String clusterName, String accountId, String region,
+                                      Map<String, Object> admissionReview) {
         String apiVersion = admissionReview != null && admissionReview.get("apiVersion") instanceof String version
                 ? version : DEFAULT_API_VERSION;
         Map<String, Object> request = admissionReview == null ? null : asMap(admissionReview.get("request"));
         String uid = request != null && request.get("uid") instanceof String value ? value : "";
         try {
-            return admissionReview(apiVersion, uid, decide(clusterName, accountId, request));
+            return admissionReview(apiVersion, uid, decide(clusterName, accountId, region, request));
         } catch (RuntimeException e) {
             LOG.warnv("EKS pod-identity-webhook: admitting pod unchanged for cluster {0} after an "
                     + "internal error: {1}", clusterName, e.toString());
@@ -107,7 +118,7 @@ public class EksPodIdentityWebhook {
         }
     }
 
-    private List<Map<String, Object>> decide(String clusterName, String accountId,
+    private List<Map<String, Object>> decide(String clusterName, String accountId, String region,
                                              Map<String, Object> request) {
         if (request == null) {
             return List.of();
@@ -120,7 +131,11 @@ public class EksPodIdentityWebhook {
         if (namespace == null) {
             return List.of();
         }
-        Optional<Cluster> cluster = eks.findAuthenticationCluster(accountId, clusterName);
+        // A route without a Region was registered by a cluster created before cluster names became
+        // Regional, so that cluster answers it, not a same-named one created since.
+        Optional<Cluster> cluster = region == null
+                ? eks.findPreRegionalCluster(accountId, clusterName)
+                : eks.findAuthenticationCluster(accountId, region, clusterName);
         if (cluster.isEmpty()) {
             return List.of();
         }
@@ -135,11 +150,11 @@ public class EksPodIdentityWebhook {
 
     /**
      * A pod resolves names through CoreDNS, which never sees the cluster container's
-     * {@code /etc/hosts}, where {@code host.docker.internal} lives on Linux. Floci's DNS server does
-     * not reach it either: on a custom Docker network the container's resolver is {@code 127.0.0.11},
-     * which k3s rejects as loopback and replaces with a public resolver, so Floci's hostname resolves
-     * to {@code 127.0.0.1} inside the pod. Only an IP address is reachable, and that is what
-     * {@code baseUrl(false)} returns whenever Floci runs in a container. No endpoint is injected
+     * {@code /etc/hosts}, where {@code host.docker.internal} lives on Linux. Floci's hostname resolves
+     * in a pod only when the cluster hands its pods Floci's embedded DNS server: without it, a custom
+     * Docker network's resolver is {@code 127.0.0.11}, which k3s rejects as loopback and replaces with
+     * a public resolver, so the name resolves to {@code 127.0.0.1}. An IP address is reachable either
+     * way, and that is what {@code baseUrl(false)} returns whenever Floci runs in a container. No endpoint is injected
      * otherwise, which leaves the SDK default.
      */
     static String podReachableEndpoint(String baseUrl) {
@@ -151,14 +166,12 @@ public class EksPodIdentityWebhook {
     }
 
     private boolean podIdentityAgentInstalled(Cluster cluster) {
-        try {
-            addons.describe(cluster, POD_IDENTITY_ADDON);
+        if (addons.isInstalled(cluster, POD_IDENTITY_ADDON)) {
             return true;
-        } catch (AwsException e) {
-            LOG.debugv("EKS pod-identity-webhook: cluster {0} has no {1} addon, admitting pods unchanged ({2})",
-                    cluster.getName(), POD_IDENTITY_ADDON, e.getMessage());
-            return false;
         }
+        LOG.debugv("EKS pod-identity-webhook: cluster {0} has no {1} addon, admitting pods unchanged",
+                cluster.getName(), POD_IDENTITY_ADDON);
+        return false;
     }
 
     private boolean hasAssociation(Cluster cluster, String namespace, String serviceAccount) {

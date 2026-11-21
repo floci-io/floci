@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudformation.provisioners.ProvisionContext;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.scheduler.SchedulerService;
+import io.floci.aws.services.ses.SesConfigurationSetService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MainSources;
 import org.junit.jupiter.api.Test;
@@ -38,11 +39,12 @@ class CfnProvisionerFixtureTest {
 
     /**
      * Provisioners the fixture cannot build from a single service, so they must be passed to
-     * {@code provisioners(...)} explicitly. Both take collaborators beyond one service
-     * ({@code RegionResolver} and an {@code ObjectMapper}), which the Builder does not model.
+     * {@code provisioners(...)} explicitly. The CodeBuild and CodePipeline ones take collaborators beyond one
+     * service ({@code RegionResolver} and an {@code ObjectMapper}), which the Builder does not model, and the
+     * StackSet one takes CloudFormation's own services, which deploy each stack instance as a stack.
      */
     private static final Set<String> NOT_INFERABLE =
-            Set.of("CodeBuildCfnProvisioner", "CodePipelineCfnProvisioner");
+            Set.of("CodeBuildCfnProvisioner", "CodePipelineCfnProvisioner", "StackSetCfnProvisioner");
 
     /**
      * Builder setters that replace the inferred registry outright rather than naming a service.
@@ -70,6 +72,14 @@ class CfnProvisionerFixtureTest {
 
         assertTrue(serves(fixture, "AWS::Scheduler::Schedule"));
         assertTrue(serves(fixture, "AWS::Scheduler::ScheduleGroup"));
+    }
+
+    @Test
+    void sesConfigurationSetsWireEventDestinations() {
+        CfnProvisionerFixture.Builder fixture = CfnProvisionerFixture.builder()
+                .sesConfigurationSets(mock(SesConfigurationSetService.class));
+
+        assertTrue(serves(fixture, "AWS::SES::ConfigurationSetEventDestination"));
     }
 
     @Test

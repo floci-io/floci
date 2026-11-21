@@ -9,10 +9,11 @@ import java.util.concurrent.ConcurrentHashMap;
 @RegisterForReflection
 public class VectorBucket {
     private Instant creationTime;
-    private Map<String, String> tags = new ConcurrentHashMap<>();
+    private volatile Map<String, String> tags = new ConcurrentHashMap<>();
     private String vectorBucketName;
     private String vectorBucketArn;
     private Object encryptionConfiguration;
+    private String policy;
     private Map<String, VectorIndex> indexes = new ConcurrentHashMap<>();
 
     public VectorBucket() {}
@@ -37,6 +38,9 @@ public class VectorBucket {
 
     public Object getEncryptionConfiguration() { return encryptionConfiguration; }
     public void setEncryptionConfiguration(Object encryptionConfiguration) { this.encryptionConfiguration = encryptionConfiguration; }
+
+    public String getPolicy() { return policy; }
+    public void setPolicy(String policy) { this.policy = policy; }
 
     public Map<String, VectorIndex> getIndexes() { return indexes; }
     public void setIndexes(Map<String, VectorIndex> indexes) { this.indexes = indexes; }

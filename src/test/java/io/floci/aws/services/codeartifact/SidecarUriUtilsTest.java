@@ -3,6 +3,7 @@ package io.floci.aws.services.codeartifact;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.time.Duration;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -85,5 +86,35 @@ class SidecarUriUtilsTest {
         URI result = SidecarUriUtils.combine(URI.create("http://user%2Ftenant@example.com"), "/dom--repo/a-1.0.jar");
 
         assertThat(result.getRawAuthority(), equalTo("user%2Ftenant@example.com"));
+    }
+
+    @Test
+    void transferTimeoutIsJustTheFixedFloorForATinyUpload() {
+        assertThat(SidecarUriUtils.transferTimeout(0), equalTo(Duration.ofSeconds(30)));
+    }
+
+    @Test
+    void transferTimeoutScalesWithContentLengthPastTheFixedFloor() {
+        long twentyMebibytes = 20L * 1024 * 1024;
+
+        assertThat(SidecarUriUtils.transferTimeout(twentyMebibytes), equalTo(Duration.ofSeconds(32)));
+    }
+
+    /**
+     * {@link SidecarUriUtils#maxTransferTimeout()} is the worst-case sibling every real asset
+     * download (every sidecar client's own streamed read, every external-connection client's real
+     * registry fetch) uses instead of a flat, small timeout: confirms it is exactly {@link
+     * SidecarUriUtils#transferTimeout} evaluated at the real 5 GB asset quota, not some other,
+     * drifted value.
+     */
+    @Test
+    void maxTransferTimeoutMatchesTransferTimeoutAtTheRealAssetQuota() {
+        assertThat(SidecarUriUtils.maxTransferTimeout(),
+                equalTo(SidecarUriUtils.transferTimeout(CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES)));
+    }
+
+    @Test
+    void maxTransferTimeoutIsGenerousEnoughForARealMultiGigabyteDownload() {
+        assertThat(SidecarUriUtils.maxTransferTimeout().compareTo(Duration.ofMinutes(5)) > 0, equalTo(true));
     }
 }

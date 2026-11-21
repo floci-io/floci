@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -114,7 +116,7 @@ class ApiGatewayIntegrationReadBackTest {
     }
 
     @Test
-    void methodSettingsAcceptTheEscapedResourcePathAwsSends() {
+    void methodSettingsKeepTheEscapedResourcePathAsTheKey() {
         String deploymentId = given().contentType(ContentType.JSON).body("{}")
                 .when().post("/restapis/" + apiId + "/deployments")
                 .then().statusCode(201).extract().path("id");
@@ -123,21 +125,25 @@ class ApiGatewayIntegrationReadBackTest {
                 .when().post("/restapis/" + apiId + "/stages")
                 .then().statusCode(201);
 
-        // AWS escapes the resource path's slashes as ~1. That spelling previously produced the
-        // unusable key "~1widget/POST" instead of "widget/POST".
         given().contentType(ContentType.JSON)
-                .body("{\"patchOperations\":[{\"op\":\"replace\","
-                        + "\"path\":\"/~1widget/POST/throttling/burstLimit\",\"value\":\"77\"}]}")
+                .body("{\"patchOperations\":["
+                        + "{\"op\":\"replace\",\"path\":\"/~1widget/POST/throttling/burstLimit\",\"value\":\"77\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/~1webhook~1status/POST/logging/loglevel\",\"value\":\"INFO\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/~1webhook~1status/POST/logging/dataTrace\",\"value\":\"true\"}]}")
                 .when().patch("/restapis/" + apiId + "/stages/test")
                 .then().statusCode(200);
 
         given().when().get("/restapis/" + apiId + "/stages/test")
                 .then().statusCode(200)
-                .body("methodSettings.'widget/POST'.throttlingBurstLimit", equalTo(77));
+                .body("methodSettings.'~1widget/POST'.throttlingBurstLimit", equalTo(77))
+                .body("methodSettings.'~1webhook~1status/POST'.loggingLevel", equalTo("INFO"))
+                .body("methodSettings.'~1webhook~1status/POST'.dataTraceEnabled", equalTo(true))
+                .body("methodSettings", not(hasKey("widget/POST")))
+                .body("methodSettings", not(hasKey("webhook/status/POST")));
     }
 
     @Test
-    void methodSettingsUnescapeTheJsonPointerTildeEscape() {
+    void methodSettingsKeepTheTildeEscapeInTheKey() {
         String deploymentId = given().contentType(ContentType.JSON).body("{}")
                 .when().post("/restapis/" + apiId + "/deployments")
                 .then().statusCode(201).extract().path("id");
@@ -146,9 +152,6 @@ class ApiGatewayIntegrationReadBackTest {
                 .when().post("/restapis/" + apiId + "/stages")
                 .then().statusCode(201);
 
-        // RFC 6901 escapes a literal "~" as ~0 and "/" as ~1. "/~1pets~0promo/GET/..." therefore
-        // addresses the resource "/pets~promo"; only ~1 used to be decoded, leaving a stray "~0".
-        // "~01" is an escaped literal "~1", not a slash, so decoding order matters too.
         given().contentType(ContentType.JSON)
                 .body("{\"patchOperations\":["
                         + "{\"op\":\"replace\",\"path\":\"/~1pets~0promo/GET/throttling/burstLimit\",\"value\":\"12\"},"
@@ -158,8 +161,8 @@ class ApiGatewayIntegrationReadBackTest {
 
         given().when().get("/restapis/" + apiId + "/stages/tilde")
                 .then().statusCode(200)
-                .body("methodSettings.'pets~promo/GET'.throttlingBurstLimit", equalTo(12))
-                .body("methodSettings.'v~1/POST'.throttlingRateLimit", equalTo(3.5f));
+                .body("methodSettings.'~1pets~0promo/GET'.throttlingBurstLimit", equalTo(12))
+                .body("methodSettings.'~1v~01/POST'.throttlingRateLimit", equalTo(3.5f));
     }
 
     @Test

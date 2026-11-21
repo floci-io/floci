@@ -4,10 +4,13 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
@@ -57,12 +60,12 @@ class EksResourceTaggingIntegrationTest {
             for (Map.Entry<String, String> resource : arns.entrySet()) {
                 String arn = resource.getValue();
                 eks().contentType("application/json").body(Map.of("tags", Map.of("team", resource.getKey(), "env", "dev")))
-                        .post("/tags/" + arn).then().statusCode(200);
-                eks().get("/tags/" + arn).then().statusCode(200)
+                        .post(tagsPath(arn)).then().statusCode(200);
+                eks().get(tagsPath(arn)).then().statusCode(200)
                         .body("tags.team", equalTo(resource.getKey()))
                         .body("tags.env", equalTo("dev"));
-                eks().queryParam("tagKeys", "env").delete("/tags/" + arn).then().statusCode(200);
-                eks().get("/tags/" + arn).then().statusCode(200)
+                eks().queryParam("tagKeys", "env").delete(tagsPath(arn)).then().statusCode(200);
+                eks().get(tagsPath(arn)).then().statusCode(200)
                         .body("tags", not(hasKey("env")))
                         .body("tags.team", equalTo(resource.getKey()));
             }
@@ -74,20 +77,20 @@ class EksResourceTaggingIntegrationTest {
             // A child ARN whose id is not the stored resource's, or whose cluster does not exist, names nothing.
             String staleNodegroup = arns.get("nodegroup").substring(0, arns.get("nodegroup").lastIndexOf('/') + 1)
                     + UUID.randomUUID();
-            eks().get("/tags/" + staleNodegroup).then().statusCode(404)
+            eks().get(tagsPath(staleNodegroup)).then().statusCode(404)
                     .body("__type", equalTo("NotFoundException"));
-            eks().get("/tags/" + arns.get("addon").replace("/" + name + "/", "/no-such-cluster/")).then()
+            eks().get(tagsPath(arns.get("addon").replace("/" + name + "/", "/no-such-cluster/"))).then()
                     .statusCode(404).body("__type", equalTo("NotFoundException"));
-            eks().get("/tags/arn:aws:eks:us-east-1:" + ACCOUNT + ":identityproviderconfig/" + name + "/oidc/x/y")
+            eks().get(tagsPath("arn:aws:eks:us-east-1:" + ACCOUNT + ":identityproviderconfig/" + name + "/oidc/x/y"))
                     .then().statusCode(404).body("__type", equalTo("NotFoundException"));
-            eks().get("/tags/" + arns.get("cluster")).then().statusCode(200).body("tags", not(anEmptyMap()));
+            eks().get(tagsPath(arns.get("cluster"))).then().statusCode(200).body("tags", not(anEmptyMap()));
 
             // An ARN that names a resource type but no cluster is a bad request, not a server error.
             String noCluster = "arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/";
-            eks().get("/tags/" + noCluster).then().statusCode(400).body("__type", equalTo("BadRequestException"));
-            eks().queryParam("tagKeys", "team").delete("/tags/" + noCluster).then().statusCode(400)
+            eks().get(tagsPath(noCluster)).then().statusCode(400).body("__type", equalTo("BadRequestException"));
+            eks().queryParam("tagKeys", "team").delete(tagsPath(noCluster)).then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
-            eks().get("/tags/" + arns.get("addon").substring(0, arns.get("addon").indexOf(name)) + name + "/")
+            eks().get(tagsPath(arns.get("addon").substring(0, arns.get("addon").indexOf(name)) + name + "/"))
                     .then().statusCode(400).body("__type", equalTo("BadRequestException"));
 
             // TagResource keeps every resource within the TagMap limits, counting the tags it already has.
@@ -96,15 +99,15 @@ class EksResourceTaggingIntegrationTest {
                 fortyNine.put("k" + i, "v");
             }
             eks().contentType("application/json").body(Map.of("tags", fortyNine))
-                    .post("/tags/" + arns.get("addon")).then().statusCode(200);
+                    .post(tagsPath(arns.get("addon"))).then().statusCode(200);
             eks().contentType("application/json").body(Map.of("tags", Map.of("one-too-many", "v")))
-                    .post("/tags/" + arns.get("addon")).then().statusCode(400)
+                    .post(tagsPath(arns.get("addon"))).then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
-            eks().get("/tags/" + arns.get("addon")).then().statusCode(200)
+            eks().get(tagsPath(arns.get("addon"))).then().statusCode(200)
                     .body("tags", not(hasKey("one-too-many")))
                     .body("tags.team", equalTo("addon"));
             eks().contentType("application/json").body(Map.of("tags", Map.of("k", "v".repeat(257))))
-                    .post("/tags/" + arns.get("access-entry")).then().statusCode(400)
+                    .post(tagsPath(arns.get("access-entry"))).then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
         } finally {
             eks().delete("/clusters/" + name + "/addons/vpc-cni");
@@ -116,14 +119,20 @@ class EksResourceTaggingIntegrationTest {
         }
     }
 
+    /** Sends paths as given, so a tags path keeps the one encoding {@link #tagsPath} gives it. */
     private static RequestSpecification eks() {
-        return given().header("Authorization", auth("eks"));
+        return given().urlEncodingEnabled(false).header("Authorization", auth("eks"));
+    }
+
+    /** The modeled {@code /tags/{resourceArn}} for an ARN, encoded as one path segment as an SDK sends it. */
+    private static String tagsPath(String arn) {
+        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
     }
 
     private static void createRole(String role) {
         given().header("Authorization", auth("iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/")
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
     }
 
     private static void createCluster(String name, String roleArn) {

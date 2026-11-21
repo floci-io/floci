@@ -112,7 +112,7 @@ public class BackupService {
             if (!List.of("CREATED", "RUNNING", "ABORTING").contains(job.getState())) {
                 continue;
             }
-            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(job.getBackupVaultArn());
             if ("ABORTING".equals(job.getState())) {
                 scheduler.execute(() -> RequestScopes.runAs(entry.accountId(), region, () -> abortJob(entry.key())));
             } else {
@@ -705,8 +705,7 @@ public class BackupService {
     public PaginatedResult<BackupPlan> listBackupPlans(String region, boolean includeDeleted,
                                                        Integer maxResults, String nextToken) {
         List<BackupPlan> plans = planStore.scan(k -> true).stream()
-                .filter(plan -> region.equals(AwsArnUtils.regionOrDefault(plan.getBackupPlanArn(),
-                        regionResolver.getDefaultRegion())))
+                .filter(plan -> region.equals(regionResolver.regionOf(plan.getBackupPlanArn())))
                 .filter(plan -> includeDeleted || plan.getDeletionDate() == null)
                 .toList();
         String namespace = "backup:ListBackupPlans:" + regionResolver.getAccountId() + ":" + region + ":" + includeDeleted;
@@ -803,7 +802,7 @@ public class BackupService {
             job.setStatusMessage("Job stop requested");
             jobStore.put(jobId, job);
             String accountId = regionResolver.getAccountId();
-            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(job.getBackupVaultArn());
             scheduler.schedule(() -> RequestScopes.runAs(accountId, region, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
         }
     }
@@ -816,6 +815,16 @@ public class BackupService {
                 .filter(j -> byResourceArn == null || byResourceArn.equals(j.getResourceArn()))
                 .filter(j -> byResourceType == null || byResourceType.equals(j.getResourceType()))
                 .toList();
+    }
+
+    public PaginatedResult<BackupJob> listBackupJobs(String byVaultName, String byState,
+                                                     String byResourceArn, String byResourceType,
+                                                     Integer maxResults, String nextToken) {
+        List<BackupJob> jobs = listBackupJobs(byVaultName, byState, byResourceArn, byResourceType);
+        String namespace = "backup:ListBackupJobs:" + regionResolver.getAccountId() + ":"
+                + (byVaultName == null ? "all" : byVaultName) + ":" + (byState == null ? "all" : byState)
+                + ":" + (byResourceArn == null ? "all" : byResourceArn) + ":" + (byResourceType == null ? "all" : byResourceType);
+        return paginate(jobs, BackupJob::getBackupJobId, maxResults, nextToken, namespace);
     }
 
     // ── Recovery Point ─────────────────────────────────────────────────────────
@@ -833,6 +842,13 @@ public class BackupService {
         return recoveryStore.scan(k -> true).stream()
                 .filter(rp -> vaultName.equals(rp.getBackupVaultName()))
                 .toList();
+    }
+
+    public PaginatedResult<RecoveryPoint> listRecoveryPointsByBackupVault(String vaultName, String region,
+                                                                          Integer maxResults, String nextToken) {
+        List<RecoveryPoint> points = listRecoveryPointsByBackupVault(vaultName, region);
+        String namespace = "backup:ListRecoveryPointsByBackupVault:" + regionResolver.getAccountId() + ":" + region + ":" + vaultName;
+        return paginate(points, RecoveryPoint::getRecoveryPointArn, maxResults, nextToken, namespace);
     }
 
     /**

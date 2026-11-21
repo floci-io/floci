@@ -6,6 +6,9 @@ import com.github.dockerjava.transport.DockerHttpClient;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 /**
  * Decorates a {@link DockerHttpClient} with the {@link DockerRetry} policy so every docker call
@@ -65,23 +68,76 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     private final DockerHttpClient delegate;
     private final int maxAttempts;
     private final long backoffMillis;
+    private final Predicate<Request> replayable;
+    /**
+     * One limit across a call's attempts and backoffs (see {@link DockerRetry#call(int, long, Duration,
+     * DockerRetry.DockerCall)}), the Docker call timeout, so retries cannot stretch a call to several
+     * times it; null for none.
+     */
+    private final Duration callDeadline;
+    private final LongSupplier nanoTime;
+    private final DockerRetry.BackoffWait backoffWait;
 
     public RetryingDockerHttpClient(DockerHttpClient delegate) {
-        this(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+        this(delegate, (Duration) null);
+    }
+
+    /** @param callDeadline the longest a call may take across its attempts, or null for no limit */
+    public RetryingDockerHttpClient(DockerHttpClient delegate, Duration callDeadline) {
+        this(delegate, MAX_ATTEMPTS, BACKOFF_MS, RetryingDockerHttpClient::isReplayable, callDeadline,
+                System::nanoTime, Thread::sleep);
     }
 
     RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis) {
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, null,
+                System::nanoTime, Thread::sleep);
+    }
+
+    /** With a clock and a backoff wait of the test's own, so a deadline is checked without sleeping. */
+    RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis, Duration callDeadline,
+                             LongSupplier nanoTime, DockerRetry.BackoffWait backoffWait) {
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, callDeadline,
+                nanoTime, backoffWait);
+    }
+
+    private RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis,
+                                     Predicate<Request> replayable, Duration callDeadline,
+                                     LongSupplier nanoTime, DockerRetry.BackoffWait backoffWait) {
         this.delegate = delegate;
         this.maxAttempts = maxAttempts;
         this.backoffMillis = backoffMillis;
+        this.replayable = replayable;
+        this.callDeadline = callDeadline;
+        this.nanoTime = nanoTime;
+        this.backoffWait = backoffWait;
+    }
+
+    /**
+     * A decorator that replays only container waits, for the streaming transport. A wait that fails
+     * before the daemon answers is replayed as it is on the control-plane transport, while the
+     * streaming transport's other requests, exec starts and log and attach streams, are never
+     * replayed.
+     */
+    static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate) {
+        return forContainerWaits(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+    }
+
+    static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate, int maxAttempts,
+                                                      long backoffMillis) {
+        // No call timeout: a container wait is a long-lived stream, which the deadline never bounds.
+        return new RetryingDockerHttpClient(delegate, maxAttempts, backoffMillis,
+                request -> isReplayable(request) && isContainerWait(request), null, System::nanoTime, Thread::sleep);
     }
 
     @Override
     public Response execute(Request request) {
-        if (!isReplayable(request)) {
+        if (!replayable.test(request)) {
             return delegate.execute(request);
         }
-        return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(request));
+        // A long-lived stream has no response timeout, so the call timeout does not bound its retries either.
+        Duration deadline = FlociDockerHttpClient.isLongLivedStream(request) ? null : callDeadline;
+        return DockerRetry.call(maxAttempts, backoffMillis, deadline, nanoTime, backoffWait,
+                () -> delegate.execute(request));
     }
 
     /**
@@ -110,10 +166,9 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     /** The {@code POST} routes whose replay after a lost response leaves the same outcome. */
     private static boolean isReplayablePost(Request request) {
         String path = request.path();
-        int queryStart = path.indexOf('?');
-        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        String route = route(path);
         if (route.endsWith("/containers/create")) {
-            String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
+            String query = route.length() < path.length() ? path.substring(route.length() + 1) : "";
             for (String param : query.split("&")) {
                 if (param.startsWith("name=")) {
                     return true;
@@ -126,6 +181,16 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         }
         return route.endsWith("/start") || route.endsWith("/stop") || route.endsWith("/wait")
                 || route.endsWith("/images/create");
+    }
+
+    private static boolean isContainerWait(Request request) {
+        return "POST".equals(request.method()) && route(request.path()).endsWith("/wait");
+    }
+
+    /** A request path without its query string. */
+    private static String route(String path) {
+        int queryStart = path.indexOf('?');
+        return queryStart < 0 ? path : path.substring(0, queryStart);
     }
 
     /**

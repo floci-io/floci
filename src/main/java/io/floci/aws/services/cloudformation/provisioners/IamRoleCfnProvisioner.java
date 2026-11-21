@@ -87,7 +87,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         IamRequestShapes.check("UpdateRole", durationParams);
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
-        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+        String templateBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+        // A stack a delegation created caps every role it provisions, the guide limiting roles
+        // "created or managed through temporary access". The cap is the customer's registration
+        // rather than a choice of the template, so it wins over a boundary the template names, the
+        // same way it wins over one a CreateRole call names.
+        String permissionsBoundary = ctx.delegatedRoleBoundaryArn() != null
+                ? ctx.delegatedRoleBoundaryArn() : templateBoundary;
 
         IamRole role;
         boolean createdRole = false;
@@ -153,6 +159,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         Set<String> previousManagedArns = CfnTrackedSets.read(r, MANAGED_ARNS_ATTR);
 
         Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
+        List<String> canonicalPolicyArns = new ArrayList<>();
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> detachedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> inlineRemovedByThisAttempt = new LinkedHashSet<>();
@@ -185,9 +192,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             }
 
             for (String policyArn : managedPolicyArns) {
-                iamService.attachRolePolicy(resolvedRoleName, policyArn);
-                if (!originalPolicyArns.contains(policyArn)) {
-                    attachedByThisAttempt.add(policyArn);
+                String canonicalArn = iamService.canonicalPolicyArn(policyArn);
+                iamService.attachRolePolicy(resolvedRoleName, canonicalArn);
+                canonicalPolicyArns.add(canonicalArn);
+                if (!originalPolicyArns.contains(canonicalArn)) {
+                    attachedByThisAttempt.add(canonicalArn);
                 }
             }
 
@@ -237,7 +246,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 inlineWrittenByThisAttempt.add(policy.getKey());
             }
             for (String stale : previousManagedArns) {
-                if (!managedPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
+                if (!canonicalPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
                     iamService.detachRolePolicy(resolvedRoleName, stale);
                     detachedByThisAttempt.add(stale);
                 }
@@ -270,7 +279,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 String prior = originalInlinePolicies.get(policyName);
                 if (prior != null && !CfnRollback.attemptIamCleanup(failure,
                         "restore inline policy " + policyName + " on role " + resolvedRoleName,
-                        () -> iamService.putRolePolicy(resolvedRoleName, policyName, prior))) {
+                        () -> iamService.restoreRolePolicy(resolvedRoleName, policyName, prior))) {
                     cleanupSucceeded = false;
                 }
             }
@@ -308,7 +317,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 // recreated under this name in between, this must not write the restored document
                 // onto the replacement.
                 if (!CfnRollback.attemptIamCleanup(failure, "restore prior trust policy on role " + resolvedRoleName,
-                        () -> iamService.updateAssumeRolePolicy(
+                        () -> iamService.restoreAssumeRolePolicy(
                                 resolvedRoleName, documentToRestore, roleIdToRestore))) {
                     cleanupSucceeded = false;
                 }
@@ -327,7 +336,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
         // What the next execution compares its template against.
         CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
-        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, canonicalPolicyArns);
     }
 
     private void snapshotDuration(StackResource resource, IamRole role) {

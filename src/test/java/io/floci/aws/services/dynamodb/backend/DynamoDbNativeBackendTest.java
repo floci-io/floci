@@ -70,11 +70,14 @@ class DynamoDbNativeBackendTest {
             stores.add(store);
             return store;
         });
-        DynamoDbStreamService streams = new DynamoDbStreamService(mapper, storageFactory);
+        EmulatorConfig streamConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(streamConfig.services().dynamodb().streamShardCount()).thenReturn(1);
+        when(streamConfig.services().dynamodb().streamMaxRecords()).thenReturn(1000);
+        DynamoDbStreamService streams = new DynamoDbStreamService(mapper, storageFactory, streamConfig);
         DynamoDbService service = new DynamoDbService(storageFactory, new RegionResolver(REGION, ACCOUNT), streams,
                 forwarder, null, mapper, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
         NativeDynamoDbTableService tables = new NativeDynamoDbTableService(service, streams, mock(KinesisService.class));
-        backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper),
+        backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper, mock(EmulatorConfig.class)),
                 new NativeDynamoDbStreamsJsonHandler(streams, service, new RegionResolver(REGION, ACCOUNT), mapper),
                 tables, service, streams, ttl, mapper);
     }
@@ -178,6 +181,37 @@ class DynamoDbNativeBackendTest {
         assertNull(none);
         assertNull(updatedNew);
         assertEquals(json("{\"id\":{\"S\":\"k\"},\"n\":{\"N\":\"5\"}}"), backend.getItem(SCOPE, TABLE, key));
+    }
+
+    @Test
+    void storedTagsAreTheTablesForItAndItsIndexesInTheArnsAccountAndRegionAndTaggingPutsANewMap() throws Exception {
+        call(Api.DYNAMODB, "CreateTable", json("""
+                {"TableName":"%s",
+                 "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"},
+                                         {"AttributeName":"customer","AttributeType":"S"}],
+                 "GlobalSecondaryIndexes":[{"IndexName":"byCustomer",
+                                            "KeySchema":[{"AttributeName":"customer","KeyType":"HASH"}],
+                                            "Projection":{"ProjectionType":"ALL"}}],
+                 "BillingMode":"PAY_PER_REQUEST",
+                 "Tags":[{"Key":"team","Value":"data"}]}
+                """.formatted(TABLE)));
+        String arn = backend.describeTable(SCOPE, TABLE).getTableArn();
+        Map<String, String> held = backend.listTagsOfResource(SCOPE, arn);
+
+        assertEquals(Map.of("team", "data"), backend.storedTags(arn));
+        assertEquals(Map.of("team", "data"), backend.storedTags(arn + "/index/byCustomer"));
+        assertEquals(Map.of(), backend.storedTags(arn + "/index/byStatus"));
+        assertEquals(Map.of(), backend.storedTags(arn + "/stream/2026-11-16T00:00:00.000"));
+        assertEquals(Map.of(), backend.storedTags(arn.replace(ACCOUNT, "111122223333")));
+        assertEquals(Map.of(), backend.storedTags(arn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), backend.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")));
+
+        backend.tagResource(SCOPE, arn, Map.of("stage", "prod"));
+        backend.untagResource(SCOPE, arn, List.of("team"));
+
+        assertEquals(Map.of("stage", "prod"), backend.storedTags(arn + "/index/byCustomer"));
+        assertEquals(Map.of("team", "data"), held);
     }
 
     @Test

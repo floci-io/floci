@@ -88,18 +88,31 @@ public class EmrEventPublisher {
      * FAILED.
      */
     Event stepStatusChange(EmrCluster cluster, EmrStep step, String state) {
-        ObjectNode detail = objectMapper.createObjectNode();
-        detail.put("severity", switch (state) {
+        return stepEvent(cluster, step, state, switch (state) {
             case "CANCELLED" -> "WARN";
             case "FAILED" -> "ERROR";
             default -> "INFO";
-        });
+        }, stepMessage(cluster, step, state));
+    }
+
+    /**
+     * {@code step} of {@code cluster} going CANCEL_PENDING, cancelled at {@code at}: WARN, as the guide's step events
+     * table has it.
+     */
+    Event stepCancelPending(EmrCluster cluster, EmrStep step, Instant at) {
+        return stepEvent(cluster, step, "CANCEL_PENDING", "WARN", "Step " + named(step) + " in Amazon EMR cluster "
+                + named(cluster) + " was cancelled at " + time(at) + " and is pending cancellation.");
+    }
+
+    private Event stepEvent(EmrCluster cluster, EmrStep step, String state, String severity, String message) {
+        ObjectNode detail = objectMapper.createObjectNode();
+        detail.put("severity", severity);
         detail.put("actionOnFailure", step.getActionOnFailure());
         detail.put("stepId", step.getId());
         detail.put("name", step.getName());
         detail.put("clusterId", cluster.getId());
         detail.put("state", state);
-        detail.put("message", stepMessage(cluster, step, state));
+        detail.put("message", message);
         return new Event(STEP_STATUS_CHANGE, detail.toString());
     }
 
@@ -137,7 +150,7 @@ public class EmrEventPublisher {
     }
 
     private static String clusterMessage(EmrCluster cluster, String state, Instant at) {
-        String named = cluster.getId() + " (" + cluster.getName() + ")";
+        String named = named(cluster);
         return switch (state) {
             case "STARTING" -> "Amazon EMR cluster " + named + " was requested at " + time(at)
                     + " and is being created.";
@@ -153,8 +166,8 @@ public class EmrEventPublisher {
     }
 
     private static String stepMessage(EmrCluster cluster, EmrStep step, String state) {
-        String stepNamed = step.getId() + " (" + step.getName() + ")";
-        String clusterNamed = cluster.getId() + " (" + cluster.getName() + ")";
+        String stepNamed = named(step);
+        String clusterNamed = named(cluster);
         return switch (state) {
             case "PENDING" -> "Step " + stepNamed + " was added to Amazon EMR cluster " + clusterNamed + " at "
                     + time(step.getCreationDateTime()) + " and is pending execution.";
@@ -172,6 +185,16 @@ public class EmrEventPublisher {
                     + time(step.getEndDateTime()) + ".";
             default -> throw new IllegalArgumentException("No step event for state " + state);
         };
+    }
+
+    // "StepID (StepName)", as the guide's tables write a step.
+    private static String named(EmrStep step) {
+        return step.getId() + " (" + step.getName() + ")";
+    }
+
+    // "ClusterId (ClusterName)", as the guide's tables write a cluster.
+    private static String named(EmrCluster cluster) {
+        return cluster.getId() + " (" + cluster.getName() + ")";
     }
 
     private static String time(Instant instant) {

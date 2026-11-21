@@ -1,27 +1,18 @@
 package io.floci.aws.services.elasticache;
 
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.services.elasticache.container.ElastiCacheContainerHandle;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerManager;
-import io.floci.aws.services.elasticache.container.ValkeyClusterFormation;
 import io.floci.aws.services.elasticache.model.AuthMode;
 import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.proxy.ElastiCacheProxyManager;
-import io.floci.aws.services.kms.KmsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
@@ -31,14 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -55,41 +43,20 @@ class ElastiCacheSnapshotServiceTest {
     private ElastiCacheService service;
     private ElastiCacheContainerManager containerManager;
     private ElastiCacheProxyManager proxyManager;
-    private final Map<String, AccountAwareStorageBackend<?>> backendsByFile = new ConcurrentHashMap<>();
+    private Map<String, AccountAwareStorageBackend<?>> backendsByFile;
 
     @BeforeEach
     void setUp() {
-        containerManager = mock(ElastiCacheContainerManager.class);
-        proxyManager = mock(ElastiCacheProxyManager.class);
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
-        when(config.services()).thenReturn(servicesConfig);
-        when(servicesConfig.elasticache()).thenReturn(ecConfig);
-        when(ecConfig.proxyBasePort()).thenReturn(16379);
-        when(ecConfig.proxyMaxPort()).thenReturn(16399);
-        when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
-        when(config.hostname()).thenReturn(Optional.of("localhost"));
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
-                backendsByFile.computeIfAbsent(inv.getArgument(1),
-                        file -> AccountAwareStorageBackend.inMemory("000000000000")));
+        ElastiCacheServiceFixture fixture = new ElastiCacheServiceFixture();
+        service = fixture.service;
+        containerManager = fixture.containerManager;
+        proxyManager = fixture.proxyManager;
+        backendsByFile = fixture.backendsByFile;
         // Every group gets a container named after it, except "headless", which gets none.
-        when(containerManager.tryStart(anyString(), anyString(), any())).thenAnswer(inv ->
-                "headless".equals(inv.getArgument(0)) ? null
-                        : new ElastiCacheContainerHandle("container-" + inv.getArgument(0),
-                                inv.getArgument(0), "localhost", 6379));
-        // A group created from a snapshot starts through the overload that takes server flags.
-        when(containerManager.tryStart(anyString(), anyString(), anyList(), any())).thenAnswer(inv ->
-                new ElastiCacheContainerHandle("container-" + inv.getArgument(0),
-                        inv.getArgument(0), "localhost", 6379));
+        doAnswer(inv -> "headless".equals(inv.getArgument(0)) ? null
+                : ElastiCacheServiceFixture.containerHandle(inv.getArgument(0)))
+                .when(containerManager).tryStart(anyString(), anyString(), any());
         when(containerManager.snapshot("container-source")).thenReturn(RDB);
-        doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
-        KmsService kmsService = mock(KmsService.class);
-        when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
-        service = new ElastiCacheService(containerManager, proxyManager, mock(ValkeyClusterFormation.class),
-                storageFactory, config, mock(Ec2Service.class), new RegionResolver("us-east-1", "000000000000"),
-                kmsService, new ElastiCacheProvisioningIds());
     }
 
     @Test
@@ -105,19 +72,6 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("arn:aws:elasticache:us-east-1:000000000000:snapshot:snap", snapshot.getArn());
         verify(containerManager).restore("container-restored", RDB);
         assertEquals("restored", service.getReplicationGroup("restored").getReplicationGroupId());
-    }
-
-    @Test
-    void onlyAGroupCreatedFromASnapshotStartsWithTheDebugCommand() {
-        group("source");
-        service.createSnapshot("snap", "source", null);
-
-        service.createReplicationGroupFromSnapshot(request("restored", null), "snap");
-
-        verify(containerManager).tryStart(eq("source"), anyString(), any());
-        verify(containerManager, never()).tryStart(eq("source"), anyString(), anyList(), any());
-        verify(containerManager).tryStart(eq("restored"), anyString(),
-                eq(List.of(ElastiCacheContainerManager.RESTORE_SERVER_FLAG)), any());
     }
 
     @Test
@@ -223,7 +177,6 @@ class ElastiCacheSnapshotServiceTest {
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("restored")));
         verify(containerManager, never()).tryStart(eq("restored"), anyString(), any());
-        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyList(), any());
     }
 
     @Test
@@ -248,7 +201,6 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("InvalidParameterCombination",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("sharded", "enabled"), "snap")));
         verify(containerManager, never()).tryStart(eq("sharded"), anyString(), any());
-        verify(containerManager, never()).tryStart(eq("sharded"), anyString(), anyList(), any());
     }
 
     @Test

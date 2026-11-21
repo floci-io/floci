@@ -5,18 +5,16 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -43,7 +41,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String roleName = "LambdaRuntimeRole" + suffix;
         String roleArn = "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName;
-        iamService.createRole(roleName, "/", "{}", null, 0, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(roleName, "RuntimePolicy", """
                 {
                   "Version": "2012-10-17",
@@ -95,7 +93,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String roleName = "LambdaVersionRole" + suffix;
         String functionName = "version-account-" + suffix;
-        iamService.createRole(roleName, "/", "{}", null, 0, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(roleName, "RuntimePolicy",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
                         + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}");
@@ -132,14 +130,8 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         }
     }
 
-    private static String handlerZipBase64() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => ({});\n".getBytes());
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+    private static String handlerZipBase64() {
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({});\n");
     }
 
     private static String auth(String accessKeyId, String service) {

@@ -22,7 +22,6 @@ import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
-import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.ssm.SsmCommandService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
@@ -140,6 +139,11 @@ public class AutoScalingReconciler {
     }
 
     public void reconcile(AutoScalingGroup asg) {
+        // EKS owns the capacity of a managed node group's group. Its instance is the cluster's node, which
+        // Auto Scaling never launches, terminates or replaces.
+        if (asg.isEksManaged()) {
+            return;
+        }
         asgService.reconcileIfPresent(asg, () -> {
             settleStandbyMoves(asg);
             removeTerminatingInstances(asg);
@@ -295,8 +299,14 @@ public class AutoScalingReconciler {
                 if ("running".equals(ec2State)) {
                     String standbyActivityId = asgInst.getStandbyActivityId();
                     boolean returningFromStandby = standbyActivityId != null;
-                    registerWithTargetGroups(asg, asgInst, returningFromStandby);
-                    registerWithClassicLoadBalancers(asg, asgInst, returningFromStandby);
+                    AutoScalingService.registerWithTargetGroups(elbV2Service, asg,
+                            AutoScalingService.attachedTargetGroups(asg),
+                            asgInst.getInstanceId(), returningFromStandby);
+                    // Without this a Classic Load Balancer would stay empty, and a min_elb_capacity wait would never
+                    // be satisfied.
+                    AutoScalingService.registerWithClassicLoadBalancers(elbClassicService, asg,
+                            AutoScalingService.attachedClassicLoadBalancers(asg), List.of(asgInst.getInstanceId()),
+                            returningFromStandby);
                     asgInst.setLifecycleState("InService");
                     changed = true;
                     if (standbyActivityId != null) {
@@ -875,56 +885,6 @@ public class AutoScalingReconciler {
     }
 
 
-    /**
-     * Registers a newly launched or returning instance with every Classic load balancer the group names.
-     *
-     * <p>An ASG attached through {@code LoadBalancerNames} feeds a Classic load balancer, not a
-     * target group, and the two lists are independent; a group can carry either or both. Without
-     * this the Classic load balancer would stay empty, and a {@code min_elb_capacity} wait would
-     * never be satisfied.
-     */
-    private void registerWithClassicLoadBalancers(AutoScalingGroup asg, AsgInstance asgInst,
-                                                 boolean returningFromStandby) {
-        if (elbClassicService == null) {
-            return;
-        }
-        for (String lbName : asg.getLoadBalancerNames()) {
-            try {
-                elbClassicService.registerInstances(asg.getRegion(), lbName,
-                        List.of(asgInst.getInstanceId()));
-                LOG.debugv("ASG {0}: registered {1} with Classic ELB {2}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), lbName);
-            } catch (Exception e) {
-                LOG.warnv(e, "ASG {0}: could not register {1} with Classic ELB {2}: {3}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), lbName, e.getMessage());
-                if (returningFromStandby && !(e instanceof AwsException aws
-                        && "LoadBalancerNotFound".equals(aws.getErrorCode()))) {
-                    throw e;
-                }
-            }
-        }
-    }
-
-    private void registerWithTargetGroups(AutoScalingGroup asg, AsgInstance asgInst,
-                                          boolean returningFromStandby) {
-        for (String tgArn : asg.getTargetGroupARNs()) {
-            try {
-                TargetDescription td = new TargetDescription();
-                td.setId(asgInst.getInstanceId());
-                elbV2Service.registerTargets(asg.getRegion(), tgArn, List.of(td));
-                LOG.debugv("ASG {0}: registered {1} with TG {2}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), tgArn);
-            } catch (Exception e) {
-                LOG.warnv(e, "ASG {0}: could not register {1} with TG {2}: {3}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), tgArn, e.getMessage());
-                if (returningFromStandby && !(e instanceof AwsException aws
-                        && "TargetGroupNotFound".equals(aws.getErrorCode()))) {
-                    throw e;
-                }
-            }
-        }
-    }
-
     private LaunchSource resolveLaunchSource(AutoScalingGroup asg) {
         LaunchConfiguration lc = resolveLaunchConfiguration(asg);
         if (lc != null) {
@@ -964,7 +924,7 @@ public class AutoScalingReconciler {
                     asg.getRegion(),
                     launchTemplate.getLaunchTemplateId(),
                     null,
-                    asg.getLaunchTemplateVersion() == null ? List.of() : List.of(asg.getLaunchTemplateVersion()))
+                    AutoScalingService.launchTemplateVersionSelector(asg.getLaunchTemplateVersion()))
                     .getFirst();
             String resolvedVersion = version.getLatestVersionNumber() != null
                     ? version.getLatestVersionNumber()
@@ -997,7 +957,7 @@ public class AutoScalingReconciler {
                         asg.getRegion(),
                         mixedLaunchTemplate.getLaunchTemplateId(),
                         null,
-                        specification.getVersion() == null ? List.of() : List.of(specification.getVersion()))
+                        AutoScalingService.launchTemplateVersionSelector(specification.getVersion()))
                         .getFirst();
                 String resolvedVersion = version.getLatestVersionNumber() != null
                         ? version.getLatestVersionNumber()

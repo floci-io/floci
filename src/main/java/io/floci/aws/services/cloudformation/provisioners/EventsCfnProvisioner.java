@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
@@ -25,6 +26,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -41,16 +43,21 @@ import java.util.stream.Collectors;
  * {@code AWS::Events::EventBus} and {@code AWS::Events::EventBusPolicy}. Extracted from
  * the former CloudFormation monolith.
  *
- * <p>Two of these types need the resource's stored attributes to delete, not just the physical
- * id, so they are served by the {@link #delete(StackResource, String)} override rather than the
- * id-only form: a rule remembers the custom bus it lives on, and an event bus remembers the
- * creation time that proves the stack still owns it.
+ * <p>Two of these types are served by the {@link #delete(StackResource, String)} override rather
+ * than the id-only form: an event bus remembers the creation time that proves the stack still owns
+ * it, and a rule saved before its physical id carried its custom bus finds that bus in the
+ * {@code EventBusName} attribute it stored.
  */
 @ApplicationScoped
 public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(EventsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final String DEFAULT_EVENT_BUS = "default";
+    private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
+    /** Joins a custom bus to the rule name in a rule's physical id; neither name can contain it. */
+    private static final char RULE_ID_SEPARATOR = '|';
 
     /** The shape AWS::Events::Rule's resource schema declares for its targets. */
     private static final String TARGETS = CfnPropertyTypes.propertyShape("AWS::Events::Rule", "Targets");
@@ -59,7 +66,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
     private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
-            Set.of("Name", "Description", "Tags", "Policy");
+            Set.of("Name", "EventSourceName", "Description", "Tags", "Policy");
     private static final Pattern EVENT_BUS_TAG_PATTERN =
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
@@ -91,14 +98,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * A rule and an event bus both need attributes the physical id cannot carry: the rule's custom
-     * bus, and the bus's recorded creation time. Deleting either by id alone would silently target
-     * the default bus or skip the ownership check.
+     * An event bus needs its stored creation time, which the physical id cannot carry; deleting
+     * it by id alone would skip the ownership check. A rule's physical id names its custom bus, but
+     * a rule saved before it did has only the rule name there and its bus in the stored
+     * {@code EventBusName}, which deleting by id alone would silently trade for the default bus.
      */
     @Override
     public void delete(StackResource resource, String region) {
         switch (resource.getResourceType()) {
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+            case "AWS::Events::Rule" -> deleteRule(resource.getPhysicalId(),
                     resource.getAttributes() != null ? resource.getAttributes().get("EventBusName") : null,
                     region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(resource, region);
@@ -112,7 +120,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
+            case "AWS::Events::Rule" -> deleteRule(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::Events::ApiDestination" -> deleteApiDestinationSafe(physicalId, region);
@@ -127,11 +135,14 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         // before this run touches a target, so a rollback never puts back a target the rule stopped
         // carrying two updates ago.
         r.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
-        // Name is createOnly and the physical id is the rule name, so ctx.stablePhysicalName
-        // applies directly: without it an unnamed rule was given a fresh random name on every
-        // UpdateStack, creating a second rule and leaving the first behind with its targets.
-        String ruleName = ctx.stablePhysicalName(
-                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        // Name is createOnly, so an unnamed rule keeps its name across an UpdateStack: without that it
+        // was given a fresh random name on every update, creating a second rule and leaving the first
+        // behind with its targets. The prior name comes out of the prior physical id, which for a rule
+        // on a custom bus also carries the bus.
+        String explicitName = ctx.resolveOptional(props, "Name");
+        String ruleName = explicitName != null && !explicitName.isBlank()
+                ? explicitName
+                : ruleNameOf(ctx.stablePhysicalName(null, r.getLogicalId(), 64, false));
 
         String busName = ctx.resolveOptional(props, "EventBusName");
         String description = ctx.resolveOptional(props, "Description");
@@ -153,11 +164,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
         Rule rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
                 state, description, roleArn, Map.of(), ctx.region());
-        r.setPhysicalId(ruleName);
+        r.setPhysicalId(rulePhysicalId(ruleName, busName, ctx.accountId()));
         r.getAttributes().put("Arn", rule.getArn());
         r.getAttributes().put("RuleName", ruleName);
-        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
-        // the right bus (the physical id is only the rule name, which resolves to the default bus).
+        // The bus as the template gave it, name or ARN. The physical id carries it too; this copy is
+        // what a delete reads for a rule saved before the physical id did.
         if (busName != null && !busName.isBlank()) {
             r.getAttributes().put("EventBusName", busName);
         }
@@ -203,6 +214,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             }
             Target target = new Target(targetId, targetArn, input, inputPath);
             target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+            JsonNode kinesisParamsNode = resolved.path("KinesisParameters");
+            if (kinesisParamsNode.isObject()) {
+                target.setKinesisParameters(MAPPER.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+            }
             JsonNode httpParamsNode = resolved.path("HttpParameters");
             if (httpParamsNode.isObject()) {
                 target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
@@ -307,6 +322,17 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * An event bus update that failed after its tag snapshot may already have changed tags, so the
+     * engine keeps that attempt for {@link #rollbackUpdate} instead of putting the previous resource
+     * back over it. A failure before the snapshot changed nothing and is left to the engine.
+     */
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return "AWS::Events::EventBus".equals(resource.getResourceType())
+                && resource.getAttributes().containsKey(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
      * Puts the rule's targets back to what the snapshot holds and spends it. Exact rather than
      * additive: a target the failed update added is removed, and every snapshotted target is put
      * again, so one the update modified goes back to the configuration it was found with.
@@ -322,6 +348,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         if ("AWS::Events::ApiDestination".equals(resource.getResourceType())) {
             return rollbackApiDestinationUpdate(resource);
+        }
+        if ("AWS::Events::EventBus".equals(resource.getResourceType())) {
+            return rollbackEventBusUpdate(resource);
         }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
@@ -386,10 +415,19 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
      */
     private void provisionEventBus(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale
+        r.getAttributes().remove(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
         validateEventBusProperties(props);
         String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
-        validateEventBusName(busName);
+        String eventSourceName = ctx.resolveOptional(props, "EventSourceName");
+        boolean sameBus = existingBusName != null && existingBusName.equals(busName);
+        if (eventSourceName != null || !sameBus) {
+            validateEventBusName(busName, eventSourceName);
+        }
+        if (sameBus) {
+            eventSourceName = busName.indexOf('/') >= 0 ? busName : null;
+        }
         if (existingBusName != null && !existingBusName.equals(busName)) {
             throw new AwsException("ValidationError",
                     "Updating EventBus Name requires resource replacement, which is not supported.", 400);
@@ -401,11 +439,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> tags = parseEventBusTags(props != null ? props.get("Tags") : null, ctx);
         JsonNode policy = resolveEventBusPolicy(props, ctx);
+        if (eventSourceName != null && !policy.isNull()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Policy is not supported on a partner event bus.", 400);
+        }
 
         EventBus bus;
         boolean createdBus = false;
         try {
-            bus = eventBridgeService.createEventBus(busName, description, tags, ctx.region());
+            bus = eventBridgeService.createEventBus(busName, eventSourceName, description, tags, ctx.region());
             createdBus = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
@@ -424,7 +466,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
                 throw e;
             }
-            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags, policy);
+            validateEventBusMutablePropertiesUnchanged(r, bus, description, policy);
+            updateEventBusTags(r, bus, tags, ctx.region());
         }
 
         // Record identity before applying the policy: rollbackCreatedResources skips any resource
@@ -467,10 +510,22 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void validateEventBusName(String busName) {
+    private void validateEventBusName(String busName, String eventSourceName) {
         if (busName == null || busName.isBlank()) {
             throw new AwsException("ValidationError",
                     "Name is required for AWS::Events::EventBus.", 400);
+        }
+        if (eventSourceName != null) {
+            if (eventSourceName.length() > 256
+                    || !EventBridgeService.PARTNER_EVENT_SOURCE_NAME.matcher(eventSourceName).matches()) {
+                throw new AwsException("ValidationError",
+                        "Invalid AWS::Events::EventBus EventSourceName: " + eventSourceName, 400);
+            }
+            if (!eventSourceName.equals(busName)) {
+                throw new AwsException("ValidationError",
+                        "AWS::Events::EventBus Name must match EventSourceName: " + eventSourceName, 400);
+            }
+            return;
         }
         if (busName.length() > 256
                 || !busName.matches("[.\\-_A-Za-z0-9]+")
@@ -530,25 +585,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void validateEventBusMutablePropertiesUnchanged(
-            StackResource resource, EventBus bus, String requestedDescription,
-            Map<String, String> requestedTags, JsonNode requestedPolicy) {
+            StackResource resource, EventBus bus, String requestedDescription, JsonNode requestedPolicy) {
         if (!Objects.equals(bus.getDescription(), requestedDescription)) {
             throw unsupportedEventBusMutableUpdate();
-        }
-
-        // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
-        // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
-        // so allow this one-time adoption and start tracking the requested keys afterwards.
-        if (resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
-            Map<String, String> currentManagedTags = new LinkedHashMap<>();
-            for (String key : eventBusManagedTagKeys(resource)) {
-                if (bus.getTags().containsKey(key)) {
-                    currentManagedTags.put(key, bus.getTags().get(key));
-                }
-            }
-            if (!currentManagedTags.equals(requestedTags)) {
-                throw unsupportedEventBusMutableUpdate();
-            }
         }
 
         String managedPolicy = resource.getAttributes().get(EVENT_BUS_MANAGED_POLICY_ATTR);
@@ -594,8 +633,60 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private AwsException unsupportedEventBusMutableUpdate() {
         return new AwsException("ValidationError",
-                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
+                "Updating AWS::Events::EventBus Description or Policy is not supported "
                         + "until transactional rollback is available.", 400);
+    }
+
+    /**
+     * Drives the tags of the bus the stack already owns to the template's, as AWS's update handler
+     * does: a key the stack set and the template dropped is untagged, and a tag added outside the
+     * stack stays. A bus provisioned before its keys were tracked has none to drop. The tags of the
+     * keys this touches are recorded first, so {@link #rollbackUpdate} can put them back.
+     */
+    private void updateEventBusTags(StackResource r, EventBus bus, Map<String, String> tags, String region) {
+        Set<String> managedKeys = eventBusManagedTagKeys(r);
+        Set<String> touchedKeys = new HashSet<>(managedKeys);
+        touchedKeys.addAll(tags.keySet());
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("arn", bus.getArn());
+        snapshot.put("managedTagKeys", r.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR));
+        CfnRollback.putTagSnapshot(snapshot, touchedKeys, bus.getTags());
+        r.getAttributes().put(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+        reconcileEventBusTags(bus.getArn(), managedKeys, tags, region);
+    }
+
+    /**
+     * Puts the managed tags and tracked keys the bus had before the failed update back, and spends
+     * the snapshot. A bus this update did not reach carries no snapshot, which is the false that
+     * keeps the stack reporting that rollback is not implemented.
+     */
+    private boolean rollbackEventBusUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        reconcileEventBusTags(snapshot.path("arn").asText(), CfnRollback.snapshotTagKeys(snapshot),
+                CfnRollback.snapshotTags(snapshot), snapshot.path("region").asText());
+        String managedTagKeys = snapshotText(snapshot, "managedTagKeys");
+        if (managedTagKeys == null) {
+            resource.getAttributes().remove(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
+        } else {
+            resource.getAttributes().put(EVENT_BUS_MANAGED_TAG_KEYS_ATTR, managedTagKeys);
+        }
+        resource.getAttributes().remove(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    /**
+     * Applies {@code desired} and removes the {@code managedKeys} it does not hold, so a tag added
+     * outside the stack stays.
+     */
+    private void reconcileEventBusTags(String arn, Collection<String> managedKeys, Map<String, String> desired,
+                                       String region) {
+        CfnRollback.reconcileTags(managedKeys, desired,
+                dropped -> eventBridgeService.untagResource(arn, dropped, region),
+                tags -> eventBridgeService.tagResource(arn, tags, region));
     }
 
     private Set<String> eventBusManagedTagKeys(StackResource resource) {
@@ -632,8 +723,59 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
     }
 
+    /**
+     * The physical id CloudFormation gives a rule, which is also what its {@code Ref} returns: the
+     * rule name for a rule on the default event bus, and {@code <event bus name>|<rule name>} for a
+     * rule on a custom bus. An event bus given by ARN counts by its name when it is in the stack's own
+     * account, so the default bus given by ARN still yields the bare rule name; a bus in another
+     * account keeps its ARN, {@code <event bus ARN>|<rule name>}. This is the format of AWS's resource
+     * provider for the type. EventBridge's own operations take the rule name and the bus separately,
+     * so a caller splits the value at the {@code |}.
+     */
+    private static String rulePhysicalId(String ruleName, String busNameOrArn, String stackAccountId) {
+        if (busNameOrArn == null || busNameOrArn.isBlank() || DEFAULT_EVENT_BUS.equals(busNameOrArn)) {
+            return ruleName;
+        }
+        String busResource = AwsArnUtils.resourceIfArnFor(busNameOrArn, "events").orElse(null);
+        if (busResource != null && busResource.startsWith(EVENT_BUS_RESOURCE_PREFIX)
+                && AwsArnUtils.parse(busNameOrArn).accountId().equals(stackAccountId)) {
+            String busName = busResource.substring(EVENT_BUS_RESOURCE_PREFIX.length());
+            return DEFAULT_EVENT_BUS.equals(busName) ? ruleName : busName + RULE_ID_SEPARATOR + ruleName;
+        }
+        return busNameOrArn + RULE_ID_SEPARATOR + ruleName;
+    }
+
+    /** The rule name a rule's physical id carries: all of it, or what follows its custom bus. */
+    private static String ruleNameOf(String physicalId) {
+        int separator = physicalId.indexOf(RULE_ID_SEPARATOR);
+        return separator < 0 ? physicalId : physicalId.substring(separator + 1);
+    }
+
+    /** The custom bus, by name or ARN, a rule's physical id carries, or null for the default bus. */
+    private static String busNameOf(String physicalId) {
+        int separator = physicalId.indexOf(RULE_ID_SEPARATOR);
+        return separator < 0 ? null : physicalId.substring(0, separator);
+    }
+
+    /**
+     * Deletes the rule a physical id names, on the bus the id carries. A rule saved before the id
+     * carried its custom bus has only the rule name there; {@code storedBus}, the bus it stored at
+     * creation, then says where it lives.
+     */
+    private void deleteRule(String physicalId, String storedBus, String region) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return;
+        }
+        String busName = busNameOf(physicalId);
+        deleteEventBridgeRuleSafe(ruleNameOf(physicalId), busName != null ? busName : storedBus, region);
+    }
+
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
+            if (!eventBridgeService.ruleExists(ruleName, busName, region)) {
+                LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
+                return;
+            }
             // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
             List<Target> targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {

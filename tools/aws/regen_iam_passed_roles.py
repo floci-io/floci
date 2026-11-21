@@ -81,9 +81,10 @@ NAMESPACES = (
     "application-autoscaling", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
-    "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda", "logs", "pipes",
-    "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "sagemaker", "scheduler",
-    "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
+    "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
+    "logs", "pipes",
+    "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
+    "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
     "transcribe", "transfer", "translate",
 )
 
@@ -104,7 +105,6 @@ NOT_COVERED = {
     "cloudfront": "REST routes no rule maps yet",
     "dlm": "REST routes no rule maps yet",
     "elasticfilesystem": "REST routes no rule maps yet",
-    "emr-serverless": "REST routes no rule maps yet",
     "es": "REST routes no rule maps yet",
     "fis": "REST routes no rule maps yet",
     "guardduty": "REST routes no rule maps yet",
@@ -114,7 +114,6 @@ NOT_COVERED = {
     "mq": "REST routes no rule maps yet",
     "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented",
     "rum": "REST routes no rule maps yet",
-    "s3tables": "REST routes no rule maps yet",
 }
 
 # A member that names a role: Role, RoleArn, RoleName, their plurals, and an Update or Override of one.
@@ -245,6 +244,11 @@ BY_HAND.update({
 })
 
 NO_ROLE_MEMBER = "no member of the request names a role"
+# For an operation no botocore release models, as a legacy one the SDKs dropped.
+NO_SUCH_OPERATION = "botocore's model has no such operation"
+# For an operation the reference lists that no model of the pinned botocore has, one AWS has shipped since the
+# pin. It lasts until a bump brings the operation in, when entry_for reads the role its request names.
+NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
 XML_BODY = "the request body is XML, which PassedRoles does not read"
 
@@ -257,24 +261,21 @@ NOT_READ = {
     "dms:ModifyInstanceProfile": NO_ROLE_MEMBER,
     "ec2:RequestSpotFleet": "the request names its roles in EC2's own protocol, one of them as an instance profile",
     "ecs:CreateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
-    "ecs:CreateGateway": "botocore's model has no such operation",
     "ecs:UpdateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
-    "ecs:UpdateGateway": "botocore's model has no such operation",
     "eks:UpdateClusterConfig": "the reference passes the node role to ec2 or eks and nothing says which",
     "elasticmapreduce:RunJobFlow": "JobFlowRole names an instance profile, and the reference passes the roles "
                                    "to three services without saying which goes where",
     "elasticmapreduce:UpdateStudio": NO_ROLE_MEMBER,
     "glue:GetJob": NO_ROLE_MEMBER,
     "glue:GetJobs": NO_ROLE_MEMBER,
-    "lambda:AddEventSource": "botocore's model has no such operation",
+    "lambda:AddEventSource": NO_SUCH_OPERATION,
     "logs:CreateImportTask": "the reference passes the role to cloudtrail or logs and nothing says which",
+    "logs:StartQuery": NO_ROLE_MEMBER,
     "rds:CreateBlueGreenDeployment": NO_ROLE_MEMBER,
     "s3:CreateAccessGrantsLocation": XML_BODY,
     "s3:PutBucketReplication": XML_BODY,
     "redshift:ModifyLakehouseConfiguration": NO_ROLE_MEMBER,
     "redshift-serverless:UpdateLakehouseConfiguration": NO_ROLE_MEMBER,
-    "sagemaker:CreateTrainingSession": "the reference passes the role to sagemaker or training-session.sagemaker "
-                                       "and nothing says which",
     "sagemaker:CreateTransformJob": NO_ROLE_MEMBER,
     "sagemaker:ImportHubContent": NO_ROLE_MEMBER,
     "ssm:CreateDocument": NO_ROLE_MEMBER,
@@ -394,9 +395,6 @@ MEMBER_SERVICES = {
         "taskRoleArn": ECS_TASKS,
         "infrastructureRoleArn": ECS_INFRASTRUCTURE,
     },
-    # "Amazon EMR uses this role" for the session. The reference also lists
-    # managed-compute.elasticmapreduce, but the request cannot say which compute it runs on.
-    "elasticmapreduce:StartSession": {"ExecutionRoleArn": "elasticmapreduce"},
     # rds-preview is the principal of RDS's preview environment; PassedRoles' RDS cases pass to rds.
     "rds:*": {"*": "rds"},
 }
@@ -584,9 +582,11 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
     """What the file says for one operation, from its services and the models of its namespace."""
     if operation in BY_HAND:
         return {"passedTo": passed_to, "byHand": BY_HAND[operation]}
+    name = operation.split(":", 1)[1]
     if operation in NOT_READ:
         return {"passedTo": passed_to, "notRead": NOT_READ[operation]}
-    name = operation.split(":", 1)[1]
+    if not any(name in model["operations"] for model in models.values()):
+        return {"passedTo": passed_to, "notRead": NOT_IN_BOTOCORE}
     members: dict[str, bool] = {}
     for model in models.values():
         for path, by_name in role_members(model, name).items():

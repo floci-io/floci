@@ -9,7 +9,9 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Integration {
     private String integrationId;
+    private String description;
     private String integrationType; // AWS_PROXY, HTTP_PROXY
+    private String integrationSubtype;
     private String connectionType; // INTERNET, VPC_LINK
     private String integrationUri;
     private String payloadFormatVersion; // 1.0, 2.0
@@ -19,6 +21,7 @@ public class Integration {
     private Map<String, String> responseTemplates;
     private String templateSelectionExpression;
     private Map<String, String> requestParameters;
+    private Map<String, Map<String, String>> responseParameters;
     private String connectionId;
 
     private String credentialsArn;
@@ -32,7 +35,9 @@ public class Integration {
     public Integration(Integration src) {
         this.credentialsArn = src.credentialsArn;
         this.integrationId = src.integrationId;
+        this.description = src.description;
         this.integrationType = src.integrationType;
+        this.integrationSubtype = src.integrationSubtype;
         this.connectionType = src.connectionType;
         this.integrationUri = src.integrationUri;
         this.payloadFormatVersion = src.payloadFormatVersion;
@@ -42,14 +47,21 @@ public class Integration {
         this.responseTemplates = src.responseTemplates;
         this.templateSelectionExpression = src.templateSelectionExpression;
         this.requestParameters = src.requestParameters;
+        this.responseParameters = src.responseParameters;
         this.connectionId = src.connectionId;
     }
 
     public String getIntegrationId() { return integrationId; }
     public void setIntegrationId(String integrationId) { this.integrationId = integrationId; }
 
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+
     public String getIntegrationType() { return integrationType; }
     public void setIntegrationType(String integrationType) { this.integrationType = integrationType; }
+
+    public String getIntegrationSubtype() { return integrationSubtype; }
+    public void setIntegrationSubtype(String integrationSubtype) { this.integrationSubtype = integrationSubtype; }
 
     public String getConnectionType() { return connectionType; }
     public void setConnectionType(String connectionType) { this.connectionType = connectionType; }
@@ -77,6 +89,9 @@ public class Integration {
 
     public Map<String, String> getRequestParameters() { return requestParameters; }
     public void setRequestParameters(Map<String, String> requestParameters) { this.requestParameters = requestParameters; }
+
+    public Map<String, Map<String, String>> getResponseParameters() { return responseParameters; }
+    public void setResponseParameters(Map<String, Map<String, String>> responseParameters) { this.responseParameters = responseParameters; }
 
     public String getConnectionId() { return connectionId; }
     public void setConnectionId(String connectionId) { this.connectionId = connectionId; }

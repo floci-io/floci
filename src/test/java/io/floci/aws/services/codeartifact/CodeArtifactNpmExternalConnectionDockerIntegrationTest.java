@@ -2,8 +2,6 @@ package io.floci.aws.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.core.common.Digests;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -15,9 +13,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.Base64;
 
+import static io.floci.aws.testing.CodeArtifactRequests.npmPublishEnvelope;
 import static io.floci.aws.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -265,29 +262,11 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
      */
     @Test
     @Order(9)
-    void retainingAnOlderRealVersionNeverClobbersAGenuineLocalLatest() throws Exception {
+    void retainingAnOlderRealVersionNeverClobbersAGenuineLocalLatest() {
         byte[] localContent = "a-genuine-local-publish".getBytes(StandardCharsets.UTF_8);
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode localVersionDoc = mapper.createObjectNode();
-        localVersionDoc.put("name", PACKAGE_NAME);
-        localVersionDoc.put("version", "9.9.9");
-        ObjectNode localDist = localVersionDoc.putObject("dist");
-        localDist.put("shasum", Digests.sha1Hex(localContent));
-        localDist.put("integrity", "sha512-" + Base64.getEncoder().encodeToString(
-                MessageDigest.getInstance("SHA-512").digest(localContent)));
-        ObjectNode publishBody = mapper.createObjectNode();
-        publishBody.put("_id", PACKAGE_NAME);
-        publishBody.put("name", PACKAGE_NAME);
-        publishBody.put("description", "");
-        publishBody.putObject("dist-tags").put("latest", "9.9.9");
-        publishBody.putObject("versions").set("9.9.9", localVersionDoc);
-        ObjectNode attachment = publishBody.putObject("_attachments").putObject(PACKAGE_NAME + "-9.9.9.tgz");
-        attachment.put("content_type", "application/octet-stream");
-        attachment.put("data", Base64.getEncoder().encodeToString(localContent));
-        attachment.put("length", localContent.length);
-
         given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
-                .body(mapper.writeValueAsString(publishBody))
+                .body(npmPublishEnvelope(PACKAGE_NAME, "9.9.9", PACKAGE_NAME + "-9.9.9.tgz", localContent,
+                        "{\"latest\":\"9.9.9\"}"))
                 .put("/codeartifact/npm/" + DOMAIN + "/" + LATEST_REPO + "/" + PACKAGE_NAME)
                 .then().statusCode(anyOf(equalTo(200), equalTo(201)));
 
