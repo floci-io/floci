@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -330,13 +331,55 @@ final class EmrSparkSteps {
     }
 
     /**
+     * The S3 folder a step's application container logs go to: its own log destination's {@code containers} folder,
+     * as "the application's container logs will also be uploaded to the location specified in the
+     * StepMonitoringConfiguration", where it has one ({@link #logUri}), and else its cluster's.
+     */
+    static String containerLogFolder(EmrCluster cluster, EmrStep step) {
+        return EmrServerlessSparkRunner.logFolder(logUri(cluster, step), cluster.getId() + "/containers/");
+    }
+
+    /**
+     * Where a node removed from the cluster puts its containers' logs: the running steps' own destination when they
+     * share one, as those logs are their applications', and else the cluster's. A node removed between steps, or while
+     * steps with other destinations run, uses the cluster's.
+     */
+    static String nodeLogFolder(EmrCluster cluster) {
+        Set<String> folders = new HashSet<>();
+        String folder = containerLogFolder(cluster);
+        for (EmrStep step : cluster.getSteps()) {
+            if (EmrClusterLifecycle.RUNNING.equals(step.getState())
+                    || EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState())) {
+                folder = containerLogFolder(cluster, step);
+                folders.add(String.valueOf(folder));
+            }
+        }
+        return folders.size() == 1 ? folder : containerLogFolder(cluster);
+    }
+
+    /**
      * The S3 folder a step's logs go to, or null when its cluster has no {@code LogUri}: "If a value is not
      * provided, logs are not created". The Management Guide's "Log locations" puts step logs at
-     * {@code <LogUri>/<cluster-id>/steps/<step-id>/}.
+     * {@code <LogUri>/<cluster-id>/steps/<step-id>/}, under the step's own destination where it has one.
      */
     static String logFolder(EmrCluster cluster, EmrStep step) {
-        return EmrServerlessSparkRunner.logFolder(cluster.getLogUri(),
+        return EmrServerlessSparkRunner.logFolder(logUri(cluster, step),
                 cluster.getId() + "/steps/" + step.getId() + "/");
+    }
+
+    /**
+     * Where a step's logs are published: the {@code LogUri} of its StepMonitoringConfiguration, which "Beginning in
+     * Amazon EMR version 7.11" "take[s] precedence over any cluster-wide logging settings", and else its cluster's.
+     * None without the cluster's: "If your cluster does not enable cluster logging, step logs will not be uploaded to
+     * S3 even if you provide a StepMonitoringConfiguration" (Management Guide, "Customizing the log location for step
+     * log files"). The guide gives no folder layout under the step's own destination; it is the cluster's.
+     */
+    static String logUri(EmrCluster cluster, EmrStep step) {
+        if (cluster.getLogUri() == null || step.getLogUri() == null
+                || !EmrService.releaseAtLeast(cluster.getReleaseLabel(), 7, 11, 0)) {
+            return cluster.getLogUri();
+        }
+        return step.getLogUri();
     }
 
     /**

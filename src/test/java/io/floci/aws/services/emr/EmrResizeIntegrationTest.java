@@ -10,8 +10,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.floci.aws.testing.EmrRequests.emr;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
@@ -448,5 +450,64 @@ class EmrResizeIntegrationTest {
         emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("InstanceFleets", hasSize(1));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    // A cluster on releaseLabel whose task group starts with these configurations: the cluster's id, then the group's.
+    private static List<String> clusterWithTaskConfigurations(String releaseLabel, String configurations) {
+        String id = emr("RunJobFlow", "{\"Name\":\"reconfigure\",\"ReleaseLabel\":\"" + releaseLabel + "\","
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":["
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1,"
+                + "\"Configurations\":" + configurations + "}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        return List.of(id, emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'TASK' }.Id"));
+    }
+
+    /**
+     * MERGE "only adds or modifies the new configurations that you submit. It preserves existing configurations",
+     * where OVERWRITE, the default, replaces them.
+     */
+    @Test
+    void aMergeReconfigurationKeepsTheGroupsOtherConfigurationsAndOverwriteReplacesThem() {
+        List<String> ids = clusterWithTaskConfigurations("emr-7.5.0", "[{\"Classification\":\"yarn-site\","
+                + "\"Properties\":{\"a\":\"1\",\"b\":\"2\"}},{\"Classification\":\"core-site\","
+                + "\"Properties\":{\"x\":\"1\"}}]");
+        String listGroups = "{\"ClusterId\":\"" + ids.get(0) + "\"}";
+        String task = "InstanceGroups.find { it.Id == '" + ids.get(1) + "' }";
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + ids.get(1) + "\","
+                + "\"ReconfigurationType\":\"MERGE\",\"Configurations\":[{\"Classification\":\"yarn-site\","
+                + "\"Properties\":{\"b\":\"3\",\"c\":\"4\"}},{\"Classification\":\"hive-site\","
+                + "\"Properties\":{\"h\":\"1\"}}]}]}").then().statusCode(200);
+        emr("ListInstanceGroups", listGroups).then().statusCode(200)
+                .body(task + ".Configurations.Classification", equalTo(List.of("yarn-site", "core-site", "hive-site")))
+                // GPath answers null for a key named Properties read as ".Properties".
+                .body(task + ".Configurations[0].get('Properties')", equalTo(Map.of("a", "1", "b", "3", "c", "4")))
+                .body(task + ".Configurations[1].get('Properties').x", equalTo("1"))
+                .body(task + ".ConfigurationsVersion", equalTo(1));
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + ids.get(1) + "\","
+                + "\"Configurations\":[{\"Classification\":\"spark\",\"Properties\":{\"s\":\"1\"}}]}]}")
+                .then().statusCode(200);
+        emr("ListInstanceGroups", listGroups).then().statusCode(200)
+                .body(task + ".Configurations.Classification", equalTo(List.of("spark")))
+                .body(task + ".ConfigurationsVersion", equalTo(2));
+    }
+
+    @Test
+    void aMergeBeforeItsReleasesOrAnUnknownTypeIsRefused() {
+        String early = clusterWithTaskConfigurations("emr-6.5.0", "[]").get(1);
+        String current = clusterWithTaskConfigurations("emr-7.5.0", "[]").get(1);
+        String change = "\"Configurations\":[{\"Classification\":\"spark\",\"Properties\":{}}]";
+
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + early + "\","
+                + "\"ReconfigurationType\":\"MERGE\"," + change + "}]}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("5.35.0 and 6.6.0"));
+        emr("ModifyInstanceGroups", "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + current + "\","
+                + "\"ReconfigurationType\":\"REPLACE\"," + change + "}]}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("'instanceGroups.1.member.reconfigurationType'"));
     }
 }

@@ -405,6 +405,7 @@ public class EmrHandler {
         setRawJson(node, "EngineConfigurations", session.getEngineConfigurations());
         setRawJson(node, "MonitoringConfiguration", session.getMonitoringConfiguration());
         node.put("SessionIdleTimeoutInMinutes", session.getSessionIdleTimeoutInMinutes());
+        putIfSet(node, "ServerUrl", session.getServerUrl());
         node.set("Tags", tagArray(session.getTags()));
         return node;
     }
@@ -1279,7 +1280,8 @@ public class EmrHandler {
                 modifications.add(new EmrService.InstanceGroupModification(
                         g.path("InstanceGroupId").asText(null),
                         count.isMissingNode() || count.isNull() ? null : count.asInt(),
-                        configurations.isArray() ? configurations.toString() : null));
+                        configurations.isArray() ? configurations.toString() : null,
+                        g.path("ReconfigurationType").asText(null)));
             }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
@@ -1490,6 +1492,9 @@ public class EmrHandler {
         if (includeExecutionRole && step.getExecutionRoleArn() != null) {
             node.put("ExecutionRoleArn", step.getExecutionRoleArn());
         }
+        // Its own log destination and key, the StepMonitoringConfiguration it was given.
+        putIfSet(node, "LogUri", step.getLogUri());
+        putIfSet(node, "EncryptionKeyArn", step.getEncryptionKeyArn());
         ObjectNode status = node.putObject("Status");
         status.put("State", step.getState());
         if (step.getStateChangeReason() != null) {
@@ -1697,6 +1702,9 @@ public class EmrHandler {
                 props.forEach(p -> map.put(p.path("Key").asText(), p.path("Value").asText()));
                 step.setProperties(map);
             }
+            JsonNode s3Logs = s.path("StepMonitoringConfiguration").path("S3MonitoringConfiguration");
+            step.setLogUri(s3Logs.path("LogUri").asText(null));
+            step.setEncryptionKeyArn(s3Logs.path("EncryptionKeyArn").asText(null));
             steps.add(step);
         }
         return steps;

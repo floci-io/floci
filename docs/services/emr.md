@@ -190,6 +190,19 @@ The reference names no devices, so Floci names them `/dev/sdb`, `/dev/sdc` and o
 volumes to an instance is refused with `ValidationException` "There is a limit of 25 volumes per instance.", the
 Management Guide's own limit and sentence; AWS's error for it is not documented. `ModifyInstanceFleet` changes a
 fleet's target capacities only; the `InstanceTypeConfigs` it takes are not applied.
+`ModifyInstanceGroups` keeps the `Configurations` it gives a group, which `ListInstanceGroups` gives back with the
+group's `ConfigurationsVersion`. With `ReconfigurationType` `MERGE` they are merged into the group's own, as the Release
+Guide's "Reconfigure an instance group in a running cluster" has it: "This option only adds or modifies the new
+configurations that you submit. It preserves existing configurations." A classification they name takes their
+properties over its own, and its nested configurations are merged the same way; the group's other classifications
+stay. `OVERWRITE`, the default, replaces them. `MERGE` is "supported for Amazon EMR releases 5.35.0 and 6.6.0 and
+later"; on an earlier release it is refused with `ValidationException`, in Floci's wording, and a type that is neither
+with the framework's enum message.
+A managed scaling policy, from `PutManagedScalingPolicy` or `RunJobFlow`, takes a `UtilizationPerformanceIndex` of 1,
+25, 50, 75 or 100 only, as the Management Guide's "Advanced Scaling for Amazon EMR" says: "If you set the index to
+values other than these, it results in a validation error." One outside the model's 1 to 100 is refused with the
+framework's `ValidationException`, and another with `ValidationException` in Floci's wording, as the guide gives none.
+The policy is kept and given back as written.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
@@ -251,6 +264,11 @@ lifecycle on its cluster but runs no server for it.
   hour". AWS's endpoint is an `https://` URL per session without a port; a Spark Connect URL holds no path, so Floci's
   is its address alone, port included, and the token names the session. No `Credentials` are given. A session that has
   ended, or is `TERMINATING`, is refused with `InvalidRequestException`, in Floci's own wording.
+* **ServerUrl**: in the `docker` mode, once a session's server answers, `GetSession` and `ListSessions` give it Floci's
+  own address in Spark Connect's form, such as `sc://localhost:4566`, as "The Spark Connect server URL for the
+  session", which a client uses "with the Credentials returned by GetSessionEndpoint". A call there still needs
+  `GetSessionEndpoint`'s token, which routes it to the session's server, so the server is reached no other way. AWS's
+  form is not documented. An ended session has none.
 * **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
   in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
   page.
@@ -907,7 +925,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   cluster, its standard output and error also go to Floci's S3 once the step ends, gzipped, as
   `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the
   Management Guide's "Log locations" (an `s3n://` or `s3a://` `LogUri` names the same bucket). A
-  cancelled step's logs hold what its driver wrote until it was stopped. Logs that cannot be written,
+  cancelled step's logs hold what its driver wrote until it was stopped. From release 7.11, a step's
+  `StepMonitoringConfiguration` sends its logs, and its applications' container logs, to its own `LogUri` instead, as
+  its options "take precedence over any cluster-wide logging settings" (Management Guide, "Customizing the log
+  location for step log files"), still only on a cluster with a `LogUri`: "If your cluster does not enable cluster
+  logging, step logs will not be uploaded to S3 even if you provide a StepMonitoringConfiguration". The guide gives no
+  layout under a step's own destination, so it is the cluster's. A node a resize removes while such steps run puts its
+  containers' logs at their destination when they share one, and at the cluster's otherwise. `DescribeStep` and
+  `ListSteps` give a step's own `LogUri` and `EncryptionKeyArn` back; the logs are not encrypted with the key. Logs
+  that cannot be written,
   to a bucket that does not exist say, leave the step as it ended. On a cluster that runs YARN, the logs of its
   applications' containers, a cluster-mode driver's output among them, go gzipped to
   `<LogUri>/<cluster-id>/containers/<application>/<container>/` when a step ends, "Application container logs. The logs
