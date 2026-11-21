@@ -16,19 +16,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.HashMap;
 import java.util.List;
 
+import static io.floci.aws.services.cloudformation.provisioners.DynamoDbCreateCalls.onDemandCreate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -117,24 +114,14 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
         return new KinesisStreamingDestination(streamArn, precision);
     }
 
-    private OngoingStubbing<TableDefinition> stubOnDemandCreate() {
-        return when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                anyList(), eq("PAY_PER_REQUEST"), anyString()));
-    }
-
-    private void verifyNoCreate() {
-        verify(dynamoDb, never()).createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                anyList(), anyString(), anyString());
-    }
-
     private void newTable() {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table());
         when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(table());
     }
 
     private void existingTable(TableDefinition current) {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(current);
     }
@@ -176,7 +163,7 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
         assertEquals("InvalidRequest", e.getErrorCode());
-        verifyNoCreate();
+        onDemandCreate(verify(dynamoDb, never()));
     }
 
     @Test
@@ -190,7 +177,7 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
         assertEquals("InvalidRequest", e.getErrorCode());
-        verifyNoCreate();
+        onDemandCreate(verify(dynamoDb, never()));
     }
 
     @ParameterizedTest

@@ -11,7 +11,6 @@ import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
-import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -19,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static io.floci.aws.services.cloudformation.provisioners.DynamoDbCreateCalls.onDemandCreate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -110,20 +110,6 @@ class DynamoDbCfnProvisionerTest {
         return mapper.readTree(json);
     }
 
-    private OngoingStubbing<TableDefinition> stubOnDemandCreate() {
-        return stubOnDemandCreate(null);
-    }
-
-    private OngoingStubbing<TableDefinition> stubOnDemandCreate(String name) {
-        return when(dynamoDb.createTable(name == null ? anyString() : eq(name), anyList(), anyList(), any(), any(),
-                anyList(), anyList(), anyList(), eq("PAY_PER_REQUEST"), anyString()));
-    }
-
-    private void verifyOnDemandCreate(String name) {
-        verify(dynamoDb).createTable(eq(name), anyList(), anyList(), any(), any(), anyList(), anyList(), anyList(),
-                eq("PAY_PER_REQUEST"), eq("us-east-1"));
-    }
-
     @Test
     void ownsExactlyTheThreeDynamoDbTypes() {
         assertEquals(Set.of("AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable", "Custom::DynamoDBReplica"),
@@ -133,7 +119,7 @@ class DynamoDbCfnProvisionerTest {
     /** The registry schema declares only Arn and StreamArn read-only on a plain table; TableId belongs to the global table. */
     @Test
     void tablePublishesOnlyArnWithoutAStream() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
@@ -210,7 +196,7 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void streamedTablePublishesStreamArn() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1")).thenReturn(table(true));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -332,7 +318,7 @@ class DynamoDbCfnProvisionerTest {
         String priorName = "my-stack-Orders-0123456789ab";
         TableDefinition existing = table(false);
         existing.setTableName(priorName);
-        stubOnDemandCreate(priorName)
+        when(onDemandCreate(dynamoDb, priorName, "us-east-1"))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(priorName, "us-east-1")).thenReturn(existing);
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -341,13 +327,13 @@ class DynamoDbCfnProvisionerTest {
         provisioner.provision(r, props("{\"BillingMode\":\"PAY_PER_REQUEST\"}"), updateCtx(priorName));
 
         assertEquals(priorName, r.getPhysicalId());
-        verifyOnDemandCreate(priorName);
+        onDemandCreate(verify(dynamoDb), priorName, "us-east-1");
         verify(dynamoDb, atLeastOnce()).describeTable(priorName, "us-east-1");
     }
 
     @Test
     void tagsAreAppliedAndStaleOnesRemoved() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("old", "1", "env", "dev"));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -368,14 +354,14 @@ class DynamoDbCfnProvisionerTest {
 
     /** The update path: the table already exists and reports {@code current}. */
     private void existingTable(TableDefinition current) {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(current);
     }
 
     @Test
     void createWithTimeToLiveEnablesItOnce() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -389,7 +375,7 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void enabledGivenAsAStringIsResolvedThroughTheEngine() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         ProvisionContext ctx = ctx();
@@ -599,7 +585,7 @@ class DynamoDbCfnProvisionerTest {
     }
 
     private void createdTableWhoseTimeToLiveCallFails() {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         doThrow(new AwsException("LimitExceededException", "boom", 400))
@@ -714,7 +700,7 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void successfulCreateLeavesNoOwnershipMarker() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -791,7 +777,7 @@ class DynamoDbCfnProvisionerTest {
      */
     @Test
     void replacingUpdateDropsAStaleSnapshotAndReportsNoRollback() throws Exception {
-        stubOnDemandCreate()
+        when(onDemandCreate(dynamoDb))
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");

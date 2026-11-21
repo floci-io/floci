@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.function.Function;
 
+import static io.floci.aws.services.cloudformation.provisioners.DynamoDbCreateCalls.onDemandCreate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -64,8 +65,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
 
     /** Make provisioning take the update path: the table already exists, with a live stream. */
     private void existingStreamedTable() {
-        when(dynamoDbService.createTable(anyString(), anyList(), anyList(), any(), any(),
-                anyList(), anyList(), anyList(), anyString(), anyString()))
+        when(onDemandCreate(dynamoDbService))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDbService.describeTable(TABLE, "us-east-1"))
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
@@ -113,7 +113,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
 
         StackResource resource = provisionTable("""
-                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
+                {"TableName":"stream-repro",
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "BillingMode":"PAY_PER_REQUEST",
