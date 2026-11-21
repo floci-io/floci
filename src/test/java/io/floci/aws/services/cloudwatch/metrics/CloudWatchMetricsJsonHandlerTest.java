@@ -435,6 +435,25 @@ class CloudWatchMetricsJsonHandlerTest {
     }
 
     @Test
+    void describeAlarms_returnsExtendedStatisticWhenSetAndOmitsWhenUnset() {
+        ObjectNode req = alarmRequest("P99Alarm");
+        req.put("ExtendedStatistic", "p99");
+
+        JsonNode alarm = describeFirstAlarm(req);
+
+        assertEquals("p99", alarm.get("ExtendedStatistic").asText());
+        assertFalse(alarm.has("Statistic"));
+
+        ObjectNode updatedReq = alarmRequest("P99Alarm");
+        updatedReq.put("Statistic", "Average");
+
+        JsonNode updatedAlarm = describeFirstAlarm(updatedReq);
+
+        assertEquals("Average", updatedAlarm.get("Statistic").asText());
+        assertFalse(updatedAlarm.has("ExtendedStatistic"));
+    }
+
+    @Test
     void describeAlarms_reportsStateTransitionedTimestampForBothAlarmKinds() {
         handler.handle("PutMetricAlarm", alarmRequest("TransitionedMetric"), REGION);
         ObjectNode composite = MAPPER.createObjectNode();

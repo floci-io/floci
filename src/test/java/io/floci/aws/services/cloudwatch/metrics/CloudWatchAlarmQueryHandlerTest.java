@@ -117,6 +117,45 @@ class CloudWatchAlarmQueryHandlerTest {
                 error.getMessage());
     }
 
+    @Test
+    void putAndDescribeMetricAlarmPreservesExtendedStatistic() {
+        String region = "us-east-1";
+        CloudWatchMetricsService service = new CloudWatchMetricsService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new RegionResolver(region, "123456789012"));
+        CloudWatchMetricsQueryHandler handler = new CloudWatchMetricsQueryHandler(service, null, null);
+        MultivaluedMap<String, String> put = new MultivaluedHashMap<>();
+        put.putSingle("AlarmName", "p99-query");
+        put.putSingle("Namespace", "AWS/ApplicationELB");
+        put.putSingle("MetricName", "TargetResponseTime");
+        put.putSingle("ExtendedStatistic", "p99");
+        put.putSingle("Period", "300");
+        put.putSingle("EvaluationPeriods", "1");
+        put.putSingle("Threshold", "1");
+        put.putSingle("ComparisonOperator", "GreaterThanThreshold");
+        assertEquals(200, handler.handle("PutMetricAlarm", put, region).getStatus());
+
+        MultivaluedMap<String, String> describe = new MultivaluedHashMap<>();
+        describe.putSingle("AlarmNames.member.1", "p99-query");
+        String xml = (String) handler.handle("DescribeAlarms", describe, region).getEntity();
+        assertTrue(xml.contains("<ExtendedStatistic>p99</ExtendedStatistic>"), xml);
+        assertFalse(xml.contains("<Statistic>"), xml);
+
+        MultivaluedMap<String, String> update = new MultivaluedHashMap<>();
+        update.putSingle("AlarmName", "p99-query");
+        update.putSingle("Namespace", "AWS/ApplicationELB");
+        update.putSingle("MetricName", "TargetResponseTime");
+        update.putSingle("Statistic", "Average");
+        update.putSingle("Period", "300");
+        update.putSingle("EvaluationPeriods", "1");
+        update.putSingle("Threshold", "1");
+        update.putSingle("ComparisonOperator", "GreaterThanThreshold");
+        assertEquals(200, handler.handle("PutMetricAlarm", update, region).getStatus());
+
+        String updatedXml = (String) handler.handle("DescribeAlarms", describe, region).getEntity();
+        assertTrue(updatedXml.contains("<Statistic>Average</Statistic>"), updatedXml);
+        assertFalse(updatedXml.contains("<ExtendedStatistic>"), updatedXml);
+    }
+
     private static NodeList elements(Document document, String name) {
         return document.getElementsByTagNameNS(AwsNamespaces.CW, name);
     }

@@ -15,6 +15,7 @@ public class MetricAlarm extends Alarm {
     private String metricName;
     private String namespace;
     private String statistic;
+    private String extendedStatistic;
     private List<Dimension> dimensions = new ArrayList<>();
     /** Single-metric period; absent for alarms whose periods are defined in Metrics. */
     private Integer period;
@@ -42,6 +43,9 @@ public class MetricAlarm extends Alarm {
 
     public String getStatistic() { return statistic; }
     public void setStatistic(String statistic) { this.statistic = statistic; }
+
+    public String getExtendedStatistic() { return extendedStatistic; }
+    public void setExtendedStatistic(String extendedStatistic) { this.extendedStatistic = extendedStatistic; }
 
     public List<Dimension> getDimensions() { return dimensions; }
     public void setDimensions(List<Dimension> dimensions) { this.dimensions = dimensions; }
