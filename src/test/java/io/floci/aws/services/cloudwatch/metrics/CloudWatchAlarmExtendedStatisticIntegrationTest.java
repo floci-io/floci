@@ -6,7 +6,6 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,12 +51,8 @@ class CloudWatchAlarmExtendedStatisticIntegrationTest {
     @BeforeEach
     void setUp() {
         cloudWatch = AwsTestClients.create(CloudWatchClient.builder(), "test", Region.US_EAST_1);
+        cleanup.register(cloudWatch::close);
         suffix = Long.toString(System.nanoTime(), 36);
-    }
-
-    @AfterEach
-    void closeClient() {
-        cloudWatch.close();
     }
 
     @ParameterizedTest
@@ -122,5 +117,30 @@ class CloudWatchAlarmExtendedStatisticIntegrationTest {
         MetricAlarm stored = cloudWatch.describeAlarms(r -> r.alarmNames(name)).metricAlarms().getFirst();
         assertEquals("p99", stored.extendedStatistic());
         assertNull(stored.statisticAsString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bothProtocolsRejectStatisticAndExtendedStatisticTogether(boolean json) throws Exception {
+        String name = "wire-both-stat-" + (json ? "json-" : "query-") + suffix;
+        cleanup.register(() -> CloudWatchTestRequests.deleteAlarmJson(baseUri, SCOPE, name));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("AlarmName", name);
+        body.put("Namespace", "AWS/ApplicationELB");
+        body.put("MetricName", "TargetResponseTime");
+        body.put("Statistic", "Average");
+        body.put("ExtendedStatistic", "p99");
+        body.put("Period", 300);
+        body.put("EvaluationPeriods", 1);
+        body.put("Threshold", 1);
+        body.put("ComparisonOperator", "GreaterThanThreshold");
+
+        Response refused = CloudWatchTestRequests.call(baseUri, SCOPE, json, "PutMetricAlarm", body);
+        refused.then().statusCode(400);
+        assertEquals(json ? "InvalidParameterCombinationException" : "InvalidParameterCombination",
+                json ? refused.jsonPath().getString("__type")
+                        : refused.xmlPath().getString("ErrorResponse.Error.Code"));
+        assertEquals(0, cloudWatch.describeAlarms(r -> r.alarmNames(name)).metricAlarms().size());
     }
 }

@@ -454,6 +454,21 @@ class CloudWatchMetricsJsonHandlerTest {
     }
 
     @Test
+    void putMetricAlarm_rejectsStatisticAndExtendedStatisticTogether() {
+        ObjectNode req = alarmRequest("BothStatsAlarm");
+        req.put("Statistic", "Average");
+        req.put("ExtendedStatistic", "p99");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", req, REGION));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("InvalidParameterCombinationException", error.jsonType());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("BothStatsAlarm"), null, REGION).isEmpty());
+    }
+
+    @Test
     void describeAlarms_reportsStateTransitionedTimestampForBothAlarmKinds() {
         handler.handle("PutMetricAlarm", alarmRequest("TransitionedMetric"), REGION);
         ObjectNode composite = MAPPER.createObjectNode();

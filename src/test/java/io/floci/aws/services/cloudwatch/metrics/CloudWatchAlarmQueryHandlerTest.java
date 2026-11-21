@@ -156,6 +156,30 @@ class CloudWatchAlarmQueryHandlerTest {
         assertFalse(updatedXml.contains("<ExtendedStatistic>"), updatedXml);
     }
 
+    @Test
+    void putMetricAlarmRejectsStatisticAndExtendedStatisticTogether() {
+        String region = "us-east-1";
+        CloudWatchMetricsService service = new CloudWatchMetricsService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new RegionResolver(region, "123456789012"));
+        CloudWatchMetricsQueryHandler handler = new CloudWatchMetricsQueryHandler(service, null, null);
+        MultivaluedMap<String, String> put = new MultivaluedHashMap<>();
+        put.putSingle("AlarmName", "both-stats-query");
+        put.putSingle("Namespace", "AWS/ApplicationELB");
+        put.putSingle("MetricName", "TargetResponseTime");
+        put.putSingle("Statistic", "Average");
+        put.putSingle("ExtendedStatistic", "p99");
+        put.putSingle("Period", "300");
+        put.putSingle("EvaluationPeriods", "1");
+        put.putSingle("Threshold", "1");
+        put.putSingle("ComparisonOperator", "GreaterThanThreshold");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", put, region));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("both-stats-query"), null, region).isEmpty());
+    }
+
     private static NodeList elements(Document document, String name) {
         return document.getElementsByTagNameNS(AwsNamespaces.CW, name);
     }
