@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
@@ -54,6 +55,7 @@ import jakarta.inject.Inject;
 import jakarta.inject.Provider;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -230,6 +232,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
+    private static final int MIN_PERFORMANCE_INDEX = 1;
+    private static final int MAX_PERFORMANCE_INDEX = 100;
+    private static final List<Integer> PERFORMANCE_INDEXES = List.of(1, 25, 50, 75, 100);
+    private static final String MERGE = "MERGE";
+    private static final List<String> RECONFIGURATION_TYPES = List.of("OVERWRITE", MERGE);
     private static final long MIN_IDLE_TIMEOUT_SECONDS = 60;
     private static final long MAX_IDLE_TIMEOUT_SECONDS = 604_800;
     // StepConcurrencyLevel: "You can specify a minimum of 1 step and a maximum of 256 steps" (ModifyCluster), "The
@@ -1357,6 +1364,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             sessionStore.put(stored.getId(), stored);
         }
 
+        /**
+         * The session's ServerUrl, "The Spark Connect server URL for the session", which a client uses "with the
+         * Credentials returned by GetSessionEndpoint to connect directly to the session": Floci's own address in Spark
+         * Connect's {@code sc://} form, where {@link SparkConnectProxy} takes a call carrying GetSessionEndpoint's token
+         * on to the session's server, so that no client reaches the server without one. The model gives no example of
+         * AWS's.
+         */
+        @Override
+        protected void ready(EmrSession stored) {
+            URI base = URI.create(baseUrl);
+            int port = base.getPort() != -1 ? base.getPort() : "https".equals(base.getScheme()) ? 443 : 80;
+            stored.setServerUrl("sc://" + base.getHost() + ":" + port);
+        }
+
         // The reason it has, as TerminateSession or its cluster's end gave it.
         @Override
         protected String endReason(EmrSession stored, SparkJobRunner.Outcome outcome) {
@@ -1408,8 +1429,17 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
-    /** One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is. */
-    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {}
+    /**
+     * One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is, and a null
+     * reconfiguration type is OVERWRITE.
+     */
+    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations,
+                                            String reconfigurationType) {
+
+        public InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {
+            this(instanceGroupId, instanceCount, configurations, null);
+        }
+    }
 
     /**
      * Resizes or reconfigures instance groups in place. ClusterId is optional in the request, so
@@ -1423,7 +1453,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
             Map<String, EmrCluster> touched = new LinkedHashMap<>();
             List<EmrInstanceGroup> groups = new ArrayList<>();
-            for (InstanceGroupModification mod : modifications) {
+            for (int position = 1; position <= modifications.size(); position++) {
+                InstanceGroupModification mod = modifications.get(position - 1);
                 EmrCluster found = clusterId != null
                         ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
                 // AWS's answer here, recorded by Terraform users
@@ -1435,6 +1466,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 // One copy per cluster, so two groups of the same cluster are changed and stored together.
                 EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
                 EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
+                checkReconfigurationType(mod.reconfigurationType(), position, cluster.getReleaseLabel());
                 if (mod.instanceCount() != null) {
                     if (mod.instanceCount() < 0) {
                         throw invalid("InstanceCount must not be negative.");
@@ -1454,13 +1486,83 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     group.setRunningInstanceCount(mod.instanceCount());
                 }
                 if (mod.configurations() != null) {
-                    group.setConfigurations(mod.configurations());
+                    group.setConfigurations(MERGE.equals(mod.reconfigurationType())
+                            ? mergedConfigurations(group.getConfigurations(), mod.configurations())
+                            : mod.configurations());
                     group.setConfigurationsVersion(group.getConfigurationsVersion() + 1);
                 }
             }
             touched.forEach(clusterStore::put);
             touched.values().forEach(this::resizeNodes);
         });
+    }
+
+    /**
+     * A reconfiguration type is OVERWRITE or MERGE, the model's enum. MERGE is "supported for Amazon EMR releases
+     * 5.35.0 and 6.6.0 and later", and OVERWRITE is "the only one available in Amazon EMR releases earlier than 5.35.0
+     * and 6.6.0" (Release Guide, "Reconfigure an instance group in a running cluster"). No source gives AWS's refusal
+     * of MERGE on an earlier release, so its wording is Floci's.
+     */
+    private static void checkReconfigurationType(String type, int position, String releaseLabel) {
+        if (type == null) {
+            return;
+        }
+        if (!RECONFIGURATION_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(type,
+                    "instanceGroups." + position + ".member.reconfigurationType", RECONFIGURATION_TYPES));
+        }
+        boolean merges = releaseAtLeast(releaseLabel, 6, 6, 0)
+                || (releaseAtLeast(releaseLabel, 5, 35, 0) && !releaseAtLeast(releaseLabel, 6, 0, 0));
+        if (MERGE.equals(type) && !merges) {
+            throw new AwsException("ValidationException", "MERGE reconfiguration is supported for Amazon EMR releases"
+                    + " 5.35.0 and 6.6.0 and later, and the cluster runs " + releaseLabel + ".", 400);
+        }
+    }
+
+    /**
+     * An instance group's configurations after a MERGE reconfiguration: it "merges the newly submitted configurations
+     * with configurations that already exist on the cluster. This option only adds or modifies the new configurations
+     * that you submit. It preserves existing configurations." A classification it names takes its properties over the
+     * existing ones of that classification, and its nested configurations merged the same way; one it does not name
+     * stays, and a new one is added.
+     */
+    static String mergedConfigurations(String existing, String added) {
+        try {
+            ArrayNode merged = existing != null && SNAPSHOT_MAPPER.readTree(existing) instanceof ArrayNode held
+                    ? held : SNAPSHOT_MAPPER.createArrayNode();
+            return merged(merged, (ArrayNode) SNAPSHOT_MAPPER.readTree(added)).toString();
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Stored configurations are not JSON", e);
+        }
+    }
+
+    private static ArrayNode merged(ArrayNode existing, ArrayNode added) {
+        ArrayNode merged = existing.deepCopy();
+        for (JsonNode configuration : added) {
+            String classification = configuration.path("Classification").asText(null);
+            ObjectNode match = null;
+            for (JsonNode held : merged) {
+                if (classification != null && held instanceof ObjectNode object
+                        && classification.equals(held.path("Classification").asText(null))) {
+                    match = object;
+                }
+            }
+            if (match == null || !configuration.isObject()) {
+                merged.add(configuration.deepCopy());
+                continue;
+            }
+            if (configuration.path("Properties").isObject()) {
+                JsonNode properties = match.path("Properties");
+                ObjectNode into = properties.isObject() ? (ObjectNode) properties : match.putObject("Properties");
+                into.setAll((ObjectNode) configuration.get("Properties").deepCopy());
+            }
+            if (configuration.path("Configurations").isArray()) {
+                JsonNode nested = match.path("Configurations");
+                match.set("Configurations", merged(nested.isArray() ? (ArrayNode) nested
+                        : SNAPSHOT_MAPPER.createArrayNode(), (ArrayNode) configuration.get("Configurations")));
+            }
+        }
+        return merged;
     }
 
     @Override
@@ -1717,22 +1819,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int INSTANCE_TYPE_PAGE = 50;
 
     /**
-     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * The catalogue's releases, in ListReleaseLabels' order. Floci's configured default release label is always
      * among them, with no applications when the catalogue does not describe it, so a non-default
-     * setting never makes Floci's own default unknown.
+     * setting never makes Floci's own default unknown. A blank setting names no release, so it adds none.
      */
     List<EmrReleaseCatalog.Release> releases() {
-        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+        if (defaultReleaseLabel == null || defaultReleaseLabel.isBlank()
+                || EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
             return EmrReleaseCatalog.RELEASES;
         }
         List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
         all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
-        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        all.sort((a, b) -> EmrReleaseCatalog.LISTING_ORDER.compare(a.label(), b.label()));
         return all;
     }
 
     /**
-     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * Release labels, in the catalogue's order, narrowed by {@code prefix} (such as {@code emr-6}) and by
      * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
      * without regard to case. A token belongs to the filters it was issued for, so one replayed
      * with other filters, or altered, is refused.
@@ -1763,32 +1866,35 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 nextToken, namespace, EmrService::invalidToken);
     }
 
-    /** A release's applications and OS releases; no label means the latest release. */
+    /** A release's applications and OS releases; no label means the newest numbered release, the first listed. */
     public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
-        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+        if (label == null || label.isBlank()) {
+            return releases().get(0);
+        }
+        // AWS's recorded answer: InvalidRequestException with this ErrorCode and a message naming no label.
+        return findRelease(label).orElseThrow(() -> new AwsException("InvalidRequestException",
+                "The release label isn't valid.", 400, Map.of("ErrorCode", "InvalidInputParameter")));
     }
 
     public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
-        if (label == null || label.isBlank()) {
-            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        // AWS's recorded answer, a missing label reading "null"; its ErrorCode and wording differ from
+        // DescribeReleaseLabel's.
+        if (label == null || label.isBlank() || findRelease(label).isEmpty()) {
+            throw new AwsException("InvalidRequestException", "The supplied release label is invalid: " + label + ".",
+                    400, Map.of("ErrorCode", "INVALID_RELEASE_LABEL"));
         }
-        requireRelease(label);
         List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
         return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
                 "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
     }
 
-    private EmrReleaseCatalog.Release requireRelease(String label) {
-        return releases().stream()
-                .filter(r -> r.label().equals(label))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "The specified release label " + label + " is not valid.", 400));
+    private Optional<EmrReleaseCatalog.Release> findRelease(String label) {
+        return releases().stream().filter(r -> r.label().equals(label)).findFirst();
     }
 
     /**
      * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
-     * catalogue is newest first rather than alphabetical.
+     * catalogue is in ListReleaseLabels' order rather than alphabetical.
      */
     private static <T> Function<T, String> positionIn(List<T> items) {
         Map<T, String> positions = new HashMap<>();
@@ -2037,6 +2143,31 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         JsonNode strategy = policy.path("ScalingStrategy");
         if (!strategy.isMissingNode() && !SCALING_STRATEGIES.contains(strategy.asText(""))) {
             throw invalid("ScalingStrategy must be one of " + SCALING_STRATEGIES + ".");
+        }
+        checkUtilizationPerformanceIndex(policy.path("UtilizationPerformanceIndex"));
+    }
+
+    /**
+     * The model bounds UtilizationPerformanceIndex to 1 to 100, and of those "Possible values are 1, 25, 50, 75 and
+     * 100. If you set the index to values other than these, it results in a validation error" (Management Guide,
+     * "Advanced Scaling for Amazon EMR"). The guide gives no message for the latter, so its wording is Floci's.
+     */
+    private static void checkUtilizationPerformanceIndex(JsonNode index) {
+        if (index.isMissingNode() || index.isNull()) {
+            return;
+        }
+        String path = "managedScalingPolicy.utilizationPerformanceIndex";
+        if (!index.isIntegralNumber() || !index.canConvertToInt()) {
+            throw invalid("ManagedScalingPolicy.UtilizationPerformanceIndex must be an integer.");
+        }
+        String range = SmithyValidationErrors.outOfRange(path, index.intValue(), MIN_PERFORMANCE_INDEX,
+                MAX_PERFORMANCE_INDEX);
+        if (range != null) {
+            throw SmithyValidationErrors.validationException(range);
+        }
+        if (!PERFORMANCE_INDEXES.contains(index.intValue())) {
+            throw new AwsException("ValidationException", "UtilizationPerformanceIndex must be one of "
+                    + PERFORMANCE_INDEXES + ".", 400);
         }
     }
 
@@ -2771,7 +2902,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
                     teardowns.get());
             executing.add(stepKey(accountId, step.getId()));
-            String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster) : null;
+            String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster, step) : null;
             stepExecutor.execute(() -> runStep(job, launch, onCluster.releaseImage(), onCluster.hdfs(), containerLogs,
                     onCluster.primary()));
         }
@@ -3006,7 +3137,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         long coreNodes = nodes.stream().filter(ClusterStorage.Node::core).count();
         return nodeManager.withHadoopFolder(EmrReleaseImages.hadoopFolder(cluster.getReleaseLabel()))
                 .onNodes(nodes, (int) Math.max(1, Math.min(replication(cluster), coreNodes)),
-                        EmrSparkSteps.containerLogFolder(cluster))
+                        EmrSparkSteps.nodeLogFolder(cluster))
                 .withPrimaryWorking(cluster.getProvisionedCoreNodes() == 0 || coreNodes == 0)
                 .withSparkHistory(EmrSparkSteps.names(cluster.getApplications(), SNAPSHOT_MAPPER, "Spark"))
                 .withHistories(timeline, timeline && tezImage
@@ -3049,40 +3180,47 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // A cluster's core and task nodes as containers: "Core nodes run the Data Node daemon" and "a core node runs YARN
     // NodeManager daemons", and "Task nodes don't run the Data Node daemon". No more than the setting allows, core
     // nodes first, as they hold HDFS, and no fewer core nodes than HDFS keeps copies, as "Amazon EMR will not allow
-    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node.
-    private List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
+    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node. Neither kind is
+    // built past the setting, however many a cluster asks for.
+    List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
         int floor = Math.min(cluster.getProvisionedCoreNodes(), replication(cluster));
         List<ClusterStorage.Node> core = new ArrayList<>();
         List<ClusterStorage.Node> task = new ArrayList<>();
+        long asked = 0;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             boolean isCore = "CORE".equals(group.getInstanceGroupType());
             if (isCore || "TASK".equals(group.getInstanceGroupType())) {
                 int count = group.getRequestedInstanceCount();
-                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), isCore ? Math.max(count, floor) : count,
-                        isCore, isCore ? core : task);
+                count = isCore ? Math.max(count, floor) : count;
+                asked += Math.max(count, 0);
+                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), count, isCore, isCore ? core : task,
+                        maxWorkerNodes);
             }
         }
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
             int number = fleetNumber(cluster.getInstanceFleets(), fleet);
             if (number > 0) {
                 boolean isCore = "CORE".equals(fleet.getInstanceFleetType());
-                int count = fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
-                addNodes(cluster, number, isCore ? Math.max(count, floor) : count, isCore, isCore ? core : task);
+                long capacity = (long) fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
+                long count = isCore ? Math.max(capacity, floor) : capacity;
+                asked += Math.max(count, 0);
+                addNodes(cluster, number, count, isCore, isCore ? core : task, maxWorkerNodes);
             }
         }
         List<ClusterStorage.Node> nodes = new ArrayList<>(core);
         nodes.addAll(task);
-        if (nodes.size() > maxWorkerNodes) {
+        if (asked > maxWorkerNodes) {
             LOG.infov("EMR cluster {0} asks for {1} core and task nodes, and runs the first {2}, as yarn-max-worker-nodes"
-                    + " says", cluster.getId(), nodes.size(), maxWorkerNodes);
-            return List.copyOf(nodes.subList(0, maxWorkerNodes));
+                    + " says", cluster.getId(), asked, maxWorkerNodes);
+            return List.copyOf(nodes.subList(0, Math.min(nodes.size(), maxWorkerNodes)));
         }
         return nodes;
     }
 
-    private static void addNodes(EmrCluster cluster, int group, int count, boolean core,
-                                 List<ClusterStorage.Node> nodes) {
-        for (int ordinal = 1; ordinal <= count; ordinal++) {
+    // Up to count nodes of the group, as long as the list holds fewer than limit.
+    private static void addNodes(EmrCluster cluster, int group, long count, boolean core,
+                                 List<ClusterStorage.Node> nodes, int limit) {
+        for (int ordinal = 1; ordinal <= count && nodes.size() < limit; ordinal++) {
             String id = group + "-" + ordinal;
             nodes.add(new ClusterStorage.Node(id,
                     AwsRegions.ec2PrivateIpDnsName(privateIpAddress(group, ordinal), cluster.getRegion()), core,

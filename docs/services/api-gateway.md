@@ -897,6 +897,31 @@ control character besides tab, as is a mapped `Host`: the request never reaches 
 caller receives `502` with
 `{"message":"Bad Gateway: invalid request header value for <name>"}`.
 
+HTTP API integrations store and return `responseParameters`, and an `HTTP_PROXY` integration
+applies the mappings keyed by the backend's status code to its response. `overwrite:statuscode`
+replaces the status, and `append:header.<name>`, `overwrite:header.<name>` and
+`remove:header.<name>` edit the response headers, matching the name case-insensitively. A value is a
+static string, `$response.header.<name>` (repeated values joined with commas), `$response.body`,
+`$response.body.<JSONPath>`, `$stageVariables.<name>` or one of the `$context` variables above, and
+every value reads the backend response as it arrived. A value that resolves to nothing skips its
+mapping. So does an `overwrite:statuscode` source that resolves to anything but a status from 100 to
+599, and a header value holding CR, LF, NUL or any other control character besides tab, such as a
+pretty-printed `$response.body`, while the other mappings still apply. Floci
+evaluates the whole body, where AWS reads only its first 100 KB, and does not resolve the braced
+`${response.header.<name>}` form. The `502` Floci answers for an unreachable backend goes through
+the same mappings as a backend's own `502`. Lambda (`AWS_PROXY`) integrations store
+`responseParameters` without applying them.
+
+Create, update and OpenAPI import reject `responseParameters` that is not an object, a status code
+key outside 200 to 599, a mapping key other than `overwrite:statuscode` or an `append`, `overwrite`
+or `remove` of `header.<name>`, a header name that is not an HTTP token, and a static
+`overwrite:statuscode` value that is not a status from 100 to 599, with `400 BadRequestException`.
+The headers AWS reserves from mapping, such as `Content-Length`, are not checked. `UpdateIntegration` merges by status code: a status code with mappings replaces that status
+code's mappings, an empty map such as `{"500": {}}` removes it, and a status code the update leaves
+out is kept. CloudFormation carries `ResponseParameters` from an `AWS::ApiGatewayV2::Integration`,
+each status code's `Destination` and `Source` pairs becoming its mappings, and from the
+`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`.
+
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
 `SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,

@@ -70,8 +70,8 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `RemoveAutoTerminationPolicy` | Removes a cluster's auto termination policy |
 | `PutAutoScalingPolicy` | Attaches an automatic scaling policy to a core or task instance group |
 | `RemoveAutoScalingPolicy` | Removes an instance group's automatic scaling policy |
-| `ListReleaseLabels` | List release labels, newest first, by prefix or application; see [Release catalogue](#release-catalogue) |
-| `DescribeReleaseLabel` | A release's applications and Amazon Linux releases (the latest release without a label) |
+| `ListReleaseLabels` | List release labels, in AWS's order, by prefix or application; see [Release catalogue](#release-catalogue) |
+| `DescribeReleaseLabel` | A release's applications and Amazon Linux releases (the first one listed without a label) |
 | `ListSupportedInstanceTypes` | The instance types a release supports, with vCPU, memory, storage and architecture |
 | `GetBlockPublicAccessConfiguration` | Returns the account's block public access configuration for the Region |
 | `PutBlockPublicAccessConfiguration` | Sets the account's block public access configuration for the Region |
@@ -166,6 +166,16 @@ A cluster's `SecurityConfiguration` names one `CreateSecurityConfiguration` made
 `RunJobFlow` naming one that does not exist is refused with `ValidationException` "Security configuration does not
 exist: <name>"; no source gives AWS's answer, so the code is the one `RunJobFlow` refuses its other input with, and the
 wording that of `DescribeSecurityConfiguration` and `DeleteSecurityConfiguration`.
+A cluster made with `RunJobFlow`'s uniform form, `MasterInstanceType`, `SlaveInstanceType` and `InstanceCount` in place
+of `InstanceGroups` or `InstanceFleets`, gets the instance groups that form describes: "If the value is 1, the same
+instance serves as both the master and core and task node. If the value is greater than 1, one instance is the master
+node and all others are core and task nodes." That is a `MASTER` group of one `MasterInstanceType` instance and, for a
+count above 1, a `CORE` group of the rest as `SlaveInstanceType`, both `ON_DEMAND`. The master group is named
+`Master InstanceGroup`, as in `DescribeJobFlows`' sample response; no source names the core group, so Floci names it
+`Core InstanceGroup`. A single instance needs no `SlaveInstanceType`, as AWS runs one without it, but core nodes do, as
+"all three must be present": a request for more instances without it is refused with `ValidationException`
+"SlaveInstanceType is required when InstanceCount is greater than 1."; AWS's wording is not documented, so it is
+Floci's.
 A cluster has instance groups or instance fleets, never both, as "instance fleets and instance groups cannot coexist in a
 cluster": `RunJobFlow` with both is refused with `ValidationException` "The RunJobFlow request can contain
 InstanceFleets parameters or InstanceGroups parameters, but not both.", the API reference's own words, and
@@ -180,6 +190,19 @@ The reference names no devices, so Floci names them `/dev/sdb`, `/dev/sdc` and o
 volumes to an instance is refused with `ValidationException` "There is a limit of 25 volumes per instance.", the
 Management Guide's own limit and sentence; AWS's error for it is not documented. `ModifyInstanceFleet` changes a
 fleet's target capacities only; the `InstanceTypeConfigs` it takes are not applied.
+`ModifyInstanceGroups` keeps the `Configurations` it gives a group, which `ListInstanceGroups` gives back with the
+group's `ConfigurationsVersion`. With `ReconfigurationType` `MERGE` they are merged into the group's own, as the Release
+Guide's "Reconfigure an instance group in a running cluster" has it: "This option only adds or modifies the new
+configurations that you submit. It preserves existing configurations." A classification they name takes their
+properties over its own, and its nested configurations are merged the same way; the group's other classifications
+stay. `OVERWRITE`, the default, replaces them. `MERGE` is "supported for Amazon EMR releases 5.35.0 and 6.6.0 and
+later"; on an earlier release it is refused with `ValidationException`, in Floci's wording, and a type that is neither
+with the framework's enum message.
+A managed scaling policy, from `PutManagedScalingPolicy` or `RunJobFlow`, takes a `UtilizationPerformanceIndex` of 1,
+25, 50, 75 or 100 only, as the Management Guide's "Advanced Scaling for Amazon EMR" says: "If you set the index to
+values other than these, it results in a validation error." One outside the model's 1 to 100 is refused with the
+framework's `ValidationException`, and another with `ValidationException` in Floci's wording, as the guide gives none.
+The policy is kept and given back as written.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
@@ -241,6 +264,11 @@ lifecycle on its cluster but runs no server for it.
   hour". AWS's endpoint is an `https://` URL per session without a port; a Spark Connect URL holds no path, so Floci's
   is its address alone, port included, and the token names the session. No `Credentials` are given. A session that has
   ended, or is `TERMINATING`, is refused with `InvalidRequestException`, in Floci's own wording.
+* **ServerUrl**: in the `docker` mode, once a session's server answers, `GetSession` and `ListSessions` give it Floci's
+  own address in Spark Connect's form, such as `sc://localhost:4566`, as "The Spark Connect server URL for the
+  session", which a client uses "with the Credentials returned by GetSessionEndpoint". A call there still needs
+  `GetSessionEndpoint`'s token, which routes it to the session's server, so the server is reached no other way. AWS's
+  form is not documented. An ended session has none.
 * **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
   in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
   page.
@@ -897,7 +925,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   cluster, its standard output and error also go to Floci's S3 once the step ends, gzipped, as
   `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the
   Management Guide's "Log locations" (an `s3n://` or `s3a://` `LogUri` names the same bucket). A
-  cancelled step's logs hold what its driver wrote until it was stopped. Logs that cannot be written,
+  cancelled step's logs hold what its driver wrote until it was stopped. From release 7.11, a step's
+  `StepMonitoringConfiguration` sends its logs, and its applications' container logs, to its own `LogUri` instead, as
+  its options "take precedence over any cluster-wide logging settings" (Management Guide, "Customizing the log
+  location for step log files"), still only on a cluster with a `LogUri`: "If your cluster does not enable cluster
+  logging, step logs will not be uploaded to S3 even if you provide a StepMonitoringConfiguration". The guide gives no
+  layout under a step's own destination, so it is the cluster's. A node a resize removes while such steps run puts its
+  containers' logs at their destination when they share one, and at the cluster's otherwise. `DescribeStep` and
+  `ListSteps` give a step's own `LogUri` and `EncryptionKeyArn` back; the logs are not encrypted with the key. Logs
+  that cannot be written,
   to a bucket that does not exist say, leave the step as it ended. On a cluster that runs YARN, the logs of its
   applications' containers, a cluster-mode driver's output among them, go gzipped to
   `<LogUri>/<cluster-id>/containers/<application>/<container>/` when a step ends, "Application container logs. The logs
@@ -926,8 +962,6 @@ holding the driver and its executors, or a command or a script. The cluster itse
   that it does not scale below them, but no error for the request.
 - **No YARN node labels.** An application master can run on any node, as on EMR's 6.x releases by default. EMR's 7.x
   releases label nodes by market type and 5.x's keep application masters on core nodes.
-- **No nodes for a cluster made with `MasterInstanceType`, `SlaveInstanceType` and `InstanceCount`.** Floci keeps no
-  instance groups for that older form of `RunJobFlow`, so such a cluster runs on its primary node alone.
 - **An `emr-spark-*` cluster's HDFS and YARN are `emr-7.5.0`'s.** The Release Guide lists both at Hadoop 3.4.2 for
   `emr-spark-8.0.0` and `emr-spark-8.1.0`, and EMR Serverless publishes no image holding them, so the primary node runs
   Hadoop 3.4.0's. Spark and its Hadoop client are the release's own.
@@ -1011,20 +1045,31 @@ its `STARTING` event, has its events sent after the rest of that call's.
 ## Release catalogue
 
 `ListReleaseLabels`, `DescribeReleaseLabel` and `ListSupportedInstanceTypes` read a curated catalogue,
-not AWS's full list: `emr-7.5.0` (Floci's default), `emr-7.4.0`, `emr-6.15.0`, `emr-6.14.0` and
-`emr-5.36.2`. Each release's applications and versions come from its page in the Amazon EMR Release
-Guide, with names lowercased and AWS's `-amzn-N` build suffix dropped, as the API reports them, and
-its two most recent Amazon Linux releases. A `floci.services.emr.default-release-label` outside the
-catalogue is still listed, with no applications.
+not AWS's full list: every `emr-7.x` release, `emr-7.0.0` to `emr-7.14.0` (`emr-7.5.0` is Floci's
+default), then `emr-6.15.0`, `emr-6.14.0` and `emr-5.36.2`, and the AWS runtime for Apache Spark's
+`emr-spark-8.0.0`, `emr-spark-8.1.0` and `emr-spark-8.2.0`. Each release's applications and versions
+come from its page in the Amazon EMR Release Guide. Names are spelled as that page's list of
+applications spells them, which is how AWS answers them (`Spark`, `HBase`, `ZooKeeper`), with `Trino`
+for "Trino (PrestoSQL)". Versions drop AWS's `-amzn-N` build suffix, as the API gives "the concise
+version of the application". Each release has the two most recent Amazon Linux releases its page lists;
+the `emr-7.14.0`, `emr-spark-8.1.0` and `emr-spark-8.2.0` pages list none, so those report none. A
+`floci.services.emr.default-release-label` outside the catalogue is still listed, with no applications.
 
-`ListReleaseLabels` filters by `Prefix` (such as `emr-6`) and `Application` (`spark` or
-`spark@3.4.1`, matched without regard to case) and pages with `MaxResults` (1 to 100) /
-`NextToken`; a token only works with the filters it was issued for. `DescribeReleaseLabel` answers
-every application at once, since AWS reserves its `MaxResults` and `NextToken` for future use.
-`ListSupportedInstanceTypes` reports common families (c5, m5, m5d, m6g, r5, r6g) with
-their EC2 sizes. An unknown release label, a bad token or an out-of-range `MaxResults` is
-`InvalidRequestException`. `RunJobFlow` does not check its release label or instance types against
-the catalogue.
+`ListReleaseLabels` lists the numbered releases newest first, as AWS does. The `emr-spark-*` releases
+come after them, oldest first, as AWS answered for that family; where AWS puts them among the numbered
+releases is not recorded. It filters by `Prefix` (such as `emr-6`) and `Application` (`spark` or
+`spark@3.4.1`, matched without regard to case) and pages with `MaxResults` (1 to 100) / `NextToken`; a
+token only works with the filters it was issued for. `DescribeReleaseLabel` answers every application
+at once, since AWS reserves its `MaxResults` and `NextToken` for future use, and describes the first
+release listed, `emr-7.14.0`, when given no label. `ListSupportedInstanceTypes` reports common
+families (c5, m5, m5d, m6g, r5, r6g) with their EC2 sizes.
+
+An unknown release label is `InvalidRequestException` in AWS's recorded wording, which differs between
+the two operations. `DescribeReleaseLabel` answers "The release label isn't valid." with `ErrorCode`
+`InvalidInputParameter`. `ListSupportedInstanceTypes` names the label, as in "The supplied release label
+is invalid: emr-1.0.0.", with `ErrorCode` `INVALID_RELEASE_LABEL`, and a missing one reads `null`. A bad token
+or an out-of-range `MaxResults` is `InvalidRequestException` too. `RunJobFlow` does not check its
+release label or instance types against the catalogue.
 
 ## Example
 

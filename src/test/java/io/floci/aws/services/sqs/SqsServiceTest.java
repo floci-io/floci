@@ -34,10 +34,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -998,6 +1000,68 @@ class SqsServiceTest {
 
         assertThrows(AwsException.class, () -> sqsService.changeMessageVisibilityIfUnchanged(
                 queue.getQueueUrl(), received.getReceiptHandle(), setByReceive, 0, region));
+    }
+
+    @Test
+    void changeMessageVisibility_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        String handle = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst().getReceiptHandle();
+
+        service.changeMessageVisibility(queue.getQueueUrl(), handle, 0, "us-east-1");
+
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    @Test
+    void changeMessageVisibilityBatch_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared-batch", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        String handle = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst().getReceiptHandle();
+
+        List<SqsService.BatchResultEntry> results = service.changeMessageVisibilityBatch(queue.getQueueUrl(),
+                List.of(new SqsService.ChangeVisibilityBatchEntry("e", handle, 0)), "us-east-1");
+
+        assertTrue(results.getFirst().success(), results.getFirst().errorCode() + ": " + results.getFirst().errorMessage());
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    @Test
+    void changeMessageVisibilityIfUnchanged_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        RequestContext caller = new RequestContext();
+        SqsService service = accountScopedService(caller);
+        caller.setAccountId("111111111111");
+        Queue queue = service.createQueue("shared-conditional", null, "us-east-1");
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+        caller.setAccountId("222222222222");
+        Message received = service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst();
+
+        boolean changed = service.changeMessageVisibilityIfUnchanged(
+                queue.getQueueUrl(), received.getReceiptHandle(), received.getVisibleAt(), 0, "us-east-1");
+
+        assertTrue(changed);
+        assertEquals(1, service.receiveMessage(queue.getQueueUrl(), 1, 30, 0, "us-east-1").size());
+    }
+
+    /**
+     * A service whose storage is scoped to {@code caller}'s account, which a test can switch between calls. Queue
+     * URLs name account 111111111111, which creates the queues.
+     */
+    private SqsService accountScopedService(RequestContext caller) {
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        when(requestContextInstance.get()).thenReturn(caller);
+        return new SqsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"),
+                null, null, 30, 1048576, BASE_URL, new RegionResolver("us-east-1", "111111111111"), false, null, clock);
     }
 
     @Test
@@ -2482,6 +2546,88 @@ class SqsServiceTest {
         sqsService.createQueue("attrs-bare", Map.of("VisibilityTimeout", "45"), region);
         Map<String, String> attrs = sqsService.getQueueAttributes("attrs-bare", List.of("VisibilityTimeout"), region);
         assertEquals("45", attrs.get("VisibilityTimeout"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingFifoHeadWakesParkedReceive(boolean inBatch) throws Exception {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delete-wakeup.fifo", Map.of("FifoQueue", "true"), region);
+        String queueUrl = queue.getQueueUrl();
+        sqsService.sendMessage(queueUrl, "head", 0, "group", "head", region);
+        Message next = sqsService.sendMessage(queueUrl, "next", 0, "group", "next", region);
+        Message head = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
+        assertEquals("head", head.getBody());
+        assertTrue(sqsService.receiveMessage(queueUrl, 1, 30, 0, region).isEmpty(),
+                "The next message must remain blocked while the head is in flight");
+
+        FutureTask<List<Message>> receive = new FutureTask<>(
+                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
+        Thread poller = new Thread(receive, "sqs-fifo-delete-wakeup");
+        poller.start();
+        try {
+            // Observe the actual wait rather than sleeping and assuming the receive has parked.
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
+                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+            if (inBatch) {
+                sqsService.deleteMessageInBatch(queueUrl, head.getReceiptHandle(), region);
+            } else {
+                sqsService.deleteMessage(queueUrl, head.getReceiptHandle(), region);
+            }
+
+            // Require a wakeup before the one-second polling retry.
+            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
+            assertEquals(1, received.size());
+            assertEquals(next.getMessageId(), received.getFirst().getMessageId());
+            assertEquals(1, received.getFirst().getReceiveCount());
+        } finally {
+            poller.interrupt();
+            poller.join(5000);
+        }
+        assertFalse(poller.isAlive());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,single", "true,single", "false,batch", "true,batch", "false,conditional", "true,conditional"})
+    void returningMessageToQueueWakesParkedReceive(boolean fifo, String operation) throws Exception {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("visibility-wakeup" + (fifo ? ".fifo" : ""),
+                fifo ? Map.of("FifoQueue", "true") : null, region);
+        String queueUrl = queue.getQueueUrl();
+        sqsService.sendMessage(queueUrl, "returned", 0, fifo ? "group" : null, fifo ? "message" : null, region);
+        Message head = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
+        assertTrue(sqsService.receiveMessage(queueUrl, 1, 30, 0, region).isEmpty());
+
+        FutureTask<List<Message>> receive = new FutureTask<>(
+                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
+        Thread poller = new Thread(receive, "sqs-visibility-wakeup");
+        poller.start();
+        try {
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
+                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+            switch (operation) {
+                case "single" -> sqsService.changeMessageVisibility(queueUrl, head.getReceiptHandle(), 0, region);
+                case "batch" -> {
+                    List<SqsService.BatchResultEntry> results = sqsService.changeMessageVisibilityBatch(queueUrl,
+                            List.of(new SqsService.ChangeVisibilityBatchEntry("return", head.getReceiptHandle(), 0)),
+                            region);
+                    assertTrue(results.getFirst().success());
+                }
+                case "conditional" -> assertTrue(sqsService.changeMessageVisibilityIfUnchanged(queueUrl,
+                        head.getReceiptHandle(), head.getVisibleAt(), 0, region));
+                default -> throw new AssertionError("Unknown visibility operation: " + operation);
+            }
+
+            // Require a wakeup before the one-second polling retry.
+            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
+            assertEquals(1, received.size());
+            assertEquals(head.getMessageId(), received.getFirst().getMessageId());
+            assertEquals(2, received.getFirst().getReceiveCount());
+        } finally {
+            poller.interrupt();
+            poller.join(5000);
+        }
+        assertFalse(poller.isAlive());
     }
 
     // --- DeleteQueue releases in-flight ReceiveMessage long polls ---

@@ -42,6 +42,8 @@ public class JobRun {
     private Instant startedAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant endedAt;
+    // "The total time for a job in the QUEUED state in milliseconds", once it has left that state.
+    private Long queuedDurationMilliseconds;
     private ImageConfiguration imageConfiguration;
     private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
 
@@ -95,6 +97,10 @@ public class JobRun {
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getEndedAt() { return endedAt; }
     public void setEndedAt(Instant endedAt) { this.endedAt = endedAt; }
+    public Long getQueuedDurationMilliseconds() { return queuedDurationMilliseconds; }
+    public void setQueuedDurationMilliseconds(Long queuedDurationMilliseconds) {
+        this.queuedDurationMilliseconds = queuedDurationMilliseconds;
+    }
     public ImageConfiguration getImageConfiguration() { return imageConfiguration; }
     public void setImageConfiguration(ImageConfiguration imageConfiguration) { this.imageConfiguration = imageConfiguration; }
     public Map<String, WorkerTypeSpecification> getWorkerTypeSpecifications() { return workerTypeSpecifications; }

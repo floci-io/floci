@@ -257,7 +257,7 @@ resource once the stack update commits, as on AWS. Deleting the stack deletes th
 Properties the emulated control plane has no model for are accepted and logged once at `WARN`
 rather than failing the stack: the runtime's `CapacityProviderConfiguration`,
 `FilesystemConfigurations`, `LifecycleConfiguration`, `PlatformVersion` and
-`RequestHeaderConfiguration`; the endpoint's `Tags`; and the memory's `MemoryStrategies`,
+`RequestHeaderConfiguration`; and the memory's `MemoryStrategies`,
 `IndexedKeys`, `NamespaceKeys` and `StreamDeliveryResources`.
 
 ## Examples

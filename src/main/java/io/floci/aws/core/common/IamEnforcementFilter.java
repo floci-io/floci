@@ -649,17 +649,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         // Tagged group creation requires either tagging permission, using the same resolved
-        // caller (including session, boundary and SCP ceilings) as the primary operation.
+        // caller (including session, boundary and SCP ceilings) as the primary operation, on the
+        // group the table checks the create on; the evaluator matches TagLogGroup's policies on it
+        // with or without the trailing :* as it does the create's.
         if ("logs:CreateLogGroup".equals(action) && conditionContext != null
                 && !conditionContext.getOrDefault("aws:TagKeys", List.of()).isEmpty()) {
-            String groupResource = resources.getFirst();
-            String taggingResource = groupResource.substring(0, groupResource.length() - 2);
+            String taggingResource = resources.getFirst();
             Map<String, List<String>> taggingContext = IamConditionContextResolver.withGlobalContext(
                     conditionContext, taggingResource, region, accountId, accountId);
-            Map<String, List<String>> groupContext = IamConditionContextResolver.withGlobalContext(
-                    conditionContext, groupResource, region, accountId, accountId);
             if (evaluator.evaluate(caller, null, "logs:TagResource", taggingResource, taggingContext) == Decision.DENY
-                    && evaluator.evaluate(caller, null, "logs:TagLogGroup", groupResource, groupContext) == Decision.DENY) {
+                    && evaluator.evaluate(caller, null, "logs:TagLogGroup", taggingResource, taggingContext)
+                    == Decision.DENY) {
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}",
                         akid, "logs:TagResource", taggingResource);
                 ctx.abortWith(accessDeniedForRequest("logs:TagResource", credentialScope, ctx, taggingResource));
@@ -1801,16 +1801,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition; API
-     * Gateway's path ARNs on the request's partition, which that service mints them in; and the targets of a
-     * namespace the table of request resources reads on {@code operation}, the one the request is dispatched as (see
-     * {@link RequestResources}).
+     * KMS targets depend on the serving operation and the request's partition; API Gateway's path ARNs on the
+     * request's partition, which that service mints them in; and the targets of a namespace the table of request
+     * resources reads on {@code operation}, the one the request is dispatched as (see {@link RequestResources}).
      */
     private List<String> targetResources(String credentialScope, String action, String operation,
                                          ContainerRequestContext ctx, String region, String accountId) {
-        if ("logs".equals(credentialScope)) {
-            return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
-        }
         if ("kms".equals(credentialScope)) {
             return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
         }

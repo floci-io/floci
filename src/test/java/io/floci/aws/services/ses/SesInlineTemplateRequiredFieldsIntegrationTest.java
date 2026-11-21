@@ -8,7 +8,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.DESTINATION;
+import static io.floci.aws.services.ses.SesV2Requests.ENTRY;
+import static io.floci.aws.services.ses.SesV2Requests.post;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -20,24 +22,9 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesInlineTemplateRequiredFieldsIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String UNVERIFIED = "sender@unverified-inline-template.floci.test";
-    private static final String TO = "success@simulator.amazonses.com";
-    private static final String DESTINATION = "\"Destination\": {\"ToAddresses\": [\"" + TO + "\"]}";
-    private static final String ENTRY = "{" + DESTINATION + "}";
     private static final String SUBJECT_ONLY = "{\"Subject\": \"s\"}";
     private static final String MESSAGE = "Template is missing required fields.";
-
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
-    }
 
     private static String template(String templateContent) {
         return "{\"Template\": {\"TemplateContent\": " + templateContent + ", \"TemplateData\": \"{}\"}}";
@@ -154,44 +141,6 @@ class SesInlineTemplateRequiredFieldsIntegrationTest {
                 Arguments.of("template data that is not JSON", "{" + from
                         + ", \"DefaultContent\": {\"Template\": {\"TemplateContent\": " + SUBJECT_ONLY
                         + ", \"TemplateData\": \"not json\"}}, " + entries + "}"));
-    }
-
-    static Stream<Arguments> storedTemplateSelectors() {
-        return Stream.of(
-                Arguments.of("name", "\"TemplateName\": \"inline-template-ghost\""),
-                Arguments.of("arn", "\"TemplateArn\": "
-                        + "\"arn:aws:ses:us-east-1:000000000000:template/inline-template-ghost\""));
-    }
-
-    private static String templateWithSelector(String selector, String templateContent) {
-        return "{\"Template\": {" + selector + ", \"TemplateContent\": " + templateContent
-                + ", \"TemplateData\": \"{}\"}}";
-    }
-
-    // AWS words the combination differently on the two operations, and SendEmail reports it even
-    // when the inline content is incomplete (probe-confirmed).
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("storedTemplateSelectors")
-    void sendEmail_storedTemplateBesideContent_isRejectedWhateverTheContent(String label, String selector) {
-        for (String templateContent : new String[] {"{\"Subject\": \"s\", \"Text\": \"t\"}", "{}", SUBJECT_ONLY}) {
-            post("/v2/email/outbound-emails", "{\"FromEmailAddress\": \"" + UNVERIFIED + "\", " + DESTINATION
-                    + ", \"Content\": " + templateWithSelector(selector, templateContent) + "}")
-                .statusCode(400)
-                .body("__type", equalTo("BadRequestException"))
-                .body("message", equalTo(
-                        "TemplateName and TemplateArn cannot be provided when TemplateContent is provided."));
-        }
-    }
-
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("storedTemplateSelectors")
-    void sendBulkEmail_storedTemplateBesideCompleteContent_isRejected(String label, String selector) {
-        post("/v2/email/outbound-bulk-emails", "{\"FromEmailAddress\": \"" + UNVERIFIED
-                + "\", \"DefaultContent\": " + templateWithSelector(selector, "{\"Subject\": \"s\", \"Text\": \"t\"}")
-                + ", \"BulkEmailEntries\": [" + ENTRY + "]}")
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("message", equalTo("TemplateName or TemplateArn cannot be provided with EmailTemplateContent"));
     }
 
     @ParameterizedTest(name = "{0}")

@@ -965,7 +965,7 @@ class StsQueryHandlerTest {
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
         when(keys.findVerificationKey(issuer)).thenReturn(Optional.of(mock(RSAPublicKey.class)));
         WebIdentityTrustPolicyEvaluator trust = mock(WebIdentityTrustPolicyEvaluator.class);
-        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap())).thenReturn(true);
+        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"))).thenReturn(true);
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
@@ -980,7 +980,7 @@ class StsQueryHandlerTest {
         Response response = handler.handle("AssumeRoleWithWebIdentity", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
-        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap());
+        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap(), eq("app"));
         assertEquals("arn:aws-cn:sts::000000000000:assumed-role/web-role/app",
                 extract(ARN, (String) response.getEntity()));
     }

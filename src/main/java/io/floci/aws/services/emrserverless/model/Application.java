@@ -44,6 +44,9 @@ public class Application {
     private MonitoringConfiguration monitoringConfiguration;
     private List<RuntimeConfiguration> runtimeConfiguration;
     private SchedulerConfiguration schedulerConfiguration;
+    // Whether an empty schedulerConfiguration turned queuing off, which leaves the application with none, so that a
+    // release that queues by default does not; Floci's own, as the API has none.
+    private Boolean schedulerOff;
     private DiskEncryptionConfiguration diskEncryptionConfiguration;
     private InteractiveConfiguration interactiveConfiguration;
     private IdentityCenterConfiguration identityCenterConfiguration;
@@ -91,6 +94,8 @@ public class Application {
     public void setMonitoringConfiguration(MonitoringConfiguration monitoringConfiguration) { this.monitoringConfiguration = monitoringConfiguration; }
     public List<RuntimeConfiguration> getRuntimeConfiguration() { return runtimeConfiguration; }
     public void setRuntimeConfiguration(List<RuntimeConfiguration> runtimeConfiguration) { this.runtimeConfiguration = runtimeConfiguration; }
+    public Boolean getSchedulerOff() { return schedulerOff; }
+    public void setSchedulerOff(Boolean schedulerOff) { this.schedulerOff = schedulerOff; }
     public SchedulerConfiguration getSchedulerConfiguration() { return schedulerConfiguration; }
     public void setSchedulerConfiguration(SchedulerConfiguration schedulerConfiguration) { this.schedulerConfiguration = schedulerConfiguration; }
     public DiskEncryptionConfiguration getDiskEncryptionConfiguration() { return diskEncryptionConfiguration; }

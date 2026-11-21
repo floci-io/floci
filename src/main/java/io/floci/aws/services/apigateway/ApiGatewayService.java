@@ -5276,6 +5276,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
     }
 
+    public PaginatedResult<VpcLink> getVpcLinkPage(String region, Integer limit, String position) {
+        return pageById(getVpcLinks(region), VpcLink::getId, limit, position);
+    }
+
     /**
      * AWS's patch-operation table for a VPC link supports only {@code replace}, and only on
      * {@code /name} and {@code /description}. Applying anything else is an error rather than a

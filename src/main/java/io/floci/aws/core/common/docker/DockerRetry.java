@@ -96,7 +96,7 @@ public final class DockerRetry {
             if (c instanceof InterruptedIOException && !(c instanceof SocketTimeoutException)) {
                 return false;
             }
-            if (c instanceof LocalFailure) {
+            if (c instanceof LocalFailure || c instanceof DockerUnavailableException) {
                 return false;
             }
             if (isUnusableSocket(c)) {
@@ -126,6 +126,30 @@ public final class DockerRetry {
             }
         }
         return false;
+    }
+
+    /**
+     * True when {@code t} says the daemon could not be reached at the transport, what
+     * {@link DockerCircuitBreaker} counts: a transient I/O failure ({@link #isTransientIo}) or a
+     * socket that is missing or may not be opened. A wait for a pooled connection, an interruption, a
+     * failure raised on this host ({@link LocalFailure}) and the breaker's own fail-fast exception say
+     * nothing about the daemon and do not count.
+     */
+    static boolean isDaemonFailure(Throwable t) {
+        boolean unusableSocket = false;
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof InterruptedIOException && !(c instanceof SocketTimeoutException)) {
+                return false;
+            }
+            if (c instanceof LocalFailure || c instanceof DockerUnavailableException) {
+                return false;
+            }
+            unusableSocket |= isUnusableSocket(c);
+            if (c.getCause() == c) {
+                break;
+            }
+        }
+        return unusableSocket || isTransientIo(t);
     }
 
     /**

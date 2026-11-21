@@ -49,6 +49,11 @@ public class EmrHandler {
     private static final Logger LOG = Logger.getLogger(EmrHandler.class);
     /** "There is a limit of 25 volumes per instance." (Amazon EMR Management Guide, Instance storage) */
     private static final int EBS_VOLUMES_PER_INSTANCE = 25;
+    // RunJobFlow's uniform form's instance groups (see uniformInstanceGroups).
+    static final String UNIFORM_MASTER_GROUP = "Master InstanceGroup";
+    static final String UNIFORM_CORE_GROUP = "Core InstanceGroup";
+    static final String NO_CORE_INSTANCE_TYPE =
+            "SlaveInstanceType is required when InstanceCount is greater than 1.";
     // ListInstances "Provides information for all active Amazon EC2 instances and Amazon EC2 instances terminated in the
     // last 30 days, up to a maximum of 2,000": that many to a call, the rest after its Marker.
     static final int INSTANCES_PER_PAGE = 2000;
@@ -199,8 +204,10 @@ public class EmrHandler {
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
         cluster.setSessionEnabled(request.path("SessionEnabled").asBoolean(false));
         cluster.setEc2Attributes(buildEc2Attributes(instances, region));
-        cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
-        cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
+        List<EmrInstanceGroup> groups = parseInstanceGroups(instances.path("InstanceGroups"));
+        List<EmrInstanceFleet> fleets = parseInstanceFleets(instances.path("InstanceFleets"));
+        cluster.setInstanceGroups(groups.isEmpty() && fleets.isEmpty() ? uniformInstanceGroups(instances) : groups);
+        cluster.setInstanceFleets(fleets);
         cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
 
         EmrCluster created = service.runJobFlow(cluster, region);
@@ -398,6 +405,7 @@ public class EmrHandler {
         setRawJson(node, "EngineConfigurations", session.getEngineConfigurations());
         setRawJson(node, "MonitoringConfiguration", session.getMonitoringConfiguration());
         node.put("SessionIdleTimeoutInMinutes", session.getSessionIdleTimeoutInMinutes());
+        putIfSet(node, "ServerUrl", session.getServerUrl());
         node.set("Tags", tagArray(session.getTags()));
         return node;
     }
@@ -1272,7 +1280,8 @@ public class EmrHandler {
                 modifications.add(new EmrService.InstanceGroupModification(
                         g.path("InstanceGroupId").asText(null),
                         count.isMissingNode() || count.isNull() ? null : count.asInt(),
-                        configurations.isArray() ? configurations.toString() : null));
+                        configurations.isArray() ? configurations.toString() : null,
+                        g.path("ReconfigurationType").asText(null)));
             }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
@@ -1483,6 +1492,9 @@ public class EmrHandler {
         if (includeExecutionRole && step.getExecutionRoleArn() != null) {
             node.put("ExecutionRoleArn", step.getExecutionRoleArn());
         }
+        // Its own log destination and key, the StepMonitoringConfiguration it was given.
+        putIfSet(node, "LogUri", step.getLogUri());
+        putIfSet(node, "EncryptionKeyArn", step.getEncryptionKeyArn());
         ObjectNode status = node.putObject("Status");
         status.put("State", step.getState());
         if (step.getStateChangeReason() != null) {
@@ -1690,6 +1702,9 @@ public class EmrHandler {
                 props.forEach(p -> map.put(p.path("Key").asText(), p.path("Value").asText()));
                 step.setProperties(map);
             }
+            JsonNode s3Logs = s.path("StepMonitoringConfiguration").path("S3MonitoringConfiguration");
+            step.setLogUri(s3Logs.path("LogUri").asText(null));
+            step.setEncryptionKeyArn(s3Logs.path("EncryptionKeyArn").asText(null));
             steps.add(step);
         }
         return steps;
@@ -1719,6 +1734,45 @@ public class EmrHandler {
             groups.add(group);
         }
         return groups;
+    }
+
+    /**
+     * The instance groups of RunJobFlow's uniform form, a cluster given as its MasterInstanceType, SlaveInstanceType
+     * and InstanceCount: "If the value is 1, the same instance serves as both the master and core and task node. If the
+     * value is greater than 1, one instance is the master node and all others are core and task nodes." None without a
+     * MasterInstanceType. The master group's name is the one DescribeJobFlows' sample response gives it; no source
+     * names the core group, so its name follows the master's.
+     *
+     * <p>A single instance needs no SlaveInstanceType, as AWS runs one without it, but core nodes do, as "all three
+     * must be present": a request for more without it is refused with a ValidationException, whose wording, AWS's not
+     * being documented, is Floci's.
+     */
+    static List<EmrInstanceGroup> uniformInstanceGroups(JsonNode instances) {
+        List<EmrInstanceGroup> groups = new ArrayList<>();
+        String masterType = instances.path("MasterInstanceType").asText(null);
+        if (masterType == null) {
+            return groups;
+        }
+        groups.add(uniformInstanceGroup(UNIFORM_MASTER_GROUP, "MASTER", masterType, 1));
+        int count = instances.path("InstanceCount").asInt(1);
+        if (count > 1) {
+            String coreType = instances.path("SlaveInstanceType").asText(null);
+            if (coreType == null || coreType.isBlank()) {
+                throw new AwsException("ValidationException", NO_CORE_INSTANCE_TYPE, 400);
+            }
+            groups.add(uniformInstanceGroup(UNIFORM_CORE_GROUP, "CORE", coreType, count - 1));
+        }
+        return groups;
+    }
+
+    private static EmrInstanceGroup uniformInstanceGroup(String name, String role, String instanceType, int count) {
+        EmrInstanceGroup group = new EmrInstanceGroup();
+        group.setName(name);
+        group.setInstanceGroupType(role);
+        group.setInstanceType(instanceType);
+        group.setMarket("ON_DEMAND");
+        group.setRequestedInstanceCount(count);
+        return group;
     }
 
     private List<EmrInstanceFleet> parseInstanceFleets(JsonNode fleetsNode) {

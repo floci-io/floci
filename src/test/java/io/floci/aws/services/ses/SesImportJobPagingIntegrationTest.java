@@ -29,8 +29,7 @@ import static org.hamcrest.Matchers.nullValue;
 class SesImportJobPagingIntegrationTest {
 
     private static final String REGION = "eu-central-2";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor(REGION);
     private static final String BUCKET = "ses-import-job-paging-it";
     private static final String PAGE_SIZE_BELOW_ONE = "Value '0' at 'pageSize' failed to satisfy constraint: "
             + "Member must have value greater than or equal to 1";
@@ -42,7 +41,7 @@ class SesImportJobPagingIntegrationTest {
     private static final List<String> created = new ArrayList<>();
 
     private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
+        return SesV2Requests.v2(AUTH);
     }
 
     @Test

@@ -1703,6 +1703,9 @@ public class SqsService implements Resettable, ResourceProvider {
             LOG.debugv("No message for receipt handle {0}", receiptHandle);
             return;
         }
+        if (queue.isFifo()) {
+            notifyReceivers(storageKey);
+        }
         LOG.debugv("Deleted message with receipt handle {0}", receiptHandle);
         if (LOG.isTraceEnabled()) {
             Message m = removal.message();
@@ -1729,9 +1732,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private boolean changeMessageVisibility(String queueUrl, String receiptHandle, Instant expectedVisibleAt,
                                             int visibilityTimeout, String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
-        Queue queue = queueStore.get(storageKey)
-                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
-                        "The specified queue does not exist.", 400));
+        Queue queue = getQueueByUrl(storageKey, queueUrl).orElseThrow(SqsService::nonExistentQueue);
         ReceiptHandle handle = checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
         GuardedMessageQueue messages = getOrCreateQueue(storageKey);
@@ -1742,6 +1743,9 @@ public class SqsService implements Resettable, ResourceProvider {
         if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             throw invalidReceiptHandle(receiptHandle,
                     "Message does not exist or is not available for visibility timeout change", inBatch);
+        }
+        if (result == GuardedMessageQueue.HandleResult.APPLIED && visibilityTimeout == 0) {
+            notifyReceivers(storageKey);
         }
         return result == GuardedMessageQueue.HandleResult.APPLIED;
     }
@@ -2105,7 +2109,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
     public List<BatchResultEntry> changeMessageVisibilityBatch(String queueUrl,
                                                                List<ChangeVisibilityBatchEntry> entries, String region) {
-        ensureQueueExists(regionKey(region, queueUrl));
+        ensureQueueExists(regionKey(region, queueUrl), queueUrl);
         List<BatchResultEntry> results = new ArrayList<>();
         for (ChangeVisibilityBatchEntry entry : entries) {
             try {
@@ -2486,9 +2490,20 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private void ensureQueueExists(String storageKey) {
         if (queueStore.get(storageKey).isEmpty()) {
-            throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
-                    "The specified queue does not exist.", 400);
+            throw nonExistentQueue();
         }
+    }
+
+    /** Looks the queue up in the account its URL names, as the message operations do, not the caller's. */
+    private void ensureQueueExists(String storageKey, String queueUrl) {
+        if (getQueueByUrl(storageKey, queueUrl).isEmpty()) {
+            throw nonExistentQueue();
+        }
+    }
+
+    private static AwsException nonExistentQueue() {
+        return new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                "The specified queue does not exist.", 400);
     }
 
     /**

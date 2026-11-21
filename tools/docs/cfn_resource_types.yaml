@@ -45,6 +45,7 @@ order:
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
+  - AWS::CodeDeploy
   - AWS::Batch
   - AWS::Cognito
   - AWS::CertificateManager
@@ -144,6 +145,7 @@ service_labels:
   AWS::CloudTrail: CloudTrail
   AWS::CloudWatch: CloudWatch
   AWS::CodeBuild: CodeBuild
+  AWS::CodeDeploy: CodeDeploy
   AWS::CodePipeline: CodePipeline
   AWS::Cognito: Cognito
   AWS::Config: Config
@@ -249,7 +251,7 @@ notes:
   AWS::GuardDuty::MalwareProtectionPlan: 'management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected'
   AWS::Bedrock::ApplicationInferenceProfile: 'Ref returns the profile id; InferenceProfileArn and InferenceProfileId are available through GetAtt'
   AWS::BedrockAgentCore::Runtime: 'Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored'
-  AWS::BedrockAgentCore::RuntimeEndpoint: 'Ref returns the endpoint ARN; Tags are accepted and not stored'
+  AWS::BedrockAgentCore::RuntimeEndpoint: 'Ref returns the endpoint ARN'
   AWS::BedrockAgentCore::Memory: 'Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored'
   AWS::KinesisFirehose::DeliveryStream: '`DeliveryStreamName`, `Tags` and, from an S3 destination, `BucketARN`, `RoleARN`, `Prefix`, `ErrorOutputPrefix`, `CompressionFormat`, `BufferingHints`, `CloudWatchLoggingOptions` and `ProcessingConfiguration` are applied; other properties are ignored, and a destination member the template drops on update keeps its stored value, as on AWS'
 

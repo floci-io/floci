@@ -122,6 +122,19 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS`
 
+### Unreachable daemon
+
+When the Docker daemon stops answering, Floci stops waiting on it. After `breaker-failure-threshold` attempts in a row (3 by default) fail before the daemon answers (a broken connection, a refused or missing socket, a call that times out), Floci pings the daemon. Each retry of a call is an attempt, so a single call that Floci retries can reach the threshold on its own; the ping is what keeps that from turning Docker off. If the ping fails too, every Docker call fails at once instead of waiting out its own connect, response and retry timeouts, so a container-backed request reports a missing daemon in about a second. Floci logs one warning when this starts, pings the daemon every `breaker-probe-interval-seconds` (5 by default), and logs one line when it answers again. An error status from the daemon (a 404, a 500) is an answer and never counts, for a call or for the ping, and a ping that never reaches the daemon (Floci shutting down) neither turns Docker off nor back on. The ping uses a connection of its own and gives up after 5 seconds. Set the threshold to 0 to turn this off:
+
+```yaml
+floci:
+  docker:
+    breaker-failure-threshold: 3
+    breaker-probe-interval-seconds: 5
+```
+
+Environment variables: `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD`, `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
@@ -368,6 +381,8 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls |
+| `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
+| `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
