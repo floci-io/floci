@@ -308,7 +308,7 @@ class KmsServiceTest {
 
         ObjectMapper objectMapper = new ObjectMapper();
         KmsJsonHandler handler = new KmsJsonHandler(kmsService, objectMapper,
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000"), mock(KmsCustomKeyStoreService.class));
         ObjectNode request = objectMapper.createObjectNode();
         request.put("KeyId", replica.getKeyId());
 

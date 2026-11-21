@@ -15,14 +15,19 @@ import io.floci.aws.services.kms.model.KmsGrant;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.kms.model.KmsKeySpec;
 import io.floci.aws.services.kms.model.KmsKeyUsage;
+import io.floci.aws.services.kms.model.KmsCustomKeyStore;
 import io.floci.aws.services.kms.model.KmsMessageType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.util.*;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
 
@@ -32,12 +37,15 @@ public class KmsJsonHandler {
     private final KmsService service;
     private final ObjectMapper objectMapper;
     private final RegionResolver regionResolver;
+    private final KmsCustomKeyStoreService customKeyStoreService;
 
     @Inject
-    public KmsJsonHandler(KmsService service, ObjectMapper objectMapper, RegionResolver regionResolver) {
+    public KmsJsonHandler(KmsService service, ObjectMapper objectMapper, RegionResolver regionResolver,
+                          KmsCustomKeyStoreService customKeyStoreService) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
+        this.customKeyStoreService = customKeyStoreService;
     }
 
     private static final Set<String> KEY_ID_OPERATIONS = Set.of(
@@ -113,10 +121,125 @@ public class KmsJsonHandler {
             case "GetParametersForImport" -> handleGetParametersForImport(request, region);
             case "ImportKeyMaterial" -> handleImportKeyMaterial(request, region);
             case "DeleteImportedKeyMaterial" -> handleDeleteImportedKeyMaterial(request, region);
+            case "CreateCustomKeyStore" -> handleCreateCustomKeyStore(request, region);
+            case "DescribeCustomKeyStores" -> handleDescribeCustomKeyStores(request, region);
+            case "UpdateCustomKeyStore" -> handleUpdateCustomKeyStore(request, region);
+            case "DeleteCustomKeyStore" -> handleDeleteCustomKeyStore(request, region);
+            case "ConnectCustomKeyStore" -> handleConnectCustomKeyStore(request, region);
+            case "DisconnectCustomKeyStore" -> handleDisconnectCustomKeyStore(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+    }
+
+    private Response handleCreateCustomKeyStore(JsonNode request, String region) {
+        String type = requiredStringText(request, "CustomKeyStoreType");
+        String connectivity = requiredStringText(request, "XksProxyConnectivity");
+        if (!"EXTERNAL_KEY_STORE".equals(type) || !"PUBLIC_ENDPOINT".equals(connectivity)
+                || hasValue(request, "XksProxyVpcEndpointServiceName")
+                || hasValue(request, "XksProxyVpcEndpointServiceOwner")) {
+            throw new AwsException("UnsupportedOperationException",
+                    "Only EXTERNAL_KEY_STORE with PUBLIC_ENDPOINT connectivity is supported", 400);
+        }
+        JsonNode credential = request.path("XksProxyAuthenticationCredential");
+        if (!credential.isObject()) {
+            throw new AwsException("ValidationException", "XksProxyAuthenticationCredential is required", 400);
+        }
+        KmsCustomKeyStore store = customKeyStoreService.create(requiredStringText(request, "CustomKeyStoreName"),
+                requiredStringText(request, "XksProxyUriEndpoint"), requiredStringText(request, "XksProxyUriPath"),
+                requiredStringText(credential, "AccessKeyId"), requiredStringText(credential, "RawSecretAccessKey"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("CustomKeyStoreId", store.getCustomKeyStoreId());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeCustomKeyStores(JsonNode request, String region) {
+        String id = optionalText(request, "CustomKeyStoreId");
+        String name = optionalText(request, "CustomKeyStoreName");
+        KmsCustomKeyStoreService.Page page = customKeyStoreService.describe(id, name,
+                marker(request), limit(request), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode stores = response.putArray("CustomKeyStores");
+        for (KmsCustomKeyStore store : page.items()) {
+            ObjectNode entry = stores.addObject();
+            entry.put("CustomKeyStoreId", store.getCustomKeyStoreId());
+            entry.put("CustomKeyStoreName", store.getCustomKeyStoreName());
+            entry.put("CustomKeyStoreType", store.getCustomKeyStoreType());
+            entry.put("ConnectionState", store.getConnectionState());
+            if (store.getConnectionErrorCode() != null) {
+                entry.put("ConnectionErrorCode", store.getConnectionErrorCode());
+            }
+            entry.put("CreationDate", (double) store.getCreationDate());
+            ObjectNode proxy = entry.putObject("XksProxyConfiguration");
+            proxy.put("AccessKeyId", store.getAccessKeyId());
+            proxy.put("Connectivity", store.getProxyConnectivity());
+            proxy.put("UriEndpoint", store.getProxyUriEndpoint());
+            proxy.put("UriPath", store.getProxyUriPath());
+        }
+        response.put("Truncated", page.truncated());
+        if (page.truncated()) {
+            response.put("NextMarker", page.nextMarker());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateCustomKeyStore(JsonNode request, String region) {
+        String id = requiredText(request, "CustomKeyStoreId");
+        String name = optionalText(request, "NewCustomKeyStoreName");
+        String endpoint = optionalText(request, "XksProxyUriEndpoint");
+        String path = optionalText(request, "XksProxyUriPath");
+        String accessKeyId = null;
+        String secretAccessKey = null;
+        JsonNode credential = request.path("XksProxyAuthenticationCredential");
+        if (!credential.isMissingNode() && !credential.isNull()) {
+            if (!credential.isObject()) {
+                throw new AwsException("SerializationException",
+                        "XksProxyAuthenticationCredential must be an object", 400);
+            }
+            accessKeyId = requiredStringText(credential, "AccessKeyId");
+            secretAccessKey = requiredStringText(credential, "RawSecretAccessKey");
+        }
+        JsonNode connectivity = request.path("XksProxyConnectivity");
+        if (hasValue(request, "XksProxyVpcEndpointServiceName")
+                || hasValue(request, "XksProxyVpcEndpointServiceOwner")
+                || (!connectivity.isMissingNode() && !connectivity.isNull()
+                    && !"PUBLIC_ENDPOINT".equals(connectivity.asText()))) {
+            throw new AwsException("UnsupportedOperationException", "Only PUBLIC_ENDPOINT connectivity is supported", 400);
+        }
+        customKeyStoreService.update(id, name, endpoint, path, accessKeyId, secretAccessKey, region);
+        return Response.ok().build();
+    }
+
+    private Response handleDeleteCustomKeyStore(JsonNode request, String region) {
+        customKeyStoreService.delete(requiredText(request, "CustomKeyStoreId"), region);
+        return Response.ok().build();
+    }
+
+    private Response handleConnectCustomKeyStore(JsonNode request, String region) {
+        customKeyStoreService.connect(requiredText(request, "CustomKeyStoreId"), region);
+        return Response.ok().build();
+    }
+
+    private Response handleDisconnectCustomKeyStore(JsonNode request, String region) {
+        customKeyStoreService.disconnect(requiredText(request, "CustomKeyStoreId"), region);
+        return Response.ok().build();
+    }
+
+    private static boolean hasValue(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        return !value.isMissingNode() && !value.isNull();
+    }
+
+    private static String optionalText(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("SerializationException", field + " must be a String", 400);
+        }
+        return value.textValue();
     }
 
     private Response handleListKeyRotations(JsonNode request, String region) {
@@ -700,6 +823,14 @@ public class KmsJsonHandler {
                 requiredText(request, "Description"),
                 region);
         return Response.ok().build();
+    }
+
+    private String requiredStringText(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (!value.isTextual() || value.asText().isBlank()) {
+            throw new AwsException("ValidationException", field + " must be a non-empty string", 400);
+        }
+        return value.asText();
     }
 
     private String requiredText(JsonNode request, String field) {
