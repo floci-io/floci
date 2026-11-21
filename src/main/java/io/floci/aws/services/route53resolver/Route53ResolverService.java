@@ -79,6 +79,13 @@ public class Route53ResolverService {
             "status", "Status",
             "type", "RuleType");
 
+    /** The config fields the DNSSEC listing filters on, keyed as the normalized filter name. */
+    private static final Map<String, String> DNSSEC_FILTER_FIELDS = Map.of(
+            "id", "Id",
+            "ownerid", "OwnerId",
+            "resourceid", "ResourceId",
+            "validationstatus", "ValidationStatus");
+
     /** The AWS-managed domain lists available in commercial regions. */
     static final List<String> AWS_MANAGED_DOMAIN_LIST_NAMES = List.of(
             "AWSManagedDomainsAggregateThreatList",
@@ -694,6 +701,76 @@ public class Route53ResolverService {
                     dnssecConfigStore.put(region + "::" + resourceId, config);
                     return config;
                 }).deepCopy();
+    }
+
+    /**
+     * One page of the region's DNSSEC validation configurations, matching every filter of
+     * {@code filters} the way {@link #listResolverRules} does: a config matches a filter when its
+     * field equals any of the filter's values, filter names are read case-insensitively without
+     * underscores, and a name the operation does not list filters nothing. {@code MaxResults}
+     * defaults to the modeled 100 and is type-checked as the JSON integer it is; the page cursor
+     * is the config id, and an invalid token is the modeled {@code InvalidNextTokenException}.
+     */
+    public synchronized ObjectNode listResolverDnssecConfigs(JsonNode filters, JsonNode maxResults,
+                                                             String nextToken, String region) {
+        List<ObjectNode> configs = dnssecConfigStore.scan(key -> key.startsWith(region + "::")).stream()
+                .map(ObjectNode::deepCopy).toList();
+        if (filters != null && !filters.isNull()) {
+            if (!filters.isArray()) {
+                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+            }
+            for (JsonNode filter : filters) {
+                configs = filterDnssecConfigs(configs, filter);
+            }
+        }
+        boolean absent = maxResults == null || maxResults.isNull();
+        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
+                || maxResults.intValue() < 1 || maxResults.intValue() > 100)) {
+            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
+        }
+        PaginatedResult<ObjectNode> paged = Pagination.paginate(configs, config -> text(config, "Id"),
+                absent ? 100 : maxResults.intValue(), nextToken, "dnssec-configs",
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode page = result.putArray("ResolverDnssecConfigs");
+        for (ObjectNode config : paged.items()) {
+            page.add(config);
+        }
+        if (paged.nextToken() != null) {
+            result.put("NextToken", paged.nextToken());
+        }
+        return result;
+    }
+
+    private List<ObjectNode> filterDnssecConfigs(List<ObjectNode> configs, JsonNode filter) {
+        if (!filter.isObject()) {
+            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+        }
+        String name = filter.path("Name").asText("");
+        if (name.isEmpty() || name.length() > 64) {
+            throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
+        }
+        JsonNode filterValues = filter.path("Values");
+        if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : filterValues) {
+            if (!value.isTextual()) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+            }
+            if (value.asText().isEmpty() || value.asText().length() > 600) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
+            }
+            values.add(value.asText());
+        }
+        String field = DNSSEC_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
+        if (field == null) {
+            return configs;
+        }
+        return configs.stream()
+                .filter(config -> values.stream().anyMatch(value -> value.equals(text(config, field))))
+                .toList();
     }
 
     private Vpc requireDnssecVpc(String resourceId, String region) {
