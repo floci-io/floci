@@ -1717,22 +1717,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int INSTANCE_TYPE_PAGE = 50;
 
     /**
-     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * The catalogue's releases, in ListReleaseLabels' order. Floci's configured default release label is always
      * among them, with no applications when the catalogue does not describe it, so a non-default
-     * setting never makes Floci's own default unknown.
+     * setting never makes Floci's own default unknown. A blank setting names no release, so it adds none.
      */
     List<EmrReleaseCatalog.Release> releases() {
-        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+        if (defaultReleaseLabel == null || defaultReleaseLabel.isBlank()
+                || EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
             return EmrReleaseCatalog.RELEASES;
         }
         List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
         all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
-        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        all.sort((a, b) -> EmrReleaseCatalog.LISTING_ORDER.compare(a.label(), b.label()));
         return all;
     }
 
     /**
-     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * Release labels, in the catalogue's order, narrowed by {@code prefix} (such as {@code emr-6}) and by
      * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
      * without regard to case. A token belongs to the filters it was issued for, so one replayed
      * with other filters, or altered, is refused.
@@ -1763,32 +1764,35 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 nextToken, namespace, EmrService::invalidToken);
     }
 
-    /** A release's applications and OS releases; no label means the latest release. */
+    /** A release's applications and OS releases; no label means the newest numbered release, the first listed. */
     public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
-        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+        if (label == null || label.isBlank()) {
+            return releases().get(0);
+        }
+        // AWS's recorded answer: InvalidRequestException with this ErrorCode and a message naming no label.
+        return findRelease(label).orElseThrow(() -> new AwsException("InvalidRequestException",
+                "The release label isn't valid.", 400, Map.of("ErrorCode", "InvalidInputParameter")));
     }
 
     public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
-        if (label == null || label.isBlank()) {
-            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        // AWS's recorded answer, a missing label reading "null"; its ErrorCode and wording differ from
+        // DescribeReleaseLabel's.
+        if (label == null || label.isBlank() || findRelease(label).isEmpty()) {
+            throw new AwsException("InvalidRequestException", "The supplied release label is invalid: " + label + ".",
+                    400, Map.of("ErrorCode", "INVALID_RELEASE_LABEL"));
         }
-        requireRelease(label);
         List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
         return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
                 "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
     }
 
-    private EmrReleaseCatalog.Release requireRelease(String label) {
-        return releases().stream()
-                .filter(r -> r.label().equals(label))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "The specified release label " + label + " is not valid.", 400));
+    private Optional<EmrReleaseCatalog.Release> findRelease(String label) {
+        return releases().stream().filter(r -> r.label().equals(label)).findFirst();
     }
 
     /**
      * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
-     * catalogue is newest first rather than alphabetical.
+     * catalogue is in ListReleaseLabels' order rather than alphabetical.
      */
     private static <T> Function<T, String> positionIn(List<T> items) {
         Map<T, String> positions = new HashMap<>();
@@ -3049,40 +3053,47 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // A cluster's core and task nodes as containers: "Core nodes run the Data Node daemon" and "a core node runs YARN
     // NodeManager daemons", and "Task nodes don't run the Data Node daemon". No more than the setting allows, core
     // nodes first, as they hold HDFS, and no fewer core nodes than HDFS keeps copies, as "Amazon EMR will not allow
-    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node.
-    private List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
+    // clusters to scale core nodes below dfs.replication". A fleet's unit of capacity is one node. Neither kind is
+    // built past the setting, however many a cluster asks for.
+    List<ClusterStorage.Node> workerNodes(EmrCluster cluster) {
         int floor = Math.min(cluster.getProvisionedCoreNodes(), replication(cluster));
         List<ClusterStorage.Node> core = new ArrayList<>();
         List<ClusterStorage.Node> task = new ArrayList<>();
+        long asked = 0;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             boolean isCore = "CORE".equals(group.getInstanceGroupType());
             if (isCore || "TASK".equals(group.getInstanceGroupType())) {
                 int count = group.getRequestedInstanceCount();
-                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), isCore ? Math.max(count, floor) : count,
-                        isCore, isCore ? core : task);
+                count = isCore ? Math.max(count, floor) : count;
+                asked += Math.max(count, 0);
+                addNodes(cluster, groupNumber(cluster.getInstanceGroups(), group), count, isCore, isCore ? core : task,
+                        maxWorkerNodes);
             }
         }
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
             int number = fleetNumber(cluster.getInstanceFleets(), fleet);
             if (number > 0) {
                 boolean isCore = "CORE".equals(fleet.getInstanceFleetType());
-                int count = fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
-                addNodes(cluster, number, isCore ? Math.max(count, floor) : count, isCore, isCore ? core : task);
+                long capacity = (long) fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
+                long count = isCore ? Math.max(capacity, floor) : capacity;
+                asked += Math.max(count, 0);
+                addNodes(cluster, number, count, isCore, isCore ? core : task, maxWorkerNodes);
             }
         }
         List<ClusterStorage.Node> nodes = new ArrayList<>(core);
         nodes.addAll(task);
-        if (nodes.size() > maxWorkerNodes) {
+        if (asked > maxWorkerNodes) {
             LOG.infov("EMR cluster {0} asks for {1} core and task nodes, and runs the first {2}, as yarn-max-worker-nodes"
-                    + " says", cluster.getId(), nodes.size(), maxWorkerNodes);
-            return List.copyOf(nodes.subList(0, maxWorkerNodes));
+                    + " says", cluster.getId(), asked, maxWorkerNodes);
+            return List.copyOf(nodes.subList(0, Math.min(nodes.size(), maxWorkerNodes)));
         }
         return nodes;
     }
 
-    private static void addNodes(EmrCluster cluster, int group, int count, boolean core,
-                                 List<ClusterStorage.Node> nodes) {
-        for (int ordinal = 1; ordinal <= count; ordinal++) {
+    // Up to count nodes of the group, as long as the list holds fewer than limit.
+    private static void addNodes(EmrCluster cluster, int group, long count, boolean core,
+                                 List<ClusterStorage.Node> nodes, int limit) {
+        for (int ordinal = 1; ordinal <= count && nodes.size() < limit; ordinal++) {
             String id = group + "-" + ordinal;
             nodes.add(new ClusterStorage.Node(id,
                     AwsRegions.ec2PrivateIpDnsName(privateIpAddress(group, ordinal), cluster.getRegion()), core,

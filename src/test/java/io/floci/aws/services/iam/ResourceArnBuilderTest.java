@@ -906,54 +906,66 @@ class ResourceArnBuilderTest {
                 "us-east-1", ACCOUNT, "aws"));
     }
 
+    /** A stream call is checked on the stream its group and stream names name, read raw, in the request's partition. */
     @Test
-    void logStreamTargetsUseTheServingActionAndRequestPartition() {
-        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
+    void logStreamTargetsAreTheStreamTheRequestNamesFromTheTable() {
+        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream", "logs:PutLogEvents")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                String partition = AwsRegions.partitionFor(region);
                 setJsonBody("{\"logGroupName\":\" /group \",\"logStreamName\":42}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
-                assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
-                                + ":logs:" + region + ":123456789012:log-group: /group :log-stream:42"),
-                        builder.buildLogResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
+                assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT
+                                + ":log-group: /group :log-stream:42"),
+                        builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
             }
         }
     }
 
+    /**
+     * A group call is checked on the group its name names, as the Service Reference formats a log group, with no
+     * trailing {@code :*}; the evaluator matches a policy naming the group with one for the group's own management
+     * actions ({@code LogGroupArnPolicyCompatibilityTest}).
+     */
     @Test
-    void logGroupTargetsUseTheServingActionAndRequestPartition() {
+    void logGroupTargetsAreTheGroupTheRequestNamesFromTheTable() {
         for (String action : List.of("logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
-                "logs:DeleteRetentionPolicy")) {
+                "logs:DeleteRetentionPolicy", "logs:TagLogGroup", "logs:FilterLogEvents", "logs:DescribeLogStreams",
+                "logs:PutMetricFilter", "logs:StartQuery")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                String partition = AwsRegions.partitionFor(region);
                 setJsonBody("{\"logGroupName\":42}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogStream");
-                assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
-                                + ":logs:" + region + ":123456789012:log-group:42:*"),
-                        builder.buildLogResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
+                assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":log-group:42"),
+                        builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
             }
         }
+        // A request naming no group names nothing the table reads.
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildResources("logs", "logs:FilterLogEvents", ctx, "us-east-1", ACCOUNT,
+                "aws"));
+    }
+
+    /** A subscription filter is checked on its group, and on its destination when that is a Logs destination. */
+    @Test
+    void subscriptionFilterTargetsAreItsGroupAndALogsDestination() {
+        String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
+        setJsonBody("{\"logGroupName\":\"app\",\"destinationArn\":\"arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":function:ship\"}");
+        assertEquals(List.of(prefix + "log-group:app"),
+                builder.buildResources("logs", "logs:PutSubscriptionFilter", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"logGroupName\":\"app\",\"destinationArn\":\"" + prefix + "destination:central\"}");
+        assertEquals(List.of(prefix + "destination:central", prefix + "log-group:app"),
+                builder.buildResources("logs", "logs:PutSubscriptionFilter", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
-    void directLogTagTargetsUseBareArnAndServingAction() {
+    void logTagTargetsAreTheArnTheRequestCarries() {
         for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
             for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1", "custom-region-1")) {
                 String partition = AwsRegions.partitionFor(region);
-                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":log-group:group";
-                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
-                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
-                assertEquals(List.of(arn), builder.buildLogResources(action, ctx, region, ACCOUNT, partition));
-            }
-        }
-    }
-
-    @Test
-    void destinationTagTargetsUseDestinationArn() {
-        for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
-            for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
-                String partition = AwsRegions.partitionFor(region);
-                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central";
-                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
-                assertEquals(List.of(arn), builder.buildLogResources(action, ctx, region, ACCOUNT, partition));
+                for (String resource : List.of("log-group:group", "destination:central")) {
+                    String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":" + resource;
+                    setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
+                    assertEquals(List.of(arn), builder.buildResources("logs", action, ctx, region, ACCOUNT, partition));
+                }
             }
         }
     }
@@ -963,15 +975,16 @@ class ResourceArnBuilderTest {
     void putDestinationTargetsTheDestinationItNames(String partition, String region) {
         setJsonBody("{\"destinationName\":\"central\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
-                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
         String targetArn = "arn:" + partition + ":kinesis:" + region + ":" + ACCOUNT + ":stream/central";
         String roleArn = "arn:" + partition + ":iam::" + ACCOUNT + ":role/logs-delivery";
         setJsonBody("{\"destinationName\":\"central\",\"targetArn\":\"" + targetArn
                 + "\",\"roleArn\":\"" + roleArn + "\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
-                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
         setJsonBody("{}");
-        assertEquals(List.of("*"), builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+        assertEquals(List.of("*"),
+                builder.buildResources("logs", "logs:PutDestination", ctx, region, ACCOUNT, partition));
     }
 
     @Test
@@ -987,51 +1000,43 @@ class ResourceArnBuilderTest {
                 .thenThrow(new AwsException("ResourceNotFoundException", "Delivery not found", 400));
         when(deliveries.destinationArnsFrom("bus-source", "us-east-1"))
                 .thenReturn(List.of(prefix + "delivery-destination:bus-logs"));
-        ResourceArnBuilder builder = reading(new CloudWatchLogsStoredResourceArns(deliveries));
+        ResourceArnBuilder builder = reading(new CloudWatchLogsStoredResourceArns(null, null, deliveries, null));
         for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource")) {
             setJsonBody("{\"name\":\"bus-source\"}");
             assertEquals(List.of(prefix + "delivery-source:bus-source"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         setJsonBody("{\"name\":\"bus-source\"}");
         assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
-                builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
+                builder.buildResources("logs", "logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
         // A source with no deliveries reaches no destination, so the request names none of its resource type.
         setJsonBody("{\"name\":\"idle-source\"}");
-        assertEquals(List.of("*"), builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT,
-                "aws"));
+        assertEquals(List.of("*"),
+                builder.buildResources("logs", "logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
         for (String action : List.of("logs:PutDeliveryDestination", "logs:GetDeliveryDestination",
                 "logs:DeleteDeliveryDestination")) {
             setJsonBody("{\"name\":\"bus-logs\"}");
             assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         for (String action : List.of("logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration")) {
             setJsonBody("{\"id\":\"AbCdEfGh12345678\"}");
             assertEquals(List.of(prefix + "delivery:AbCdEfGh12345678"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
             // One it holds none of has its id open.
             setJsonBody("{\"id\":\"gone\"}");
             assertEquals(List.of(prefix + "delivery:*"),
-                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+                    builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         setJsonBody("{\"deliverySourceName\":\"bus-source\",\"deliveryDestinationArn\":\""
                 + prefix + "delivery-destination:bus-logs\"}");
         assertEquals(List.of(prefix + "delivery-destination:bus-logs", prefix + "delivery:*",
                         prefix + "delivery-source:bus-source"),
-                builder.buildLogResources("logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
+                builder.buildResources("logs", "logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
         for (String action : List.of("logs:DescribeDeliverySources", "logs:DescribeDeliveryDestinations",
                 "logs:DescribeDeliveries")) {
             setJsonBody("{}");
-            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
-        }
-    }
-
-    @Test
-    void excludedLogsActionsKeepWildcardResources() {
-        for (String action : List.of("logs:PutLogEvents")) {
-            setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
-            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+            assertEquals(List.of("*"), builder.buildResources("logs", action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
     }
 

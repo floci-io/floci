@@ -17,6 +17,7 @@ class WebIdentityTrustPolicyEvaluatorTest {
     private static final String NAMESPACE = "my-namespace";
     private static final String SERVICE_ACCOUNT = "my-service-account";
     private static final String SUBJECT = "system:serviceaccount:" + NAMESPACE + ":" + SERVICE_ACCOUNT;
+    private static final String SESSION_NAME = "build-42";
 
     private final WebIdentityTrustPolicyEvaluator evaluator =
             new WebIdentityTrustPolicyEvaluator(new ObjectMapper());
@@ -45,7 +46,7 @@ class WebIdentityTrustPolicyEvaluatorTest {
     }
 
     private boolean allows(String policy, Map<String, List<String>> claims) {
-        return evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims);
+        return evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims, SESSION_NAME);
     }
 
     @Test
@@ -87,7 +88,7 @@ class WebIdentityTrustPolicyEvaluatorTest {
         String policy = irsaTrustPolicy(SUBJECT);
         assertFalse(evaluator.allows(policy,
                 "arn:aws:iam::000000000000:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/OTHER",
-                PREFIX, claims(SUBJECT)));
+                PREFIX, claims(SUBJECT), SESSION_NAME));
     }
 
     @Test
@@ -240,5 +241,47 @@ class WebIdentityTrustPolicyEvaluatorTest {
                 "Action":"STS:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{
                 "%s:SUB":"%s"}}}]}""".formatted(PROVIDER_ARN, PREFIX.toUpperCase(), SUBJECT);
         assertTrue(allows(policy, claims(SUBJECT)));
+    }
+
+    /** A trust policy that pins the session name the caller passes in {@code RoleSessionName}. */
+    private String sessionNamePolicy(String operator, String sessionName) {
+        return """
+                {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},
+                "Action":"sts:AssumeRoleWithWebIdentity","Condition":{"%s":{
+                "sts:RoleSessionName":"%s"}}}]}""".formatted(PROVIDER_ARN, operator, sessionName);
+    }
+
+    @Test
+    void allowsTheRoleSessionNameThePolicyRequires() {
+        assertTrue(allows(sessionNamePolicy("StringEquals", SESSION_NAME), claims(SUBJECT)));
+        assertTrue(allows(sessionNamePolicy("StringLike", "build-*"), claims(SUBJECT)));
+    }
+
+    @Test
+    void deniesAnotherRoleSessionName() {
+        assertFalse(allows(sessionNamePolicy("StringEquals", "deploy-1"), claims(SUBJECT)));
+        assertFalse(allows(sessionNamePolicy("StringNotEquals", SESSION_NAME), claims(SUBJECT)));
+    }
+
+    @Test
+    void roleSessionNameKeyIsCaseInsensitiveButItsValueIsNot() {
+        String policy = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},
+                "Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{
+                "STS:rolesessionname":"%s"}}}]}""".formatted(PROVIDER_ARN, SESSION_NAME);
+        assertTrue(allows(policy, claims(SUBJECT)));
+        assertFalse(allows(sessionNamePolicy("StringEquals", SESSION_NAME.toUpperCase()), claims(SUBJECT)));
+    }
+
+    @Test
+    void roleSessionNameAndSubjectConditionsMustBothHold() {
+        String policy = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Federated":"%s"},
+                "Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{
+                "%s:sub":"%s","sts:RoleSessionName":"%s"}}}]}"""
+                .formatted(PROVIDER_ARN, PREFIX, SUBJECT, SESSION_NAME);
+        assertTrue(allows(policy, claims(SUBJECT)));
+        assertFalse(evaluator.allows(policy, PROVIDER_ARN, PREFIX, claims(SUBJECT), "other-session"));
+        assertFalse(allows(policy, claims("system:serviceaccount:my-namespace:other")));
     }
 }
