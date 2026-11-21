@@ -281,6 +281,150 @@ class EmrContainersServiceTest {
         assertFalse(cleared.has("schedulerStatus"));
     }
 
+    // A virtual cluster on EKS_CLUSTER with these concurrent job limits.
+    private String limitedVirtualCluster(EmrContainersService service, String schedulerConfiguration) {
+        return service.createVirtualCluster(json("""
+                {"name": "vc", "clientToken": "%s", "schedulerConfiguration": %s,
+                 "containerProvider": {"type": "EKS", "id": "%s", "info": {"eksInfo": {"namespace": "spark"}}}}
+                """.formatted(UUID.randomUUID(), schedulerConfiguration, EKS_CLUSTER))).get("id").textValue();
+    }
+
+    private JsonNode schedulerStatus(EmrContainersService service, String clusterId) {
+        return service.describeVirtualCluster(clusterId).at("/virtualCluster/schedulerStatus");
+    }
+
+    @Test
+    void aRunBeyondTheRunningLimitWaitsPendingAndStartsWhenASlotFreesUp() {
+        EmrContainersService service = service(600);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        String first = startJobRun(service, clusterId).get("id").textValue();
+        clock.advance(Duration.ofSeconds(1));
+        String second = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals("RUNNING", jobRun(service, clusterId, first).get("state").textValue());
+        assertEquals("PENDING", jobRun(service, clusterId, second).get("state").textValue());
+        assertEquals(1, schedulerStatus(service, clusterId).get("currentConcurrentJobRuns").intValue());
+        assertEquals(1, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+
+        // Read only after both have ended: the second started the moment the first's slot freed up.
+        clock.advance(Duration.ofHours(1));
+        assertEquals("2026-01-01T00:10:00Z", jobRun(service, clusterId, first).get("finishedAt").textValue());
+        JsonNode run = jobRun(service, clusterId, second);
+        assertEquals("COMPLETED", run.get("state").textValue());
+        assertEquals("2026-01-01T00:20:00Z", run.get("finishedAt").textValue());
+        assertFalse(run.has("_queuePosition"), "Floci's own members never leave the service");
+        assertEquals(0, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+    }
+
+    @Test
+    void aFullQueueRefusesTheRunAndARunQueuedThirtyMinutesFails() {
+        EmrContainersService service = service(3600);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1, \"maxInQueueJobRuns\": 100}");
+        startJobRun(service, clusterId);
+        List<String> queued = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            queued.add(startJobRun(service, clusterId).get("id").textValue());
+        }
+
+        AwsException full = assertThrows(AwsException.class, () -> startJobRun(service, clusterId));
+        assertEquals("ValidationException", full.getErrorCode());
+        assertEquals(400, full.getHttpStatus());
+        assertEquals(100, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+
+        clock.advance(Duration.ofMinutes(30));
+        JsonNode timedOut = jobRun(service, clusterId, queued.get(0));
+        assertEquals("FAILED", timedOut.get("state").textValue());
+        assertEquals("2026-01-01T00:30:00Z", timedOut.get("finishedAt").textValue());
+        assertTrue(timedOut.get("stateDetails").textValue().contains("30 minutes"), timedOut.toString());
+        assertEquals(0, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+        String next = startJobRun(service, clusterId).get("id").textValue();
+        assertEquals("PENDING", jobRun(service, clusterId, next).get("state").textValue(),
+                "the first run still holds the one running slot");
+    }
+
+    @Test
+    void aCancelledRunOrARaisedLimitStartsTheQueuedRunsInOrderAtOnce() {
+        EmrContainersService service = service(600);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        String first = startJobRun(service, clusterId).get("id").textValue();
+        String second = startJobRun(service, clusterId).get("id").textValue();
+        String third = startJobRun(service, clusterId).get("id").textValue();
+
+        clock.advance(Duration.ofMinutes(1));
+        service.cancelJobRun(clusterId, first);
+        assertEquals("RUNNING", jobRun(service, clusterId, second).get("state").textValue());
+        assertEquals("PENDING", jobRun(service, clusterId, third).get("state").textValue());
+
+        clock.advance(Duration.ofMinutes(1));
+        JsonNode raised = service.updateVirtualCluster(clusterId,
+                json("{\"clientToken\": \"u\", \"schedulerConfiguration\": {\"maxConcurrentJobRuns\": 2}}"));
+        assertEquals(2, raised.at("/virtualCluster/schedulerStatus/currentConcurrentJobRuns").intValue());
+        clock.advance(Duration.ofHours(1));
+        assertEquals("2026-01-01T00:11:00Z", jobRun(service, clusterId, second).get("finishedAt").textValue());
+        assertEquals("2026-01-01T00:12:00Z", jobRun(service, clusterId, third).get("finishedAt").textValue());
+    }
+
+    @Test
+    void withoutLimitsAThousandRunsRunAtOnce() {
+        EmrContainersService service = service(600);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        for (int i = 0; i < 1000; i++) {
+            startJobRun(service, clusterId);
+        }
+        String beyond = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals("PENDING", jobRun(service, clusterId, beyond).get("state").textValue());
+        clock.advance(Duration.ofHours(1));
+        assertEquals("2026-01-01T00:20:00Z", jobRun(service, clusterId, beyond).get("finishedAt").textValue());
+    }
+
+    @Test
+    void runsThatCompleteAndStartTogetherAreStoredInOneWrite() {
+        CountingStorage runs = new CountingStorage();
+        EmrContainersService service = service(600, REGION, List.of(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                new AccountAwareStorageBackend<>(runs, null, ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID)));
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 5}");
+        for (int i = 0; i < 10; i++) {
+            startJobRun(service, clusterId);
+        }
+
+        clock.advance(Duration.ofHours(1));
+        int before = runs.writes;
+        service.describeVirtualCluster(clusterId);
+        assertEquals(before + 1, runs.writes, "five runs completed, five started and completed");
+        List<String> states = service.listJobRuns(clusterId, ListQuery.of(null, null, null, null, null), null)
+                .findValuesAsText("state");
+        assertEquals(List.of("COMPLETED"), states.stream().distinct().toList());
+        assertEquals(before + 1, runs.writes, "a read with nothing to settle writes nothing");
+    }
+
+    // An in-memory store that counts its writes, a batch as one.
+    private static final class CountingStorage extends InMemoryStorage<String, ObjectNode> {
+        private int writes;
+        private boolean inBatch;
+
+        @Override
+        public synchronized void put(String key, ObjectNode value) {
+            if (!inBatch) {
+                writes++;
+            }
+            super.put(key, value);
+        }
+
+        @Override
+        public synchronized void putAll(Map<String, ObjectNode> entries) {
+            writes++;
+            inBatch = true;
+            try {
+                super.putAll(entries);
+            } finally {
+                inBatch = false;
+            }
+        }
+    }
+
     /**
      * IAM's lookup reads the tags of the virtual cluster, job run or job template the ARN names, as the tag calls
      * leave them, and nothing for another account's, another Region's, an unknown or another service's ARN.
