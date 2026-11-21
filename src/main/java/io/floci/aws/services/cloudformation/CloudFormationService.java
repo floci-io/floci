@@ -1263,9 +1263,16 @@ public class CloudFormationService implements ResourceProvider {
                                 compared[0].path(logicalId).path("Properties"),
                                 compared[1].path(logicalId).path("Properties")});
                     }
+                    JsonNode comparedOld = compared[0] != null ? compared[0].path(logicalId) : null;
+                    JsonNode comparedNew = compared[0] != null ? compared[1].path(logicalId) : null;
+                    // Details are descriptive and only DescribeChangeSet reads them: execution (which passes
+                    // comparedProperties) must not be able to fail on them.
+                    List<ChangeDetail> details = comparedProperties != null ? List.of()
+                            : changeDetails(resourceType, oldDef, newDef, comparedOld, comparedNew, changedParams);
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
-                            replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE));
+                            replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE,
+                            details.stream().map(ChangeDetail::attribute).distinct().toList(), details));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -1400,7 +1407,8 @@ public class CloudFormationService implements ResourceProvider {
             if (change.logicalResourceId().equals(logicalId)
                     && replacementRank(replacement) > replacementRank(change.replacement())) {
                 changes.set(i, new ResourceChange(change.action(), change.logicalResourceId(),
-                        change.physicalResourceId(), change.resourceType(), replacement));
+                        change.physicalResourceId(), change.resourceType(), replacement,
+                        change.scope(), change.details()));
             }
         }
     }
@@ -1760,8 +1768,114 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
+    /**
+     * One change of a resource. {@code scope} and {@code details} are those of {@code
+     * DescribeChangeSet}: filled for a Modify that the template diff found, empty for an Add, a Remove, a nested
+     * stack and a resource that changes only because it reads a replaced resource or a changed attribute.
+     */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
-                                 String resourceType, String replacement) {}
+                                 String resourceType, String replacement,
+                                 List<String> scope, List<ChangeDetail> details) {
+        public ResourceChange(String action, String logicalResourceId, String physicalResourceId,
+                              String resourceType, String replacement) {
+            this(action, logicalResourceId, physicalResourceId, resourceType, replacement, List.of(), List.of());
+        }
+    }
+
+    /**
+     * An AWS {@code ResourceChangeDetail}: {@code attribute} and {@code name} are its Target (no name
+     * unless the attribute is Properties), {@code requiresRecreation} is set for Properties and Tags
+     * only, {@code causingEntity} is the parameter of a ParameterReference.
+     */
+    public record ChangeDetail(String attribute, String name, String requiresRecreation, String evaluation,
+                               String changeSource, String causingEntity) {}
+
+    private static final List<String> RESOURCE_ATTRIBUTES = List.of(
+            "Metadata", "DeletionPolicy", "UpdateReplacePolicy", "UpdatePolicy");
+
+    /**
+     * The details of a modified resource: one entry per property and per resource-level attribute that
+     * differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
+     * template did not resolve and the definitions as written were diffed). A difference in the written
+     * definitions is a static DirectModification. One that shows only in the compared forms comes from
+     * a changed parameter, a mapping or a dynamic reference: a dynamic DirectModification, with a static
+     * ParameterReference for each changed parameter the value reads. {@code RequiresRecreation} is
+     * {@code Always} when a create-only value under the property changed, nested pointers included, and
+     * {@code Never} otherwise. {@code Conditionally} is not produced: floci's create-only table records no
+     * conditional replacement, which AWS has.
+     */
+    private List<ChangeDetail> changeDetails(String resourceType, JsonNode oldDef, JsonNode newDef,
+                                             JsonNode comparedOld, JsonNode comparedNew,
+                                             Set<String> changedParams) {
+        List<ChangeDetail> details = new ArrayList<>();
+        PropertyChanges.between(resourceType, true, oldDef.path("Properties"), newDef.path("Properties"),
+                comparedOld != null ? comparedOld.path("Properties") : null,
+                comparedNew != null ? comparedNew.path("Properties") : null)
+                .byName().values().stream()
+                .filter(c -> comparedOld != null
+                        ? !comparedOld.path("Properties").path(c.name())
+                                .equals(comparedNew.path("Properties").path(c.name()))
+                        : c.kind() != PropertyChanges.Kind.UNCHANGED
+                                || referencesAnyParameter(c.current(), changedParams))
+                .forEach(c -> {
+                    boolean tags = "Tags".equals(c.name());
+                    addDetails(details, tags ? "Tags" : "Properties", tags ? null : c.name(),
+                            createOnlyChanged(resourceType, c.name(), comparedOld, comparedNew, c)
+                                    ? "Always" : "Never", c.prior(), c.current(), changedParams);
+                });
+        for (String attribute : RESOURCE_ATTRIBUTES) {
+            JsonNode before = (comparedOld != null ? comparedOld : oldDef).path(attribute);
+            JsonNode after = (comparedNew != null ? comparedNew : newDef).path(attribute);
+            if (!before.equals(after)
+                    || comparedOld == null && referencesAnyParameter(newDef.path(attribute), changedParams)) {
+                addDetails(details, attribute, null, null, oldDef.path(attribute), newDef.path(attribute),
+                        changedParams);
+            }
+        }
+        return details;
+    }
+
+    /**
+     * Whether the property's update recreates the resource: a create-only value under it changed, in the
+     * compared forms when given, or (written definitions only) it holds one and reads a changed parameter.
+     */
+    private boolean createOnlyChanged(String resourceType, String name, JsonNode comparedOld, JsonNode comparedNew,
+                                      PropertyChanges.PropertyChange change) {
+        JsonNode before = comparedOld != null ? comparedOld.path("Properties").path(name) : change.prior();
+        JsonNode after = comparedNew != null ? comparedNew.path("Properties").path(name) : change.current();
+        if (CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, single(name, before),
+                single(name, after))) {
+            return true;
+        }
+        // A value that differs only through a changed parameter has the property's own update behaviour.
+        return comparedOld == null && Objects.equals(change.prior(), change.current())
+                && (CfnCreateOnlyProperties.isCreateOnly(resourceType, name)
+                        || !CfnCreateOnlyProperties.createOnlySubtrees(resourceType, single(name, after))
+                                .isEmpty());
+    }
+
+    private ObjectNode single(String name, JsonNode value) {
+        ObjectNode props = objectMapper.createObjectNode();
+        if (value != null && !value.isMissingNode()) {
+            props.set(name, value);
+        }
+        return props;
+    }
+
+    private void addDetails(List<ChangeDetail> details, String attribute, String name, String recreation,
+                            JsonNode writtenBefore, JsonNode writtenAfter, Set<String> changedParams) {
+        if (!Objects.equals(writtenBefore, writtenAfter)) {
+            details.add(new ChangeDetail(attribute, name, recreation, "Static", "DirectModification", null));
+            return;
+        }
+        details.add(new ChangeDetail(attribute, name, recreation, "Dynamic", "DirectModification", null));
+        for (String parameter : new TreeSet<>(changedParams)) {
+            if (referencesAnyParameter(writtenAfter, Set.of(parameter))) {
+                details.add(new ChangeDetail(attribute, name, recreation, "Static", "ParameterReference",
+                        parameter));
+            }
+        }
+    }
 
     private String resourcePhysicalId(Stack stack, String logicalId) {
         StackResource resource = stack.getResources().get(logicalId);
