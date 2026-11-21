@@ -315,10 +315,7 @@ public class AwsJson11Controller {
 
         try {
             String region = regionResolver.getRegion();
-            String authorization = httpHeaders.getHeaderString("Authorization");
-            if (authorization == null || authorization.isBlank()) {
-                authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
-            }
+            String authorization = requestAuthorization(httpHeaders, uriInfo);
 
             Response delegated = dispatch(targetMatch, request, region, authorization, uriInfo.getBaseUri());
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
@@ -334,6 +331,15 @@ public class AwsJson11Controller {
             LOG.errorf(e, "Error processing %s request", serviceKey);
             return JsonErrorResponseUtils.createErrorResponse(e);
         }
+    }
+
+    /** Uses the header credential, falling back to the query only when the header is absent or blank. */
+    static String requestAuthorization(HttpHeaders headers, UriInfo uriInfo) {
+        String authorization = headers.getHeaderString("Authorization");
+        if (authorization == null || authorization.isBlank()) {
+            authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+        }
+        return authorization;
     }
 
     /** Dispatches an already-decoded request before HTTP-specific response encoding. */
