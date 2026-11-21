@@ -36,6 +36,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -82,12 +83,17 @@ class DynamoDbThroughputCfnProvisionerTest {
             + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":3,\"WriteCapacityUnits\":3},"
             + "\"WarmThroughput\":{\"ReadUnitsPerSecond\":2,\"WriteUnitsPerSecond\":2}}";
     private static final String INDEX_WARM = "{\"TableName\":\"orders\","
+            + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":1},"
             + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"gix1\","
+            + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":3,\"WriteCapacityUnits\":3},"
             + "\"WarmThroughput\":{\"ReadUnitsPerSecond\":1,\"WriteUnitsPerSecond\":1}}]}";
     private static final String INDEX_WARM_CHANGED = "{\"TableName\":\"orders\","
+            + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":1},"
             + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"gix1\","
+            + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":3,\"WriteCapacityUnits\":3},"
             + "\"WarmThroughput\":{\"ReadUnitsPerSecond\":2,\"WriteUnitsPerSecond\":2}}]}";
     private static final String UNDECLARED = "{\"TableName\":\"orders\"}";
+    private static final String EMPTY_CAPACITY_MESSAGE = "Property ProvisionedThroughput cannot be empty";
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final NativeDynamoDbTableService tableService = mock(NativeDynamoDbTableService.class);
@@ -344,17 +350,49 @@ class DynamoDbThroughputCfnProvisionerTest {
     }
 
     @Test
-    void aTemplateWithoutThroughputCreatesTheTableAsBefore() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                anyString())).thenReturn(table(5, 5, false));
-        when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(table(5, 5, false));
+    void aTemplateWithoutBillingModeAndCapacityFailsBeforeTheTableIsCreated() throws Exception {
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(UNDECLARED), ctx()));
 
-        provisioner.provision(resource("AWS::DynamoDB::Table"), props(UNDECLARED), ctx());
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals(EMPTY_CAPACITY_MESSAGE, e.getMessage());
+        verifyNoTableCreated();
+        verifyNoInteractions(dynamoDb);
+    }
 
-        verify(dynamoDb).createTable(eq(TABLE_NAME), anyList(), anyList(), eq(null), eq(null), anyList(),
-                anyList(), eq(REGION));
-        verify(tableService, never()).createTable(anyString(), anyList(), anyList(), anyBoolean(), any(),
-                anyList(), anyList(), anyString());
+    @Test
+    void provisionedBillingModeWithoutCapacityFailsBeforeTheTableIsCreated() throws Exception {
+        String template = "{\"TableName\":\"orders\",\"BillingMode\":\"PROVISIONED\"}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertEquals(EMPTY_CAPACITY_MESSAGE, e.getMessage());
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void anIndexWithoutCapacityFailsBeforeTheTableIsCreated() throws Exception {
+        String template = "{\"TableName\":\"orders\","
+                + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":1},"
+                + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"gix1\"}]}";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::DynamoDB::Table"), props(template), ctx()));
+
+        assertEquals(EMPTY_CAPACITY_MESSAGE, e.getMessage());
+        verifyNoTableCreated();
+    }
+
+    @Test
+    void anUpdateThatRemovesTheCapacityFailsBeforeAnyUpdate() throws Exception {
+        existingTable(table(1, 2, false));
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(existingResource(), props(UNDECLARED), updateCtx(PROVISIONED)));
+
+        assertEquals(EMPTY_CAPACITY_MESSAGE, e.getMessage());
+        verify(tableService, never()).updateThroughput(anyString(), any(), anyString());
     }
 
     @Test
@@ -364,6 +402,7 @@ class DynamoDbThroughputCfnProvisionerTest {
         when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(table(5, 5, false));
 
         provisioner.provision(resource("AWS::DynamoDB::GlobalTable"), props(PROVISIONED), ctx());
+        provisioner.provision(resource("AWS::DynamoDB::GlobalTable"), props(UNDECLARED), ctx());
 
         verify(tableService, never()).createTable(anyString(), anyList(), anyList(), anyBoolean(), any(),
                 anyList(), anyList(), anyString());
