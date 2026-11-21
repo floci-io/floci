@@ -3528,7 +3528,7 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void nodegroupReleaseVersionUsedAsImageId() {
+        void nodegroupImageLabelIsTheRecommendedAmiOfItsVersionAndAmiTypeNotItsReleaseVersion() {
             Cluster cluster = new Cluster();
             cluster.setName("prod-cluster");
             cluster.setAccountId("123456789012");
@@ -3536,7 +3536,9 @@ class EksClusterManagerTest {
 
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("versioned-group");
-            nodegroup.setReleaseVersion("1.30.2-20240703");
+            nodegroup.setVersion("1.30");
+            nodegroup.setAmiType("AL2_x86_64");
+            nodegroup.setReleaseVersion("1.30.10-20230404");
             nodeGroupStorage.put("us-west-2::prod-cluster/versioned-group", nodegroup);
 
             manager.startCluster(cluster);
@@ -3551,7 +3553,7 @@ class EksClusterManagerTest {
                     .findFirst()
                     .orElseThrow(() -> new AssertionError("node-labels arg missing"));
             Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
-            assertEquals("1.30.2-20240703", labels.get("eks.amazonaws.com/nodegroup-image"));
+            assertEquals("ami-0abcdef1234567890", labels.get("eks.amazonaws.com/nodegroup-image"));
         }
 
         private static Map<String, String> parseNodeLabels(String nodeLabelsArg) {

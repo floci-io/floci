@@ -3365,9 +3365,6 @@ public class EksClusterManager
 
     private String resolveNodegroupImageId(Nodegroup nodegroup) {
         if (nodegroup != null) {
-            if (nodegroup.getReleaseVersion() != null && !nodegroup.getReleaseVersion().isBlank()) {
-                return nodegroup.getReleaseVersion().trim();
-            }
             if (nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
                 Object directImage = map.get("imageId");
                 if (directImage != null && !directImage.toString().isBlank()) {
@@ -3390,6 +3387,9 @@ public class EksClusterManager
                     }
                 }
             }
+            // The release version names the AMI's release, not the AMI: the label carries the recommended AMI's id.
+            return EksAmiReleaseVersions.recommendedImage(imageCatalog, nodegroup.getVersion(), nodegroup.getAmiType())
+                    .map(image -> image.imageId).orElse("ami-eks-k3s");
         }
         return "ami-eks-k3s";
     }

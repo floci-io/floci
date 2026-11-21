@@ -452,7 +452,7 @@ Floci configures `--kubelet-arg=node-labels=...` with the following entries:
 - EKS system labels:
   - `eks.amazonaws.com/nodegroup=<nodegroupName>`
   - `eks.amazonaws.com/capacityType=<ON_DEMAND|SPOT|CAPACITY_BLOCK>` (defaults to `ON_DEMAND` when omitted)
-  - `eks.amazonaws.com/nodegroup-image=<imageId>` (sourced from `releaseVersion`, launch template AMI, or defaulting to `ami-eks-k3s`)
+  - `eks.amazonaws.com/nodegroup-image=<imageId>` (the launch template's AMI, else the recommended EKS optimized AMI for the node group's version and AMI type, as AWS labels a node with its AMI rather than its `releaseVersion`, else `ami-eks-k3s`)
 - User-defined labels: all key-value pairs specified in the nodegroup's `labels` map, excluding reserved system keys (`topology.kubernetes.io/*`, `eks.amazonaws.com/*`, and `node.kubernetes.io/instance-type`).
 
 #### Applied taints
