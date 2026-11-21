@@ -28,6 +28,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -491,23 +492,58 @@ public class DynamoDbStreamService {
                     throw trimmed();
                 }
             }
-            List<DynamoDbStreamRecord> held = new ArrayList<>(shard.records);
-            int position = held.size();
-            for (int i = 0; i < held.size(); i++) {
-                int againstCursor = held.get(i).getSequenceNumber().compareTo(cursor.sequence());
-                if (cursor.inclusive() ? againstCursor >= 0 : againstCursor > 0) {
-                    position = i;
-                    break;
-                }
-            }
-            int effectiveLimit = limit != null ? limit : 100;
-            page = new ArrayList<>(held.subList(position, Math.min(position + effectiveLimit, held.size())));
+            page = readFrom(shard.records, cursor, limit != null ? limit : 100);
             next = page.isEmpty() ? cursor : new Cursor(page.getLast().getSequenceNumber(), false);
             // A closed shard read to its end has no next iterator, which is how a reader learns it is done.
-            ended = !shard.open() && position >= held.size();
+            ended = !shard.open() && page.isEmpty();
         }
         return new GetRecordsResult(page, ended ? null
                 : encodeIterator(new IteratorToken(iterator.streamArn(), iterator.shardId(), next, now)));
+    }
+
+    /**
+     * Up to {@code limit} of {@code records}, oldest first, from where {@code cursor} reads. Records are in sequence
+     * order, so the search walks in from both ends at once and stops at whichever side finds the cursor first: a
+     * reader keeping up finds its place near the tail, one far behind near the head, and the shard is never copied.
+     */
+    private static List<DynamoDbStreamRecord> readFrom(ArrayDeque<DynamoDbStreamRecord> records, Cursor cursor,
+                                                       int limit) {
+        Iterator<DynamoDbStreamRecord> fromHead = records.iterator();
+        Iterator<DynamoDbStreamRecord> fromTail = records.descendingIterator();
+        // What the tail side has passed that the cursor reads, nearest the cursor first and at most a page of it.
+        ArrayDeque<DynamoDbStreamRecord> passed = new ArrayDeque<>();
+        int unvisited = records.size();
+        while (unvisited > 0) {
+            DynamoDbStreamRecord head = fromHead.next();
+            unvisited--;
+            if (reads(cursor, head)) {
+                List<DynamoDbStreamRecord> page = new ArrayList<>();
+                page.add(head);
+                while (page.size() < limit && fromHead.hasNext()) {
+                    page.add(fromHead.next());
+                }
+                return page;
+            }
+            if (unvisited == 0) {
+                break;
+            }
+            DynamoDbStreamRecord tail = fromTail.next();
+            unvisited--;
+            if (!reads(cursor, tail)) {
+                break;
+            }
+            passed.addFirst(tail);
+            if (passed.size() > limit) {
+                passed.removeLast();
+            }
+        }
+        return new ArrayList<>(passed);
+    }
+
+    /** Whether {@code record} is at or past where {@code cursor} reads from. */
+    private static boolean reads(Cursor cursor, DynamoDbStreamRecord record) {
+        int againstCursor = record.getSequenceNumber().compareTo(cursor.sequence());
+        return cursor.inclusive() ? againstCursor >= 0 : againstCursor > 0;
     }
 
     /**
