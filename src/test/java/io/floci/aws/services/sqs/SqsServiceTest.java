@@ -2487,6 +2487,45 @@ class SqsServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingFifoHeadWakesParkedReceive(boolean inBatch) throws Exception {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delete-wakeup.fifo", Map.of("FifoQueue", "true"), region);
+        String queueUrl = queue.getQueueUrl();
+        sqsService.sendMessage(queueUrl, "head", 0, "group", "head", region);
+        Message next = sqsService.sendMessage(queueUrl, "next", 0, "group", "next", region);
+        Message head = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
+        assertEquals("head", head.getBody());
+        assertTrue(sqsService.receiveMessage(queueUrl, 1, 30, 0, region).isEmpty(),
+                "The next message must remain blocked while the head is in flight");
+
+        FutureTask<List<Message>> receive = new FutureTask<>(
+                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
+        Thread poller = new Thread(receive, "sqs-fifo-delete-wakeup");
+        poller.start();
+        try {
+            // Observe the actual wait rather than sleeping and assuming the receive has parked.
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
+                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+            if (inBatch) {
+                sqsService.deleteMessageInBatch(queueUrl, head.getReceiptHandle(), region);
+            } else {
+                sqsService.deleteMessage(queueUrl, head.getReceiptHandle(), region);
+            }
+
+            // Require a wakeup before the one-second polling retry.
+            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
+            assertEquals(1, received.size());
+            assertEquals(next.getMessageId(), received.getFirst().getMessageId());
+            assertEquals(1, received.getFirst().getReceiveCount());
+        } finally {
+            poller.interrupt();
+            poller.join(5000);
+        }
+        assertFalse(poller.isAlive());
+    }
+
+    @ParameterizedTest
     @CsvSource({"false,single", "true,single", "false,batch", "true,batch", "false,conditional", "true,conditional"})
     void returningMessageToQueueWakesParkedReceive(boolean fifo, String operation) throws Exception {
         String region = "eu-west-1";

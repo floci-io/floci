@@ -4,9 +4,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.UuidShapes;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.bcmpricingcalculator.model.WorkloadEstimate;
@@ -22,11 +25,12 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class BcmPricingCalculatorService {
+public class BcmPricingCalculatorService implements StoredResourceArns {
     private static final Pattern NAME = Pattern.compile("[a-zA-Z0-9-]+");
     private static final Pattern ACCOUNT = Pattern.compile("\\d{12}");
     private static final List<String> RATE_TYPES = List.of(
@@ -36,6 +40,9 @@ public class BcmPricingCalculatorService {
                              String usageAccountId, String group, double amount) {}
     public record UsageError(String key, String errorCode, String errorMessage) {}
     public record UsageBatchResult(List<WorkloadEstimateUsage> items, List<UsageError> errors) {}
+
+    private static final String NAMESPACE = "bcm-pricing-calculator";
+    private static final String WORKLOAD_ESTIMATE = "workload-estimate/";
 
     private final StorageBackend<String, WorkloadEstimate> estimates;
     private final StorageBackend<String, WorkloadEstimateUsage> usages;
@@ -100,6 +107,39 @@ public class BcmPricingCalculatorService {
         estimate.setTags(tags);
         estimates.put(estimate.getId(), estimate);
         return estimate;
+    }
+
+    @Override
+    public String namespace() {
+        return NAMESPACE;
+    }
+
+    /** A request names a workload estimate by its id: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the workload estimate whose ARN is {@code arn}, in the request's account, where the handlers read: an
+     * ARN of another account names none. A workload estimate records no ARN, so the ARN has to be the one its account
+     * and id give in the request's partition, which has no Region; the estimate is read in place by its id, one stored
+     * before storage was account-aware included. Its tags are the ones it was created with, which nothing changes.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, NAMESPACE)) {
+            return Map.of();
+        }
+        String account = regionResolver.getAccountId();
+        String resource = AwsArnUtils.parse(arn).resource();
+        if (!resource.startsWith(WORKLOAD_ESTIMATE)
+                || !arn.equals(regionResolver.buildGlobalArn(NAMESPACE, account, resource))) {
+            return Map.of();
+        }
+        return new LinkedHashMap<>(AccountAwareStorageBackend
+                .readInAccount(estimates, account, resource.substring(WORKLOAD_ESTIMATE.length()))
+                .map(WorkloadEstimate::getTags).orElse(Map.of()));
     }
 
     public WorkloadEstimate get(String id) {

@@ -21,6 +21,7 @@ public class Integration {
     private Map<String, String> responseTemplates;
     private String templateSelectionExpression;
     private Map<String, String> requestParameters;
+    private Map<String, Map<String, String>> responseParameters;
     private String connectionId;
 
     private String credentialsArn;
@@ -46,6 +47,7 @@ public class Integration {
         this.responseTemplates = src.responseTemplates;
         this.templateSelectionExpression = src.templateSelectionExpression;
         this.requestParameters = src.requestParameters;
+        this.responseParameters = src.responseParameters;
         this.connectionId = src.connectionId;
     }
 
@@ -87,6 +89,9 @@ public class Integration {
 
     public Map<String, String> getRequestParameters() { return requestParameters; }
     public void setRequestParameters(Map<String, String> requestParameters) { this.requestParameters = requestParameters; }
+
+    public Map<String, Map<String, String>> getResponseParameters() { return responseParameters; }
+    public void setResponseParameters(Map<String, Map<String, String>> responseParameters) { this.responseParameters = responseParameters; }
 
     public String getConnectionId() { return connectionId; }
     public void setConnectionId(String connectionId) { this.connectionId = connectionId; }

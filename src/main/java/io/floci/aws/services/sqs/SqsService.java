@@ -1703,6 +1703,9 @@ public class SqsService implements Resettable, ResourceProvider {
             LOG.debugv("No message for receipt handle {0}", receiptHandle);
             return;
         }
+        if (queue.isFifo()) {
+            notifyReceivers(storageKey);
+        }
         LOG.debugv("Deleted message with receipt handle {0}", receiptHandle);
         if (LOG.isTraceEnabled()) {
             Message m = removal.message();

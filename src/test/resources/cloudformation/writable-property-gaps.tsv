@@ -50,7 +50,6 @@ AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
 AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
 AWS::ApiGatewayV2::Integration	Description	accepted and ignored
 AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
-AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
 AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored
 AWS::ApiGatewayV2::Route	ApiKeyRequired	accepted and ignored
 AWS::ApiGatewayV2::Route	ModelSelectionExpression	accepted and ignored
@@ -163,7 +162,6 @@ AWS::DynamoDB::GlobalTable	ReadProvisionedThroughputSettings	accepted and ignore
 AWS::DynamoDB::GlobalTable	SSESpecification	accepted and ignored
 AWS::DynamoDB::GlobalTable	TableType	accepted and ignored
 AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
-AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
@@ -171,12 +169,10 @@ AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
-AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored
 AWS::DynamoDB::Table	ResourcePolicy	accepted and ignored
 AWS::DynamoDB::Table	SSESpecification	accepted and ignored
 AWS::DynamoDB::Table	TableClass	accepted and ignored
 AWS::DynamoDB::Table	VectorIndexes	accepted and ignored
-AWS::DynamoDB::Table	WarmThroughput	accepted and ignored
 AWS::EC2::EIP	Address	accepted and ignored
 AWS::EC2::EIP	Domain	accepted and ignored
 AWS::EC2::EIP	InstanceId	accepted and ignored

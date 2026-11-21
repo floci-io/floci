@@ -1054,7 +1054,7 @@ When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issue
 - `iss` matches the cluster's issuer exactly
 - `aud` contains `sts.amazonaws.com`
 - `exp` / `nbf`, with 60s of clock-skew tolerance
-- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` with exact, case-sensitive equality
+- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` / `sts:RoleSessionName` with exact, case-sensitive equality
 
 The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token, `ExpiredTokenException` (400) for an expired one, or `AccessDenied` (403) when the trust policy does not permit the subject.
 
