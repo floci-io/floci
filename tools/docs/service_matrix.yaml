@@ -127,6 +127,7 @@ action_count_sources:
       DeleteV2DomainName: DeleteDomainName
       CreateV2Model: CreateModel
       GetV2Model: GetModel
+      GetV2ModelTemplate: GetModelTemplate
       GetV2Models: GetModels
       UpdateV2Model: UpdateModel
       DeleteV2Model: DeleteModel
