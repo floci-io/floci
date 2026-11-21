@@ -76,8 +76,10 @@ import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EmrCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EmrContainersCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EmrServerlessCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EmrStudioCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsV2CfnProvisioner;
@@ -155,6 +157,8 @@ import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
 import io.floci.aws.services.elasticache.ElastiCacheService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.emr.EmrService;
+import io.floci.aws.services.emr.EmrStudioService;
 import io.floci.aws.services.emrcontainers.EmrContainersService;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
 import io.floci.aws.services.emrserverless.EmrServerlessService;
@@ -282,6 +286,8 @@ final class CfnProvisionerFixture {
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
         private CodeDeployService codeDeployService;
+        private EmrService emrService;
+        private EmrStudioService emrStudioService;
         private EmrContainersService emrContainersService;
         private EmrServerlessService emrServerlessService;
         private EmrServerlessJobRunService emrServerlessJobRunService;
@@ -571,6 +577,12 @@ final class CfnProvisionerFixture {
             if (codeDeployService != null) {
                 discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
             }
+            if (emrService != null) {
+                discovered.add(new EmrCfnProvisioner(emrService));
+            }
+            if (emrStudioService != null) {
+                discovered.add(new EmrStudioCfnProvisioner(emrStudioService));
+            }
             if (emrContainersService != null) {
                 discovered.add(new EmrContainersCfnProvisioner(emrContainersService));
             }
@@ -804,6 +816,16 @@ final class CfnProvisionerFixture {
 
         public Builder codeDeploy(CodeDeployService v) {
             this.codeDeployService = v;
+            return this;
+        }
+
+        public Builder emr(EmrService v) {
+            this.emrService = v;
+            return this;
+        }
+
+        public Builder emrStudio(EmrStudioService v) {
+            this.emrStudioService = v;
             return this;
         }
 

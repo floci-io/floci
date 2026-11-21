@@ -494,7 +494,9 @@ final class CfnPropertyTypes {
                 record(new Violation(path, "expected maxLength: " + shape.maxLength() + ", actual: " + length,
                         true), true);
             }
-            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).matches()) {
+            // A schema pattern is not anchored: the validator CloudFormation runs looks for it in the value, as the
+            // Studio schema's Name pattern [a-zA-Z0-9_-]+ takes "notebooks for etl".
+            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).find()) {
                 record(new Violation(path, "failed validation constraint for keyword [pattern]", true), true);
             }
         }

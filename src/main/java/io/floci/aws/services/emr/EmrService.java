@@ -1300,6 +1300,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return parameters.toString();
     }
 
+    private static boolean isJsonObject(String json) {
+        try {
+            return SNAPSHOT_MAPPER.readTree(json).isObject();
+        } catch (JsonProcessingException notJson) {
+            return false;
+        }
+    }
+
     private static JsonNode rawJson(String json) {
         if (json == null) {
             return null;
@@ -1780,6 +1788,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public SecurityConfiguration createSecurityConfiguration(String name, String json, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidRequestException", "Name is required.", 400);
+        }
+        if (json != null && !isJsonObject(json)) {
+            // A configuration that is no JSON object could not be read when a cluster names it; no source gives AWS's
+            // refusal, so the wording is Floci's.
+            throw new AwsException("InvalidRequestException", "SecurityConfiguration must be a JSON object.", 400);
         }
         String key = securityConfigurationKey(region, name);
         if (secConfigStore.get(key).isPresent()) {
