@@ -63,6 +63,29 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(EmrCfnProvisioner.class);
     private static final String SECURITY_CONFIGURATION = "AWS::EMR::SecurityConfiguration";
     private static final String CLUSTER = "AWS::EMR::Cluster";
+    private static final String STEP = "AWS::EMR::Step";
+    private static final String INSTANCE_GROUP = "AWS::EMR::InstanceGroupConfig";
+    private static final String INSTANCE_FLEET = "AWS::EMR::InstanceFleetConfig";
+    /**
+     * The cluster an instance group or fleet belongs to, which its update and delete need; a resource it uses, so a
+     * replacement's rollback puts it back with the prior id.
+     */
+    static final String CLUSTER_ID_ATTR = CfnRollback.USES_ATTR_PREFIX + "EmrCluster";
+    /** What an in-place instance group or fleet update is about to change, for {@link #rollbackUpdate}. */
+    static final String CAPACITY_SNAPSHOT_ATTR = "__FlociEmrCapacityUpdateSnapshot";
+    /**
+     * The auto scaling policy the stack last applied to an instance group, absent for none; kept beside the cluster id
+     * so a replacement's rollback puts it back too.
+     */
+    static final String GROUP_POLICY_ATTR = CfnRollback.USES_ATTR_PREFIX + "EmrInstanceGroupPolicy";
+    /** The instance group properties AddInstanceGroups takes as the template writes them. */
+    private static final List<String> INSTANCE_GROUP_MEMBERS = List.of("InstanceRole", "InstanceType",
+            "InstanceCount", "Name", "Market", "BidPrice", "CustomAmiId", "Configurations", "EbsConfiguration",
+            "AutoScalingPolicy");
+    /** The instance fleet properties AddInstanceFleet takes as the template writes them. */
+    private static final List<String> INSTANCE_FLEET_MEMBERS = List.of("InstanceFleetType", "Name",
+            "TargetOnDemandCapacity", "TargetSpotCapacity", "InstanceTypeConfigs", "LaunchSpecifications",
+            "ResizeSpecifications");
     private static final int NAME_MAX_LENGTH = 255;
     /** What an in-place cluster update is about to change, for {@link #rollbackUpdate} to put back. */
     static final String CLUSTER_SNAPSHOT_ATTR = "__FlociEmrClusterUpdateSnapshot";
@@ -106,7 +129,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(SECURITY_CONFIGURATION, CLUSTER);
+        return Set.of(SECURITY_CONFIGURATION, CLUSTER, STEP, INSTANCE_GROUP, INSTANCE_FLEET);
     }
 
     @Override
@@ -122,6 +145,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(CLUSTER_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(CAPACITY_SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
@@ -131,12 +155,13 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        CfnRollback.carryFailedUndoSnapshot(previous, attempted, CLUSTER_SNAPSHOT_ATTR);
+        CfnRollback.carryFailedUndoSnapshot(previous, attempted, CLUSTER_SNAPSHOT_ATTR, CAPACITY_SNAPSHOT_ATTR);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CLUSTER_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(CAPACITY_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -147,6 +172,21 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public boolean rollbackUpdate(StackResource resource) {
         if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        JsonNode capacity = CfnRollback.updateSnapshot(resource, CAPACITY_SNAPSHOT_ATTR);
+        if (capacity != null) {
+            restoreCapacity(capacity, true, true);
+            if (capacity.has("groupId")) {
+                // The policy the group has again, which the next update and the delete are compared with.
+                JsonNode policy = capacity.get("policy");
+                if (policy == null || policy.isNull()) {
+                    resource.getAttributes().remove(GROUP_POLICY_ATTR);
+                } else {
+                    resource.getAttributes().put(GROUP_POLICY_ATTR, policy.toString());
+                }
+            }
+            resource.getAttributes().remove(CAPACITY_SNAPSHOT_ATTR);
             return true;
         }
         JsonNode snapshot = CfnRollback.updateSnapshot(resource, CLUSTER_SNAPSHOT_ATTR);
@@ -166,6 +206,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CLUSTER_SNAPSHOT_ATTR);
+        r.getAttributes().remove(CAPACITY_SNAPSHOT_ATTR);
         if (ctx.isUpdate()) {
             ReplacementCleanup.endRollbackRetry(r);
         }
@@ -174,6 +215,9 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         switch (r.getResourceType()) {
             case SECURITY_CONFIGURATION -> provisionSecurityConfiguration(r, props, ctx, stub);
             case CLUSTER -> provisionCluster(r, props, ctx, stub);
+            case STEP -> provisionStep(r, props, ctx, stub);
+            case INSTANCE_GROUP -> provisionInstanceGroup(r, props, ctx, stub);
+            case INSTANCE_FLEET -> provisionInstanceFleet(r, props, ctx, stub);
             default -> throw new IllegalStateException("EmrCfnProvisioner cannot provision " + r.getResourceType());
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -303,14 +347,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         }
         if (template.has("Steps")) {
             ArrayNode steps = request.putArray("Steps");
-            template.get("Steps").forEach(step -> {
-                ObjectNode copy = step.deepCopy();
-                JsonNode jar = copy.path("HadoopJarStep");
-                if (jar instanceof ObjectNode hadoop && hadoop.has("StepProperties")) {
-                    hadoop.set("Properties", hadoop.remove("StepProperties"));
-                }
-                steps.add(copy);
-            });
+            template.get("Steps").forEach(step -> steps.add(stepRequest(step)));
         }
         ObjectNode instances = template.get("Instances") instanceof ObjectNode given ? given.deepCopy()
                 : MAPPER.createObjectNode();
@@ -332,6 +369,15 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         }
         request.set("Instances", instances);
         return request;
+    }
+
+    /** A step as the API names it: the template's {@code StepProperties} are its {@code HadoopJarStep}'s Properties. */
+    private static ObjectNode stepRequest(JsonNode step) {
+        ObjectNode copy = step.deepCopy();
+        if (copy.path("HadoopJarStep") instanceof ObjectNode hadoop && hadoop.has("StepProperties")) {
+            hadoop.set("Properties", hadoop.remove("StepProperties"));
+        }
+        return copy;
     }
 
     private static void addRole(ArrayNode into, String roleMember, String role, JsonNode config) {
@@ -645,12 +691,314 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /** The cluster once it is running, waiting or has ended, or as it is when the wait runs out. */
+    private EmrCluster awaitSettled(String id) {
+        Instant deadline = Instant.now().plus(READY_TIMEOUT);
+        while (true) {
+            EmrCluster cluster = emrService.describeCluster(id);
+            if (READY.contains(cluster.getState()) || ENDED.contains(cluster.getState())
+                    || Instant.now().isAfter(deadline)) {
+                return cluster;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for EMR cluster " + id, e);
+            }
+        }
+    }
+
     private static void publishCluster(StackResource r, EmrCluster cluster) {
         r.setPhysicalId(cluster.getId());
         r.getAttributes().put("Id", cluster.getId());
         if (cluster.getMasterPublicDnsName() != null) {
             r.getAttributes().put("MasterPublicDNS", cluster.getMasterPublicDnsName());
         }
+    }
+
+    // ──────────────────────────── Steps, instance groups and fleets ────────────────────────────
+
+    /**
+     * A step is added through AddJobFlowSteps; every property of it is create-only, so a change adds the new one, and
+     * the old one stays in the cluster's history, as the schema's delete handler calls nothing. Its {@code LogUri} and
+     * {@code EncryptionKeyArn} are AddJobFlowSteps' {@code StepMonitoringConfiguration}.
+     */
+    private void provisionStep(StackResource r, JsonNode props, ProvisionContext ctx, boolean stub) {
+        JsonNode template = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(STEP, props);
+        refuseReadOnly(template, "Id");
+        if (ctx.isUpdate() && !stub && !ctx.changes(STEP, props).requiresReplacement()) {
+            r.setPhysicalId(ctx.priorPhysicalId());
+            r.getAttributes().put("Id", ctx.priorPhysicalId());
+            return;
+        }
+        ObjectNode step = MAPPER.createObjectNode();
+        step.set("Name", template.get("Name"));
+        step.set("ActionOnFailure", template.get("ActionOnFailure"));
+        step.set("HadoopJarStep", stepRequest(template).get("HadoopJarStep"));
+        if (template.has("LogUri") || template.has("EncryptionKeyArn")) {
+            ObjectNode s3 = step.putObject("StepMonitoringConfiguration").putObject("S3MonitoringConfiguration");
+            if (template.has("LogUri")) {
+                s3.set("LogUri", template.get("LogUri"));
+            }
+            if (template.has("EncryptionKeyArn")) {
+                s3.set("EncryptionKeyArn", template.get("EncryptionKeyArn"));
+            }
+        }
+        List<String> ids = emrService.addJobFlowSteps(template.path("JobFlowId").asText(),
+                emrHandler.stepsFrom(MAPPER.createArrayNode().add(step), null));
+        r.setPhysicalId(ids.get(0));
+        r.getAttributes().put("Id", ids.get(0));
+    }
+
+    /**
+     * An instance group is added through AddInstanceGroups; its {@code InstanceCount} and {@code AutoScalingPolicy}
+     * change in place through ModifyInstanceGroups and Put/RemoveAutoScalingPolicy, as the update handler's permissions
+     * say, and any create-only change adds a new group. A rollback puts back the count and policy it had changed.
+     */
+    private void provisionInstanceGroup(StackResource r, JsonNode props, ProvisionContext ctx, boolean stub) {
+        JsonNode template = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(INSTANCE_GROUP, props);
+        refuseReadOnly(template, "InstanceGroupId");
+        requireTask(template, "InstanceRole");
+        String clusterId = template.path("JobFlowId").asText();
+        JsonNode policy = template.get("AutoScalingPolicy");
+        if (ctx.isUpdate() && !stub && !ctx.changes(INSTANCE_GROUP, props).requiresReplacement()) {
+            String id = ctx.priorPhysicalId();
+            liveCluster(clusterId);
+            EmrInstanceGroup live = emrService.listInstanceGroups(clusterId).stream()
+                    .filter(group -> id.equals(group.getId())).findFirst()
+                    .orElseThrow(() -> notFound(INSTANCE_GROUP, id));
+            JsonNode lastPolicy = CfnRollback.updateSnapshot(r, GROUP_POLICY_ATTR);
+            int count = template.path("InstanceCount").asInt();
+            ObjectNode snapshot = MAPPER.createObjectNode();
+            snapshot.put("clusterId", clusterId);
+            snapshot.put("groupId", id);
+            snapshot.put("region", ctx.region());
+            snapshot.put("count", live.getRequestedInstanceCount());
+            snapshot.set("policy", lastPolicy);
+            publishCapacity(r, id, clusterId);
+            r.getAttributes().put("InstanceGroupId", id);
+            r.getAttributes().put(CAPACITY_SNAPSHOT_ATTR, snapshot.toString());
+            AtomicBoolean countChanged = new AtomicBoolean();
+            AtomicBoolean policyChanged = new AtomicBoolean();
+            CfnRollback.guarded(r, ctx, false, () -> { },
+                    () -> restoreCapacity(snapshot, countChanged.get(), policyChanged.get()), () -> {
+                        if (count != live.getRequestedInstanceCount()) {
+                            emrService.modifyInstanceGroups(clusterId, ctx.region(),
+                                    List.of(new InstanceGroupModification(id, count, null)));
+                            countChanged.set(true);
+                        }
+                        if (!Objects.equals(policy, lastPolicy)) {
+                            applyGroupPolicy(clusterId, id, policy);
+                            policyChanged.set(true);
+                        }
+                    });
+        } else {
+            ObjectNode group = MAPPER.createObjectNode();
+            for (String name : INSTANCE_GROUP_MEMBERS) {
+                if (template.has(name)) {
+                    group.set(name, template.get(name));
+                }
+            }
+            if (group.has("Configurations")) {
+                group.set("Configurations", configurations(group.get("Configurations")));
+            }
+            List<String> ids = emrService.addInstanceGroups(clusterId,
+                    emrHandler.instanceGroupsFrom(MAPPER.createArrayNode().add(group)));
+            publishCapacity(r, ids.get(0), clusterId);
+            r.getAttributes().put("InstanceGroupId", ids.get(0));
+        }
+        if (policy == null) {
+            r.getAttributes().remove(GROUP_POLICY_ATTR);
+        } else {
+            r.getAttributes().put(GROUP_POLICY_ATTR, policy.toString());
+        }
+    }
+
+    /**
+     * An instance fleet is added through AddInstanceFleet; its target capacities change in place through
+     * ModifyInstanceFleet, and any create-only change adds a new fleet. Floci's ModifyInstanceFleet changes the
+     * capacities alone, so a change to {@code InstanceTypeConfigs} or {@code ResizeSpecifications} is accepted with a
+     * warning and not applied. A rollback puts back the capacities it had changed.
+     */
+    private void provisionInstanceFleet(StackResource r, JsonNode props, ProvisionContext ctx, boolean stub) {
+        JsonNode template = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(INSTANCE_FLEET, props);
+        refuseReadOnly(template, "InstanceFleetId");
+        requireTask(template, "InstanceFleetType");
+        String clusterId = template.path("ClusterId").asText();
+        PropertyChanges changes = ctx.isUpdate() && !stub ? ctx.changes(INSTANCE_FLEET, props) : null;
+        if (changes != null && !changes.requiresReplacement()) {
+            String id = ctx.priorPhysicalId();
+            liveCluster(clusterId);
+            EmrInstanceFleet live = emrService.listInstanceFleets(clusterId).stream()
+                    .filter(fleet -> id.equals(fleet.getId())).findFirst()
+                    .orElseThrow(() -> notFound(INSTANCE_FLEET, id));
+            for (String name : List.of("InstanceTypeConfigs", "ResizeSpecifications")) {
+                PropertyChanges.Kind kind = changes.kindOf(name);
+                if (kind != null && kind != PropertyChanges.Kind.UNCHANGED) {
+                    LOG.warnv("EMR instance fleet {0}: {1} is not applied, as ModifyInstanceFleet changes the "
+                            + "target capacities alone", id, name);
+                }
+            }
+            int onDemand = template.path("TargetOnDemandCapacity").asInt(0);
+            int spot = template.path("TargetSpotCapacity").asInt(0);
+            ObjectNode snapshot = MAPPER.createObjectNode();
+            snapshot.put("clusterId", clusterId);
+            snapshot.put("fleetId", id);
+            snapshot.put("region", ctx.region());
+            snapshot.put("onDemand", live.getTargetOnDemandCapacity());
+            snapshot.put("spot", live.getTargetSpotCapacity());
+            publishCapacity(r, id, clusterId);
+            r.getAttributes().put("InstanceFleetId", id);
+            r.getAttributes().put(CAPACITY_SNAPSHOT_ATTR, snapshot.toString());
+            AtomicBoolean changed = new AtomicBoolean();
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreCapacity(snapshot, changed.get(), false), () -> {
+                if (onDemand != live.getTargetOnDemandCapacity() || spot != live.getTargetSpotCapacity()) {
+                    emrService.modifyInstanceFleet(clusterId, id, onDemand, spot);
+                    changed.set(true);
+                }
+            });
+            return;
+        }
+        ObjectNode fleet = MAPPER.createObjectNode();
+        for (String name : INSTANCE_FLEET_MEMBERS) {
+            if (template.has(name)) {
+                fleet.set(name, template.get(name).deepCopy());
+            }
+        }
+        fleet.path("InstanceTypeConfigs").forEach(type -> {
+            if (type instanceof ObjectNode typeConfig && typeConfig.has("Configurations")) {
+                typeConfig.set("Configurations", configurations(typeConfig.get("Configurations")));
+            }
+        });
+        String id = emrService.addInstanceFleet(clusterId, emrHandler.instanceFleetFrom(fleet));
+        publishCapacity(r, id, clusterId);
+        r.getAttributes().put("InstanceFleetId", id);
+    }
+
+    private void applyGroupPolicy(String clusterId, String groupId, JsonNode policy) {
+        if (policy == null) {
+            emrService.removeAutoScalingPolicy(clusterId, groupId);
+        } else {
+            emrService.putAutoScalingPolicy(clusterId, groupId, policy);
+        }
+    }
+
+    /** Puts back a group's count and policy, or a fleet's capacities, each once the update had changed it. */
+    private void restoreCapacity(JsonNode snapshot, boolean first, boolean second) {
+        String clusterId = snapshot.path("clusterId").asText();
+        if (snapshot.has("fleetId")) {
+            if (first) {
+                emrService.modifyInstanceFleet(clusterId, snapshot.path("fleetId").asText(),
+                        snapshot.path("onDemand").asInt(), snapshot.path("spot").asInt());
+            }
+            return;
+        }
+        String groupId = snapshot.path("groupId").asText();
+        if (first) {
+            emrService.modifyInstanceGroups(clusterId, snapshot.path("region").asText(),
+                    List.of(new InstanceGroupModification(groupId, snapshot.path("count").asInt(), null)));
+        }
+        if (second) {
+            JsonNode policy = snapshot.get("policy");
+            applyGroupPolicy(clusterId, groupId, policy == null || policy.isNull() ? null : policy);
+        }
+    }
+
+    private static void publishCapacity(StackResource r, String id, String clusterId) {
+        r.setPhysicalId(id);
+        r.getAttributes().put(CLUSTER_ID_ATTR, clusterId);
+    }
+
+    /**
+     * The template reference's one allowed value for an instance group's role and an instance fleet's type, "Allowed
+     * Values: TASK": a master or core group or fleet is the cluster's own. No source gives AWS's refusal, so the
+     * wording is Floci's.
+     */
+    private static void requireTask(JsonNode template, String name) {
+        String role = template.path(name).asText();
+        if (!"TASK".equals(role)) {
+            throw new AwsException("InvalidRequest", name + " must be TASK, the one value the template reference "
+                    + "allows, not " + role + ".", 400);
+        }
+    }
+
+    private static void refuseReadOnly(JsonNode template, String name) {
+        if (template.has(name)) {
+            throw new AwsException("InvalidRequest",
+                    name + " is a ReadOnly property which cannot be specified in the template", 400);
+        }
+    }
+
+    private static AwsException notFound(String type, String id) {
+        return new AwsException("NotFound", "Resource of type '" + type + "' with identifier '" + id
+                + "' was not found.", 404);
+    }
+
+    /**
+     * An instance group or fleet cannot be removed from its cluster, so its delete shrinks it to nothing, as the
+     * delete handler's ModifyInstanceGroups and ModifyInstanceFleet permissions say, removing a group's policy first.
+     * One whose cluster has terminated or is gone is done.
+     */
+    @Override
+    public void delete(StackResource resource, String region) {
+        String type = resource.getResourceType();
+        String clusterId = resource.getAttributes().get(CLUSTER_ID_ATTR);
+        if ((INSTANCE_GROUP.equals(type) || INSTANCE_FLEET.equals(type)) && clusterId != null) {
+            shrink(type, clusterId, resource.getPhysicalId(), region);
+            return;
+        }
+        delete(type, resource.getPhysicalId(), region);
+    }
+
+    /**
+     * Shrinks the group or fleet to nothing once its cluster is running or waiting, the states ModifyInstanceGroups
+     * and ModifyInstanceFleet take, removing a group's policy first when it has one. A cluster still starting is waited
+     * for, as the create waits, since a group can be added to it then; one that is gone, or has ended, is left be.
+     */
+    private void shrink(String type, String clusterId, String id, String region) {
+        EmrCluster cluster;
+        try {
+            cluster = emrService.describeCluster(clusterId);
+        } catch (AwsException e) {
+            if ("InvalidRequestException".equals(e.getErrorCode())) {
+                return;
+            }
+            throw e;
+        }
+        if (!READY.contains(cluster.getState()) && !ENDED.contains(cluster.getState())) {
+            cluster = awaitSettled(clusterId);
+        }
+        if (!READY.contains(cluster.getState())) {
+            return;
+        }
+        if (INSTANCE_FLEET.equals(type)) {
+            emrService.modifyInstanceFleet(clusterId, id, 0, 0);
+            return;
+        }
+        boolean policy = emrService.listInstanceGroups(clusterId).stream()
+                .anyMatch(group -> id.equals(group.getId()) && group.getAutoScalingPolicy() != null);
+        if (policy) {
+            emrService.removeAutoScalingPolicy(clusterId, id);
+        }
+        emrService.modifyInstanceGroups(clusterId, region, List.of(new InstanceGroupModification(id, 0, null)));
+    }
+
+    /** The live cluster in the Region that holds the instance group or fleet {@code id}, for a delete by id alone. */
+    private String clusterHolding(String type, String id, String region) {
+        for (EmrCluster cluster : emrService.listClusters(region, null, null, null)) {
+            if (ENDED.contains(cluster.getState())) {
+                continue;
+            }
+            String clusterId = cluster.getId();
+            boolean holds = INSTANCE_GROUP.equals(type)
+                    ? emrService.listInstanceGroups(clusterId).stream().anyMatch(group -> id.equals(group.getId()))
+                    : emrService.listInstanceFleets(clusterId).stream().anyMatch(fleet -> id.equals(fleet.getId()));
+            if (holds) {
+                return cluster.getId();
+            }
+        }
+        return null;
     }
 
     /**
@@ -668,6 +1016,15 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
             case CLUSTER -> emrService.terminateJobFlows(List.of(physicalId));
+            // The schema's delete handler calls nothing: a step stays in its cluster's history.
+            case STEP -> LOG.debugv("EMR step {0} stays in its cluster's history", physicalId);
+            case INSTANCE_GROUP, INSTANCE_FLEET -> {
+                // Reached by id alone for a replaced group or fleet, whose cluster is found by looking.
+                String clusterId = clusterHolding(resourceType, physicalId, region);
+                if (clusterId != null) {
+                    shrink(resourceType, clusterId, physicalId, region);
+                }
+            }
             default -> throw new IllegalStateException("EmrCfnProvisioner cannot delete " + resourceType);
         }
     }
