@@ -1116,7 +1116,13 @@ def test_the_vendored_file_is_well_formed():
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"s3"}
+    # S3 is read from the table: an object by its bucket and key, a bucket per client, and DeleteObjects, whose keys
+    # its XML body names, left to S3.
+    assert "s3" in document["namespaces"] and "s3" not in document["handBuilt"]
+    assert operations["s3:PutObject"]["resources"] == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    assert operations["s3:CreateBucket"]["locatedApart"] == {"s3": {"Bucket": "{Bucket}"}, "s3control": {"Bucket": "{name}"}}
+    assert operations["s3:DeleteObjects"]["unread"] == ["Delete.Objects[].Key"]
     # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
     assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
     assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]

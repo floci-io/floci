@@ -480,7 +480,9 @@ class RequestResourceMembersTest {
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        return table.operations().entrySet().stream().flatMap(operation -> operation.getValue().stream()
+        // An unread operation names what it acts on in a body the reader does not read, so it reads none of it.
+        return table.operations().entrySet().stream().filter(operation -> !table.unread().contains(operation.getKey()))
+                .flatMap(operation -> operation.getValue().stream()
                 .map(resource -> DynamicTest.dynamicTest(operation.getKey() + " " + resource, () -> {
                     String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
                     String name = operation.getKey().substring(namespace.length() + 1);
@@ -534,9 +536,9 @@ class RequestResourceMembersTest {
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
                                     || other.endpoint().equals(resource.endpoint())))
-                            .map(other -> other == resource ? expected : expected(
-                                    table.formats().get(namespace).get(other.types().getFirst()).format(), other,
-                                    "000000000000", given.keySet()))
+                            .flatMap(other -> other == resource ? inTheRequestsRegionToo(expected, resource).stream()
+                                    : Stream.of(expected(table.formats().get(namespace).get(other.types().getFirst())
+                                    .format(), other, "000000000000", given.keySet())))
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn, resource.byDefault());
                     assertEquals(named, RequestResources.of(operation.getKey(),
@@ -801,6 +803,21 @@ class RequestResourceMembersTest {
             assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]}," + formats
                     + ",\"operations\":{\"a:Op\":{\"resources\":[]," + bad + "}}}"), bad);
         }
+    }
+
+    /**
+     * The ARN a request names in a member, and, for one whose format gives it a Region of its own (a Multi-Region
+     * Access Point request's, in us-west-2), the same ARN in the request's, us-east-1, where the reader checks a named
+     * resource as well.
+     */
+    private static List<String> inTheRequestsRegionToo(String expected, Resource resource) {
+        if (resource.arn() == null || !AwsArnUtils.isArn(expected)) {
+            return List.of(expected);
+        }
+        AwsArnUtils.Arn named = AwsArnUtils.parse(expected);
+        return named.region().isEmpty() || named.region().equals("us-east-1") ? List.of(expected)
+                : List.of(expected, new AwsArnUtils.Arn(named.partition(), named.service(), "us-east-1",
+                        named.accountId(), named.resource()).toString());
     }
 
     private static String document(String formats, String resource) {

@@ -286,6 +286,32 @@ def authorized_actions(documents: list[dict], page: dict | None = None, models: 
             if operations}
 
 
+def version_choice(entry: dict) -> dict | None:
+    """The choice an S3 user guide Either row gives: the parameter its sentences name, the action for a request
+    without it and the one for a request specifying it; None for a row giving no such choice."""
+    sentences = entry.get("either", {}).get("sentences", {})
+    named = {match.group(1) for match in map(SPECIFYING_RE.search, sentences.values()) if match}
+    without = [action for action, sentence in sentences.items() if "without specifying" in sentence]
+    with_ = [action for action, sentence in sentences.items() if "without specifying" not in sentence]
+    if len(named) == 1 and len(without) == 1 and len(with_) == 1:
+        return {"parameter": next(iter(named)), "without": without[0], "with": with_[0]}
+    return None
+
+
+def s3_version_choices(page: dict) -> dict[str, dict]:
+    """Each S3 operation the user guide gives a version choice and no single required action of its own, wherever its
+    request names the version: DeleteObjects names each in its body, so no request's query tells the choice."""
+    found = {}
+    for heading, entry in page.items():
+        head = LEVEL_RE.match(heading)
+        if head is None or head.group(2) or any(action.startswith("s3:") for action in entry.get("required", [])):
+            continue
+        choice = version_choice(entry)
+        if choice is not None:
+            found[head.group(1)] = choice
+    return dict(sorted(found.items()))
+
+
 def s3_query_parameters(data: Path | None = None) -> dict[str, list[str]]:
     """The query parameters botocore's S3 model gives each operation's request, from the botocore `regen_rest_routes`
     reads unless `data` names one."""
@@ -347,14 +373,8 @@ def s3_required(page: dict, models: dict, query: dict[str, list[str]]) -> tuple[
                 s3_model[operation] = singles[0]
         elif len(singles) == 1:
             actions[operation] = singles[0]
-        elif not singles and "either" in entry:
-            sentences = entry["either"]["sentences"]
-            named = {match.group(1) for match in map(SPECIFYING_RE.search, sentences.values()) if match}
-            without = [action for action, sentence in sentences.items() if "without specifying" in sentence]
-            with_ = [action for action, sentence in sentences.items() if "without specifying" not in sentence]
-            if (len(named) == 1 and len(without) == 1 and len(with_) == 1
-                    and next(iter(named)) in query.get(operation, [])):
-                versioned[operation] = {"parameter": next(iter(named)), "without": without[0], "with": with_[0]}
+        elif not singles and (choice := version_choice(entry)) and choice["parameter"] in query.get(operation, []):
+            versioned[operation] = choice
     for (namespace, model, operation), (action, evidence) in MEASURED_BY_MODEL.items():
         if "https://" not in evidence:
             raise ValueError(f"MEASURED_BY_MODEL gives {model}:{operation} with no link to its evidence")

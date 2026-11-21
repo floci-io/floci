@@ -7,17 +7,13 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.RequestPathLabels;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.services.kms.KmsService;
-import io.floci.aws.services.s3.S3ControlArnUtils;
-import io.floci.aws.services.s3.S3ObjectKeys;
-import io.floci.aws.services.s3.S3ResourceArns;
-import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
-import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -26,10 +22,10 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -58,9 +54,6 @@ public class ResourceArnBuilder {
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
 
-    /** Where an S3 Control tagging route carries the ARN of the resource it acts on. */
-    private static final String S3_CONTROL_TAGS_PREFIX = "/v20180820/tags/";
-
     /** The segment that starts an API Gateway v2 management path, and is not part of the resource it names. */
     private static final String API_GATEWAY_V2_SEGMENT = "v2";
 
@@ -84,22 +77,21 @@ public class ResourceArnBuilder {
      */
     private final Instance<StoredResourceArns> storedResourceArns;
     /**
-     * The current request, for the path as the client sent it: an S3 key keeps its own slashes,
-     * which JAX-RS has collapsed out of {@code UriInfo} by the time this runs. Null outside a
-     * request, as in a unit test, where the request URI's raw path stands in.
+     * Looked up lazily as well, to read a path's labels as the namespace's handlers read them where the router's
+     * normalized path gives them otherwise (an S3 key's own slashes).
      */
-    private final CurrentVertxRequest currentVertxRequest;
+    private final Instance<RequestPathLabels> requestPathLabels;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<KmsService> kmsService,
                               Instance<StoredResourceArns> storedResourceArns,
-                              CurrentVertxRequest currentVertxRequest) {
+                              Instance<RequestPathLabels> requestPathLabels) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.kmsService = kmsService;
         this.storedResourceArns = storedResourceArns;
-        this.currentVertxRequest = currentVertxRequest;
+        this.requestPathLabels = requestPathLabels;
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -123,10 +115,6 @@ public class ResourceArnBuilder {
 
     public ResourceArnBuilder(ObjectMapper objectMapper) {
         this(objectMapper, null, null);
-    }
-
-    ResourceArnBuilder(ObjectMapper objectMapper, CurrentVertxRequest currentVertxRequest) {
-        this(objectMapper, null, null, null, currentVertxRequest);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -163,10 +151,8 @@ public class ResourceArnBuilder {
         if (operation != null && operation.startsWith(credentialScope + ":") && RequestResources.reads(operation)) {
             return namedResources(credentialScope, operation, ctx, region, accountId, partition);
         }
-        String path = "s3".equals(credentialScope) ? ctx.getUriInfo().getPath()
-                : IamActionRegistry.decodedPath(ctx);
+        String path = IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
-            case "s3"             -> buildS3Resources(operation, path, ctx, region);
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
@@ -179,14 +165,38 @@ public class ResourceArnBuilder {
      * The resources a request of a namespace this builder has no branch for names, from the vendored table of
      * request resources (see {@link RequestResources}); {@code *} when it names none, or the operation is not one
      * of the namespace. A resource whose service mints an id after its name, or as all of its ARN, is the one the
-     * namespace's {@link StoredResourceArns} finds under that name or the members naming it.
+     * namespace's {@link StoredResourceArns} finds under that name or the members naming it. A label of the
+     * request's path is read as the namespace's {@link RequestPathLabels} reads it, where it reads one otherwise.
      */
     private List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
                                         String region, String accountId, String partition) {
-        List<String> named = operation == null || !operation.startsWith(credentialScope + ":") ? List.of()
-                : RequestResources.of(operation, ctx, partition, region, accountId, storedResourceArns(credentialScope),
-                        IamActionRegistry.pathLabels(credentialScope, ctx));
+        if (operation == null || !operation.startsWith(credentialScope + ":")) {
+            return List.of("*");
+        }
+        Map<String, String> labels = IamActionRegistry.pathLabels(credentialScope, ctx);
+        RequestPathLabels read = requestPathLabels(credentialScope);
+        Map<String, String> otherwise = read == null ? Map.of() : read.labels(ctx, labels);
+        if (!otherwise.isEmpty()) {
+            Map<String, String> merged = new HashMap<>(labels);
+            merged.putAll(otherwise);
+            labels = Map.copyOf(merged);
+        }
+        List<String> named = RequestResources.of(operation, ctx, partition, region, accountId,
+                storedResourceArns(credentialScope), labels);
         return named.isEmpty() ? List.of("*") : named;
+    }
+
+    /** The registered reader of the namespace's path labels; null when there is none. */
+    private RequestPathLabels requestPathLabels(String namespace) {
+        if (requestPathLabels == null || requestPathLabels.isUnsatisfied()) {
+            return null;
+        }
+        for (RequestPathLabels read : requestPathLabels) {
+            if (read.namespace().equals(namespace)) {
+                return read;
+            }
+        }
+        return null;
     }
 
     /**
@@ -749,115 +759,6 @@ public class ResourceArnBuilder {
             default -> Optional.empty();
         };
         return stored.filter(entity -> entity.arn() != null && !entity.arn().isBlank());
-    }
-
-    // ── S3 ──────────────────────────────────────────────────────────────────────
-
-    /**
-     * The path of an S3 data-plane request, {@code path} as JAX-RS matched it, with its object key
-     * read from the path as the client sent it. {@code UriInfo} carries JAX-RS's collapsing of
-     * consecutive slashes, which drops a key's own leading slash and so names another object:
-     * {@code PUT /bucket//email.txt} stores the key {@code /email.txt} but would be checked on
-     * {@code arn:aws:s3:::bucket/email.txt}, so a grant on that object would cover this one and a
-     * statement naming {@code bucket//*} would match nothing it names. {@code S3Controller} stores
-     * the object under the key read here and the IAM condition resolver describes that same key,
-     * so all three agree on which object the request is about. The bucket comes from the matched
-     * path, which {@code S3VirtualHostFilter} has put it into for a virtual-hosted request.
-     */
-    private String s3Path(String path, ContainerRequestContext ctx) {
-        String bucket = s3Bucket(path);
-        if (bucket == null) {
-            return path;
-        }
-        URI requestUri = ctx.getUriInfo().getRequestUri();
-        RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
-        String sentPath = current != null && current.request() != null ? current.request().path()
-                : requestUri == null ? null : requestUri.getRawPath();
-        String key = S3ObjectKeys.objectKey(sentPath, requestUri == null ? null : requestUri.getPath(),
-                path, bucket);
-        return key == null ? path : "/" + bucket + "/" + key;
-    }
-
-    /**
-     * The bucket an S3 data-plane path names an object in, or null when the path names no object to
-     * read a key for: the root, and a bucket on its own or with one trailing slash, which the ARN
-     * reads as the bucket itself.
-     */
-    private static String s3Bucket(String path) {
-        if (path == null) {
-            return null;
-        }
-        String stripped = path.startsWith("/") ? path.substring(1) : path;
-        int slash = stripped.indexOf('/');
-        return slash <= 0 || slash == stripped.length() - 1 ? null : stripped.substring(0, slash);
-    }
-
-    // Minted in the request's partition; IamEnforcementFilter re-mints an existing bucket's ARN
-    // in the bucket's own partition through S3ResourcePolicyProvider before any policy sees it.
-    private String buildS3Arn(String path, String region) {
-        // path: /bucket or /bucket/key
-        String partition = AwsRegions.partitionFor(region);
-        String stripped = path.startsWith("/") ? path.substring(1) : path;
-        if (stripped.isEmpty()) {
-            return S3ResourceArns.bucket(partition, "*");
-        }
-        // S3VirtualHostFilter rewrites a bucket-level virtual-hosted request (GET /) to
-        // /bucket/, and the empty key after that separator is not part of the resource.
-        // A policy names the bucket as arn:<partition>:s3:::bucket, so the trailing slash has to
-        // go or a bucket-level ARN never matches. A key that itself ends in a slash
-        // (a folder marker such as folder/) keeps it, because there the slash is key data.
-        int firstSlash = stripped.indexOf('/');
-        if (firstSlash < 0 || firstSlash == stripped.length() - 1) {
-            return S3ResourceArns.bucket(partition, firstSlash < 0 ? stripped : stripped.substring(0, firstSlash));
-        }
-        return S3ResourceArns.object(partition, stripped.substring(0, firstSlash), stripped.substring(firstSlash + 1));
-    }
-
-    /**
-     * The resources an s3-scope request names, which an S3 Control operation reads differently
-     * from an S3 data-plane path. S3 Control clients sign with the s3 scope and its operations
-     * are {@code s3:} actions (the Service Authorization Reference lists them under Amazon S3),
-     * so the operation, not the path, tells the two apart: a tagging route carries the ARN of the
-     * bucket or access point it acts on in its path, and the request is checked against that ARN
-     * as written, the way every ARN-carrying request is; the Service Authorization Reference
-     * gives ListAccessPoints and the account-level Block Public Access no resource type, so
-     * those are checked against the wildcard alone, as the no-resource actions of other
-     * namespaces are (the KMS list operations), and a bucket-scoped statement grants them
-     * nothing. Any other operation is the data plane, checked against the bucket or object its
-     * path names, even in a bucket named like the S3 Control prefix, {@code v20180820}.
-     */
-    private List<String> buildS3Resources(String operation, String path, ContainerRequestContext ctx,
-                                          String region) {
-        if (operation == null) {
-            return List.of(buildS3Arn(s3Path(path, ctx), region));
-        }
-        return switch (operation) {
-            case "s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource" ->
-                    List.of(taggedS3ControlArn(path));
-            case "s3:ListAccessPoints", "s3:PutAccountPublicAccessBlock",
-                    "s3:GetAccountPublicAccessBlock" -> List.of("*");
-            default -> List.of(buildS3Arn(s3Path(path, ctx), region));
-        };
-    }
-
-    /**
-     * The ARN an S3 Control tagging route names in its path, read with the one parse the handler
-     * and the policy lookup share: the Go SDK, and so Terraform's provider, percent-encodes the
-     * ARN's colons and slashes, so the path may still carry them. A path naming no ARN leaves
-     * the wildcard, which the handler answers {@code InvalidRequest} under, and nothing is
-     * rebuilt from the bucket it names: the ARN as the caller wrote it is the resource.
-     */
-    private static String taggedS3ControlArn(String path) {
-        String tagged = path.startsWith(S3_CONTROL_TAGS_PREFIX)
-                ? path.substring(S3_CONTROL_TAGS_PREFIX.length()) : null;
-        if (tagged == null) {
-            return "*";
-        }
-        try {
-            return S3ControlArnUtils.parse(tagged).map(AwsArnUtils.Arn::toString).orElse("*");
-        } catch (IllegalArgumentException malformedEncoding) {
-            return "*";
-        }
     }
 
     /**

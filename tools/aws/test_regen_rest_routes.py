@@ -85,7 +85,8 @@ def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path, m
     assert r.main(data + ["--check"]) == 1
 
 
-def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused():
+def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused(monkeypatch):
+    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
     with pytest.raises(SystemExit):
         r.build({"lambda": model("rest-json", "2015-03-31", GetByName=("GET", "/things/{Name}"),
                                  GetById=("GET", "/things/{Id}/"))}, "botocore test")
@@ -190,7 +191,8 @@ def test_an_operation_signed_for_another_service_on_every_request_is_left_out_of
         r.build({"s3": s3}, "botocore test")
 
 
-def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
+def test_the_hand_routed_scopes_are_rendered_with_their_reasons(monkeypatch):
+    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
     text = r.render(r.build({"s3": model("rest-xml", "2006-03-01", HeadBucket=("HEAD", "/{Bucket}"))},
                             "botocore test"))
 
@@ -456,7 +458,8 @@ def test_vendored_documented_routes_read_from_another_page_or_malformed_are_refu
         r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": malformed})))
 
 
-def test_a_hand_routed_scopes_routes_list_all_their_requests_must_carry_for_the_coverage_test():
+def test_a_hand_routed_scopes_routes_list_all_their_requests_must_carry_for_the_coverage_test(monkeypatch):
+    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
     s3 = shaped(model("rest-xml", "2006-03-01", CompleteMultipartUpload=("POST", "/{Bucket}/{Key+}"),
                       PutObject=("PUT", "/{Bucket}/{Key+}")),
                 "CompleteMultipartUpload", {"UploadId": ("querystring", "uploadId")})

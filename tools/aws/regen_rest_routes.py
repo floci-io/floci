@@ -9,21 +9,21 @@ A request no rule maps is the operation whose route it matches, checked as the a
 `iam-authorized-actions.json` names for it, or as its own; `IamRestRouteCoverageTest` builds a
 request on each route and compares the action the registry gives with that one.
 
-The credential scopes in `HAND_ROUTED` are authorized by the registry's rules alone, each for its
-reason, and their routes are vendored for the coverage test only, each with the query parameters and
-headers botocore requires its request to carry (`required`), which the registry's rules read: S3's
-CompleteMultipartUpload, on `POST /{Bucket}/{Key+}`, is told by its `uploadId`. Operations sharing a route are told
-apart by what botocore models their requests as carrying: the query parameters and headers of the
-members their input requires (`requires`: S3's UploadPart, on `PUT /{Bucket}/{Key+}` with PutObject,
-requires `partNumber` and `uploadId`, CopyObject the `x-amz-copy-source` header), and a deprecated
-operation (`deprecated`) yields to a current one of the same route and conditions. An operation whose
-every request botocore's endpoint rules send to another service's endpoint, signed for it, is that
-service's (`signedElsewhere`: S3's ListDirectoryBuckets, signed `s3express`). Within any scope, the
-operations of a route must leave every request one operation: no two current ones requiring the same, and
-what any two require together required by one of them, the route requiring all a request carries being its
-operation (`shared_routes`). The generation fails otherwise. Supported shared-controller alternatives are generated beside the modeled URI, with
-member-location overrides for the bare route, and its own method where that is not the operation's. These
-alternatives describe existing Floci compatibility paths, not additional botocore operations.
+The credential scopes in `HAND_ROUTED`, none now, are authorized by the registry's rules alone, each for
+its reason, and their routes are vendored for the coverage test only, each with the query parameters and
+headers botocore requires its request to carry (`required`), which the registry's rules read. Operations
+sharing a route are told apart by what botocore models their requests as carrying: the query parameters
+and headers of the members their input requires (`requires`: S3's UploadPart, on `PUT /{Bucket}/{Key+}`
+with PutObject, requires `partNumber` and `uploadId`, CopyObject the `x-amz-copy-source` header), and a
+deprecated operation (`deprecated`) yields to a current one of the same route and conditions. An
+operation whose every request botocore's endpoint rules send to another service's endpoint, signed for
+it, is that service's (`signedElsewhere`: S3's ListDirectoryBuckets, signed `s3express`). Within any
+scope, the operations of a route must leave every request one operation: no two current ones requiring
+the same, and what any two require together required by one of them, the route requiring all a request
+carries being its operation (`shared_routes`). The generation fails otherwise. Supported shared-
+controller alternatives are generated beside the modeled URI, with member-location overrides for the
+bare route, and its own method where that is not the operation's. These alternatives describe existing
+Floci compatibility paths, not additional botocore operations.
 
 The models are botocore's `<model>/<apiVersion>/service-2.json` (Apache-2.0,
 https://github.com/boto/botocore), the latest API version of each, located as
@@ -62,11 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "src/main/resources/aws/rest-routes.json"
 
 # Credential scopes the registry's rules authorize alone, and why.
-HAND_ROUTED: dict[str, str] = {
-    "s3":"S3 tells apart the operations it serves on one route by their query parameters and headers, which the "
-          "registry's S3 rules and sub-resource overrides read, and an S3 Control route Floci does not serve "
-          "runs as the S3 data plane, checked as the bucket or object operation that runs",
-}
+HAND_ROUTED: dict[str, str] = {}
 
 # botocore model -> the credential scope Floci authorizes its requests under.
 MODELS: dict[str, str] = {

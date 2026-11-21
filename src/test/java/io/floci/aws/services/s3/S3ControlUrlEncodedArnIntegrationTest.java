@@ -37,7 +37,8 @@ class S3ControlUrlEncodedArnIntegrationTest {
     private static final String DECODED_ARN =
             "arn:aws:s3:" + REGION + ":" + ACCOUNT + ":bucket/" + BUCKET;
 
-    // What the Go SDK actually puts on the wire: colons AND slashes URL-encoded.
+    // What the Go SDK actually puts on the wire: colons AND slashes URL-encoded, once, which RestAssured must not
+    // encode again.
     private static final String ENCODED_ARN =
             "arn%3Aaws%3As3%3A" + REGION + "%3A" + ACCOUNT + "%3Abucket%2F" + BUCKET;
 
@@ -82,6 +83,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
     @DisplayName("ListTagsForResource accepts URL-encoded ARN from Go AWS SDK v2 (#435)")
     void listTagsForResourceWithUrlEncodedArn() {
         given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .get("/v20180820/tags/" + ENCODED_ARN)
@@ -119,6 +121,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
                 "</Tags></Tagging>";
 
         given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
             .contentType("application/xml")
             .body(body)
@@ -128,6 +131,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
             .statusCode(204);
 
         String response = given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .get("/v20180820/tags/" + ENCODED_ARN)
@@ -144,6 +148,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
     @DisplayName("UntagResource accepts URL-encoded ARN from Go AWS SDK v2 (#435)")
     void untagResourceWithUrlEncodedArn() {
         given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .delete("/v20180820/tags/" + ENCODED_ARN + "?tagKeys=CostCenter")
@@ -151,6 +156,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
             .statusCode(204);
 
         given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .get("/v20180820/tags/" + ENCODED_ARN)
@@ -177,7 +183,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
     @Order(7)
     @DisplayName("Malformed percent-encoding returns S3 Control ErrorResponse wrapper (#435, #557)")
     void malformedPercentEncodingReturnsXmlError() {
-        // %ZZ is not a valid percent-encoding sequence; URLDecoder throws IAE.
+        // %ZZ is not a valid percent-encoding sequence, so what the router decodes names no ARN.
         Response response = given()
             .header("x-amz-account-id", ACCOUNT)
         .when()
@@ -209,6 +215,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
         // Go SDK v2 percent-encodes colons: arn%3Aaws%3As3%3A%3A%3A<bucket>
         String encodedPlainArn = "arn%3Aaws%3As3%3A%3A%3A" + BUCKET;
         given()
+            .urlEncodingEnabled(false)
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .get("/v20180820/tags/" + encodedPlainArn)

@@ -617,6 +617,22 @@ def test_a_version_choice_is_read_only_where_botocore_gives_its_parameter_in_the
     assert "GetObject" in versioned["s3"]
 
 
+def test_every_version_choice_is_listed_wherever_the_request_names_the_version():
+    deletes = {"section": "Object operations and permissions",
+               "either": {"actions": ["s3:DeleteObject", "s3:DeleteObjectVersion"], "sentences": {
+                   "s3:DeleteObject": "Required if you want to remove an object without specifying versionId in the "
+                                      "request.",
+                   "s3:DeleteObjectVersion": "Required if you want to remove a specific version of an object by "
+                                             "specifying versionId in the request."}}}
+    choices = r.s3_version_choices({**S3_PAGE, "DeleteObjects": deletes})
+    # DeleteObjects names its versions in its body, so it has no query choice, but its choice is still the page's.
+    assert choices["DeleteObjects"] == {"parameter": "versionId", "without": "s3:DeleteObject",
+                                        "with": "s3:DeleteObjectVersion"}
+    assert choices["GetObject"]["with"] == "s3:GetObjectVersion"
+    # CopyObject requires an action of its own, so its Either row is about its source, not its version.
+    assert "CopyObject" not in choices
+
+
 def test_a_measured_version_choice_by_a_parameter_botocore_gives_no_query_is_refused():
     with pytest.raises(ValueError):
         r.s3_required(S3_PAGE, S3_MODELS, {**S3_QUERY, "GetObjectAnnotation": []})

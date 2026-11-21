@@ -2,8 +2,6 @@ package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.AwsArnUtils;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 /**
@@ -25,16 +23,15 @@ public final class S3ControlArnUtils {
     private S3ControlArnUtils() {}
 
     /**
-     * The tagging route's ARN, decoded as its handler decodes it and parsed once. Empty when the
-     * value is null, blank or not an s3 ARN; {@link IllegalArgumentException} when its
-     * percent-encoding is malformed.
+     * The tagging route's ARN, as the router decoded its path parameter, once, the way IAM reads the route's label:
+     * the Go SDK, and so Terraform's provider, sends it percent-encoded once, so a value still percent-encoded after
+     * that names no ARN. Empty when the value is null, blank or not an s3 ARN.
      */
     public static Optional<AwsArnUtils.Arn> parse(String resourceArn) {
         if (resourceArn == null || resourceArn.isBlank()) {
             return Optional.empty();
         }
-        String decoded = URLDecoder.decode(resourceArn, StandardCharsets.UTF_8);
-        return AwsArnUtils.isArnFor(decoded, "s3") ? Optional.of(AwsArnUtils.parse(decoded)) : Optional.empty();
+        return AwsArnUtils.isArnFor(resourceArn, "s3") ? Optional.of(AwsArnUtils.parse(resourceArn)) : Optional.empty();
     }
 
     /**

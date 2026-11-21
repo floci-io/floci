@@ -457,6 +457,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (action == null) {
             return; // unknown action → ALLOW for ordinary credentials (permissive)
         }
+        // A request two operations' routes take alike, as one naming two of S3's sub-resources, runs as whichever its
+        // handler picks, so it is refused rather than checked as one of them.
+        if (!isRpcCall(ctx) && IamActionRegistry.ambiguousRoute(credentialScope, ctx)) {
+            LOG.infov("IAM enforcement DENY: akid={0} action={1}, a request two operations' routes take alike",
+                    akid, action);
+            ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
+            return;
+        }
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
         }
