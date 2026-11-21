@@ -722,6 +722,58 @@ class Route53ServiceTest {
     }
 
     @Test
+    void wildcardRecordIsListedWithOctalEscapedAsteriskAndMatchesStartRecordName() {
+        Route53Service service = newService();
+        String zone = service.createHostedZone("sandbox.example.com", "wildcard-escape", null, null).zone().getId();
+        service.changeResourceRecordSets(zone, List.of(change("CREATE",
+                aRecord("*.sandbox.example.com", 60, "10.0.0.1"))), null);
+
+        List<ResourceRecordSet> listed = service.listResourceRecordSets(zone, "\\052.sandbox.example.com.", "A", 1);
+        assertEquals(1, listed.size());
+        assertEquals("\\052.sandbox.example.com.", listed.getFirst().getName());
+        assertEquals("A", listed.getFirst().getType());
+
+        // Creating the same record with the escaped spelling must be rejected as a duplicate.
+        AwsException dup = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zone,
+                List.of(change("CREATE", aRecord("\\052.sandbox.example.com.", 60, "10.0.0.2"))), null));
+        assertEquals("InvalidChangeBatch", dup.getErrorCode());
+
+        // Deleting by either literal or escaped spelling succeeds.
+        service.changeResourceRecordSets(zone, List.of(change("DELETE",
+                aRecord("\\052.sandbox.example.com.", 60, "10.0.0.1"))), null);
+        assertTrue(service.listResourceRecordSets(zone, null, null, 100).stream()
+                .noneMatch(r -> "A".equals(r.getType())));
+    }
+
+    @Test
+    void wildcardRecordSortsBeforeNumericAndAlphaSiblingsAndHonorsStartName() {
+        Route53Service service = newService();
+        String zone = service.createHostedZone("sandbox.example.com", "wildcard-sort", null, null).zone().getId();
+        service.changeResourceRecordSets(zone, List.of(
+                change("CREATE", aRecord("a.sandbox.example.com", 60, "10.0.0.3")),
+                change("CREATE", aRecord("0.sandbox.example.com", 60, "10.0.0.2")),
+                change("CREATE", aRecord("*.sandbox.example.com", 60, "10.0.0.1"))), null);
+
+        List<String> aNames = service.listResourceRecordSets(zone, null, null, 100).stream()
+                .filter(r -> "A".equals(r.getType()))
+                .map(ResourceRecordSet::getName)
+                .toList();
+        assertEquals(List.of("\\052.sandbox.example.com.", "0.sandbox.example.com.", "a.sandbox.example.com."), aNames);
+
+        List<String> fromZero = service.listResourceRecordSets(zone, "0.sandbox.example.com.", "A", 100).stream()
+                .filter(r -> "A".equals(r.getType()))
+                .map(ResourceRecordSet::getName)
+                .toList();
+        assertEquals(List.of("0.sandbox.example.com.", "a.sandbox.example.com."), fromZero);
+
+        List<String> fromWildcard = service.listResourceRecordSets(zone, "*.sandbox.example.com.", "A", 100).stream()
+                .filter(r -> "A".equals(r.getType()))
+                .map(ResourceRecordSet::getName)
+                .toList();
+        assertEquals(List.of("\\052.sandbox.example.com.", "0.sandbox.example.com.", "a.sandbox.example.com."), fromWildcard);
+    }
+
+    @Test
     void createHealthCheck_sameReferenceWithDifferentSettings_isHealthCheckAlreadyExists() {
         Route53Service service = newService();
         service.createHealthCheck("tf-ref-2", httpsCheck("/health"), "ResourcePath=/health");
