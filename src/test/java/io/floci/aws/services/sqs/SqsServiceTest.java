@@ -23,6 +23,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.Field;
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -2684,6 +2686,43 @@ class SqsServiceTest {
                 awaitMoveTaskStatus(dlqArn, task.get(), "CANCELLED");
             }
         }
+    }
+
+    @Test
+    void redriveBetweenEmptyCheckAndWaitDoesNotLoseWakeup() throws Exception {
+        String region = "eu-west-1";
+        Queue dlq = sqsService.createQueue("check-wait-dlq", null, region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String policy = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+        Queue source = sqsService.createQueue("check-wait-source", Map.of("RedrivePolicy", policy), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "redriven", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        assertTrue(sqsService.receiveMessage(dlq.getQueueUrl(), 1, 30, 0, region).isEmpty());
+
+        // Hold the actual wait monitor to stop the receiver after its empty check, before wait().
+        Field locksField = SqsService.class.getDeclaredField("queueLocks");
+        locksField.setAccessible(true);
+        Map<?, ?> locks = (Map<?, ?>) locksField.get(sqsService);
+        Object lock = locks.get(region + "::" + URI.create(dlq.getQueueUrl()).getPath());
+        assertNotNull(lock);
+        FutureTask<List<Message>> receive = new FutureTask<>(
+                () -> sqsService.receiveMessage(dlq.getQueueUrl(), 1, 30, 20, region));
+        Thread poller = new Thread(receive, "sqs-check-wait-redrive");
+        try {
+            synchronized (lock) {
+                poller.start();
+                await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
+                        .until(() -> poller.getState() == Thread.State.BLOCKED);
+                assertTrue(sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).isEmpty());
+            }
+            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
+            assertEquals(1, received.size());
+            assertEquals(sent.getMessageId(), received.getFirst().getMessageId());
+        } finally {
+            poller.interrupt();
+            poller.join(5000);
+        }
+        assertFalse(poller.isAlive());
     }
 
     private List<Message> receiveAfterAction(String queueUrl, String region, Runnable action) throws Exception {
