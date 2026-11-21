@@ -242,8 +242,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * The update AWS makes for the properties it does not replace on: the cluster keeps its name.
      * Tags, Logging, AccessConfig.AuthenticationMode and the endpoint access members of ResourcesVpcConfig
      * are applied, and only when the template's value differs from the live cluster's. EksService has no
-     * UpdateClusterVersion, so a changed Version is accepted with a warning and not applied; a changed subnet or
-     * security group list fails the resource, as the UpdateClusterConfig API refuses it.
+     * UpdateClusterVersion, so a changed Version is accepted with a warning and not applied. AWS lets
+     * UpdateClusterConfig choose different subnets and security groups, but floci does not apply that, so a
+     * changed or dropped subnet or security group list fails the resource.
      */
     private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live,
                                PropertyChanges changes) {
@@ -343,7 +344,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * cluster, or null when none does. A member the template dropped is read as its AWS default: public access
      * on, private access off, every address allowed and no log type exported; floci applies that default itself.
      * A dropped AuthenticationMode asks for nothing, as a mode cannot be moved back. The subnet and security
-     * group lists go along unchanged, so the service refuses a different one.
+     * group lists go along as the template has them, a dropped list counting as an empty one, so the service
+     * refuses one that differs from the live cluster's.
      */
     private UpdateClusterConfigRequest configRequest(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
                                                      Cluster live) {
@@ -358,8 +360,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
             boolean privateAccess = desired != null && Boolean.TRUE.equals(desired.getEndpointPrivateAccess());
             List<String> cidrs = desired == null || desired.getPublicAccessCidrs() == null
                     ? List.of("0.0.0.0/0") : desired.getPublicAccessCidrs();
-            boolean listsDiffer = desired != null && (differs(desired.getSubnetIds(), current.getSubnetIds())
-                    || differs(desired.getSecurityGroupIds(), current.getSecurityGroupIds()));
+            List<String> subnets = desired == null ? null
+                    : desired.getSubnetIds() == null ? List.of() : desired.getSubnetIds();
+            List<String> securityGroups = desired == null ? null
+                    : desired.getSecurityGroupIds() == null ? List.of() : desired.getSecurityGroupIds();
+            boolean listsDiffer = desired != null && (differs(subnets, current.getSubnetIds())
+                    || differs(securityGroups, current.getSecurityGroupIds()));
             if (listsDiffer || publicAccess != Boolean.TRUE.equals(current.getEndpointPublicAccess())
                     || privateAccess != Boolean.TRUE.equals(current.getEndpointPrivateAccess())
                     || differs(cidrs, current.getPublicAccessCidrs())) {
@@ -367,8 +373,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                 vpc.setEndpointPublicAccess(publicAccess);
                 vpc.setEndpointPrivateAccess(privateAccess);
                 vpc.setPublicAccessCidrs(cidrs);
-                vpc.setSubnetIds(desired == null ? null : desired.getSubnetIds());
-                vpc.setSecurityGroupIds(desired == null ? null : desired.getSecurityGroupIds());
+                vpc.setSubnetIds(subnets);
+                vpc.setSecurityGroupIds(securityGroups);
             }
         }
         if (changed(changes, "Logging")) {
