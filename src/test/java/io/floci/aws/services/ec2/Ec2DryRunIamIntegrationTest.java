@@ -145,6 +145,34 @@ class Ec2DryRunIamIntegrationTest {
         }
     }
 
+    @Test
+    void aKeyPairDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Action":"ec2:DeleteKeyPair","Resource":"*"
+                }]}
+                """;
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint);
+                SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "keypair-dryrun-allowed-", "keys",
+                        policy);
+                Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
+                        user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
+            String name = "dry-run-iam-key";
+            admin.createKeyPair(r -> r.keyName(name));
+            try {
+                assertAwsError("DryRunOperation", 412, () -> caller.deleteKeyPair(r -> r.keyName(name).dryRun(true)));
+                SignedIamUsers.iam(endpoint, "DeleteUserPolicy", Map.of("UserName", user.name(), "PolicyName", "keys"))
+                        .then().statusCode(200);
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> caller.deleteKeyPair(r -> r.keyName(name).dryRun(true)));
+
+                assertEquals(1, admin.describeKeyPairs(r -> r.keyNames(name)).keyPairs().size());
+            } finally {
+                admin.deleteKeyPair(r -> r.keyName(name));
+            }
+        }
+    }
+
     /**
      * A caller the policy allows {@code action} gets DryRunOperation for {@code dryRun}, and UnauthorizedOperation
      * once the policy is removed; {@code state} reads the same before and after.

@@ -172,7 +172,8 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
                                  String clientLoginBannerText, Boolean clientRouteEnforced,
                                  Boolean disconnectOnSessionTimeout) {}
 
-    public synchronized void modifyEndpoint(String region, String id, EndpointChange change) {
+    public synchronized void modifyEndpoint(String region, String id, EndpointChange change,
+                                           boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         String vpcId = change.vpcId() != null ? change.vpcId() : endpoint.getVpcId();
         if (change.vpcId() != null && !change.vpcId().equals(endpoint.getVpcId())) {
@@ -188,6 +189,9 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
             }
             securityGroups = securityGroupsOf(region, vpcId,
                     change.securityGroupIds() != null ? change.securityGroupIds() : List.of());
+        }
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
         }
         if (change.serverCertificateArn() != null) {
             endpoint.setServerCertificateArn(change.serverCertificateArn());
@@ -239,11 +243,14 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
     }
 
     /** Refused while target networks are associated, as AWS requires them disassociated first. */
-    public synchronized void deleteEndpoint(String region, String id) {
+    public synchronized void deleteEndpoint(String region, String id, boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         if (!endpoint.getTargetNetworks().isEmpty()) {
             throw new AwsException("IncorrectState",
                     "Client VPN endpoint " + id + " has associated target networks; disassociate them first.", 400);
+        }
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
         }
         endpoints.delete(key(region, id));
         ec2.deleteTags(region, List.of(id), List.of());
@@ -328,12 +335,16 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
     }
 
     /** Removes the association and every route through its subnet. */
-    public synchronized TargetNetwork disassociate(String region, String id, String associationId) {
+    public synchronized TargetNetwork disassociate(String region, String id, String associationId,
+                                                  boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         TargetNetwork network = endpoint.getTargetNetworks().stream()
                 .filter(candidate -> candidate.getAssociationId().equals(associationId)).findFirst()
                 .orElseThrow(() -> new AwsException("InvalidClientVpnAssociationId.NotFound",
                         "Association " + associationId + " does not exist", 400));
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
+        }
         endpoint.setTargetNetworks(without(endpoint.getTargetNetworks(), candidate -> candidate == network));
         endpoint.setRoutes(without(endpoint.getRoutes(),
                 route -> network.getSubnetId().equals(route.getTargetSubnet())));
@@ -364,7 +375,7 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
     // ── Authorization rules ──
 
     public synchronized void authorize(String region, String id, String targetNetworkCidr, String accessGroupId,
-                                       Boolean authorizeAllGroups, String description) {
+                                       Boolean authorizeAllGroups, String description, boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         requireCidr(targetNetworkCidr, "TargetNetworkCidr");
         boolean all = Boolean.TRUE.equals(authorizeAllGroups);
@@ -376,6 +387,9 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
                         && rule.isAccessAll() == all && Objects.equals(rule.getGroupId(), all ? "" : accessGroupId));
         if (exists) {
             throw invalid("An authorization rule for " + targetNetworkCidr + " already exists.");
+        }
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
         }
         AuthorizationRule rule = new AuthorizationRule();
         rule.setDestinationCidr(targetNetworkCidr);
@@ -442,7 +456,8 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
     }
 
     /** Removes the matching routes; a route an association added goes with the association only. */
-    public synchronized void deleteRoute(String region, String id, String destinationCidr, String targetSubnet) {
+    public synchronized void deleteRoute(String region, String id, String destinationCidr, String targetSubnet,
+                                        boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         requireCidr(destinationCidr, "DestinationCidrBlock");
         List<Route> kept = without(endpoint.getRoutes(), route -> ORIGIN_ADD_ROUTE.equals(route.getOrigin())
@@ -451,6 +466,9 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
         if (kept.size() == endpoint.getRoutes().size()) {
             throw new AwsException("InvalidClientVpnRouteNotFound",
                     "Route " + destinationCidr + " does not exist", 400);
+        }
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
         }
         endpoint.setRoutes(kept);
         endpoints.put(key(region, id), endpoint);
@@ -463,9 +481,12 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
      * server certificate's chain as the CA, and its common name to verify. The chain and name come
      * from the server certificate in ACM; a certificate ACM does not hold leaves them out.
      */
-    public String exportClientConfiguration(String region, String id) {
+    public String exportClientConfiguration(String region, String id, boolean dryRun) {
         ClientVpnEndpoint endpoint = require(region, id);
         Optional<Certificate> certificate = serverCertificate(endpoint, region);
+        if (dryRun) {
+            throw Ec2Service.dryRunOperation();
+        }
         StringBuilder config = new StringBuilder()
                 .append("client\n")
                 .append("dev tun\n")
@@ -500,11 +521,16 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
 
     // ── Helpers ──
 
-    /** The endpoint an id names: AWS's error for a malformed id and for an unknown one. */
-    public ClientVpnEndpoint require(String region, String id) {
+    /** AWS's error for a malformed id, which comes ahead of a DryRun that is answered before the lookup. */
+    public void requireWellFormedId(String id) {
         if (id == null || !ENDPOINT_ID.matcher(id).matches()) {
             throw invalid("ClientVpnEndpointId you provided is not valid");
         }
+    }
+
+    /** The endpoint an id names: AWS's error for a malformed id and for an unknown one. */
+    public ClientVpnEndpoint require(String region, String id) {
+        requireWellFormedId(id);
         return endpoints.get(key(region, id)).orElseThrow(() -> new AwsException(
                 "InvalidClientVpnEndpointId.NotFound", "Endpoint " + id + " does not exist", 400));
     }

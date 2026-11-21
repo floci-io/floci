@@ -76,6 +76,7 @@ class Ec2ClientVpnHandler {
     Response describe(MultivaluedMap<String, String> p, String region) {
         List<Map.Entry<String, List<String>>> filters = filters(p, ENDPOINT_FILTERS);
         List<ClientVpnEndpoint> endpoints = clientVpn.describeEndpoints(region, getList(p, "ClientVpnEndpointId"));
+        Ec2QueryHandler.checkDryRun(p);
         XmlBuilder xml = startResponse("DescribeClientVpnEndpoints").start("clientVpnEndpoint");
         for (ClientVpnEndpoint endpoint : endpoints) {
             List<Tag> tags = ec2.resourceTags(region, endpoint.getClientVpnEndpointId());
@@ -104,12 +105,12 @@ class Ec2ClientVpnHandler {
                 p.getFirst("ClientConnectOptions.LambdaFunctionArn"), intParam(p, "SessionTimeoutHours"),
                 boolParam(p, "ClientLoginBannerOptions.Enabled"), p.getFirst("ClientLoginBannerOptions.BannerText"),
                 boolParam(p, "ClientRouteEnforcementOptions.Enforced"), boolParam(p, "DisconnectOnSessionTimeout"));
-        clientVpn.modifyEndpoint(region, p.getFirst("ClientVpnEndpointId"), change);
+        clientVpn.modifyEndpoint(region, p.getFirst("ClientVpnEndpointId"), change, Ec2QueryHandler.dryRun(p));
         return booleanResponse("ModifyClientVpnEndpoint");
     }
 
     Response delete(MultivaluedMap<String, String> p, String region) {
-        clientVpn.deleteEndpoint(region, p.getFirst("ClientVpnEndpointId"));
+        clientVpn.deleteEndpoint(region, p.getFirst("ClientVpnEndpointId"), Ec2QueryHandler.dryRun(p));
         return endResponse(status(startResponse("DeleteClientVpnEndpoint"), "deleting"), "DeleteClientVpnEndpoint");
     }
 
@@ -122,6 +123,7 @@ class Ec2ClientVpnHandler {
     }
 
     Response describeTargetNetworks(MultivaluedMap<String, String> p, String region) {
+        answerDryRunBeforeLookup(p);
         String id = p.getFirst("ClientVpnEndpointId");
         List<Map.Entry<String, List<String>>> filters = filters(p, TARGET_NETWORK_FILTERS);
         List<TargetNetwork> networks = clientVpn.describeTargetNetworks(region, id, getList(p, "AssociationIds"));
@@ -152,13 +154,14 @@ class Ec2ClientVpnHandler {
 
     Response disassociate(MultivaluedMap<String, String> p, String region) {
         TargetNetwork network = clientVpn.disassociate(region, p.getFirst("ClientVpnEndpointId"),
-                p.getFirst("AssociationId"));
+                p.getFirst("AssociationId"), Ec2QueryHandler.dryRun(p));
         XmlBuilder xml = startResponse("DisassociateClientVpnTargetNetwork")
                 .elem("associationId", network.getAssociationId());
         return endResponse(status(xml, "disassociating"), "DisassociateClientVpnTargetNetwork");
     }
 
     Response applySecurityGroups(MultivaluedMap<String, String> p, String region) {
+        answerDryRunBeforeLookup(p);
         List<String> groups = clientVpn.applySecurityGroups(region, p.getFirst("ClientVpnEndpointId"),
                 p.getFirst("VpcId"), getList(p, "SecurityGroupId"));
         XmlBuilder xml = startResponse("ApplySecurityGroupsToClientVpnTargetNetwork");
@@ -168,11 +171,13 @@ class Ec2ClientVpnHandler {
 
     Response authorize(MultivaluedMap<String, String> p, String region) {
         clientVpn.authorize(region, p.getFirst("ClientVpnEndpointId"), p.getFirst("TargetNetworkCidr"),
-                p.getFirst("AccessGroupId"), boolParam(p, "AuthorizeAllGroups"), p.getFirst("Description"));
+                p.getFirst("AccessGroupId"), boolParam(p, "AuthorizeAllGroups"), p.getFirst("Description"),
+                Ec2QueryHandler.dryRun(p));
         return endResponse(status(startResponse("AuthorizeClientVpnIngress"), "authorizing"), "AuthorizeClientVpnIngress");
     }
 
     Response describeAuthorizationRules(MultivaluedMap<String, String> p, String region) {
+        answerDryRunBeforeLookup(p);
         String id = p.getFirst("ClientVpnEndpointId");
         List<Map.Entry<String, List<String>>> filters = filters(p, AUTHORIZATION_RULE_FILTERS);
         XmlBuilder xml = startResponse("DescribeClientVpnAuthorizationRules").start("authorizationRule");
@@ -216,6 +221,7 @@ class Ec2ClientVpnHandler {
     }
 
     Response describeRoutes(MultivaluedMap<String, String> p, String region) {
+        answerDryRunBeforeLookup(p);
         String id = p.getFirst("ClientVpnEndpointId");
         List<Map.Entry<String, List<String>>> filters = filters(p, ROUTE_FILTERS);
         XmlBuilder xml = startResponse("DescribeClientVpnRoutes").start("routes");
@@ -246,14 +252,24 @@ class Ec2ClientVpnHandler {
 
     Response deleteRoute(MultivaluedMap<String, String> p, String region) {
         clientVpn.deleteRoute(region, p.getFirst("ClientVpnEndpointId"), p.getFirst("DestinationCidrBlock"),
-                p.getFirst("TargetVpcSubnetId"));
+                p.getFirst("TargetVpcSubnetId"), Ec2QueryHandler.dryRun(p));
         return endResponse(status(startResponse("DeleteClientVpnRoute"), "deleting"), "DeleteClientVpnRoute");
     }
 
     Response exportClientConfiguration(MultivaluedMap<String, String> p, String region) {
-        String configuration = clientVpn.exportClientConfiguration(region, p.getFirst("ClientVpnEndpointId"));
+        String configuration = clientVpn.exportClientConfiguration(region, p.getFirst("ClientVpnEndpointId"),
+                Ec2QueryHandler.dryRun(p));
         return endResponse(startResponse("ExportClientVpnClientConfiguration")
                 .elem("clientConfiguration", configuration), "ExportClientVpnClientConfiguration");
+    }
+
+    /**
+     * AWS answers these calls' DryRun once the endpoint id is well formed and before the endpoint is
+     * looked up, so a well-formed id that names nothing still gets DryRunOperation.
+     */
+    private void answerDryRunBeforeLookup(MultivaluedMap<String, String> p) {
+        clientVpn.requireWellFormedId(p.getFirst("ClientVpnEndpointId"));
+        Ec2QueryHandler.checkDryRun(p);
     }
 
     /** One endpoint as DescribeClientVpnEndpoints lists it, members in AWS's order. */
