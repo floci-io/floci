@@ -210,8 +210,7 @@ class WebIdentityTokenIntegrationTest {
 
         token("RS256").when().post("/").then().statusCode(403)
             .body(CODE, equalTo("OutboundWebIdentityFederationDisabledException"))
-            .body(MESSAGE, containsString("The outbound web identity federation feature is not"
-                    + " enabled for this account."))
+            .body(MESSAGE, equalTo("OutboundWebIdentityFederation is disabled."))
             .body(not(containsString("FeatureDisabled")));
 
         enabledIssuer();

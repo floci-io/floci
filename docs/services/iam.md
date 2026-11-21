@@ -1627,6 +1627,16 @@ task"); the wording for the report-expired case is Floci's own, since AWS does n
 
 ### Account Properties and Outbound Federation
 
+**What a disabled feature answers.** `GetWebIdentityToken` on an account with outbound web identity
+federation switched off is `OutboundWebIdentityFederationDisabledException` 403 with
+`OutboundWebIdentityFederation is disabled.`, recorded 2026-11-14 and wholly fixed text. This
+package answered the error shape's own `@documentation` prose instead, which the model carries to
+describe the error rather than to be sent as one: the model states the code and the status for this
+refusal and not the message, and documentation was what the wording fell back to when STS-1 was
+built in #6517. Worth knowing as a class of defect rather than a one-off, since any refusal whose
+message the model leaves unstated can be worded the same way by mistake.
+
+
 | Action | Description |
 |--------|-------------|
 | GetAccountProperties | Returns the account's properties as a `Namespace/PropertyName` to value map. |
