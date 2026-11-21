@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 
 /**
@@ -66,7 +67,6 @@ final class ApiGatewayLambdaFixtures {
     }
 
     static RequestSpecification signed(String service, String region) {
-        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261011/" + region
-                + "/" + service + "/aws4_request, SignedHeaders=host, Signature=abc");
+        return given().header("Authorization", auth(ACCOUNT, region, service));
     }
 }

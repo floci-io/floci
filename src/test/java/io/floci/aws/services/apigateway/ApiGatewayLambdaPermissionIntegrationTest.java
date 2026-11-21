@@ -40,9 +40,10 @@ import static org.mockito.Mockito.verify;
 /**
  * With IAM enforcement on, a REST API Lambda integration invokes the function only when the
  * function policy allows apigateway.amazonaws.com to, for the request's execute-api ARN when the
- * grant names one. That ARN carries the concrete request path and the function's Region. A refused call is answered with the gateway's 500 "Internal server error" and
- * never reaches the function. An integration that names {@code credentials} invokes as that role,
- * so the function policy does not decide it.
+ * grant names one. That ARN carries the concrete request path and the function's Region. A refused
+ * call is answered with the gateway's 500 "Internal server error" and never reaches the function.
+ * An integration that names {@code credentials} invokes as that role, so the function policy does
+ * not decide it.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
