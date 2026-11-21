@@ -21,8 +21,6 @@ import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.scheduler.SchedulerController;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
-import io.vertx.core.http.HttpServerRequest;
-import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -1094,22 +1092,35 @@ class IamEnforcementFilterTest {
         verify(containerRequest).abortWith(any());
     }
 
+    /** A scoped presigned request whose resources are not its URL's own object is refused. */
     @Test
-    void scopedPresignedRequestWithoutRoutingContextIsDenied() {
-        assertScopedPresignedRequestWithoutHttpRequestIsDenied(null);
-    }
-
-    @Test
-    void scopedPresignedRequestWithoutHttpRequestIsDenied() {
-        assertScopedPresignedRequestWithoutHttpRequestIsDenied(mock(RoutingContext.class));
-    }
-
-    @Test
-    void scopedPresignedRequestUsesWirePathForAbsoluteFormProxyTarget() {
+    void aScopedPresignedRequestOnAnotherResourceIsDenied() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        RoutingContext routingContext = mock(RoutingContext.class);
-        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(eq("ASIASCOPE"), any()))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+
+        newFilter().filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
+    }
+
+    /**
+     * A scoped presigned request is checked on the resources its request names, as its service reads them: an S3 key
+     * keeps the slashes it was sent with, so {@code /bucket//key} is the object {@code /key}.
+     */
+    @Test
+    void aScopedPresignedRequestIsCheckedOnTheResourcesItsRequestNames() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
         requestContext.setAccountId("000000000000");
@@ -1121,16 +1132,14 @@ class IamEnforcementFilterTest {
         when(iamService.presignedScope("ASIASCOPE"))
                 .thenReturn(Optional.of(new IamService.PresignedScope(
                         "s3:GetObject", "arn:aws:s3:::bucket//key")));
-        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        when(routingContext.request()).thenReturn(httpRequest);
-        when(httpRequest.uri()).thenReturn("https://proxy.example/bucket//key?X-Amz-Algorithm=AWS4-HMAC-SHA256");
-        when(httpRequest.path()).thenReturn("/bucket//key");
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), any(), any(), any()))
+                .thenReturn(List.of("arn:aws:s3:::bucket//key"));
         when(conditionContextResolver.resolveRemainingTargets("s3", "s3:GetObject", containerRequest))
                 .thenReturn(List.of());
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
-        newFilter(currentVertxRequest).filter(containerRequest);
+        newFilter().filter(containerRequest);
 
         verify(containerRequest, never()).abortWith(any());
         verify(evaluator).evaluateResolvedResourcePolicy(any(), any(), any(),
@@ -1143,9 +1152,6 @@ class IamEnforcementFilterTest {
         // the extra actions of an object creation on its own: the policies here allow everything,
         // so only the guard can deny the legal hold.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        RoutingContext routingContext = mock(RoutingContext.class);
-        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
@@ -1162,42 +1168,17 @@ class IamEnforcementFilterTest {
         when(iamService.presignedScope("ASIASCOPE"))
                 .thenReturn(Optional.of(new IamService.PresignedScope(
                         "s3:PutObject", "arn:aws:s3:::bucket/key")));
-        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        when(routingContext.request()).thenReturn(httpRequest);
-        when(httpRequest.path()).thenReturn("/bucket/key");
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), any(), any(), any()))
+                .thenReturn(List.of("arn:aws:s3:::bucket/key"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
-        newFilter(currentVertxRequest).filter(containerRequest);
+        newFilter().filter(containerRequest);
 
         ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
         verify(containerRequest).abortWith(denied.capture());
         assertEquals(403, denied.getValue().getStatus());
         assertTrue(entityString(denied.getValue()).contains("s3:PutObjectLegalHold"));
-    }
-
-    private void assertScopedPresignedRequestWithoutHttpRequestIsDenied(RoutingContext routingContext) {
-        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
-                + "SignedHeaders=host, Signature=abc";
-        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
-        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
-        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
-        when(iamService.resolveCallerContext(eq("ASIASCOPE"), any()))
-                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
-        when(iamService.presignedScope("ASIASCOPE"))
-                .thenReturn(Optional.of(new IamService.PresignedScope(
-                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
-        if (routingContext != null) {
-            when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        }
-
-        newFilter(currentVertxRequest).filter(containerRequest);
-
-        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
-        verify(containerRequest).abortWith(response.capture());
-        assertEquals(403, response.getValue().getStatus());
     }
 
     @Test

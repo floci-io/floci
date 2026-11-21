@@ -27,8 +27,6 @@ import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
-import io.vertx.core.http.HttpServerRequest;
-import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -42,8 +40,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -528,30 +524,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
             PresignedScope scope = presignedScope.get();
-            if ("s3".equals(credentialScope)) {
-                // UriInfo has normalized consecutive slashes. S3 and the SigV4 verifier use
-                // the wire path, where /bucket//key names the distinct object /key.
-                RoutingContext routingContext = currentVertxRequest.getCurrent();
-                HttpServerRequest request = routingContext == null ? null : routingContext.request();
-                // Use the wire path that S3's SigV4 verifier signs. uri() may instead be an
-                // absolute-form request target forwarded by a proxy.
-                String rawPath = request == null ? null : request.path();
-                if (rawPath == null || !rawPath.startsWith("/")) {
-                    ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
-                    return;
-                }
-                String decodedPath;
-                try {
-                    decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
-                } catch (IllegalArgumentException invalidEncoding) {
-                    ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
-                    return;
-                }
-                resources = List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region),
-                        "s3", "", decodedPath.substring(1)).toString());
-            }
             // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
-            // credential is narrower: it may authorize only its literal object and action. That
+            // credential is narrower: it may authorize only its literal object and action, which the
+            // request's resources name as its service reads it (an S3 key keeps the slashes it was
+            // sent with, as S3's own reading of it gives them). That
             // action is never a version action: a generated URL signs only its X-Amz-* parameters,
             // so it names no versionId, and PreSignedUrlFilter refuses one appended to it as a
             // signature mismatch before this check.
