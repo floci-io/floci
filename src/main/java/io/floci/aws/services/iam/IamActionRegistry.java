@@ -710,8 +710,9 @@ public class IamActionRegistry {
                 return rule.action();
             }
         }
-        Optional<String> operation = restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, path),
-                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
+        Optional<String> operation = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
+                ctx.getHeaders()).map(IamRestRoutes.Match::operation);
         if (operation.isPresent()) {
             String action = IamAuthorizedActions.actionFor(credentialScope, operation.get(), method);
             if (checkedAsAws(credentialScope, operation.get(), action)) {
@@ -759,7 +760,8 @@ public class IamActionRegistry {
     private static Optional<IamRestRoutes.Match> matchedRoute(IamRestRoutes routes, String credentialScope,
                                                               ContainerRequestContext ctx) {
         return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
-                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
+                ctx.getHeaders());
     }
 
     /**
@@ -780,8 +782,10 @@ public class IamActionRegistry {
             return action;
         }
         String method = ctx.getMethod().toUpperCase();
-        return restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)),
-                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx))
+        return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)),
+                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
+                        ctx.getHeaders())
+                .map(IamRestRoutes.Match::operation)
                 .filter(operation -> action.equals(IamAuthorizedActions.actionFor(credentialScope, operation, method)))
                 .map(operation -> credentialScope + ":" + operation)
                 .orElse(action);
@@ -796,7 +800,7 @@ public class IamActionRegistry {
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
-                        movedUnderPrefix(ctx))
+                        movedUnderPrefix(ctx), ctx.getHeaders())
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
                 .map(IamRestRoutes.Match::located).orElse(Map.of());
     }
