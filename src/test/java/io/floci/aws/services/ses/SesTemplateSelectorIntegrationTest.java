@@ -10,7 +10,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.Collections;
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.DESTINATION;
+import static io.floci.aws.services.ses.SesV2Requests.ENTRY;
+import static io.floci.aws.services.ses.SesV2Requests.post;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -21,15 +23,10 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesTemplateSelectorIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SEND = "/v2/email/outbound-emails";
     private static final String BULK = "/v2/email/outbound-bulk-emails";
     private static final String UNVERIFIED = "sender@unverified-template-selector.floci.test";
     private static final String FROM = "\"FromEmailAddress\": \"" + UNVERIFIED + "\"";
-    private static final String DESTINATION =
-            "\"Destination\": {\"ToAddresses\": [\"success@simulator.amazonses.com\"]}";
-    private static final String ENTRY = "{" + DESTINATION + "}";
     private static final String ENTRIES = "\"BulkEmailEntries\": [" + ENTRY + "]";
     private static final String BAD_DESTINATION = "\"Destination\": {\"ToAddresses\": [\"not an address\"]}";
     private static final String NAME = "\"TemplateName\": \"selector-ghost\"";
@@ -45,16 +42,6 @@ class SesTemplateSelectorIntegrationTest {
             "TemplateName or TemplateArn cannot be provided with EmailTemplateContent";
     private static final String BULK_COUNT =
             "You must specify at least 1 destination, and no more than 50 destinations";
-
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
-    }
 
     private static String template(String... members) {
         return "{\"Template\": {" + String.join(", ", members) + "}}";
