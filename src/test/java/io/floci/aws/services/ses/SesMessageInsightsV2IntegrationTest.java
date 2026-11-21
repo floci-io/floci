@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesRawMessage;
 import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
@@ -289,7 +290,7 @@ class SesMessageInsightsV2IntegrationTest {
         // The signature is assembled at run time so it never appears in the tree.
         String raw = "From: " + SENDER + "\r\nTo: raw@example.com\r\n"
                 + "Subject: rejected-mime-subject\r\n"
-                + SmtpRelay.HEADER_MESSAGE_TAGS + ": campaign=fromheader\r\n\r\n"
+                + SesRawMessage.HEADER_MESSAGE_TAGS + ": campaign=fromheader\r\n\r\n"
                 + SesTestSignature.value() + "\r\n";
         String messageId = given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
