@@ -4,11 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
-import com.fasterxml.jackson.dataformat.cbor.CBORParser;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 
+import static io.floci.aws.testing.CborTestUtils.tagOf;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -107,14 +107,4 @@ class RpcV2CborCodecTest {
         assertEquals(snapshot, request);
     }
 
-    private static int tagOf(byte[] bytes, String member) throws Exception {
-        try (CBORParser parser = (CBORParser) CBOR.getFactory().createParser(bytes)) {
-            while (parser.nextToken() != null) {
-                if (member.equals(parser.currentName()) && parser.currentToken().isScalarValue()) {
-                    return parser.getCurrentTag();
-                }
-            }
-        }
-        throw new AssertionError("Missing CBOR member: " + member);
-    }
 }
