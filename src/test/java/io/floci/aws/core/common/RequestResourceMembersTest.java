@@ -758,6 +758,51 @@ class RequestResourceMembersTest {
         return new ArnFormat(format, RequestResourceMembers.pattern(format), false);
     }
 
+    /**
+     * A member the clients of an operation locate apart is read for the client whose route a request matched, and an
+     * operation naming what it acts on in a body the reader does not read is recorded unread; a malformed entry of
+     * either is refused.
+     */
+    @Test
+    void membersLocatedApartAreReadForTheRequestsClientAndUnreadOperationsAreRecorded() throws Exception {
+        String formats = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:::${ThingName}\"}}";
+        String operation = "{\"resources\":[{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Bucket\"}}],"
+                + "\"located\":{\"Marker\":\"?marker\"},"
+                + "\"locatedApart\":{\"one\":{\"Bucket\":\"{Bucket}\"},\"two\":{\"Bucket\":\"{name}\"}},"
+                + "\"unread\":[\"Delete.Objects[].Key\"]}";
+        RequestResourceMembers.Table table = parse("{\"namespaces\":{\"a\":[]}," + formats
+                + ",\"operations\":{\"a:Op\":" + operation + "}}");
+        assertEquals(Map.of("one", Map.of("Bucket", "{Bucket}"), "two", Map.of("Bucket", "{name}")),
+                table.locatedApart().get("a:Op"));
+        assertEquals(Set.of("a:Op"), table.unread());
+        // An unread operation is one the table does not read: RequestResources.of names nothing from it.
+        assertFalse(RequestResources.readable(table, "a:Op"));
+        RequestResourceMembers.Table read = parse("{\"namespaces\":{\"a\":[]}," + formats
+                + ",\"operations\":{\"a:Op\":{\"resources\":[]}}}");
+        assertTrue(RequestResources.readable(read, "a:Op"));
+        assertFalse(RequestResources.readable(read, "a:Other"));
+        assertEquals(Map.of("Marker", "?marker", "Bucket", "{Bucket}"),
+                RequestResources.locatedMembers(table, "a:Op", "one", Map.of()));
+        assertEquals(Map.of("Marker", "?marker", "Bucket", "{name}"),
+                RequestResources.locatedMembers(table, "a:Op", "two", Map.of()));
+        // A request no route of the operation matched, or one of a client locating nothing apart, reads only what every
+        // client locates alike.
+        assertEquals(Map.of("Marker", "?marker"), RequestResources.locatedMembers(table, "a:Op", null, Map.of()));
+        assertEquals(Map.of("Marker", "?marker"), RequestResources.locatedMembers(table, "a:Op", "three", Map.of()));
+        // A generated alternative route still says where its members are.
+        assertEquals(Map.of("Bucket", "{name}"),
+                RequestResources.locatedMembers(table, "a:Op", "two", Map.of("Marker", "body")));
+        for (String bad : List.of("\"locatedApart\":{\"One\":{\"Bucket\":\"{Bucket}\"}}",
+                "\"locatedApart\":{\"one\":{\"Bucket\":\"Bucket\"}}", "\"locatedApart\":{\"one\":{}}",
+                "\"locatedApart\":{}", "\"locatedApart\":[]", "\"locatedApart\":\"one\"",
+                "\"locatedApart\":{\"one\":\"{Bucket}\"}", "\"locatedApart\":{\"one\":[\"{Bucket}\"]}",
+                "\"unread\":[\"Delete..Key\"]", "\"unread\":[1]", "\"unread\":[]", "\"unread\":\"Delete.Key\"",
+                "\"unread\":{\"a\":\"Delete.Key\"}")) {
+            assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]}," + formats
+                    + ",\"operations\":{\"a:Op\":{\"resources\":[]," + bad + "}}}"), bad);
+        }
+    }
+
     private static String document(String formats, String resource) {
         return "{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"resources\":[" + resource + "]}}}";
     }

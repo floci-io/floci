@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,6 +54,11 @@ final class RequestResourceMembers {
     /** A member a REST request carries outside its body, by its name, and where: a path label or a query parameter. */
     private static final Pattern LOCATED_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
+    // A botocore client, as the vendored routes name its model.
+    private static final Pattern CLIENT = Pattern.compile("[a-z0-9][a-z0-9-]*");
+    // A member of a request's body at any depth: Delete.Objects[].Key.
+    private static final Pattern BODY_PATH = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)*");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
@@ -326,9 +332,11 @@ final class RequestResourceMembers {
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
-     * query, {@code ?name}, by the member's name. Each operation's {@code forwarded} requests are those its service
-     * makes to another as the caller, and its {@code statements} those it makes as the caller to run each statement its
-     * request may carry.
+     * query, {@code ?name}, by the member's name, and one the clients of an operation locate apart is under each
+     * client ({@code locatedApart}), whose vendored route tells a request's client. Each operation's {@code forwarded}
+     * requests are those its service makes to another as the caller, and its {@code statements} those it makes as the
+     * caller to run each statement its request may carry. An {@code unread} operation names what it acts on in a body
+     * the reader does not read.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
@@ -338,7 +346,8 @@ final class RequestResourceMembers {
                  Map<String, Map<String, List<String>>> resourceTagKeys,
                  Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
-                 Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements) {
+                 Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements,
+                 Map<String, Map<String, Map<String, String>>> locatedApart, Set<String> unread) {
     }
 
     private static final class Holder {
@@ -443,6 +452,8 @@ final class RequestResourceMembers {
         Map<String, Targets> targets = new LinkedHashMap<>();
         Map<String, Map<Member, String>> ec2Query = new LinkedHashMap<>();
         Map<String, Map<String, String>> located = new LinkedHashMap<>();
+        Map<String, Map<String, Map<String, String>>> locatedApart = new LinkedHashMap<>();
+        Set<String> unread = new LinkedHashSet<>();
         Map<String, List<Forwarded>> forwarded = new LinkedHashMap<>();
         JsonNode forwardedActions = document.path("forwardedActions");
         operations.properties().forEach(operation -> {
@@ -530,6 +541,48 @@ final class RequestResourceMembers {
             if (!where.isEmpty()) {
                 located.put(operation.getKey(), Map.copyOf(where));
             }
+            JsonNode locatedApartNode = operation.getValue().path("locatedApart");
+            if (!locatedApartNode.isMissingNode() && (!locatedApartNode.isObject() || locatedApartNode.isEmpty())) {
+                throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey()
+                        + "'s members apart under no client");
+            }
+            Map<String, Map<String, String>> apart = new LinkedHashMap<>();
+            locatedApartNode.properties().forEach(client -> {
+                if (!client.getValue().isObject()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey() + "'s members for "
+                            + client.getKey() + " as " + client.getValue() + ", no members");
+                }
+                Map<String, String> members = new LinkedHashMap<>();
+                client.getValue().properties().forEach(member -> {
+                    if (!CLIENT.matcher(client.getKey()).matches() || !LOCATED_MEMBER.matcher(member.getKey()).matches()
+                            || !LOCATION.matcher(member.getValue().asText("")).matches()) {
+                        throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey() + "'s "
+                                + member.getKey() + " at " + member.getValue() + " for " + client.getKey()
+                                + ", no client's label of a path or query parameter");
+                    }
+                    members.put(member.getKey(), member.getValue().asText());
+                });
+                if (members.isEmpty()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " locates none of " + operation.getKey()
+                            + "'s members for " + client.getKey());
+                }
+                apart.put(client.getKey(), Map.copyOf(members));
+            });
+            if (!apart.isEmpty()) {
+                locatedApart.put(operation.getKey(), Map.copyOf(apart));
+            }
+            JsonNode unreadNode = operation.getValue().path("unread");
+            if (!unreadNode.isMissingNode() && (!unreadNode.isArray() || unreadNode.isEmpty())) {
+                throw new IllegalStateException(RESOURCE_NAME + " leaves " + operation.getKey()
+                        + " unread on no member of its body");
+            }
+            for (JsonNode member : unreadNode) {
+                if (!member.isTextual() || !BODY_PATH.matcher(member.asText()).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " leaves " + operation.getKey() + "'s " + member
+                            + " unread, no member of a request's body");
+                }
+                unread.add(operation.getKey());
+            }
             List<Forwarded> forwards = new ArrayList<>();
             for (JsonNode use : operation.getValue().path("forwarded")) {
                 forwards.add(forwarded(operation.getKey(), use, types, formats.getOrDefault(namespace, Map.of()),
@@ -544,7 +597,8 @@ final class RequestResourceMembers {
                 Map.copyOf(resourceTagKeys), resourceKeys, namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
-                names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats));
+                names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats),
+                Map.copyOf(locatedApart), Set.copyOf(unread));
     }
 
     /**

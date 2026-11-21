@@ -65,9 +65,18 @@ public final class RequestResources {
     private RequestResources() {
     }
 
-    /** Whether the generated table owns this operation, including those of hand-built namespaces it reads. */
+    /**
+     * Whether the generated table owns this operation, including those of hand-built namespaces it reads. An operation
+     * naming what it acts on in a body the reader does not read ({@code unread}: S3's DeleteObjects, its keys in an XML
+     * body) is not read, as checked on the rest of its request it would be checked on none of what it names.
+     */
     public static boolean reads(String operation) {
-        return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
+        return readable(RequestResourceMembers.table(), operation);
+    }
+
+    /** Whether {@code table} reads the operation's requests: it has an entry for it, and not an unread one. */
+    static boolean readable(RequestResourceMembers.Table table, String operation) {
+        return operation != null && table.operations().containsKey(operation) && !table.unread().contains(operation);
     }
 
     /** Whether {@code ResourceArnBuilder} builds the resources of this namespace's requests itself. */
@@ -175,7 +184,8 @@ public final class RequestResources {
             return targetArns(targets, formats(table, operation), form,
                     form.isEmpty() ? PassedRoles.jsonBody(ctx) : null, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null
+        // An operation the table does not read, an unread one among them, names nothing from it.
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
                 : served(table.operations().get(operation), ctx);
         if (resources == null) {
             return List.of();
@@ -199,7 +209,8 @@ public final class RequestResources {
         if (targets != null) {
             return targetArns(targets, formats(table, operation), Map.of(), body, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
+                : table.operations().get(operation);
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
@@ -509,12 +520,26 @@ public final class RequestResources {
 
     private static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation,
                                                        ContainerRequestContext ctx) {
+        IamActionRegistry.RouteMembers route = IamActionRegistry.routeMembers(operation, ctx);
+        return locatedMembers(table, operation, route.model(), route.located());
+    }
+
+    /**
+     * The members the table locates for a request of the operation whose route is the {@code model}'s: those every
+     * client locates alike, those it locates apart for that model ({@code locatedApart}: S3 Control's CreateBucket
+     * carries its {@code Bucket} as {@code {name}}, S3's as {@code {Bucket}}), and those a generated alternative route
+     * locates ({@code alternatives}), {@code body} for one its body carries there.
+     */
+    static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation, String model,
+                                              Map<String, String> alternatives) {
         Map<String, String> located = table.located().getOrDefault(operation, Map.of());
-        Map<String, String> alternatives = IamActionRegistry.routeMemberLocations(operation, ctx);
-        if (alternatives.isEmpty()) {
+        Map<String, String> apart = model == null ? Map.of()
+                : table.locatedApart().getOrDefault(operation, Map.of()).getOrDefault(model, Map.of());
+        if (alternatives.isEmpty() && apart.isEmpty()) {
             return located;
         }
         Map<String, String> merged = new HashMap<>(located);
+        merged.putAll(apart);
         alternatives.forEach((member, source) -> {
             if ("body".equals(source)) {
                 merged.remove(member);
