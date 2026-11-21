@@ -37,6 +37,9 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 /**
  * The EC2 Instance Connect Endpoint data plane: {@code wss://<endpoint DnsName>/openTunnel}, the
  * SigV4-presigned WebSocket the AWS CLI opens for {@code aws ec2-instance-connect open-tunnel} and
@@ -72,9 +75,6 @@ public class InstanceConnectTunnelHandler {
     /** AWS's limit, and the CLI's default, for {@code maxTunnelDuration}. */
     static final int MAX_TUNNEL_SECONDS = 3600;
     private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
-    /** The well-known local-dev pair, honoured as every other SigV4 check in Floci honours it. */
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
 
     private final Ec2Service ec2Service;
     private final Vertx vertx;

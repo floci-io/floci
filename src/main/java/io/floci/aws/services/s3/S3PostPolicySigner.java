@@ -11,6 +11,9 @@ import java.time.format.ResolverStyle;
 import java.util.HexFormat;
 import java.util.Optional;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 /**
  * SigV4 verification for presigned POST policy documents. Mirrors the credential/secret-key
  * resolution and signing-key derivation in {@link PreSignedUrlFilter}'s query-string presigned
@@ -18,9 +21,6 @@ import java.util.Optional;
  * request hash, matching how the AWS SDKs sign a presigned POST policy.
  */
 final class S3PostPolicySigner {
-
-    static final String LEGACY_ACCESS_KEY_ID = "test";
-    static final String LEGACY_SECRET_KEY = "test";
 
     /** S3's error list: {@code ExpiredToken}, 400 Bad Request. */
     static final String EXPIRED_TOKEN_MESSAGE = "The provided token has expired.";

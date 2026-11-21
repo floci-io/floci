@@ -18,14 +18,14 @@ public record KinesisViewBinding(String accountId, String clusterKey, String dat
     private static final char KEY_SEPARATOR = '\u001f';
 
     public KinesisViewBinding {
-        require(accountId, "accountId");
-        require(clusterKey, "clusterKey");
-        require(databaseName, "databaseName");
-        require(viewSchema, "viewSchema");
-        require(viewName, "viewName");
-        require(streamSchema, "streamSchema");
-        require(streamName, "streamName");
-        require(select, "select");
+        SchemaBinding.require(accountId, "accountId");
+        SchemaBinding.require(clusterKey, "clusterKey");
+        SchemaBinding.require(databaseName, "databaseName");
+        SchemaBinding.require(viewSchema, "viewSchema");
+        SchemaBinding.require(viewName, "viewName");
+        SchemaBinding.require(streamSchema, "streamSchema");
+        SchemaBinding.require(streamName, "streamName");
+        SchemaBinding.require(select, "select");
         checkpoints = checkpoints == null ? Map.of() : Map.copyOf(checkpoints);
     }
 
@@ -49,11 +49,5 @@ public record KinesisViewBinding(String accountId, String clusterKey, String dat
         updated.put(shardId, sequenceNumber);
         return new KinesisViewBinding(accountId, clusterKey, databaseName, viewSchema, viewName, streamSchema,
                 streamName, select, updated);
-    }
-
-    private static void require(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(field + " is required");
-        }
     }
 }

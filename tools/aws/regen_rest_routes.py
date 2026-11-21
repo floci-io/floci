@@ -10,7 +10,9 @@ A request no rule maps is the operation whose route it matches, checked as the a
 request on each route and compares the action the registry gives with that one.
 
 The credential scopes in `HAND_ROUTED` are authorized by the registry's rules alone, each for its
-reason, and their routes are vendored for the coverage test only. Operations sharing a route are told
+reason, and their routes are vendored for the coverage test only, each with the query parameters and
+headers botocore requires its request to carry (`required`), which the registry's rules read: S3's
+CompleteMultipartUpload, on `POST /{Bucket}/{Key+}`, is told by its `uploadId`. Operations sharing a route are told
 apart by what botocore models their requests as carrying: the query parameters and headers of the
 members their input requires (`requires`: S3's UploadPart, on `PUT /{Bucket}/{Key+}` with PutObject,
 requires `partNumber` and `uploadId`, CopyObject the `x-amz-copy-source` header), and a deprecated
@@ -388,6 +390,7 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             raise SystemExit(f"error: {name} is both a botocore model and a documented endpoint")
         routes[name] = model
     routes = dict(sorted(routes.items()))
+    with_required(routes, models)
     with_conditions(routes, models)
     shared = shared_routes(routes)
     if shared:
@@ -401,6 +404,31 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
         "handRouted": dict(sorted(HAND_ROUTED.items())),
         "models": routes,
     }
+
+
+def required_members(model: dict, operation: str) -> dict[str, list[str]]:
+    """The query parameters and headers of the members the operation's input requires, as botocore models it."""
+    spec = model["operations"][operation]
+    shape = model.get("shapes", {}).get(spec.get("input", {}).get("shape", ""), {})
+    required = set(shape.get("required", []))
+    located = [(member.get("location"), member.get("locationName", member_name))
+               for member_name, member in shape.get("members", {}).items() if member_name in required]
+    query = sorted(where for location, where in located if location == "querystring")
+    headers = sorted(where.lower() for location, where in located if location == "header")
+    return {**({"query": query} if query else {}), **({"headers": headers} if headers else {})}
+
+
+def with_required(routes: dict[str, dict], models: dict[str, dict]) -> None:
+    """Each operation of a hand-routed scope given what its request must carry (`required`), for the coverage test to
+    build the request the registry's rules read; the routes of other scopes, which requests are matched on, need it only
+    where operations share them (`with_conditions`)."""
+    for name, model in routes.items():
+        if model["credentialScope"] not in HAND_ROUTED or name not in models:
+            continue
+        for operation, route in model["operations"].items():
+            required = required_members(models[name], operation)
+            if required:
+                route["required"] = required
 
 
 def with_conditions(routes: dict[str, dict], models: dict[str, dict]) -> None:
@@ -418,17 +446,11 @@ def with_conditions(routes: dict[str, dict], models: dict[str, dict]) -> None:
         for name, operation in operations:
             if name not in models:
                 continue
-            spec = models[name]["operations"][operation]
-            shape = models[name].get("shapes", {}).get(spec.get("input", {}).get("shape", ""), {})
-            required = set(shape.get("required", []))
-            located = [(member.get("location"), member.get("locationName", member_name))
-                       for member_name, member in shape.get("members", {}).items() if member_name in required]
-            query = sorted(where for location, where in located if location == "querystring")
-            headers = sorted(where.lower() for location, where in located if location == "header")
             route = routes[name]["operations"][operation]
-            if query or headers:
-                route["requires"] = {**({"query": query} if query else {}), **({"headers": headers} if headers else {})}
-            if spec.get("deprecated"):
+            requires = required_members(models[name], operation)
+            if requires:
+                route["requires"] = requires
+            if models[name]["operations"][operation].get("deprecated"):
                 route["deprecated"] = True
 
 

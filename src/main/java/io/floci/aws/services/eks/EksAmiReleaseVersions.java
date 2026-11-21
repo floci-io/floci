@@ -1,6 +1,7 @@
 package io.floci.aws.services.eks;
 
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
+import io.floci.aws.services.ec2.Ec2ImageCatalog.CatalogImage;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -48,12 +49,21 @@ public final class EksAmiReleaseVersions {
      * value SSM publishes for it, or empty when the catalog has no such AMI.
      */
     public static Optional<String> recommended(Ec2ImageCatalog catalog, String kubernetesVersion, String amiType) {
-        String amiPath = RECOMMENDED_AMI_PATHS.get(amiType);
+        return recommendedImage(catalog, kubernetesVersion, amiType)
+                .map(image -> of(kubernetesVersion, image.creationDate));
+    }
+
+    /**
+     * The recommended EKS optimized AMI for a node group's Kubernetes version and AMI type, the
+     * image SSM publishes under its {@code recommended/image_id}, or empty when the catalog has none.
+     */
+    public static Optional<CatalogImage> recommendedImage(Ec2ImageCatalog catalog, String kubernetesVersion,
+                                                          String amiType) {
+        String amiPath = amiType == null ? null : RECOMMENDED_AMI_PATHS.get(amiType);
         if (catalog == null || amiPath == null || !supports(kubernetesVersion)) {
             return Optional.empty();
         }
         return catalog.findByPublicParameterName(OPTIMIZED_AMI_PARAMETER_PREFIX + kubernetesVersion + "/" + amiPath
-                        + "/recommended/image_id")
-                .map(image -> of(kubernetesVersion, image.creationDate));
+                + "/recommended/image_id");
     }
 }
