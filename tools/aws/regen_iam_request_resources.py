@@ -268,7 +268,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fetch_athena_glue_ddl_permissions
-from regen_iam_authorized_actions import authorized_actions_from, fetch_references
+from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
+                                          load_s3_required, s3_query_parameters, vendored_sections)
 from regen_iam_passed_roles import (
     NAMESPACE_RE,
     OPERATION_RE,
@@ -562,11 +563,30 @@ def related(a: str, b: str) -> bool:
 # --------------------------------------------------------------------------- #
 # The Service Reference
 # --------------------------------------------------------------------------- #
+def action_mapping(documents: list[dict]) -> dict[str, dict[str, str]]:
+    """The action each operation is checked as where it is not its own name, as the authorized-actions file gives it
+    (`regen_iam_authorized_actions.authorized_actions`), an operation the S3 user guide gives a version choice taking
+    its action without a version, whose types are the same, and one several clients share its namesake client's
+    (`namesake_by_model`, and the S3 user guide's for S3's requests)."""
+    page = load_s3_required()
+    models = json.loads(ROUTES_FILE.read_text(encoding="utf-8"))["models"] if ROUTES_FILE.exists() else {}
+    query = s3_query_parameters() if any(document.get("Name") == "s3" for document in documents) else None
+    mapped = authorized_actions(documents, page, models, query)
+    sections = vendored_sections(documents, page, models, query, mapped)
+    for namespace, operations in sections["versioned"].items():
+        for operation, choice in operations.items():
+            mapped.setdefault(namespace, {}).setdefault(operation, choice["without"])
+    for namespace, clients in sections["authorizedByModel"].items():
+        for operation, action in clients.get(namespace, {}).items():
+            mapped.setdefault(namespace, {}).setdefault(operation, action)
+    return mapped
+
+
 def checked_actions(documents: list[dict]) -> dict[str, dict]:
     """Each operation of each namespace, as `<namespace>:<Operation>`, with the action Floci checks it
     as, that action's resource types (null when the namespace has no action of that name) and the
     operation's SDK clients."""
-    mapped = authorized_actions_from(documents)
+    mapped = action_mapping(documents)
     found = {}
     for document in documents:
         namespace = document["Name"]
@@ -3246,7 +3266,7 @@ def with_rest_operations(upstream: dict[str, dict], documents: list[dict],
     reports a vendored one as no longer listed. The reference lists the operations of one client of a namespace:
     OpenSearch Service's are the `es` client's alone, while the `opensearch` client's are named after `es` actions all
     the same."""
-    mapped = authorized_actions_from(documents)
+    mapped = action_mapping(documents)
     actions = {document["Name"]: {action["Name"].lower(): action for action in document.get("Actions", [])}
                for document in documents}
     found = dict(upstream)

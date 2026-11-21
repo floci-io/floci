@@ -710,12 +710,13 @@ public class IamActionRegistry {
                 return rule.action();
             }
         }
-        Optional<String> operation = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
-                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                ctx.getHeaders()).map(IamRestRoutes.Match::operation);
-        if (operation.isPresent()) {
-            String action = IamAuthorizedActions.actionFor(credentialScope, operation.get(), method);
-            if (checkedAsAws(credentialScope, operation.get(), action)) {
+        MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        Optional<IamRestRoutes.Match> match = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
+                query, movedUnderPrefix(ctx), ctx.getHeaders());
+        if (match.isPresent()) {
+            String action = IamAuthorizedActions.actionFor(credentialScope, match.get().operation(), method,
+                    match.get().model(), query);
+            if (checkedAsAws(credentialScope, match.get().operation(), action)) {
                 return action;
             }
         }
@@ -782,12 +783,12 @@ public class IamActionRegistry {
             return action;
         }
         String method = ctx.getMethod().toUpperCase();
-        return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)),
-                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                        ctx.getHeaders())
-                .map(IamRestRoutes.Match::operation)
-                .filter(operation -> action.equals(IamAuthorizedActions.actionFor(credentialScope, operation, method)))
-                .map(operation -> credentialScope + ":" + operation)
+        MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)), query,
+                        movedUnderPrefix(ctx), ctx.getHeaders())
+                .filter(match -> action.equals(IamAuthorizedActions.actionFor(credentialScope, match.operation(),
+                        method, match.model(), query)))
+                .map(match -> credentialScope + ":" + match.operation())
                 .orElse(action);
     }
 

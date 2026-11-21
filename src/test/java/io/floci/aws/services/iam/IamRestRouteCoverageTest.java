@@ -114,6 +114,38 @@ class IamRestRouteCoverageTest {
     }
 
     /**
+     * Each action the vendored file gives an operation for one model's requests is what a request on that model's route
+     * resolves to: S3's GetPublicAccessBlock is s3:GetBucketPublicAccessBlock, S3 Control's account-level one
+     * s3:GetAccountPublicAccessBlock, and S3's GetBucketLifecycleConfiguration s3:GetLifecycleConfiguration.
+     */
+    @TestFactory
+    Stream<DynamicTest> eachVendoredActionOfAModelsRequestsIsWhatItsRouteResolvesTo() throws IOException {
+        JsonNode models = load("/aws/rest-routes.json").path("models");
+        JsonNode byModel = load("/aws/iam-authorized-actions.json").path("authorizedByModel");
+        List<DynamicTest> tests = new ArrayList<>();
+        for (String namespace : ROUTED_NAMESPACES) {
+            Iterator<Map.Entry<String, JsonNode>> clients = byModel.path(namespace).fields();
+            while (clients.hasNext()) {
+                Map.Entry<String, JsonNode> client = clients.next();
+                Iterator<Map.Entry<String, JsonNode>> entries = client.getValue().fields();
+                while (entries.hasNext()) {
+                    Map.Entry<String, JsonNode> entry = entries.next();
+                    List<Route> routes = routesOf(models, namespace, entry.getKey()).stream()
+                            .filter(route -> route.model().equals(client.getKey())).toList();
+                    String expected = entry.getValue().asText();
+                    tests.add(DynamicTest.dynamicTest(client.getKey() + " " + entry.getKey(), () -> {
+                        assertFalse(routes.isEmpty(), "no " + client.getKey() + " route for " + entry.getKey());
+                        for (Route route : routes) {
+                            assertEquals(expected, resolve(route), route.toString());
+                        }
+                    }));
+                }
+            }
+        }
+        return tests.stream();
+    }
+
+    /**
      * Every operation of a scope the vendored routes do not leave to the rules alone resolves to its action when
      * Floci can check it as AWS does: its resources built by hand for its namespace or read by the vendored request
      * resources, or none, AWS authorizing its action on no resource type. Any other operation stays unmapped,
@@ -245,8 +277,10 @@ class IamRestRouteCoverageTest {
             Map.Entry<String, JsonNode> model = all.next();
             JsonNode route = model.getValue().path("operations").path(operation);
             if (scope.equals(model.getValue().path("credentialScope").asText()) && !route.isMissingNode()) {
+                // A hand-routed scope's route lists all its request must carry; another's what tells it apart.
+                JsonNode carries = route.has("required") ? route.path("required") : route.path("requires");
                 routes.add(new Route(scope, model.getKey(), operation, route.path("method").asText(),
-                        route.path("requestUri").asText()));
+                        route.path("requestUri").asText(), carries));
             }
         }
         return routes;
@@ -263,7 +297,17 @@ class IamRestRouteCoverageTest {
     }
 
     /** An operation's route: its method, and its request URI with each label filled in. */
-    private record Route(String scope, String model, String operation, String method, String requestUri) {
+    /**
+     * A route of a model's operation, and what botocore requires its request to carry ({@code required} for a
+     * hand-routed scope's, {@code requires} where several operations share it), which the request built on it carries
+     * as an SDK sends it.
+     */
+    private record Route(String scope, String model, String operation, String method, String requestUri,
+                         JsonNode requires) {
+
+        Route(String scope, String model, String operation, String method, String requestUri) {
+            this(scope, model, operation, method, requestUri, MAPPER.createObjectNode());
+        }
 
         ContainerRequestContext request() {
             int question = requestUri.indexOf('?');
@@ -276,7 +320,14 @@ class IamRestRouteCoverageTest {
                             equals < 0 ? "" : parameter.substring(equals + 1));
                 }
             }
+            requires.path("query").forEach(parameter -> query.add(parameter.asText(), "required-value"));
             ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+            requires.path("headers").forEach(header -> {
+                headers.add(header.asText(), "required-value");
+                when(ctx.getHeaderString(header.asText())).thenReturn("required-value");
+            });
+            when(ctx.getHeaders()).thenReturn(headers);
             UriInfo uriInfo = mock(UriInfo.class);
             when(uriInfo.getQueryParameters()).thenReturn(query);
             when(uriInfo.getPath()).thenReturn(path);

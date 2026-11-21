@@ -454,3 +454,16 @@ def test_vendored_documented_routes_read_from_another_page_or_malformed_are_refu
     malformed["operations"]["GetCatalog"] = {"method": "FETCH", "requestUri": "/iceberg/v1/config"}
     with pytest.raises(SystemExit, match="malformed"):
         r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": malformed})))
+
+
+def test_a_hand_routed_scopes_routes_list_all_their_requests_must_carry_for_the_coverage_test():
+    s3 = shaped(model("rest-xml", "2006-03-01", CompleteMultipartUpload=("POST", "/{Bucket}/{Key+}"),
+                      PutObject=("PUT", "/{Bucket}/{Key+}")),
+                "CompleteMultipartUpload", {"UploadId": ("querystring", "uploadId")})
+    lam = shaped(model("rest-json", "2015-03-31", GetThing=("GET", "/things/{Name}")),
+                 "GetThing", {"Qualifier": ("querystring", "Qualifier")})
+    doc = r.build({"s3": s3, "lambda": lam}, "botocore test")
+    assert doc["models"]["s3"]["operations"]["CompleteMultipartUpload"]["required"] == {"query": ["uploadId"]}
+    assert "required" not in doc["models"]["s3"]["operations"]["PutObject"]
+    # A routed scope's requests are matched on its routes, which carry only what tells shared ones apart.
+    assert "required" not in doc["models"]["lambda"]["operations"]["GetThing"]
