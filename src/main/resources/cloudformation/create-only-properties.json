@@ -553,9 +553,34 @@
     "MonitoringConfiguration",
     "SessionEnabled"
   ],
+  "AWS::EMR::InstanceFleetConfig": [
+    "Name",
+    "LaunchSpecifications",
+    "ClusterId",
+    "InstanceFleetType"
+  ],
+  "AWS::EMR::InstanceGroupConfig": [
+    "InstanceRole",
+    "JobFlowId",
+    "Name",
+    "InstanceType",
+    "CustomAmiId",
+    "Configurations",
+    "EbsConfiguration",
+    "Market",
+    "BidPrice"
+  ],
   "AWS::EMR::SecurityConfiguration": [
     "Name",
     "SecurityConfiguration"
+  ],
+  "AWS::EMR::Step": [
+    "JobFlowId",
+    "HadoopJarStep",
+    "Name",
+    "ActionOnFailure",
+    "LogUri",
+    "EncryptionKeyArn"
   ],
   "AWS::EMR::Studio": [
     "AuthMode",

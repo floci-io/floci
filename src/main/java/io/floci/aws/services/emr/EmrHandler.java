@@ -985,17 +985,42 @@ public class EmrHandler {
     }
 
     private Response handleAddInstanceFleet(JsonNode request) {
-        List<String> violations = new ArrayList<>();
-        EmrInstanceFleet fleet = parseInstanceFleet(request.path("InstanceFleet"), "instanceFleet", violations);
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.validationException(violations);
-        }
-        requireEbsVolumeLimit(request.path("InstanceFleet"));
-        String id = service.addInstanceFleet(text(request, "ClusterId"), fleet);
+        String id = service.addInstanceFleet(text(request, "ClusterId"),
+                instanceFleetFrom(request.path("InstanceFleet")));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ClusterId", text(request, "ClusterId"));
         response.put("InstanceFleetId", id);
         return Response.ok(response).build();
+    }
+
+    /**
+     * The instance fleet an AddInstanceFleet request's {@code InstanceFleet} describes, read and checked as
+     * AddInstanceFleet reads it, for this handler and for CloudFormation's {@code AWS::EMR::InstanceFleetConfig}.
+     */
+    public EmrInstanceFleet instanceFleetFrom(JsonNode fleetNode) {
+        List<String> violations = new ArrayList<>();
+        EmrInstanceFleet fleet = parseInstanceFleet(fleetNode, "instanceFleet", violations);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+        requireEbsVolumeLimit(fleetNode);
+        return fleet;
+    }
+
+    /**
+     * The instance groups an AddInstanceGroups request's {@code InstanceGroups} describe, read as AddInstanceGroups
+     * reads them, for this handler and for CloudFormation's {@code AWS::EMR::InstanceGroupConfig}.
+     */
+    public List<EmrInstanceGroup> instanceGroupsFrom(JsonNode groupsNode) {
+        return parseInstanceGroups(groupsNode);
+    }
+
+    /**
+     * The steps an AddJobFlowSteps request's {@code Steps} describe, read as AddJobFlowSteps reads them, for this
+     * handler and for CloudFormation's {@code AWS::EMR::Step}.
+     */
+    public List<EmrStep> stepsFrom(JsonNode stepsNode, String executionRoleArn) {
+        return parseSteps(stepsNode, executionRoleArn);
     }
 
     private Response handleListInstanceFleets(JsonNode request) {

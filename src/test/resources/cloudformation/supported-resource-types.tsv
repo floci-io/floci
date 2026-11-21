@@ -110,7 +110,10 @@ AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
 AWS::EMR::Cluster	EmrCfnProvisioner
+AWS::EMR::InstanceFleetConfig	EmrCfnProvisioner
+AWS::EMR::InstanceGroupConfig	EmrCfnProvisioner
 AWS::EMR::SecurityConfiguration	EmrCfnProvisioner
+AWS::EMR::Step	EmrCfnProvisioner
 AWS::EMR::Studio	EmrStudioCfnProvisioner
 AWS::EMR::StudioSessionMapping	EmrStudioCfnProvisioner
 AWS::EMRContainers::VirtualCluster	EmrContainersCfnProvisioner

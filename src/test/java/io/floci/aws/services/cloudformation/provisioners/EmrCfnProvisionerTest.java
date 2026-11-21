@@ -8,6 +8,7 @@ import io.floci.aws.services.emr.EmrHandler;
 import io.floci.aws.services.emr.EmrService;
 import io.floci.aws.services.emr.EmrService.InstanceGroupModification;
 import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import org.junit.jupiter.api.Test;
@@ -33,7 +34,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** {@code AWS::EMR::SecurityConfiguration} and {@code AWS::EMR::Cluster} in isolation, with EMR mocked. */
+/** Amazon EMR's own CloudFormation types over {@link EmrService} in isolation, with EMR mocked. */
 class EmrCfnProvisionerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -328,5 +329,144 @@ class EmrCfnProvisionerTest {
         provisioner.delete("AWS::EMR::Cluster", CLUSTER_ID, "us-east-1");
 
         verify(emr).terminateJobFlows(List.of(CLUSTER_ID));
+    }
+
+    private static StackResource typed(String type, String physicalId) {
+        StackResource r = resource(physicalId);
+        r.setLogicalId("Child");
+        r.setResourceType(type);
+        return r;
+    }
+
+    private static final String POLICY = """
+            {"Constraints": {"MinCapacity": 1, "MaxCapacity": 4}, "Rules": []}""";
+
+    private static String groupProps(int count, String policy) {
+        return """
+                {"JobFlowId": "%s", "InstanceRole": "TASK", "InstanceType": "m5.xlarge", "InstanceCount": %d,
+                 "Name": "spot", "Configurations": [{"Classification": "yarn-site",
+                   "ConfigurationProperties": {"yarn.nodemanager.vmem-check-enabled": "false"}}]%s}
+                """.formatted(CLUSTER_ID, count, policy == null ? "" : ", \"AutoScalingPolicy\": " + policy);
+    }
+
+    private static String fleetProps(int onDemand) {
+        return """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": %d,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}
+                """.formatted(CLUSTER_ID, onDemand);
+    }
+
+    @Test
+    void aStepIsAddedWithItsPropertiesAndMonitoringInAddJobFlowStepsMembersAndStaysWhenDeleted() {
+        when(emr.addJobFlowSteps(eq(CLUSTER_ID), any())).thenReturn(List.of("s-STEP1"));
+        StackResource r = typed("AWS::EMR::Step", null);
+
+        provisioner.provision(r, json("""
+                {"JobFlowId": "%s", "Name": "pi", "ActionOnFailure": "CONTINUE", "LogUri": "s3://logs/steps/",
+                 "HadoopJarStep": {"Jar": "command-runner.jar", "Args": ["spark-example", "SparkPi"],
+                   "StepProperties": [{"Key": "k", "Value": "v"}]}}
+                """.formatted(CLUSTER_ID)), ctx(null, null));
+        provisioner.delete(r, "us-east-1");
+
+        ArgumentCaptor<JsonNode> steps = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).stepsFrom(steps.capture(), eq(null));
+        JsonNode step = steps.getValue().get(0);
+        assertEquals(json("[{\"Key\": \"k\", \"Value\": \"v\"}]"), step.path("HadoopJarStep").get("Properties"));
+        assertEquals("s3://logs/steps/",
+                step.path("StepMonitoringConfiguration").path("S3MonitoringConfiguration").path("LogUri").asText());
+        assertEquals("s-STEP1", r.getPhysicalId());
+        assertEquals("s-STEP1", r.getAttributes().get("Id"));
+        verify(emr, never()).cancelSteps(any(), any(), any());
+    }
+
+    @Test
+    void anInstanceGroupIsAddedThenResizedAndGivenAPolicyInPlaceAndARollbackPutsThemBack() {
+        when(emr.addInstanceGroups(eq(CLUSTER_ID), any())).thenReturn(List.of("ig-TASK"));
+        StackResource r = typed("AWS::EMR::InstanceGroupConfig", null);
+        provisioner.provision(r, json(groupProps(1, null)), ctx(null, null));
+        ArgumentCaptor<JsonNode> groups = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).instanceGroupsFrom(groups.capture());
+        assertEquals("TASK", groups.getValue().get(0).path("InstanceRole").asText());
+        assertEquals("false", groups.getValue().get(0).path("Configurations").get(0).path("Properties")
+                .path("yarn.nodemanager.vmem-check-enabled").asText());
+        assertEquals("ig-TASK", r.getAttributes().get("InstanceGroupId"));
+
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceGroup live = group("ig-TASK", "TASK", "spot");
+        live.setRequestedInstanceCount(1);
+        when(emr.listInstanceGroups(CLUSTER_ID)).thenReturn(List.of(live));
+        provisioner.provision(r, json(groupProps(3, POLICY)), ctx("ig-TASK", groupProps(1, null)));
+        provisioner.rollbackUpdate(r);
+
+        verify(emr).modifyInstanceGroups(CLUSTER_ID, "us-east-1",
+                List.of(new InstanceGroupModification("ig-TASK", 3, null)));
+        verify(emr).putAutoScalingPolicy(CLUSTER_ID, "ig-TASK", json(POLICY));
+        verify(emr).modifyInstanceGroups(CLUSTER_ID, "us-east-1",
+                List.of(new InstanceGroupModification("ig-TASK", 1, null)));
+        verify(emr).removeAutoScalingPolicy(CLUSTER_ID, "ig-TASK");
+        assertEquals("ig-TASK", r.getPhysicalId());
+        // The policy the group has again is the one the next update and the delete compare with: none.
+        assertFalse(r.getAttributes().containsKey(EmrCfnProvisioner.GROUP_POLICY_ATTR));
+    }
+
+    @Test
+    void anInstanceFleetIsResizedInPlaceAndARollbackPutsItsCapacityBack() {
+        when(handler.instanceFleetFrom(any())).thenReturn(new EmrInstanceFleet());
+        when(emr.addInstanceFleet(eq(CLUSTER_ID), any())).thenReturn("if-TASK");
+        StackResource r = typed("AWS::EMR::InstanceFleetConfig", null);
+        provisioner.provision(r, json(fleetProps(1)), ctx(null, null));
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceFleet live = new EmrInstanceFleet();
+        live.setId("if-TASK");
+        live.setTargetOnDemandCapacity(1);
+        when(emr.listInstanceFleets(CLUSTER_ID)).thenReturn(List.of(live));
+
+        provisioner.provision(r, json(fleetProps(4)), ctx("if-TASK", fleetProps(1)));
+        provisioner.rollbackUpdate(r);
+
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 4, 0);
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 1, 0);
+        assertEquals("if-TASK", r.getAttributes().get("InstanceFleetId"));
+    }
+
+    @Test
+    void anInstanceGroupOrFleetDeleteShrinksItAndOneWhoseClusterEndedIsLeftAlone() {
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceGroup withPolicy = group("ig-TASK", "TASK", "spot");
+        withPolicy.setAutoScalingPolicy(POLICY);
+        when(emr.listInstanceGroups(CLUSTER_ID)).thenReturn(List.of(withPolicy));
+        StackResource group = typed("AWS::EMR::InstanceGroupConfig", "ig-TASK");
+        group.getAttributes().put(EmrCfnProvisioner.CLUSTER_ID_ATTR, CLUSTER_ID);
+        StackResource fleet = typed("AWS::EMR::InstanceFleetConfig", "if-TASK");
+        fleet.getAttributes().put(EmrCfnProvisioner.CLUSTER_ID_ATTR, CLUSTER_ID);
+        StackResource orphan = typed("AWS::EMR::InstanceGroupConfig", "ig-GONE");
+        orphan.getAttributes().put(EmrCfnProvisioner.CLUSTER_ID_ATTR, "j-ENDED");
+        when(emr.describeCluster("j-ENDED")).thenReturn(emrCluster("j-ENDED", "TERMINATED"));
+
+        provisioner.delete(group, "us-east-1");
+        provisioner.delete(fleet, "us-east-1");
+        provisioner.delete(orphan, "us-east-1");
+
+        verify(emr).removeAutoScalingPolicy(CLUSTER_ID, "ig-TASK");
+        verify(emr).modifyInstanceGroups(CLUSTER_ID, "us-east-1",
+                List.of(new InstanceGroupModification("ig-TASK", 0, null)));
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 0, 0);
+        verify(emr, never()).modifyInstanceGroups(eq("j-ENDED"), any(), any());
+    }
+
+    @Test
+    void anInstanceGroupOrFleetOfAnotherRoleThanTaskIsRefused() {
+        AwsException group = assertThrows(AwsException.class, () -> provisioner.provision(
+                typed("AWS::EMR::InstanceGroupConfig", null),
+                json(groupProps(1, null).replace("\"TASK\"", "\"CORE\"")), ctx(null, null)));
+        AwsException fleet = assertThrows(AwsException.class, () -> provisioner.provision(
+                typed("AWS::EMR::InstanceFleetConfig", null),
+                json(fleetProps(1).replace("\"TASK\"", "\"MASTER\"")), ctx(null, null)));
+
+        assertEquals("InstanceRole must be TASK, the one value the template reference allows, not CORE.",
+                group.getMessage());
+        assertEquals("InstanceFleetType must be TASK, the one value the template reference allows, not MASTER.",
+                fleet.getMessage());
+        verifyNoInteractions(emr);
     }
 }
