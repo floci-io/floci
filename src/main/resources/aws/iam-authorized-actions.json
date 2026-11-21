@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-16",
+    "retrieved": "2026-11-21",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -635,6 +635,7 @@
       "ListCrawlers",
       "ListCustomEntityTypes",
       "ListDevEndpoints",
+      "ListIntegrationTableProperties",
       "ListJobs",
       "ListRegistries",
       "ListSessions",
@@ -887,6 +888,7 @@
       "ListMicrovmImages",
       "ListMicrovms",
       "ListNetworkConnectors",
+      "ListRuntimes",
       "ListWebFunctions",
       "PassNetworkConnector"
     ],
@@ -1008,6 +1010,7 @@
       "GenerateEmbedUrlForRegisteredUserWithIdentity",
       "GetAnonymousUserEmbedUrl",
       "GetCustomPermissionsSummary",
+      "GetEffectiveCustomPermissions",
       "GetGroupMapping",
       "GetSessionEmbedUrl",
       "ListAccessControlApplications",
@@ -1044,6 +1047,7 @@
       "ScopeDownPolicy",
       "SearchDirectoryGroups",
       "SearchFlows",
+      "SearchKnowledgeBases",
       "SearchSpaces",
       "SetGroupMapping",
       "StartDashboardSnapshotJobSchedule",
@@ -1125,6 +1129,7 @@
       "GetTrafficPolicyInstanceCount",
       "ListCidrCollections",
       "ListGeoLocations",
+      "ListHealthCheckSources",
       "ListHealthChecks",
       "ListHostedZones",
       "ListHostedZonesByName",
