@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -88,7 +89,7 @@ class AwsIncludeProcessorTest {
 
     private JsonNode mergedSubstitutions(String templateYaml) throws Exception {
         JsonNode template = new CloudFormationYamlParser(mapper).parse(templateYaml);
-        JsonNode merged = processor.mergeIncludes(template);
+        JsonNode merged = processor.mergeIncludes(template, Map.of(), "us-east-1", "000000000000", "", "");
         return merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
     }
 
@@ -212,6 +213,109 @@ class AwsIncludeProcessorTest {
                 () -> mergedSubstitutions(blockFormBareName));
         assertTrue(bare.getMessage().contains("swagger.yaml"),
                 "message does not name the rejected location: " + bare.getMessage());
+    }
+
+    @Test
+    void fnSubLocationResolvesPseudoParametersAndTemplateParameters() throws Exception {
+        stubSnippet("snippets-eu-west-1", "prod/names.yaml", "orderTableName: orders-eu\n");
+        String template = """
+            Parameters:
+              Env:
+                Type: String
+                Default: dev
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: !Sub s3://snippets-${AWS::Region}/${Env}/names.yaml
+            """;
+
+        JsonNode parsed = new CloudFormationYamlParser(mapper).parse(template);
+        JsonNode merged = processor.mergeIncludes(parsed, Map.of("Env", "prod"),
+                "eu-west-1", "123456789012", "orders-stack", "arn:aws:cloudformation:eu-west-1:123456789012:stack/orders-stack/1");
+        JsonNode substitutions = merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
+
+        assertEquals("orders-eu", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
+    void fnSubArrayLocationResolvesVariableMapAndDefaultParameters() throws Exception {
+        stubSnippet("snippets-us-east-1", "custom/names.yaml", "orderTableName: orders-custom\n");
+        String template = """
+            Parameters:
+              BucketPrefix:
+                Type: String
+                Default: snippets
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location:
+                          Fn::Sub:
+                            - s3://${BucketPrefix}-${AWS::Region}/${Folder}/names.yaml
+                            - Folder: custom
+            """;
+
+        JsonNode substitutions = mergedSubstitutions(template);
+
+        assertEquals("orders-custom", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
+    void fnSubLocationWithUnresolvedVariableIsRejected() {
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: !Sub s3://snippets-${Missing}/names.yaml
+            """;
+
+        AwsException e = assertThrows(AwsException.class, () -> mergedSubstitutions(template));
+        assertTrue(e.getMessage().contains("\"Fn::Sub\":\"s3://snippets-${Missing}/names.yaml\""),
+                "unresolved Fn::Sub variable must reject the Location node rather than substituting the variable name: "
+                        + e.getMessage());
+    }
+
+    @Test
+    void fnSubLocationWithImportValueResolvesExport() throws Exception {
+        stubSnippet("exported-snippets", "names.yaml", "orderTableName: orders-exported\n");
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location:
+                          Fn::Sub:
+                            - s3://${Bucket}/names.yaml
+                            - Bucket: { Fn::ImportValue: SharedSnippetBucket }
+            """;
+
+        JsonNode parsed = new CloudFormationYamlParser(mapper).parse(template);
+        JsonNode merged = processor.mergeIncludes(parsed, Map.of(), "us-east-1", "000000000000", "", "",
+                exportName -> "SharedSnippetBucket".equals(exportName) ? "exported-snippets" : null);
+        JsonNode substitutions = merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
+
+        assertEquals("orders-exported", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
     }
 
     @Test
