@@ -127,7 +127,9 @@ AWS::BedrockAgentCore::Runtime	PlatformVersion	accepted and not stored, a warnin
 AWS::BedrockAgentCore::Runtime	RequestHeaderConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	ResourceConfigurations	accepted and not stored, a warning is logged
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
+AWS::CertificateManager::Certificate	CertificateUsage	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
+AWS::CertificateManager::Certificate	RootHierarchyType	accepted and ignored
 AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
 AWS::CloudFormation::StackSet	AdministrationRoleARN	accepted and ignored; local StackSets deploy without assuming an administration role
 AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do not model delegated administrator authorization

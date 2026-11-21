@@ -76,6 +76,7 @@ import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EmrServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsV2CfnProvisioner;
@@ -153,6 +154,8 @@ import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
 import io.floci.aws.services.elasticache.ElastiCacheService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
+import io.floci.aws.services.emrserverless.EmrServerlessService;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.firehose.FirehoseService;
@@ -277,6 +280,8 @@ final class CfnProvisionerFixture {
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
         private CodeDeployService codeDeployService;
+        private EmrServerlessService emrServerlessService;
+        private EmrServerlessJobRunService emrServerlessJobRunService;
         private TransferService transferService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
@@ -563,6 +568,9 @@ final class CfnProvisionerFixture {
             if (codeDeployService != null) {
                 discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
             }
+            if (emrServerlessService != null && emrServerlessJobRunService != null) {
+                discovered.add(new EmrServerlessCfnProvisioner(emrServerlessService, emrServerlessJobRunService));
+            }
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
             }
@@ -790,6 +798,16 @@ final class CfnProvisionerFixture {
 
         public Builder codeDeploy(CodeDeployService v) {
             this.codeDeployService = v;
+            return this;
+        }
+
+        public Builder emrServerless(EmrServerlessService v) {
+            this.emrServerlessService = v;
+            return this;
+        }
+
+        public Builder emrServerlessJobRuns(EmrServerlessJobRunService v) {
+            this.emrServerlessJobRunService = v;
             return this;
         }
 
