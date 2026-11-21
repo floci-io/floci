@@ -3,6 +3,7 @@ package io.floci.aws.services.ses;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -121,5 +122,20 @@ class SesV1TemplateArnIntegrationTest {
     @ValueSource(strings = {"SendTemplatedEmail", "SendBulkTemplatedEmail"})
     void emptyTemplate_isRejectedBeforeTheTemplateArn(String operation) {
         assertError(send(operation, "", "not-an-arn"), "InvalidParameterValue", "Template cannot be empty");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "not-an-arn"})
+    void sendBulkTemplatedEmail_whitespaceTemplate_isEmpty(String templateArn) {
+        assertError(send("SendBulkTemplatedEmail", "  ", templateArn.isEmpty() ? null : templateArn),
+                "InvalidParameterValue", "Template cannot be empty");
+    }
+
+    // SendTemplatedEmail does not count a whitespace-only Template as empty.
+    @Test
+    void sendTemplatedEmail_whitespaceTemplate_mustAlignWithTheTemplateArn() {
+        String templateArn = arn("aws", "ses", "us-east-1", "template/" + NAME);
+        assertError(send("SendTemplatedEmail", "  ", templateArn), "InvalidParameterValue",
+                "The SES resource '  ' does not align with the given ARN '" + templateArn + "'.");
     }
 }

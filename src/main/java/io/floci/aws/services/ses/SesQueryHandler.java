@@ -651,7 +651,7 @@ public class SesQueryHandler {
         if (templateName == null) {
             throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNullWithoutValue("template"));
         }
-        String resolvedName = sendTemplateName(templateName, templateArn, region);
+        String resolvedName = sendTemplateName(templateName.isEmpty(), templateName, templateArn, region);
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
         String configurationSetName = getParam(params, "ConfigurationSetName");
@@ -809,7 +809,7 @@ public class SesQueryHandler {
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String defaultDataRaw = getParam(params, "DefaultTemplateData");
 
-        String resolvedName = sendTemplateName(templateName, templateArn, region);
+        String resolvedName = sendTemplateName(templateName.isBlank(), templateName, templateArn, region);
 
         int lastIndex = destinations.last();
         if (lastIndex == 0) {
@@ -1731,8 +1731,9 @@ public class SesQueryHandler {
 
     // The templated sends require Template whatever TemplateArn holds, word an empty one ahead of
     // the ARN checks, and take a TemplateArn only beside the Template it names (probe-confirmed).
-    private static String sendTemplateName(String templateName, String templateArn, String region) {
-        if (templateName.isEmpty()) {
+    // SendBulkTemplatedEmail counts a whitespace-only Template as empty; SendTemplatedEmail does not.
+    private static String sendTemplateName(boolean empty, String templateName, String templateArn, String region) {
+        if (empty) {
             throw new AwsException("InvalidParameterValue", "Template cannot be empty", 400);
         }
         if (templateArn != null && !templateArn.isBlank()) {
