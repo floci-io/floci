@@ -68,6 +68,9 @@ class RdsQueryHandlerTest {
     @BeforeEach
     void setUp() {
         service = mock(RdsService.class);
+        when(service.getDbCluster(any(), any())).thenAnswer(inv -> makeCluster(inv.getArgument(0)));
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any()))
+                .thenAnswer(inv -> makeCluster(inv.getArgument(0)));
         when(service.instanceCertificate(any())).thenReturn(
                 new RdsService.InstanceCertificate("rds-ca-rsa2048-g1", Instant.parse("2061-05-25T23:34:57Z")));
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -912,7 +915,7 @@ class RdsQueryHandlerTest {
                 any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
-        verify(service).getDbCluster("mycluster", "us-west-2");
+        verify(service, times(2)).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2", true);
         verify(service).modifyDbCluster("mycluster", null, null,
                 null, null, null, null, null, null, false, false, "us-west-2");
@@ -924,10 +927,11 @@ class RdsQueryHandlerTest {
         cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC");
         cluster.setMasterUserSecretStatus("active");
         cluster.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false)))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), eq(false)))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -947,7 +951,7 @@ class RdsQueryHandlerTest {
         verify(service).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false));
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), eq(false));
     }
 
     @Test
@@ -955,7 +959,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -972,7 +976,7 @@ class RdsQueryHandlerTest {
     void createDbClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenThrow(new ContainerRejectedException(
                         new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
 
@@ -993,7 +997,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), anyBoolean()))
                 .thenReturn(cluster);
         // Another request associated the role between the create and the roles being added.
         when(service.addRolesToNewDbCluster(any(), eq("mycluster"), anyList()))
@@ -1032,6 +1036,7 @@ class RdsQueryHandlerTest {
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
         DbCluster cluster = makeCluster("mycluster");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null, null, null, null,
                 null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
         MultivaluedMap<String, String> p = params();
@@ -2943,9 +2948,9 @@ class RdsQueryHandlerTest {
         when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
                 any(), any(), any(), any(), any(), any(), isNull(), isNull())).thenReturn(makeInstance("restored"));
         when(service.restoreDbClusterFromSnapshot(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+                any(), any(), any(), any(), any(), anyBoolean(), any(), any())).thenReturn(makeCluster("restored"));
         for (String invalid : List.of("yes", "", "not-a-boolean")) {
             MultivaluedMap<String, String> p = params();
             p.putSingle("DBInstanceIdentifier", "restored");
@@ -3022,10 +3027,10 @@ class RdsQueryHandlerTest {
         Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
         when(service.restoreDbClusterFromSnapshot(eq("restored"), eq("snapshot"), eq("aurora-postgresql"),
                 isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(eq("restored"), eq("source"), isNull(), isNull(),
                 isNull(), eq(true), isNull(), isNull(), isNull(), eq(enabled), isNull(),
-                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+                eq(false), eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBClusterIdentifier", "restored");
         p.putSingle("SnapshotIdentifier", "snapshot");
@@ -3036,12 +3041,12 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("RestoreDBClusterFromSnapshot", p).getStatus());
         verify(service).restoreDbClusterFromSnapshot("restored", "snapshot", "aurora-postgresql",
-                null, null, null, null, null, null, enabled, null, Map.of(), null);
+                null, null, null, null, null, null, enabled, null, false, Map.of(), null);
         p.putSingle("SourceDBClusterIdentifier", "source");
         p.putSingle("UseLatestRestorableTime", "true");
         assertEquals(200, handler.handle("RestoreDBClusterToPointInTime", p).getStatus());
         verify(service).restoreDbClusterToPointInTime("restored", "source", null, null, null, true,
-                null, null, null, enabled, null, Map.of(), null);
+                null, null, null, enabled, null, false, Map.of(), null);
     }
 
     @Test

@@ -1267,18 +1267,16 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public PaginatedResult<Authorizer> getAuthorizerPage(String region, String apiId, Integer limit,
                                                          String position) {
-        List<Authorizer> authorizers = getAuthorizers(region, apiId).stream()
-                .sorted(Comparator.comparing(Authorizer::getId))
-                .toList();
-        return pageById(authorizers, Authorizer::getId, limit, position);
+        return pageById(getAuthorizers(region, apiId), Authorizer::getId, limit, position);
     }
 
     /**
-     * One page of a list already sorted by id. The token is the id of the last item returned, and
+     * One page of a list, sorted by id here. The token is the id of the last item returned, and
      * an unrecognised token is a {@code BadRequestException}, as on AWS.
      */
-    private static <T> PaginatedResult<T> pageById(List<T> sorted, Function<T, String> idOf, Integer limit,
+    private static <T> PaginatedResult<T> pageById(List<T> items, Function<T, String> idOf, Integer limit,
                                                    String position) {
+        List<T> sorted = items.stream().sorted(Comparator.comparing(idOf)).toList();
         int pageSize = resolvePageSize(limit);
         int start = 0;
         if (position != null && !position.isBlank()) {
@@ -1774,6 +1772,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return plans.stream()
                 .filter(plan -> usagePlanKeyStore.get(usagePlanKeyPathKey(region, plan.getId(), keyId)).isPresent())
                 .toList();
+    }
+
+    /**
+     * One {@code GetUsagePlans} page: the {@code keyId}-filtered plans, paged by {@code limit} and
+     * {@code position} like the other API Gateway collections.
+     */
+    public PaginatedResult<UsagePlan> getUsagePlanPage(String region, String keyId, Integer limit,
+                                                       String position) {
+        return pageById(getUsagePlans(region, keyId), UsagePlan::getId, limit, position);
     }
 
     /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
@@ -2371,6 +2378,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return requestValidatorStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<RequestValidator> getRequestValidatorPage(String region, String apiId, Integer limit,
+                                                                     String position) {
+        return pageById(getRequestValidators(region, apiId), RequestValidator::getId, limit, position);
+    }
+
     public void deleteRequestValidator(String region, String apiId, String validatorId) {
         getRequestValidator(region, apiId, validatorId);
         requestValidatorStore.delete(requestValidatorKey(region, apiId, validatorId));
@@ -2498,6 +2510,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return modelStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<Model> getModelPage(String region, String apiId, Integer limit, String position) {
+        return pageById(getModels(region, apiId), Model::getId, limit, position);
+    }
+
     public void deleteModel(String region, String apiId, String modelName) {
         getModel(region, apiId, modelName);
         modelStore.delete(modelKey(region, apiId, modelName));
@@ -2582,7 +2598,6 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .filter(part -> name == null || name.equals(part.getLocation().get("name")))
                 .filter(part -> path == null || path.equals(part.getLocation().get("path")))
                 .filter(part -> !"UNDOCUMENTED".equals(locationStatus))
-                .sorted(Comparator.comparing(DocumentationPart::getId))
                 .toList();
 
         return pageById(parts, DocumentationPart::getId, limit, position);
@@ -5272,6 +5287,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public List<VpcLink> getVpcLinks(String region) {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
+    }
+
+    public PaginatedResult<VpcLink> getVpcLinkPage(String region, Integer limit, String position) {
+        return pageById(getVpcLinks(region), VpcLink::getId, limit, position);
     }
 
     /**

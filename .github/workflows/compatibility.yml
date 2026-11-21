@@ -170,17 +170,17 @@ jobs:
         github.event.pull_request.state != 'closed' &&
         github.event.action != 'edited'
       )
-    # Both published architectures. The native image is the only place an
-    # arch-specific resource can go missing (snappy-java's JNI library is
-    # registered per platform), and one arch cannot prove the other.
+    # arm64 only. The native image is the only place an arch-specific resource can go missing
+    # (snappy-java's JNI library is registered per platform), and one arch cannot prove the other,
+    # but an amd64 build here cost 7 to 9 minutes of every run for one 2-minute suite. The amd64
+    # image is proven instead by compat-partitions.yml's amd64 job, after each Nightly, against the
+    # published multi-arch nightly image.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
-          - arch: amd64
-            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -299,14 +299,11 @@ jobs:
     needs: build-native
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
-    # The suites run against the arm64 image only. What they check is
-    # arch-neutral, and running all eight on both arches (16 jobs per PR) left
-    # them queued for the shared runner pools for longer than they take to run.
-    # The amd64 image is still built above so both published arches are proven
-    # to link and package, and one amd64 suite stays: sdk-test-python carries
-    # the Firehose compression delivery test that proves the x86_64 snappy JNI
-    # library survived the native build (the resource that can go missing per
-    # platform, see the build-native comment).
+    # The suites run against the arm64 image only. What they check is arch-neutral, and running all
+    # eight on both arches (16 jobs per PR) left them queued for the shared runner pools for longer
+    # than they take to run. The x86_64 snappy JNI library (the resource that can go missing per
+    # platform, see the build-native comment) is checked after each Nightly by compat-partitions.yml's
+    # amd64 sdk-test-python job, which carries the Firehose compression delivery test.
     strategy:
       fail-fast: false
       matrix:
@@ -324,9 +321,6 @@ jobs:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
-          - arch: amd64
-            test: sdk-test-python
-            runner: ubuntu-latest
 
     steps:
       - name: Download native floci image

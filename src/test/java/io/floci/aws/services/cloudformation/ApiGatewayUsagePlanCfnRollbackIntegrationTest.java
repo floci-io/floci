@@ -130,7 +130,7 @@ class ApiGatewayUsagePlanCfnRollbackIntegrationTest {
         cloudFormation(stack, "UpdateStack", PLAN_TEMPLATE.formatted(properties + ", \"Description\": \"changed\"",
                 FAILING_RESOURCE.formatted("Plan", stack)));
         describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
-        given().when().get("/usageplans").then()
+        given().queryParam("limit", 500).when().get("/usageplans").then()
             .statusCode(200)
             .body("item.name", not(hasItem(name)));
 

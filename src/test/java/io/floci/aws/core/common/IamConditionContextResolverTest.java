@@ -3,8 +3,6 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
@@ -61,7 +59,6 @@ import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -77,8 +74,6 @@ class IamConditionContextResolverTest {
     private Instance<DynamoDbFacade> dynamoDbFacadeInstance;
     private Ec2Service ec2Service;
     private S3Service s3Service;
-    private CloudWatchLogsService logsService;
-    private CloudWatchLogsCrossAccountService crossAccountService;
     private IamService iamService;
     private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
@@ -123,14 +118,6 @@ class IamConditionContextResolverTest {
         Instance<S3Service> s3ServiceInstance = mock(Instance.class);
         when(s3ServiceInstance.isResolvable()).thenReturn(true);
         when(s3ServiceInstance.get()).thenReturn(s3Service);
-        logsService = mock(CloudWatchLogsService.class);
-        Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
-        when(logsServiceInstance.isResolvable()).thenReturn(true);
-        when(logsServiceInstance.get()).thenReturn(logsService);
-        crossAccountService = mock(CloudWatchLogsCrossAccountService.class);
-        Instance<CloudWatchLogsCrossAccountService> crossAccountServiceInstance = mock(Instance.class);
-        when(crossAccountServiceInstance.isResolvable()).thenReturn(true);
-        when(crossAccountServiceInstance.get()).thenReturn(crossAccountService);
         iamService = mock(IamService.class);
         Instance<IamService> iamServiceInstance = mock(Instance.class);
         when(iamServiceInstance.isResolvable()).thenReturn(true);
@@ -152,8 +139,7 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
-                crossAccountServiceInstance, iamServiceInstance,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, iamServiceInstance,
                 lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()), mock(Instance.class),
                 requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
@@ -237,42 +223,36 @@ class IamConditionContextResolverTest {
     }
 
     @Test
-    void logStreamTagsUseRawParentNameAndRequestRegion() throws Exception {
+    void anAssumeRoleRequestCarriesItsSessionNameAndExternalId() {
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice"), "sts:ExternalId", List.of("partner-42")),
+                resolver.resolve("sts", "sts:AssumeRole", formRequest(
+                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A111111111111%3Arole%2Fr"
+                                + "&RoleSessionName=alice&ExternalId=partner-42")));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), resolver.resolve("sts", "sts:AssumeRole",
+                formRequest("Action=AssumeRole&RoleSessionName=alice")), "no ExternalId, no sts:ExternalId");
+        assertNull(resolver.resolve("sts", "sts:GetCallerIdentity", formRequest("Action=GetCallerIdentity")));
+    }
+
+    /** A Logs create or tag call carries the tags it asks to attach or remove; what it names carries its own. */
+    @Test
+    void aLogsTagCallCarriesTheTagsItAsksToAttachOrRemove() throws Exception {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String group = "\"resourceArn\":\"arn:aws:logs:us-east-1:123456789012:log-group:app\"";
         when(request.getProperty("floci.bufferedJsonBody"))
-                .thenReturn(mapper.readTree("{\"logGroupName\":\" group \",\"logStreamName\":42}"));
-        when(logsService.listTagsLogGroup(" group ", "eu-west-1")).thenReturn(Map.of("team", "blue"));
-        requestContext.setRegion("eu-west-1");
-        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
-            assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("logs", action, request));
-        }
-        requestContext.setRegion(null);
-        when(logsService.listTagsLogGroup(" group ", "us-east-1")).thenReturn(Map.of("team", "red"));
-        assertEquals(Map.of("aws:ResourceTag/team", List.of("red")),
-                resolver.resolve("logs", "logs:CreateLogStream", request));
-    }
-
-    @Test
-    void missingLogGroupTagsDoNotReplaceTheHandlersMissingResourceError() throws Exception {
-        ContainerRequestContext request = mock(ContainerRequestContext.class);
-        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":42}"));
-        when(logsService.listTagsLogGroup("42", "us-east-1"))
-                .thenThrow(new AwsException("ResourceNotFoundException", "missing", 400));
-        assertNull(resolver.resolve("logs", "logs:DeleteLogStream", request));
-    }
-
-    @Test
-    void unexpectedLogGroupLookupFailuresCannotEraseTagDenies() throws Exception {
-        ContainerRequestContext request = mock(ContainerRequestContext.class);
-        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":\"group\"}"));
-        AwsException failure = new AwsException("InternalFailure", "storage unavailable", 500);
-        when(logsService.listTagsLogGroup("group", "us-east-1")).thenThrow(failure);
-        assertSame(failure, assertThrows(AwsException.class,
-                () -> resolver.resolve("logs", "logs:CreateLogStream", request)));
-        IllegalStateException unexpected = new IllegalStateException("unavailable");
-        doThrow(unexpected).when(logsService).listTagsLogGroup("group", "us-east-1");
-        assertSame(unexpected, assertThrows(IllegalStateException.class,
-                () -> resolver.resolve("logs", "logs:DeleteLogStream", request)));
+                .thenReturn(mapper.readTree("{" + group + ",\"tags\":{\"team\":\"blue\"}}"));
+        assertEquals(Map.of("aws:RequestTag/team", List.of("blue"), "aws:TagKeys", List.of("team")),
+                resolver.resolve("logs", "logs:TagResource", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{" + group + ",\"tagKeys\":[\"team\"]}"));
+        assertEquals(Map.of("aws:TagKeys", List.of("team")), resolver.resolve("logs", "logs:UntagResource", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{\"logGroupName\":\"app\",\"tags\":{\"team\":\"red\"}}"));
+        assertEquals(Map.of("aws:RequestTag/team", List.of("red"), "aws:TagKeys", List.of("team")),
+                resolver.resolve("logs", "logs:CreateLogGroup", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{\"logGroupName\":\"app\",\"logStreamName\":\"s\"}"));
+        assertNull(resolver.resolve("logs", "logs:CreateLogGroup", request));
+        assertNull(resolver.resolve("logs", "logs:CreateLogStream", request));
     }
 
     /** A form request whose body can be read again, as a real request's restored stream can. */
@@ -855,7 +835,7 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class),
                 spellings(), mock(Instance.class), requestContext, new RegionResolver("us-east-1", "123456789012"),
                 config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
@@ -867,7 +847,7 @@ class IamConditionContextResolverTest {
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class),
                 spellings(), instance, requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog, Clock.systemUTC());
     }

@@ -156,13 +156,13 @@ class ApplicationDefaultsTest {
 
         assertFalse(streamingMaxConnections.isMissingNode(),
                 "streaming-max-connections should be declared in application.yml");
-        assertEquals(2048, streamingMaxConnections.asInt());
+        assertEquals(3072, streamingMaxConnections.asInt());
 
         WithDefault fallback = EmulatorConfig.DockerConfig.class
                 .getMethod("streamingMaxConnections")
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "streamingMaxConnections should declare a fallback default");
-        assertEquals("2048", fallback.value(),
+        assertEquals("3072", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
 
@@ -219,5 +219,31 @@ class ApplicationDefaultsTest {
         assertNotNull(fallback, "poolGaugeIntervalSeconds should declare a fallback default");
         assertEquals("60", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
+    }
+
+    // Catches: the Docker circuit breaker keys missing from the shipped application.yml, or a yml value
+    // that silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheDockerBreakerAtItsDefaults() throws IOException, NoSuchMethodException {
+        JsonNode docker = productionConfig().path("floci").path("docker");
+
+        assertEquals(3, docker.path("breaker-failure-threshold").asInt(-1));
+        assertEquals(5, docker.path("breaker-probe-interval-seconds").asInt(-1));
+        assertEquals("3", EmulatorConfig.DockerConfig.class.getMethod("breakerFailureThreshold")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+        assertEquals("5", EmulatorConfig.DockerConfig.class.getMethod("breakerProbeIntervalSeconds")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: max-concurrent-launches missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLaunchBoundAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode launches = productionConfig().path("floci").path("docker").path("max-concurrent-launches");
+
+        assertFalse(launches.isMissingNode(), "max-concurrent-launches should be declared in application.yml");
+        assertEquals(0, launches.asInt(-1));
+        assertEquals("0", EmulatorConfig.DockerConfig.class.getMethod("maxConcurrentLaunches")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
 }

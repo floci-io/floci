@@ -478,10 +478,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        String snapshot = attempted.getAttributes().get(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
-        if (snapshot != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
-            previous.getAttributes().put(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR, snapshot);
-        }
+        CfnRollback.carryFailedUndoSnapshot(previous, attempted, CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
     }
 
     @Override

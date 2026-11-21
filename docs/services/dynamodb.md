@@ -64,6 +64,7 @@ operations keep their existing resource builders, including batch, transaction a
 | `RestoreTableFromBackup` | Create a new table from a backup |
 | `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
+| `UpdateKinesisStreamingDestination` | Update timestamp precision on an active Kinesis destination |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
 | `ExportTableToPointInTime` | Export table data, or the changes of a period, to S3 |
 | `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
@@ -75,6 +76,8 @@ operations keep their existing resource builders, including batch, transaction a
 | `ImportTable` | Create a table and load DynamoDB JSON from S3 into it |
 | `DescribeImport` | Get import status and metadata |
 | `ListImports` | List imports, optionally filtered by table ARN |
+
+`CreateTable` and `UpdateTable` store the `WarmThroughput` of a table and of its global secondary indexes, and DescribeTable reports it. Pre-warming finishes at once, so DescribeTable always shows `ACTIVE`.
 
 ## Legacy 2011-12-05 clients
 
@@ -177,9 +180,11 @@ Disabling a stream closes its open shards, each with an `EndingSequenceNumber`, 
 stays readable. A `GetRecords` call that reaches the end of a closed shard returns no
 `NextShardIterator`. `GetShardIterator` for a shard the stream does not have answers
 `ResourceNotFoundException`. The 1,000-record limit is for the whole stream: the oldest record goes
-first, whichever shard holds it. A closed shard that holds no records is dropped once the shard that
-replaced it has closed too, so a stream that rolls over lists at most two generations of shards while
-idle, and otherwise only the shards that still hold records.
+first, whichever shard holds it. AWS has no such limit, so if a consumer can fall more than 1,000
+records behind, for example one that starts at `LATEST` before a large seed, raise it with
+`FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS`. A closed shard that holds no records is dropped once
+the shard that replaced it has closed too, so a stream that rolls over lists at most two generations
+of shards while idle, and otherwise only the shards that still hold records.
 
 ## Time to Live
 
@@ -312,6 +317,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS` | `0` | Seconds a stream shard stays open before a child shard takes its keys. `0` keeps shards open |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED` | `false` | Expire stream shard iterators 15 minutes after they are returned, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
+| `FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS` | `1000` | Most records each stream keeps across its shards; the oldest goes first. Must be at least `1` |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
@@ -632,12 +638,20 @@ record as `dynamodb.ApproximateCreationDateTimePrecision`, and reported by
 `DescribeKinesisStreamingDestination` as well as in the `EnableKinesisStreamingConfiguration` member of
 the `EnableKinesisStreamingDestination` and `DisableKinesisStreamingDestination` responses.
 
+On the native backend, `UpdateKinesisStreamingDestination` changes an active destination's precision without stopping
+forwarding. Its response carries `UpdateKinesisStreamingConfiguration`, and subsequent item changes
+use the updated precision. Omitting the configuration or its precision retains the current value.
+The update accepts a table name or table ARN, persists across restarts, and rejects missing tables,
+missing destinations, inactive destinations, and precision values other than `MILLISECOND` or
+`MICROSECOND`.
+
 Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
 Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
 
 Both calls take effect at once, so `EnableKinesisStreamingDestination` answers `ACTIVE` and
 `DisableKinesisStreamingDestination` answers `DISABLED`. AWS reports the transitional `ENABLING` and
 `DISABLING` first, because it enables and disables the destination in the background.
+Updates also apply at once and answer `ACTIVE`; AWS can report `UPDATING` while applying a change.
 
 ### Delivery contract
 

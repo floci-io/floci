@@ -64,12 +64,18 @@ import io.floci.aws.services.transfer.TransferHandler;
 import io.floci.aws.services.translate.TranslateJsonHandler;
 import io.floci.aws.services.wafv2.WafV2Handler;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
+
+import java.net.URI;
 
 /**
  * Generic dispatcher for all AWS services that use the application/x-amz-json-1.1 protocol.
@@ -309,89 +315,9 @@ public class AwsJson11Controller {
 
         try {
             String region = regionResolver.getRegion();
-            String authorization = httpHeaders.getHeaderString("Authorization");
-            if (authorization == null || authorization.isBlank()) {
-                authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
-            }
+            String authorization = requestAuthorization(httpHeaders, uriInfo);
 
-            Response delegated = switch (serviceKey) {
-                case "ssm" -> ssmJsonHandler.handle(
-                        action, request, region, authorization);
-                case "events" -> eventBridgeHandler.handle(action, request, region);
-                case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
-                case "elasticmapreduce" -> emrHandler.handle(action, request, region);
-                case "wafv2" -> wafV2Handler.handle(action, request, region);
-                case "memorydb" -> memoryDbHandler.handle(action, request, region);
-                case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
-                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region, authorization);
-                case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
-                case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
-                case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
-                case "kms" -> kmsJsonHandler.handle(action, request, region);
-                case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
-                case "acm" -> acmJsonHandler.handle(action, request, region);
-                case "ecs" -> ecsJsonHandler.handle(action, request, region, uriInfo.getBaseUri());
-                case "ecr" -> ecrJsonHandler.handle(action, request, region);
-                case "glue" -> glueJsonHandler.handle(action, request, region);
-                case "athena" -> athenaJsonHandler.handle(action, request, region);
-                case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
-                case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(
-                        action, request, region, authorization);
-                case "firehose" -> firehoseJsonHandler.handle(action, request, region);
-                case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
-                case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
-                case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
-                case "codepipeline" -> codePipelineJsonHandler.handle(
-                        action, request, region, regionResolver.getAccountId());
-                case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
-                case "ec2-instance-connect" -> instanceConnectJsonHandler.handle(action, request, region);
-                case "transfer" -> transferHandler.handle(action, request, region);
-                case "textract" -> textractJsonHandler.handle(action, request, region);
-                case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
-                case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
-                case "pricing" -> pricingJsonHandler.handle(action, request, region);
-                case "transcribe" -> transcribeJsonHandler.handle(action, request);
-                case "translate" -> translateJsonHandler.handle(action, request, region);
-                case "ce" -> costExplorerJsonHandler.handle(action, request, region);
-                case "cur" -> curJsonHandler.handle(action, request, region);
-                case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
-                case "config" -> configServiceJsonHandler.handle(action, request, region);
-                case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
-                case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
-                case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
-                case "route53resolver" -> route53ResolverJsonHandler.handle(action, request, region, regionResolver.getAccountId());
-                case "cognito-identity" -> cognitoIdentityJsonHandler.handle(action, request, region);
-                // Global Accelerator is a global service: its resources carry an empty ARN region
-                // segment and are never partitioned by the region the caller signed with, so the
-                // handler takes no region.
-                case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request);
-                case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
-                case "network-firewall" -> networkFirewallJsonHandler.handle(
-                        action, request, region, regionResolver.getAccountId());
-                case "servicecatalog" -> serviceCatalogJsonHandler.handle(
-                        action, request, region, regionResolver.getAccountId());
-                case "cloudcontrol" -> cloudControlJsonHandler.handle(
-                                        action, request, region, regionResolver.getAccountId());
-                case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
-                // Organizations is global and account-scoped rather than region-scoped: every
-                // action is authorized against the calling account, so pass that instead of region.
-                case "organizations" ->
-                        organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
-                case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId(), region);
-                case "identitystore" -> identityStoreJsonHandler.handle(action, request);
-                case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
-                case "servicequotas" -> serviceQuotasJsonHandler.handle(
-                        action, request, region, regionResolver.getAccountId());
-                case "marketplace" -> {
-                    if (targetMatch.prefix().startsWith("AWSMPEntitlementService.")) {
-                        yield marketplaceEntitlementController.handle(action, request, region);
-                    }
-                    yield marketplaceMeteringController.handle(action, request, region);
-                }
-                case "sagemaker" -> sageMakerJsonHandler.handle(action, request, region);
-                case "dms" -> dmsJsonHandler.handle(action, request, region);
-                default -> null;
-            };
+            Response delegated = dispatch(targetMatch, request, region, authorization, uriInfo.getBaseUri());
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
             // (e.g. DynamoDB_20120810.*) can match here under @Consumes json-1.1.
             // Return the AWS-style unknown-operation error rather than null.
@@ -405,6 +331,101 @@ public class AwsJson11Controller {
             LOG.errorf(e, "Error processing %s request", serviceKey);
             return JsonErrorResponseUtils.createErrorResponse(e);
         }
+    }
+
+    /** Uses the header credential, falling back to the query only when the header is absent or blank. */
+    static String requestAuthorization(HttpHeaders headers, UriInfo uriInfo) {
+        String authorization = headers.getHeaderString("Authorization");
+        if (authorization == null || authorization.isBlank()) {
+            authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+        }
+        return authorization;
+    }
+
+    /** Dispatches an already-decoded request before HTTP-specific response encoding. */
+    Response dispatch(ServiceCatalog.TargetMatch targetMatch, JsonNode request, String region,
+            String authorization, URI baseUri) throws Exception {
+        String serviceKey = targetMatch.descriptor().externalKey();
+        String action = targetMatch.action();
+        return switch (serviceKey) {
+            case "ssm" -> ssmJsonHandler.handle(
+                    action, request, region, authorization);
+            case "events" -> eventBridgeHandler.handle(action, request, region);
+            case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
+            case "elasticmapreduce" -> emrHandler.handle(action, request, region);
+            case "wafv2" -> wafV2Handler.handle(action, request, region);
+            case "memorydb" -> memoryDbHandler.handle(action, request, region);
+            case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+            case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region, authorization);
+            case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
+            case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
+            case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
+            case "kms" -> kmsJsonHandler.handle(action, request, region);
+            case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
+            case "acm" -> acmJsonHandler.handle(action, request, region);
+            case "ecs" -> ecsJsonHandler.handle(action, request, region, baseUri);
+            case "ecr" -> ecrJsonHandler.handle(action, request, region);
+            case "glue" -> glueJsonHandler.handle(action, request, region);
+            case "athena" -> athenaJsonHandler.handle(action, request, region);
+            case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
+            case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(
+                    action, request, region, authorization);
+            case "firehose" -> firehoseJsonHandler.handle(action, request, region);
+            case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
+            case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
+            case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+            case "codepipeline" -> codePipelineJsonHandler.handle(
+                    action, request, region, regionResolver.getAccountId());
+            case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
+            case "ec2-instance-connect" -> instanceConnectJsonHandler.handle(action, request, region);
+            case "transfer" -> transferHandler.handle(action, request, region);
+            case "textract" -> textractJsonHandler.handle(action, request, region);
+            case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
+            case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
+            case "pricing" -> pricingJsonHandler.handle(action, request, region);
+            case "transcribe" -> transcribeJsonHandler.handle(action, request);
+            case "translate" -> translateJsonHandler.handle(action, request, region);
+            case "ce" -> costExplorerJsonHandler.handle(action, request, region);
+            case "cur" -> curJsonHandler.handle(action, request, region);
+            case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
+            case "config" -> configServiceJsonHandler.handle(action, request, region);
+            case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+            case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
+            case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
+            case "route53resolver" -> route53ResolverJsonHandler.handle(action, request, region, regionResolver.getAccountId());
+            case "cognito-identity" -> cognitoIdentityJsonHandler.handle(action, request, region);
+            // Global Accelerator is a global service: its resources carry an empty ARN region
+            // segment and are never partitioned by the region the caller signed with, so the
+            // handler takes no region.
+            case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request);
+            case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
+            case "network-firewall" -> networkFirewallJsonHandler.handle(
+                    action, request, region, regionResolver.getAccountId());
+            case "servicecatalog" -> serviceCatalogJsonHandler.handle(
+                    action, request, region, regionResolver.getAccountId());
+            case "cloudcontrol" -> cloudControlJsonHandler.handle(
+                                    action, request, region, regionResolver.getAccountId());
+            case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
+            // Organizations is global and account-scoped rather than region-scoped: every
+            // action is authorized against the calling account, so pass that instead of region.
+            case "organizations" ->
+                    organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
+            case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId(), region);
+            case "identitystore" -> identityStoreJsonHandler.handle(action, request);
+            case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
+            case "servicequotas" -> serviceQuotasJsonHandler.handle(
+                    action, request, region, regionResolver.getAccountId());
+            case "marketplace" -> {
+                if (targetMatch.prefix().startsWith("AWSMPEntitlementService.")) {
+                    yield marketplaceEntitlementController.handle(action, request, region);
+                }
+                yield targetMatch.prefix().startsWith("AWSMPMeteringService.")
+                        ? marketplaceMeteringController.handle(action, request, region) : null;
+            }
+            case "sagemaker" -> sageMakerJsonHandler.handle(action, request, region);
+            case "dms" -> dmsJsonHandler.handle(action, request, region);
+            default -> null;
+        };
     }
 
 }

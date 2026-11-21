@@ -184,16 +184,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        if (!attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
-            return;
-        }
-        for (String attr : List.of(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR,
-                CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR)) {
-            String snapshot = attempted.getAttributes().get(attr);
-            if (snapshot != null) {
-                previous.getAttributes().put(attr, snapshot);
-            }
-        }
+        CfnRollback.carryFailedUndoSnapshot(previous, attempted,
+                CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR,
+                CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
     }
 
     /**

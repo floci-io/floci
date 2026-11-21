@@ -409,10 +409,11 @@ floci:
     # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
     # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
     # (log follow and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS
-    # Exec session, EKS audit follower, user data script and EMR bootstrap action one; 2048 covers the
-    # 500 Lambda containers the runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
+    # Exec session, EKS audit follower, user data script and EMR bootstrap action one; 3072 covers the
+    # 500 Lambda containers the runtime API port range allows with two extensions each (2000) and
+    # leaves about 1000 for everything else. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 2048
+    streaming-max-connections: 3072
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
@@ -432,6 +433,18 @@ floci:
     # threads, written only while a pool is in use; 0 turns them off. Keep in step with the
     # @WithDefault on EmulatorConfig.DockerConfig.poolGaugeIntervalSeconds: a value set here WINS over the annotation.
     pool-gauge-interval-seconds: 60
+    # FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD: consecutive Docker call attempts (each retry counts)
+    # that fail at the transport before Floci pings the daemon and, if that fails too, fails every Docker call at once until the
+    # daemon answers; 0 turns this off. FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS: seconds between
+    # those pings. Keep both in step with the @WithDefault on EmulatorConfig.DockerConfig: a value set
+    # here WINS over the annotation.
+    breaker-failure-threshold: 3
+    breaker-probe-interval-seconds: 5
+    # FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES: most container creates and starts sent to the daemon at
+    # once; more wait up to connection-request-timeout-seconds for one to finish. 0 = twice the CPUs
+    # Floci sees, at least 4. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.maxConcurrentLaunches: a value set here WINS over the annotation.
+    max-concurrent-launches: 0
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -471,6 +484,7 @@ floci:
       stream-shard-rollover-seconds: 0     # FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS. 0: shards stay open.
       stream-iterator-expiry-enabled: false   # FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED. 15-minute iterators.
       stream-retention-enabled: false      # FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED. 24-hour records and shards.
+      stream-max-records: 1000             # FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS. Records kept per stream.
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
@@ -512,7 +526,7 @@ floci:
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       # code-volume-populate-concurrency:     # FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY — max concurrent first-time code-volume populates (default max(2, cpus/2), which a CPU-constrained container collapses to 2)
-      executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      executor: docker                        # docker | kubernetes (run Lambda environments as pods) | process (run provided.* bootstraps on this machine)
       durable-sweep-enabled: true             # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED - fire durable execution timers (waits, step retries, execution timeouts, retention)
       durable-sweep-interval-seconds: 1       # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS
       # kubernetes:

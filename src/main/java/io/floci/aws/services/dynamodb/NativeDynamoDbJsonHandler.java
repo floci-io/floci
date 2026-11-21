@@ -18,6 +18,7 @@ import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.RestoreOverride
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.TableSettings;
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.Throughput;
 import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
+import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.WarmThroughput;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
 import io.floci.aws.services.dynamodb.model.ContributorInsights;
@@ -83,9 +84,6 @@ public class NativeDynamoDbJsonHandler {
             List.of("OLD_IMAGE", "KEYS_ONLY", "NEW_AND_OLD_IMAGES", "NEW_IMAGE");
     private static final List<String> ATTRIBUTE_TYPES = List.of("B", "N", "S");
     private static final List<String> PROJECTION_TYPES = List.of("ALL", "INCLUDE", "KEYS_ONLY");
-    // The warm throughput a new on-demand table or index starts with.
-    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
-    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -151,6 +149,7 @@ public class NativeDynamoDbJsonHandler {
             case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
             case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
+            case "UpdateKinesisStreamingDestination" -> handleUpdateKinesisStreamingDestination(request, region);
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
             case "ExportTableToPointInTime" -> handleExportTable(request, region);
@@ -199,7 +198,14 @@ public class NativeDynamoDbJsonHandler {
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
         ObjectNode tableNode = tableToNode(table);
-        tableNode.remove("WarmThroughput");
+        reportRequestedWarmThroughput(tableNode, request);
+        JsonNode requestedGsis = request.path("GlobalSecondaryIndexes");
+        if (tableNode.has("GlobalSecondaryIndexes")) {
+            int position = 0;
+            for (JsonNode gsiNode : tableNode.get("GlobalSecondaryIndexes")) {
+                reportRequestedWarmThroughput((ObjectNode) gsiNode, requestedGsis.path(position++));
+            }
+        }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableNode);
         return Response.ok(response).build();
@@ -271,6 +277,9 @@ public class NativeDynamoDbJsonHandler {
                         gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
                     }
                 }
+                if (memberPrefix.isEmpty()) {
+                    setWarmThroughput(gsi, parseWarmThroughput(gsiNode.path("WarmThroughput")));
+                }
                 gsis.add(gsi);
             }
         }
@@ -321,7 +330,9 @@ public class NativeDynamoDbJsonHandler {
         }
 
         return tableService.createTable(new CreateTableRequest(tableName, keySchema, attrDefs,
-                throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request)), initialStatus, region);
+                throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request),
+                memberPrefix.isEmpty() ? parseWarmThroughput(request.path("WarmThroughput")) : null),
+                initialStatus, region);
     }
 
     /**
@@ -2020,6 +2031,7 @@ public class NativeDynamoDbJsonHandler {
                             newGsi.setOnDemandMaxWriteRequestUnits(newGsiOnDemand.get("MaxWriteRequestUnits").asInt());
                         }
                     }
+                    setWarmThroughput(newGsi, parseWarmThroughput(createNode.path("WarmThroughput")));
                     gsiCreates.add(newGsi);
                 }
                 JsonNode deleteNode = update.path("Delete");
@@ -2034,7 +2046,8 @@ public class NativeDynamoDbJsonHandler {
                             requireIndexName(updateNode,
                                     "globalSecondaryIndexUpdates." + updatePosition + ".member.update"),
                             gsiPt.isObject() ? parseThroughput(gsiPt) : null,
-                            parseOnDemandThroughput(updateNode.path("OnDemandThroughput"))));
+                            parseOnDemandThroughput(updateNode.path("OnDemandThroughput")),
+                            parseWarmThroughput(updateNode.path("WarmThroughput"))));
                 }
             }
         }
@@ -2065,6 +2078,11 @@ public class NativeDynamoDbJsonHandler {
                             "Cannot delete and update the same index: " + indexName, 400);
                 }
                 if (currentTable.findGsi(indexName).isEmpty()) {
+                    if (gsiUpdate.warmThroughput() != null && gsiUpdate.provisionedThroughput() == null
+                            && gsiUpdate.onDemandThroughput() == null) {
+                        // AWS answers a warm-only update of a missing index with InternalFailure.
+                        throw new AwsException("InternalFailure", null, 500);
+                    }
                     throw DynamoDbService.missingGsi(indexName, currentTable.getTableName());
                 }
             }
@@ -2104,10 +2122,13 @@ public class NativeDynamoDbJsonHandler {
 
         TableDefinition table = tableService.updateTable(new UpdateTableRequest(tableName,
                 throughput, newAttrDefs, gsiCreates, gsiDeletes, gsiThroughputUpdates, vectorCreates, vectorDeletes,
-                addRegions, removeRegions, updateRegions, parseTableSettings(request)), region);
+                addRegions, removeRegions, updateRegions, parseTableSettings(request),
+                parseWarmThroughput(request.path("WarmThroughput"))), region);
 
+        ObjectNode tableNode = tableToNode(table);
+        markWarmThroughputUpdating(tableNode, request);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", tableToNode(table));
+        response.set("TableDescription", tableNode);
         return Response.ok(response).build();
     }
 
@@ -3495,13 +3516,8 @@ public class NativeDynamoDbJsonHandler {
                 .path("ApproximateCreationDateTimePrecision");
         String precision = precisionNode.isMissingNode() || precisionNode.isNull()
                 ? KinesisStreamingDestination.PRECISION_MILLISECOND : precisionNode.asText();
-        if (!KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
-                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + precision
-                            + "' at 'enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [MILLISECOND, MICROSECOND]");
-        }
+        validateKinesisPrecision(precision,
+                "enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
 
         return Response.ok(kinesisDestinationResponse(
                 tableService.enableKinesisStreamingDestination(tableName, streamArn, precision, region))).build();
@@ -3513,6 +3529,51 @@ public class NativeDynamoDbJsonHandler {
 
         return Response.ok(kinesisDestinationResponse(
                 tableService.disableKinesisStreamingDestination(tableName, streamArn, region))).build();
+    }
+
+    private Response handleUpdateKinesisStreamingDestination(JsonNode request, String region) {
+        String tableName = kinesisUpdateString(request, "TableName", "tableName", 1);
+        String streamArn = kinesisUpdateString(request, "StreamArn", "streamArn", 37);
+        String precision = kinesisUpdatePrecision(request);
+        KinesisDestination result = tableService.updateKinesisStreamingDestination(
+                tableName, streamArn, precision, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("TableName", result.tableName());
+        response.put("StreamArn", result.streamArn());
+        response.put("DestinationStatus", result.destinationStatus());
+        response.putObject("UpdateKinesisStreamingConfiguration")
+                .put("ApproximateCreationDateTimePrecision", result.approximateCreationDateTimePrecision());
+        return Response.ok(response).build();
+    }
+
+    private static String kinesisUpdatePrecision(JsonNode request) {
+        JsonNode precisionNode = request.path("UpdateKinesisStreamingConfiguration")
+                .path("ApproximateCreationDateTimePrecision");
+        String precision = precisionNode.isMissingNode() || precisionNode.isNull() ? null : precisionNode.asText();
+        validateKinesisPrecision(precision,
+                "updateKinesisStreamingConfiguration.approximateCreationDateTimePrecision");
+        return precision;
+    }
+
+    private static void validateKinesisPrecision(String precision, String member) {
+        if (precision != null && !KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
+                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(precision, member,
+                    List.of(KinesisStreamingDestination.PRECISION_MILLISECOND,
+                            KinesisStreamingDestination.PRECISION_MICROSECOND)));
+        }
+    }
+
+    private static String kinesisUpdateString(JsonNode request, String member, String path, int minimumLength) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
+        }
+        String violation = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), minimumLength, 1024);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+        return value.asText();
     }
 
     /**
@@ -4086,16 +4147,71 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
+     * CreateTable describes a table or index's warm throughput only when the request gave one, and
+     * then only the members it gave, still UPDATING.
+     */
+    private void reportRequestedWarmThroughput(ObjectNode described, JsonNode requested) {
+        described.remove("WarmThroughput");
+        WarmThroughput warm = parseWarmThroughput(requested.path("WarmThroughput"));
+        if (warm == null || warm.isEmpty()) {
+            return;
+        }
+        ObjectNode reported = described.putObject("WarmThroughput");
+        if (warm.readUnitsPerSecond() != null) {
+            reported.put("ReadUnitsPerSecond", warm.readUnitsPerSecond());
+        }
+        if (warm.writeUnitsPerSecond() != null) {
+            reported.put("WriteUnitsPerSecond", warm.writeUnitsPerSecond());
+        }
+        reported.put("Status", "UPDATING");
+    }
+
+    /** UpdateTable reports UPDATING only for the table and indexes whose request carried a WarmThroughput. */
+    private static void markWarmThroughputUpdating(ObjectNode described, JsonNode request) {
+        if (request.path("WarmThroughput").isObject()) {
+            ((ObjectNode) described.get("WarmThroughput")).put("Status", "UPDATING");
+        }
+        Set<String> updatedIndexes = new HashSet<>();
+        for (JsonNode indexUpdate : request.path("GlobalSecondaryIndexUpdates")) {
+            for (String action : List.of("Create", "Update")) {
+                JsonNode node = indexUpdate.path(action);
+                WarmThroughput warm = parseWarmThroughput(node.path("WarmThroughput"));
+                if (warm != null && !warm.isEmpty()) {
+                    updatedIndexes.add(node.path("IndexName").asText());
+                }
+            }
+        }
+        for (JsonNode gsiNode : described.path("GlobalSecondaryIndexes")) {
+            if (updatedIndexes.contains(gsiNode.path("IndexName").asText())) {
+                ((ObjectNode) gsiNode.get("WarmThroughput")).put("Status", "UPDATING");
+            }
+        }
+    }
+
+    private static WarmThroughput parseWarmThroughput(JsonNode warm) {
+        if (!warm.isObject()) {
+            return null;
+        }
+        return new WarmThroughput(
+                warm.hasNonNull("ReadUnitsPerSecond") ? warm.get("ReadUnitsPerSecond").asLong() : null,
+                warm.hasNonNull("WriteUnitsPerSecond") ? warm.get("WriteUnitsPerSecond").asLong() : null);
+    }
+
+    private static void setWarmThroughput(GlobalSecondaryIndex gsi, WarmThroughput warm) {
+        if (warm != null) {
+            gsi.setWarmReadUnitsPerSecond(warm.readUnitsPerSecond());
+            gsi.setWarmWriteUnitsPerSecond(warm.writeUnitsPerSecond());
+        }
+    }
+
+    /**
      * AWS reports a provisioned index's warm throughput as its provisioned capacity, and an on-demand
      * one's as the values a new on-demand index starts with. An index is ACTIVE as soon as it exists here.
      */
     private ObjectNode gsiWarmThroughput(TableDefinition table, GlobalSecondaryIndex gsi) {
-        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
         ObjectNode warmThroughput = objectMapper.createObjectNode();
-        warmThroughput.put("ReadUnitsPerSecond",
-                onDemand ? ON_DEMAND_WARM_READ_UNITS : gsi.getProvisionedThroughput().getReadCapacityUnits());
-        warmThroughput.put("WriteUnitsPerSecond",
-                onDemand ? ON_DEMAND_WARM_WRITE_UNITS : gsi.getProvisionedThroughput().getWriteCapacityUnits());
+        warmThroughput.put("ReadUnitsPerSecond", table.gsiWarmReadUnits(gsi));
+        warmThroughput.put("WriteUnitsPerSecond", table.gsiWarmWriteUnits(gsi));
         warmThroughput.put("Status", "ACTIVE");
         return warmThroughput;
     }

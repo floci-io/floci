@@ -2332,8 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-DynamoDB, SSM, KMS, IAM, Resource Groups, EKS, API Gateway, CloudWatch Logs
-and STS. For Secrets Manager, Elastic Load Balancing, ECR,
+DynamoDB, SSM, KMS, IAM and API Gateway. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2341,7 +2340,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes and Aurora DSQL they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups and Amazon CloudWatch Logs they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2560,26 +2559,24 @@ came from. `ListQueues`, and `CancelMessageMoveTask`, whose `TaskHandle` names n
 `*`, so a grant scoped to a queue, or to the account's queues, does not allow cancelling a move task: it
 takes a grant on `*`.
 
-An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
-checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
-a cluster it does not hold, and `CreateCluster` against the cluster its body names, as the EKS user
-guide's example policy for creating a cluster grants it. A node group, Fargate profile, add-on,
-access entry or Pod Identity association route is checked against the ARN EKS holds that resource
-under, which ends in an id the request does not carry, so a policy names it with a wildcard, such as
-`nodegroup/<cluster>/<name>/*`; listing or creating them, and the other routes under a cluster, are
-checked against the cluster. A name holding an encoded `/` is read as one name, as EKS reads it.
-`DescribeUpdate` is checked against the add-on the update was made to, since the updates Floci keeps
-are its add-ons' and EKS returns one whether or not the request names its add-on, and otherwise
-against the cluster. An EKS tagging request is checked against the caller's own cluster named after
-the ARN's last `/`, whatever the ARN names before it, as EKS looks it up.
+An EKS request is checked on what the generated table reads from it, in the caller's account, where
+EKS looks everything up. A cluster route is checked against `cluster/<name>`, the name its path gives,
+and `CreateCluster` against the cluster its body names, from a measured entry quoting the EKS user
+guide's example policy for creating a cluster, as the Service Reference lists no resource type for it.
+A node group, add-on or Fargate profile, whose ARN ends in an id EKS minted, is checked against the ARN
+EKS holds it under, found by the names its path gives in the request's Region, or with its names open
+when EKS holds none; an access entry, Pod Identity association, identity provider config or capability
+is checked with the parts of its ARN the request does not give open, so a policy names it with a
+wildcard, such as `access-entry/<cluster>/*`. Listing or creating them, and the other routes under a
+cluster, are checked against the cluster. An EKS tagging request is checked against the ARN its
+`/tags/{resourceArn}` carries, and EKS tags the resource whose ARN is that whole ARN.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
-and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
-it is signed with. The ARN is
+and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
 whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
-serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty, Security Hub and EKS tag only on
 `/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
 encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
@@ -3036,6 +3033,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - Aurora DSQL cluster policies take part the same way for a control plane call on the cluster, and when a client connects to the cluster's endpoint. See [DSQL](dsql.md#authentication).
 - SQS queue policies take part the same way for a call on the queue; see [SQS](sqs.md#queue-policies-under-iam-enforcement).
 - EventBridge event bus policies, the statements `PutPermission` adds, take part the same way for a call on the bus; see [EventBridge](eventbridge.md#event-bus-policies-under-iam-enforcement).
+- A role's trust policy takes part the same way for `sts:AssumeRole` on the role, with the role as its resource: a trust policy names no `Resource`. It is not consulted for IAM actions on the role, such as `iam:GetRole` or `iam:PassRole`. See [STS trust policy enforcement](sts.md#trust-policy-enforcement).
 - API Gateway REST API policies are stored but not evaluated.
 - A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES and Lambda, when it reads the code of a Web Function revision from S3, are the services checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement) and [Lambda Web Functions](lambda-web-functions.md#emulation-behavior).
 
@@ -3089,19 +3087,22 @@ These identities always bypass enforcement (backward-compatible defaults):
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
-**CloudWatch Logs streams.** `logs:CreateLogStream` and `logs:DeleteLogStream` evaluate the
-specific log-stream ARN, so policies can allow or deny one stream within a group. Their
-`aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
-account and region. Both stream operations check the documented group and stream name constraints
+**CloudWatch Logs streams.** `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:PutLogEvents` and
+`logs:GetLogEvents` are checked on the log-stream ARN their group and stream names give, from the generated
+table, so policies can allow or deny one stream within a group. A stream ARN carries no
+`aws:ResourceTag/<key>`: Floci holds no tags on a stream, and nothing AWS publishes gives a stream its group's.
+`CreateLogStream` and `DeleteLogStream` check the documented group and stream name constraints
 before changing storage, preventing delimiter aliases from targeting another stream.
 These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
-**CloudWatch Logs groups.** `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy` and
-`DeleteRetentionPolicy` accept policy resources naming the selected group with a bare ARN
-or its legacy `:*` form. Both forms participate in each statement, including explicit denies
-and `NotResource`, without bypassing session, boundary or SCP ceilings. The three operations on
-existing groups read that group's resource tags; creation uses the request's `tags` for
+**CloudWatch Logs groups.** An operation on a log group, `FilterLogEvents`, `DescribeLogStreams`, metric and
+subscription filters and `StartQuery` among them, is checked on the group's bare ARN, as the Service Reference
+formats a log group, from the generated table. `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy`,
+`DeleteRetentionPolicy` and `TagLogGroup` also accept policy resources naming the selected group with its legacy
+`:*` form. Both forms participate in each statement, including explicit denies
+and `NotResource`, without bypassing session, boundary or SCP ceilings. An operation on an
+existing group reads that group's resource tags; creation uses the request's `tags` for
 `aws:RequestTag/<key>` and `aws:TagKeys`. Tagged creation additionally requires either
 `logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on either group ARN form.
 The group name constraints apply before mutation, and deletion preserves streams and filters
@@ -3109,22 +3110,24 @@ whose stored group identity belongs to another historical group. These four oper
 or `*` in a group name. Historical names remain taggable through the ARN tagging APIs below;
 they cannot be newly created or deleted through the group lifecycle APIs. Stored names are not migrated.
 
-**CloudWatch Logs ARN tagging.** For log groups, `logs:TagResource`, `logs:UntagResource`
-and `logs:ListTagsForResource` evaluate the group's ARN without a trailing `:*`. The ARN must
+**CloudWatch Logs ARN tagging.** `logs:TagResource`, `logs:UntagResource` and
+`logs:ListTagsForResource` are checked on the ARN their `resourceArn` carries, from the generated table, for each
+type the Service Reference gives them: a log group, a destination, a delivery source, a delivery destination or a
+delivery. For a log group the ARN must
 identify a group in the request's account, region and partition; a different owner or resource
 kind returns `ResourceNotFoundException` without reading or changing a local group's tags.
-All three actions use the group's existing `aws:ResourceTag/<key>` conditions. `TagResource`
+All three actions use the resource's existing `aws:ResourceTag/<key>` conditions. `TagResource`
 also provides `aws:RequestTag/<key>` and `aws:TagKeys`; `UntagResource` provides `aws:TagKeys`.
 An unauthorized request cannot partially add or remove tags. These ownership checks also apply
 when IAM enforcement is disabled. Shared tag mutations reject storage aliases whose stored group
 name differs from the requested name, without migrating historical records.
 
-This support covers log groups. Tagging destinations and other CloudWatch Logs resource types
-remains unsupported. Plain-name inputs are used literally, including incomplete prefixes such as
+The tag handlers also take a plain group name, used literally, including incomplete prefixes such as
 `arn:archive`; arbitrary `:log-group:` substrings never select a different group. Structurally complete
 ARNs take precedence over plain-name interpretation and must identify a local group. A trailing `:*`
 is accepted on a canonical local group ARN. These compatibility forms are not a claim that AWS accepts
-them for these APIs. Other Logs actions retain their existing wildcard resource evaluation.
+them for these APIs, and authorization reads `resourceArn` as AWS does: a plain name names nothing the
+table reads, so the call is checked on `*`, and a group ARN with a trailing `:*` is checked as written.
 
 **CloudWatch Logs account policies.** `PutAccountPolicy` also needs the action for the type of
 policy it creates, checked against `*` like `logs:PutAccountPolicy` itself: `logs:PutDataProtectionPolicy`
@@ -3504,9 +3507,7 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
   `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
-  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
-  `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
-  `logs:DeleteRetentionPolicy` use the owning log group's tags. Any other ARN a request is checked on
+  Any other ARN a request is checked on
   takes the resource-tag keys the generated `resourceTagKeys` table in `iam-request-resources.json` gives
   its type (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`), which `regen_iam_request_resources.py`
   reads from the Service Reference for every namespace it reads, valued from the tags the type's service
@@ -3537,8 +3538,11 @@ floci populates:
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
   Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
-  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes and
-  Aurora DSQL for its clusters. Tag keys differing only in case are one condition key holding every value.
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
+  Aurora DSQL for its clusters, EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
+  associations and access entries, Resource Groups for its groups, CloudWatch Logs for its log groups,
+  destinations, delivery sources, delivery destinations and deliveries, and Pricing Calculator for its workload
+  estimates. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3745,6 +3749,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `sts:RoleSessionName` and `sts:ExternalId`: the `RoleSessionName` and `ExternalId` an `AssumeRole` request
+  passes, as given, for the caller's identity-based policies, permissions boundary, session policy and SCPs, as
+  the role's trust policy reads them (see [STS](sts.md)); `sts:ExternalId` is absent when the request passes none.
+  The actions and request members come from the same `request-condition-keys.json`.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
+  evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
+  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

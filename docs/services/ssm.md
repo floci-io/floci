@@ -233,6 +233,11 @@ architectures and Kubernetes versions, so `GetParameter`, `GetParameters` and `G
 resolve them to the catalog's AMI ids. As on AWS they are read-only and belong to no account,
 so they do not appear in `DescribeParameters`.
 
+Each recommended EKS optimized AMI path also has a `recommended/release_version` leaf, which
+the EKS managed node group Terraform module reads by default. As on AWS its value is the
+Kubernetes patch version and the AMI build date, such as `1.34.1-20230315`: the patch version
+Floci runs for that Kubernetes version and the catalog image's creation date.
+
 Floci also answers the Amazon Linux 2023 ECS optimized AMI `recommended/image_id` and
 `recommended` parameters under `/aws/service/ecs/optimized-ami/`. The image ID points to
 the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON with the
@@ -246,6 +251,7 @@ and `20.04`/`focal` (amd64, `ebs-gp2`), each at `stable/current`.
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
+aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/release_version
 aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
 aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 ```

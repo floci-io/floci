@@ -92,7 +92,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("apiStages[0].apiId", equalTo("a1"))
                 .body("apiStages[0].stage", equalTo("v1"));
 
-        given().get("/usageplans")
+        given().queryParam("limit", 500).get("/usageplans")
                 .then()
                 .statusCode(200)
                 .body("item.find { it.id == '" + usagePlanId + "' }.apiStages[0].stage", equalTo("v1"));
@@ -261,7 +261,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .statusCode(200)
                 .body("tags", anEmptyMap());
 
-        given().get("/usageplans")
+        given().queryParam("limit", 500).get("/usageplans")
                 .then()
                 .statusCode(200)
                 .body("item.find { it.id == '" + usagePlanId + "' }", not(hasKey("tags")));
@@ -387,7 +387,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("Invalid API Stage specified"));
 
-        given().get("/usageplans")
+        given().queryParam("limit", 500).get("/usageplans")
                 .then()
                 .statusCode(200)
                 .body("item.findAll { it.name == 'stage-without-api' }", hasSize(0));
@@ -414,7 +414,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("Start of list found where not expected"));
 
-        given().get("/usageplans")
+        given().queryParam("limit", 500).get("/usageplans")
                 .then()
                 .statusCode(200)
                 .body("item.findAll { it.name == 'structured-stage' }", hasSize(0));
@@ -430,7 +430,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("class java.lang.String can not be converted to an Integer"));
 
-        given().get("/usageplans")
+        given().queryParam("limit", 500).get("/usageplans")
                 .then()
                 .statusCode(200)
                 .body("item.findAll { it.name == 'string-limit' }", hasSize(0));
@@ -714,7 +714,7 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
     }
 
     private static int planCount() {
-        return given().get("/usageplans").then().statusCode(200).extract().path("item.size()");
+        return given().queryParam("limit", 500).get("/usageplans").then().statusCode(200).extract().path("item.size()");
     }
 
     /** Posts {@code body}, expects a 400 of {@code type} with {@code message}, and that no plan was stored. */

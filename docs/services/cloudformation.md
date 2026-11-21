@@ -219,7 +219,7 @@ cross-resource references.
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
-| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version`, `ResourcesVpcConfig`, `Logging` or `AccessConfig` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion` or `UpdateClusterConfig`), `Nodegroup` (created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place) |
+| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack, for `Logging`, for `AccessConfig.AuthenticationMode` (a mode cannot be moved back, so a stack update that does so fails, and a stack rollback restores it) and for `ResourcesVpcConfig` endpoint access and `PublicAccessCidrs`; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion`; a change to the subnets or security groups of `ResourcesVpcConfig` fails the resource, as the emulator's `UpdateClusterConfig` does not change them), `Nodegroup` (created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place) |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `ReplicationGroup` (starts a real container; modifying an existing group in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
@@ -238,6 +238,7 @@ cross-resource references.
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
+| CodeDeploy | `Application` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolIdentityProvider` (Ref returns the ProviderName; changing only `ProviderType` is refused, as on AWS, because the name is always the template's and the replacement would need the same address), `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
@@ -257,7 +258,7 @@ cross-resource references.
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
 | Amazon Bedrock | `ApplicationInferenceProfile` (Ref returns the profile id; InferenceProfileArn and InferenceProfileId are available through GetAtt) |
-| Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
+| Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `StackSet`, `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
@@ -648,9 +649,11 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `CreateDBInstance` does, so `DescribeDBInstances` reports the declared groups and the encryption.
 
 - On `UpdateStack`, a changed `VPCSecurityGroups` moves the instance to the new groups in place, as
-  in AWS. A cluster member's groups are its cluster's, so an update whose template changes a
-  member's list fails with `InvalidParameterCombination` before anything changes, as RDS refuses
-  that change for a member. When the previous template declared groups and the new one does not, a
+  in AWS. A cluster member's groups are its cluster's, so an update that changes a member's list
+  fails with `InvalidParameterCombination` before the member changes, as RDS refuses that change for
+  a member. That includes a change made only through a parameter, or through a group the same
+  update replaces. A replaced security group is not rolled back yet, so that last update ends in
+  `UPDATE_ROLLBACK_FAILED`. When the previous template declared groups and the new one does not, a
   standalone instance is put on its VPC's default security group, as AWS's handler does; a cluster
   member, or an instance whose VPC has no default group, keeps its groups. While the template never
   declares groups, groups set outside the stack are kept.
@@ -663,8 +666,8 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   custom `DBInstanceIdentifier` cannot be replaced, so that update fails with a `ValidationError`, as
   in AWS. An instance created before Floci applied `StorageEncrypted` is unencrypted whatever its
   template said, and is replaced only by an update that changes the property. Its first update
-  reads the previous value from the previous template, resolved on that update, so a change made
-  only through a parameter, or anything else the update changes, is not seen there.
+  reads the previous value from the previous template, resolved with the parameters that deployment
+  had, so a change made only through a parameter replaces it too.
 - `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
 
 ## ELBv2 target group targets
@@ -929,6 +932,10 @@ to the template.
 `src/test/resources/cloudformation/drop-policy.tsv` lists what a drop does to each property, and
 `CfnSchemaCoverageTest` keeps the list complete. Other services follow
 [#6606](https://github.com/floci-io/floci/issues/6606).
+
+A type whose provisioner arm does not read the engine's property changes (`ctx.changes`) needs a row
+with a reason in `src/test/resources/cloudformation/change-exempt.tsv`, and `CfnSchemaCoverageTest`
+fails without it. A type that moves onto the changes must delete its row.
 
 When a later resource fails the update, the rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
 place back to the members it had, including the ones the update cleared. An API that had no

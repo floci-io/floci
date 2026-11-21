@@ -13,13 +13,19 @@ import java.util.stream.StreamSupport;
 /** Evaluates the federated principal and SAML action in a role trust policy. */
 @ApplicationScoped
 public class SAMLTrustPolicyEvaluator {
+    private static final String ROLE_SESSION_NAME_KEY = "sts:RoleSessionName";
     private final ObjectMapper mapper;
     @Inject
     public SAMLTrustPolicyEvaluator(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
-    public boolean allows(String document, String providerArn, Map<String, List<String>> claims) {
+    /**
+     * {@code roleSessionName} is the assertion's {@code RoleSessionName} attribute, which a policy
+     * reads as {@code sts:RoleSessionName}, or null when the assertion carries none.
+     */
+    public boolean allows(String document, String providerArn, Map<String, List<String>> claims,
+                          String roleSessionName) {
         try {
             JsonNode statements = mapper.readTree(document).path("Statement");
             if (!TrustPolicyStatements.wellFormed(statements)) {
@@ -28,7 +34,7 @@ public class SAMLTrustPolicyEvaluator {
             if (statements.isArray()) {
                 boolean allowed = false;
                 for (JsonNode statement : statements) {
-                    int result = evaluate(statement, providerArn, claims);
+                    int result = evaluate(statement, providerArn, claims, roleSessionName);
                     if (result < 0) {
                         return false;
                     }
@@ -38,21 +44,23 @@ public class SAMLTrustPolicyEvaluator {
                 }
                 return allowed;
             }
-            return statements.isObject() && evaluate(statements, providerArn, claims) > 0;
+            return statements.isObject() && evaluate(statements, providerArn, claims, roleSessionName) > 0;
         } catch (Exception e) {
             return false;
         }
     }
 
-    private int evaluate(JsonNode statement, String providerArn, Map<String, List<String>> claims) {
+    private int evaluate(JsonNode statement, String providerArn, Map<String, List<String>> claims,
+                         String roleSessionName) {
         if (!actionApplies(statement) || !principal(statement.path("Principal"), providerArn)
-                || !conditionsSatisfied(statement.get("Condition"), claims)) {
+                || !conditionsSatisfied(statement.get("Condition"), claims, roleSessionName)) {
             return 0;
         }
         return TrustPolicyStatements.denies(statement) ? -1 : 1;
     }
 
-    private boolean conditionsSatisfied(JsonNode condition, Map<String, List<String>> claims) {
+    private boolean conditionsSatisfied(JsonNode condition, Map<String, List<String>> claims,
+                                        String roleSessionName) {
         if (condition == null || condition.isNull()) {
             return true;
         }
@@ -68,10 +76,7 @@ public class SAMLTrustPolicyEvaluator {
             Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
-                String key = entry.getKey();
-                int colon = key.indexOf(':');
-                String claimName = colon < 0 ? key : key.substring(colon + 1);
-                List<String> actual = claims.getOrDefault(claimName, List.of());
+                List<String> actual = conditionValues(entry.getKey(), claims, roleSessionName);
                 List<String> expected = entry.getValue().isArray()
                         ? StreamSupport.stream(entry.getValue().spliterator(), false)
                                 .filter(JsonNode::isTextual).map(JsonNode::asText).toList()
@@ -85,6 +90,16 @@ public class SAMLTrustPolicyEvaluator {
             }
         }
         return true;
+    }
+
+    private static List<String> conditionValues(String key, Map<String, List<String>> claims,
+                                                String roleSessionName) {
+        if (ROLE_SESSION_NAME_KEY.equalsIgnoreCase(key)) {
+            return roleSessionName == null ? List.of() : List.of(roleSessionName);
+        }
+        int colon = key.indexOf(':');
+        String claimName = colon < 0 ? key : key.substring(colon + 1);
+        return claims.getOrDefault(claimName, List.of());
     }
 
     private boolean operatorMatches(String operator, List<String> actual, List<String> expected) {

@@ -60,9 +60,12 @@ import java.util.Optional;
  * Map, for the tags of a namespace or a service; Elastic Load Balancing, for the tags of a load balancer, a target
  * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
  * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
- * for the tags of a cluster); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
- * through {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on
- * that service directly.</p>
+ * for the tags of a cluster; EKS, for the tags of a cluster, a node group, a Fargate profile, an add-on, a Pod Identity
+ * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
+ * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
+ * delivery destination or a delivery; Pricing Calculator, for the tags of a workload estimate); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
@@ -165,9 +168,10 @@ public interface StoredResourceArns {
     /**
      * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
      * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
-     * to, a RAM invitation sent to the caller or a share another account owns), so a request naming it is checked on
-     * that ARN alone; false when that account holds no such resource. Whether the caller may use it is the handler's
-     * to answer after the check. Read by the ARN alone, as it runs on every such request.
+     * to, a RAM invitation sent to the caller, a share another account owns or a role STS assumes in its account), so
+     * a request naming it is checked on that ARN alone; false when that account holds no such resource. Whether the
+     * caller may use it is the handler's to answer after the check. Read by the ARN alone, as it runs on every such
+     * request.
      */
     default boolean reachedInItsAccount(String arn, String accountId) {
         return false;

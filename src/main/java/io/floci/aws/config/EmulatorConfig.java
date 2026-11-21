@@ -1724,6 +1724,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean streamRetentionEnabled();
 
+        /**
+         * The most records a DynamoDB stream of the native engine keeps across its shards; the oldest goes first.
+         * AWS limits a stream by age rather than by count, so raise this when a consumer can fall far behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS
+         */
+        @WithDefault("1000")
+        int streamMaxRecords();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
@@ -3693,7 +3701,9 @@ public interface EmulatorConfig {
         /**
          * Execution backend for Lambda environments: {@code docker} (default) runs each
          * environment as a Docker container, {@code kubernetes} runs it as a pod in the
-         * cluster Floci is configured against (in-cluster config or local kubeconfig).
+         * cluster Floci is configured against (in-cluster config or local kubeconfig), and
+         * {@code process} runs a {@code provided.*} function's bootstrap as a process on the
+         * machine Floci runs on, for local development without Docker.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_EXECUTOR
          */
@@ -4447,12 +4457,13 @@ public interface EmulatorConfig {
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.
          *
-         * <p>2048 covers the 500 containers the runtime API port range
+         * <p>3072 covers the 500 containers the runtime API port range
          * ({@link LambdaServiceConfig#runtimeApiBasePort}) allows, each with its log follow, its
-         * exit watcher and two extensions. Connections are opened on demand, so a small stack
-         * never approaches the limit.
+         * exit watcher and two extensions (2000), and leaves about 1000 for the other containers'
+         * log follows and the long-running commands above. Connections are opened on demand, so a
+         * small stack never approaches the limit.
          */
-        @WithDefault("2048")
+        @WithDefault("3072")
         int streamingMaxConnections();
 
         /**
@@ -4492,6 +4503,28 @@ public interface EmulatorConfig {
          */
         @WithDefault("60")
         int poolGaugeIntervalSeconds();
+
+        /**
+         * Consecutive Docker call attempts that must fail at the transport (an I/O error or an
+         * unusable socket, never an HTTP response) before Floci pings the daemon and, when the ping
+         * fails too, fails every Docker call at once until the daemon answers again. Each retry of a
+         * call is an attempt, so one call the retry layer replays can reach the threshold alone; the
+         * ping keeps that from opening the breaker over a daemon that answers. 0 turns this off.
+         */
+        @WithDefault("3")
+        int breakerFailureThreshold();
+
+        /** Seconds between the pings that check whether an unreachable Docker daemon is back. */
+        @WithDefault("5")
+        int breakerProbeIntervalSeconds();
+
+        /**
+         * Most container creates and starts sent to the Docker daemon at once; more wait, up to
+         * {@link #connectionRequestTimeoutSeconds}, for one to finish. 0 means twice the CPUs Floci
+         * sees, and at least 4. Image pulls, stops, removes and every other call are not limited here.
+         */
+        @WithDefault("0")
+        int maxConcurrentLaunches();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

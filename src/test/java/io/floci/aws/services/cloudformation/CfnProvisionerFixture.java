@@ -46,6 +46,7 @@ import io.floci.aws.services.cloudformation.provisioners.CloudTrailCfnProvisione
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.CodeDeployCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoIdentityProviderCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
@@ -132,6 +133,7 @@ import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.floci.aws.services.codedeploy.CodeDeployService;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.configservice.AwsConfigService;
 import io.floci.aws.services.docdb.DocDbService;
@@ -274,6 +276,7 @@ final class CfnProvisionerFixture {
         private Route53Service route53Service;
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
+        private CodeDeployService codeDeployService;
         private TransferService transferService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
@@ -557,6 +560,9 @@ final class CfnProvisionerFixture {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
                 discovered.add(new SchedulerScheduleCfnProvisioner(schedulerService));
             }
+            if (codeDeployService != null) {
+                discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
+            }
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
             }
@@ -779,6 +785,11 @@ final class CfnProvisionerFixture {
 
         public Builder scheduler(SchedulerService v) {
             this.schedulerService = v;
+            return this;
+        }
+
+        public Builder codeDeploy(CodeDeployService v) {
+            this.codeDeployService = v;
             return this;
         }
 

@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.XmlBuilder;
@@ -1450,6 +1451,7 @@ public class RdsQueryHandler {
             List<DbRoleAssociation> associatedRoles = parseAssociatedRoles(params);
             service.validateClusterRoleAssociations(id, engine, associatedRoles);
             boolean enableHttpEndpoint = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableHttpEndpoint"));
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             String globalCluster = params.getFirst("GlobalClusterIdentifier");
             if (enableHttpEndpoint && (globalCluster == null || globalCluster.isBlank())) {
                 // A global cluster's members take its Aurora engine; any other create names its own.
@@ -1461,33 +1463,27 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Integer requestedPort = parseIntegerParam(params, "Port");
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
+            boolean protectedCluster = Boolean.TRUE.equals(deletionProtection);
+            String[] windows = BackupWindows.effectiveWindows(true,
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"), null, null);
+            // parsed before any mutating call so a malformed value leaves no cluster behind
+            List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
+                    ? vpcSecurityGroupIds(params) : null;
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
-                cluster = requestedPort == null
-                    ? service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
-                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
-                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
-                    : service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
-                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
-                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
-                            requestedPort);
+                cluster = service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
+                        params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
+                        iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
+                        serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                        manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                        requestedPort, protectedCluster);
             } else {
-                cluster = requestedPort == null
-                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
-                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
-                            requestedPort);
+                cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
+                        masterPassword, databaseName, iamEnabled, paramGroupName,
+                        dbSubnetGroupName, availabilityZone, multiAz, region,
+                        serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                        manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                        requestedPort, protectedCluster);
             }
             Map<String, String> tags = parseTags(params);
             String kmsKeyId = params.getFirst("KmsKeyId");
@@ -1503,6 +1499,9 @@ public class RdsQueryHandler {
                 try {
                     cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
                 } catch (AwsException e) {
+                    if (protectedCluster) {
+                        service.setDeletionProtection(region, id, false);
+                    }
                     service.deleteDbCluster(id, region);
                     throw e;
                 }
@@ -1516,6 +1515,7 @@ public class RdsQueryHandler {
             if (copyTagsToSnapshot != null || exports != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, exports, null);
             }
+            cluster = service.setDbClusterRequestSettings(id, region, securityGroupIds, windows[0], windows[1]);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1632,9 +1632,26 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
-            if (Boolean.TRUE.equals(enableHttpEndpoint)) {
-                RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
+            DbCluster current;
+            try {
+                current = service.getDbCluster(id, region);
+            } catch (AwsException notFound) {
+                if (!"DBClusterNotFoundFault".equals(notFound.getErrorCode())) {
+                    throw notFound;
+                }
+                // AWS words a modify of a missing cluster this way, unlike the describe and delete paths
+                throw new AwsException("DBClusterNotFoundFault", "DBCluster not found", 404);
             }
+            if (Boolean.TRUE.equals(enableHttpEndpoint)) {
+                RdsService.requireDataApiEngine(current.getEngineIdentifier());
+            }
+            BackupWindows.effectiveWindows(false, params.getFirst("PreferredBackupWindow"),
+                    params.getFirst("PreferredMaintenanceWindow"), current.getPreferredBackupWindow(),
+                    current.getPreferredMaintenanceWindow());
+            // parsed before any mutating call so a malformed value changes nothing
+            List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
+                    ? vpcSecurityGroupIds(params) : null;
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,
@@ -1649,6 +1666,11 @@ public class RdsQueryHandler {
             }
             if (copyTagsToSnapshot != null || exportChanges != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, null, exportChanges);
+            }
+            cluster = service.setDbClusterRequestSettings(id, region, securityGroupIds,
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
+            if (deletionProtection != null) {
+                cluster = service.setDeletionProtection(region, id, deletionProtection);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3054,6 +3076,7 @@ public class RdsQueryHandler {
             return missing;
         }
         try {
+            RestoreSettings settings = RestoreSettings.parse(params);
             DbCluster cluster = service.restoreDbClusterToPointInTime(clusterId,
                     params.getFirst("SourceDBClusterIdentifier"), params.getFirst("SourceDbClusterResourceId"),
                     params.getFirst("RestoreType"),
@@ -3062,7 +3085,10 @@ public class RdsQueryHandler {
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                    params.getFirst("EngineMode"), parseTags(params), region);
+                    params.getFirst("EngineMode"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                    parseTags(params), region);
+            cluster = settings.applyTo(service, clusterId, region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
         } catch (AwsException e) {
@@ -3081,15 +3107,37 @@ public class RdsQueryHandler {
         if (missing != null) {
             return missing;
         }
-        DbCluster cluster = service.restoreDbClusterFromSnapshot(clusterId, snapshotId, engine,
-                params.getFirst("EngineVersion"), optionalInt(params.getFirst("Port")),
-                params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
-                params.getFirst("DBClusterParameterGroupName"),
-                params.getFirst("AvailabilityZones.member.1"),
-                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                params.getFirst("EngineMode"), parseTags(params), region);
-        return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
-                dbClusterXml(cluster))).build();
+        try {
+            RestoreSettings settings = RestoreSettings.parse(params);
+            service.restoreDbClusterFromSnapshot(clusterId, snapshotId, engine,
+                    params.getFirst("EngineVersion"), optionalInt(params.getFirst("Port")),
+                    params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
+                    params.getFirst("DBClusterParameterGroupName"),
+                    params.getFirst("AvailabilityZones.member.1"),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
+                    params.getFirst("EngineMode"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "DeletionProtection")),
+                    parseTags(params), region);
+            DbCluster cluster = settings.applyTo(service, clusterId, region);
+            return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
+                    dbClusterXml(cluster))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    /** What a cluster restore request says about security groups, and backup window. */
+    private record RestoreSettings(List<String> securityGroupIds, String[] windows) {
+        // parsed before the restore so a malformed value leaves no cluster behind
+        static RestoreSettings parse(MultivaluedMap<String, String> params) {
+            return new RestoreSettings(
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    BackupWindows.effectiveWindows(true, params.getFirst("PreferredBackupWindow"), null, null, null));
+        }
+
+        DbCluster applyTo(RdsService service, String id, String region) {
+            return service.setDbClusterRequestSettings(id, region, securityGroupIds, windows[0], windows[1]);
+        }
     }
 
     private Response handleDescribeDbClusterSnapshotAttributes(MultivaluedMap<String, String> params, String region) {
@@ -3548,8 +3596,12 @@ public class RdsQueryHandler {
         if (groupIds.isEmpty()) {
             groupIds = List.of("sg-00000000");
         }
+        return vpcSecurityGroupsXml(groupIds);
+    }
+
+    private String vpcSecurityGroupsXml(List<String> vpcSecurityGroupIds) {
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
-        for (String groupId : groupIds) {
+        for (String groupId : vpcSecurityGroupIds) {
             xml.start("VpcSecurityGroupMembership")
                     .elem("VpcSecurityGroupId", groupId)
                     .elem("Status", "active")
@@ -3691,17 +3743,15 @@ public class RdsQueryHandler {
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
+           .elem("DeletionProtection", c.isDeletionProtection())
            .elem("CopyTagsToSnapshot", c.isCopyTagsToSnapshot())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+           .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
         if (clusterParameterGroup != null) {

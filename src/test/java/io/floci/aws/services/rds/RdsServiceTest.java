@@ -1792,6 +1792,43 @@ class RdsServiceTest {
     }
 
     @Test
+    void clusterCreatedWithNoGroupsGetsTheVpcDefaultAndModifyOnlyStoresWhatItNames() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+        DbCluster created = rdsService.createDbCluster("sg-cluster", "aurora-postgresql", null,
+                "admin", "password", "dbname", false, null);
+        assertEquals(List.of("sg-default"), created.getVpcSecurityGroupIds());
+
+        // an unrelated Modify leaves a null-groups request alone
+        assertEquals(List.of("sg-default"), rdsService.setDbClusterRequestSettings(
+                "sg-cluster", "us-east-1", null, null, null).getVpcSecurityGroupIds());
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", List.of(), null, null);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+        // ... and does not re-assign the default to a cluster stored with no groups
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", null, null, null);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void restoredAndGlobalMemberClustersGetTheVpcDefaultGroup() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+
+        clusterSnapshotOfNewCluster("csnap");
+        assertEquals(List.of("sg-default"), rdsService.restoreDbClusterFromSnapshot("restored-sg", "csnap",
+                "aurora-postgresql", null, null, null, null, null, null, null, null, false, null, "us-east-1")
+                .getVpcSecurityGroupIds());
+
+        rdsService.createGlobalCluster("sg-global", null, "aurora-postgresql", "16.3",
+                "dbname", false, false, Map.of(), "us-east-1");
+        assertEquals(List.of("sg-default"), rdsService.createDbClusterInGlobalCluster("sg-global", "global-member",
+                "aurora-postgresql", null, "admin", "password", "dbname", false, null, null, null, false,
+                "us-east-1", null, null, null, false, null, null, false).getVpcSecurityGroupIds());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistPubliclyAccessible() {
         DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -3990,6 +4027,31 @@ class RdsServiceTest {
                 20, false, null, null, null);
 
         assertEquals("floci.local", instance.getEndpoint().address());
+    }
+
+    @Test
+    void dbProxyEndpointUsesConfiguredEndpointHostOnCreateAndRestore() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("db.local"));
+        StorageBackend<String, DbProxy> proxies = new InMemoryStorage<>();
+        StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups = new InMemoryStorage<>();
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver,
+                proxies, proxyTargetGroups);
+
+        DbProxy created = service.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertEquals("db.local", created.getEndpoint());
+
+        RdsService restarted = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver,
+                proxies, proxyTargetGroups);
+        restarted.restorePersistedRuntime();
+
+        assertEquals("db.local", restarted.getDbProxy("app-proxy").getEndpoint());
     }
 
     @Test
@@ -6465,7 +6527,7 @@ class RdsServiceTest {
 
         AwsException clusterFault = assertThrows(AwsException.class, () -> rdsService.restoreDbClusterToPointInTime(
                 "pitr-cluster-target", "pitr-cluster", null, null, null, true,
-                null, null, null, null, null, Map.of(), "us-east-1"));
+                null, null, null, null, null, false, Map.of(), "us-east-1"));
         assertEquals("InvalidDBClusterStateFault", clusterFault.getErrorCode());
         assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
                 () -> rdsService.getDbCluster("pitr-cluster-target")).getErrorCode());
@@ -7983,9 +8045,9 @@ class RdsServiceTest {
 
         DbCluster restored = "snapshot".equals(path)
                 ? rdsService.restoreDbClusterFromSnapshot("iam-restored", "iam-snapshot", "aurora-postgresql",
-                        null, null, null, null, null, null, requested, null, null, "us-east-1")
+                        null, null, null, null, null, null, requested, null, false, null, "us-east-1")
                 : rdsService.restoreDbClusterToPointInTime("iam-restored", "iam-source", null, null,
-                        null, true, null, null, null, requested, null, null, "us-east-1");
+                        null, true, null, null, null, requested, null, false, null, "us-east-1");
 
         assertEquals(expected, restored.isIamDatabaseAuthenticationEnabled());
         assertEquals(expected, rdsService.getDbCluster("iam-restored").isIamDatabaseAuthenticationEnabled());
@@ -8009,7 +8071,7 @@ class RdsServiceTest {
 
         // SnapshotIdentifier takes the ARN as well as the name, as aws_rds_cluster commonly passes it.
         DbCluster restored = rdsService.restoreDbClusterFromSnapshot("restored-cluster", copy.getDbClusterSnapshotArn(),
-                "aurora-postgresql", null, null, null, null, null, null, null, null, Map.of("env", "restore"), "us-east-1");
+                "aurora-postgresql", null, null, null, null, null, null, null, null, false, Map.of("env", "restore"), "us-east-1");
         assertEquals("restored-cluster", restored.getDbClusterIdentifier());
         assertEquals("admin", restored.getMasterUsername());
         assertEquals("dbname", restored.getDatabaseName());
@@ -8019,11 +8081,11 @@ class RdsServiceTest {
 
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("mysql-cluster", "csnap", "aurora-mysql",
-                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+                        null, null, null, null, null, null, null, null, false, null, "us-east-1")).getErrorCode());
         assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("other-cluster",
                         "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:absent", "aurora-postgresql",
-                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+                        null, null, null, null, null, null, null, null, false, null, "us-east-1")).getErrorCode());
 
         DbClusterSnapshot deleted = rdsService.deleteDbClusterSnapshot("csnap");
         assertEquals("deleted", deleted.getStatus());
@@ -8038,12 +8100,28 @@ class RdsServiceTest {
     }
 
     @Test
+    void failedProtectedClusterRestoreLeavesNoCluster() {
+        clusterSnapshotOfNewCluster("csnap");
+        doThrow(new RuntimeException("failed restore"))
+                .when(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("CLUSTER_DUMP"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> rdsService.restoreDbClusterFromSnapshot("restored-cluster", "csnap", "aurora-postgresql",
+                        null, null, null, null, null, null, null, null, true, null, "us-east-1"));
+
+        assertEquals("InvalidDBClusterSnapshotStateFault", failure.getErrorCode());
+        assertEquals(0, failure.getCause().getSuppressed().length);
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.getDbCluster("restored-cluster")).getErrorCode());
+    }
+
+    @Test
     void restoreClusterFromSnapshotUsesRequestedPortAndReleasesItOnDelete() {
         clusterSnapshotOfNewCluster("csnap");
 
         DbCluster restored = rdsService.restoreDbClusterFromSnapshot("restored-cluster", "csnap",
                 "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertEquals(7005, restored.getEndpoint().port());
         assertEquals(7005, restored.getProxyPort());
         assertEquals(7005, rdsService.getDbCluster("restored-cluster").getEndpoint().port());
@@ -8053,23 +8131,23 @@ class RdsServiceTest {
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("duplicate-port", "csnap",
                         "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                        null, "us-east-1")).getErrorCode());
+                        false, null, "us-east-1")).getErrorCode());
 
         DbCluster outsideRange = rdsService.restoreDbClusterFromSnapshot("outside-range", "csnap",
                 "aurora-postgresql", null, 5432, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertNotEquals(5432, outsideRange.getProxyPort());
         assertTrue(outsideRange.getProxyPort() >= 7000 && outsideRange.getProxyPort() <= 7099);
         assertNotEquals(restored.getProxyPort(), outsideRange.getProxyPort());
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
                 () -> rdsService.restoreDbClusterFromSnapshot("invalid-port", "csnap",
                         "aurora-postgresql", null, 1149, null, null, null, null, null, null,
-                        null, "us-east-1")).getErrorCode());
+                        false, null, "us-east-1")).getErrorCode());
 
         rdsService.deleteDbCluster("restored-cluster");
         DbCluster reused = rdsService.restoreDbClusterFromSnapshot("reused-port", "csnap",
                 "aurora-postgresql", null, 7005, null, null, null, null, null, null,
-                null, "us-east-1");
+                false, null, "us-east-1");
         assertEquals(7005, reused.getEndpoint().port());
     }
 

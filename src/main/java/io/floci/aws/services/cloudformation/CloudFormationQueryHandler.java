@@ -377,7 +377,7 @@ public class CloudFormationQueryHandler {
                    .elem("PhysicalResourceId", change.physicalResourceId())
                    .elem("ResourceType", change.resourceType())
                    .elem("Replacement", change.replacement())
-                   .raw("<Scope/><Details/>")
+                   .raw(scopeAndDetails(change))
                    .end("ResourceChange")
                    .end("member");
             }
@@ -390,6 +390,34 @@ public class CloudFormationQueryHandler {
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
+    }
+
+    private static String scopeAndDetails(CloudFormationService.ResourceChange change) {
+        XmlBuilder xml = new XmlBuilder();
+        if (change.scope().isEmpty()) {
+            xml.raw("<Scope/>");
+        } else {
+            xml.start("Scope");
+            change.scope().forEach(attribute -> xml.elem("member", attribute));
+            xml.end("Scope");
+        }
+        if (change.details().isEmpty()) {
+            return xml.raw("<Details/>").build();
+        }
+        xml.start("Details");
+        for (CloudFormationService.ChangeDetail detail : change.details()) {
+            xml.start("member")
+               .start("Target")
+               .elem("Attribute", detail.attribute())
+               .elem("Name", detail.name())
+               .elem("RequiresRecreation", detail.requiresRecreation())
+               .end("Target")
+               .elem("Evaluation", detail.evaluation())
+               .elem("ChangeSource", detail.changeSource())
+               .elem("CausingEntity", detail.causingEntity())
+               .end("member");
+        }
+        return xml.end("Details").build();
     }
 
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────

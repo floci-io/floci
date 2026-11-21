@@ -52,6 +52,22 @@ class RequestResourcesTest {
     };
 
     @Test
+    void detachFindsBothAttachmentEndpointsAndKeepsTypedMissingFallbacks() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.findByMembers("instance", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "instance/i-one"));
+        when(stored.findByMembers("network-interface", List.of("eni-attach-one"), "us-east-1"))
+                .thenReturn(Optional.of(prefix + "network-interface/eni-one"));
+        assertEquals(List.of(prefix + "instance/i-one", prefix + "network-interface/eni-one"),
+                of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one"), stored));
+        List<String> missing = List.of(prefix + "instance/*", prefix + "network-interface/*");
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-missing"), stored));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", form("AttachmentId=eni-attach-one")));
+        assertEquals(missing, of("ec2:DetachNetworkInterface", json("{\"AttachmentId\":\"eni-attach-missing\"}"), stored));
+    }
+
+    @Test
     void ec2ListsUseSdkWireNamesAndIgnoreForgedQuerySpellings() {
         String prefix = "arn:aws:ec2:us-east-1:000000000000:";
         List<String> expected = List.of(prefix + "network-interface/*", prefix + "security-group/sg-one",
@@ -61,6 +77,39 @@ class RequestResourcesTest {
                 + "&Groups.member.1=sg-forged&Groups.2=sg-forged&Groups=sg-forged")));
         assertEquals(expected, of("ec2:CreateNetworkInterface", json("""
                 {"SubnetId":"subnet-one","Groups":["sg-one","sg-two"]}
+                """)));
+    }
+
+    @Test
+    void vpcEndpointModificationChecksAddedAndRemovedResources() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "route-table/rtb-add", prefix + "security-group/sg-add",
+                prefix + "subnet/subnet-add", prefix + "vpc-endpoint/vpce-one",
+                prefix + "route-table/rtb-remove", prefix + "security-group/sg-remove",
+                prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", form("VpcEndpointId=vpce-one"
+                + "&AddRouteTableId.1=rtb-add&RemoveRouteTableId.1=rtb-remove"
+                + "&AddSecurityGroupId.1=sg-add&RemoveSecurityGroupId.1=sg-remove"
+                + "&AddSubnetId.1=subnet-add&RemoveSubnetId.1=subnet-remove")));
+        assertEquals(expected, of("ec2:ModifyVpcEndpoint", json("""
+                {"VpcEndpointId":"vpce-one","AddRouteTableIds":["rtb-add"],
+                 "RemoveRouteTableIds":["rtb-remove"],"AddSecurityGroupIds":["sg-add"],
+                 "RemoveSecurityGroupIds":["sg-remove"],"AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
+                """)));
+    }
+
+    @Test
+    void transitGatewayModificationChecksRemovedSubnetsWithItsDistinctWireSpelling() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "subnet/subnet-add",
+                prefix + "transit-gateway-attachment/tgw-attach-one", prefix + "subnet/subnet-remove");
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", form(
+                "TransitGatewayAttachmentId=tgw-attach-one&AddSubnetIds.1=subnet-add"
+                        + "&RemoveSubnetIds.1=subnet-remove&RemoveSubnetId.1=subnet-forged")));
+        assertEquals(expected, of("ec2:ModifyTransitGatewayVpcAttachment", json("""
+                {"TransitGatewayAttachmentId":"tgw-attach-one","AddSubnetIds":["subnet-add"],
+                 "RemoveSubnetIds":["subnet-remove"]}
                 """)));
     }
 
@@ -163,6 +212,35 @@ class RequestResourcesTest {
     }
 
     @Test
+    void endpointTagTargetsRetainTheCallerPartitionAndEachResource() throws Exception {
+        for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
+            List<String> expected = List.of(
+                    "arn:aws-us-gov:ec2:us-gov-west-1:111111111111:network-interface/eni-11111111",
+                    "*");
+            assertEquals(expected, RequestResources.ofBody(operation,
+                    new ObjectMapper().readTree("{\"Resources\":[\"eni-11111111\",\"vpce-22222222\"]}"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(expected, RequestResources.of(operation,
+                    form("ResourceId.1=eni-11111111&ResourceId.2=vpce-22222222"),
+                    "aws-us-gov", "us-gov-west-1", "111111111111", null));
+            assertEquals(List.of("*", "*"), of(operation,
+                    form("ResourceId.1=vpce-svc-22222222&ResourceId.2=eni-attach-11111111")));
+        }
+    }
+
+    @Test
+    void endpointDeletionReadsDistinctEndpointsUsingItsActualQueryListName() throws Exception {
+        List<String> expected = List.of(
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-11111111",
+                "arn:aws:ec2:us-east-1:000000000000:vpc-endpoint/vpce-22222222");
+        assertEquals(expected, of("ec2:DeleteVpcEndpoints", form("VpcEndpointId.1=vpce-11111111"
+                + "&VpcEndpointId.2=vpce-22222222&VpcEndpointId.3=vpce-11111111&ResourceId.1=vpce-33333333")));
+        assertEquals(expected, RequestResources.ofBody("ec2:DeleteVpcEndpoints", new ObjectMapper().readTree(
+                "{\"VpcEndpointIds\":[\"vpce-11111111\",\"vpce-22222222\",\"vpce-11111111\"]}"),
+                "aws", "us-east-1", "000000000000", null));
+    }
+
+    @Test
     void generatedIdTargetsReadModelListsAndSerializedQueryNamesInOrder() throws Exception {
         String instance = "arn:aws:ec2:us-east-1:000000000000:instance/i-one";
         for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
@@ -258,7 +336,8 @@ class RequestResourcesTest {
     /**
      * An ARN naming another account whose service acts on that account's resource for the caller (the sink an OAM
      * link is made to, a RAM invitation sent to it) is that resource alone, never the caller's of that name too; one
-     * the service holds no such resource under is still checked as the caller's own too.
+     * the service holds no such resource under is still checked as the caller's own too. The link {@code CreateLink}
+     * makes is the caller's.
      */
     @Test
     void anArnOfAnotherAccountItsServiceActsOnThereIsCheckedAsGivenAlone() {
@@ -267,13 +346,15 @@ class RequestResourcesTest {
         String link = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\"}";
         String accept = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
 
-        assertEquals(List.of(sink), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+        String made = "arn:aws:oam:us-east-1:000000000000:link/*";
+        assertEquals(List.of(sink, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
                 "000000000000", reaching("oam", sink)));
         assertEquals(List.of(invitation), RequestResources.of("ram:AcceptResourceShareInvitation", json(accept), "aws",
                 "us-east-1", "000000000000", reaching("ram", invitation)));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), RequestResources.of("oam:CreateLink",
-                json(link), "aws", "us-east-1", "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
-        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), of("oam:CreateLink", json(link)));
+        String own = "arn:aws:oam:us-east-1:000000000000:sink/abc";
+        assertEquals(List.of(sink, own, made), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+                "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
+        assertEquals(List.of(sink, own, made), of("oam:CreateLink", json(link)));
     }
 
     /**

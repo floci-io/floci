@@ -177,11 +177,18 @@ pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (defau
 unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). As in AWS, the
 first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` sets the
 first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
-past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
-function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
-five minutes. Deleting the function drops its pending retries without delivering a record, as AWS does.
+past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. Deleting the function
+drops its pending retries without delivering a record, as AWS does.
 
-When retries are exhausted or event age is exceeded:
+An event invoked while the function's concurrency is in use is still accepted with `202` and queued, as AWS
+does. An attempt that finds the concurrency in use waits for a permit without spending an attempt: it asks again
+after 1 second, and each further wait doubles, up to 30 seconds, until the event expires. The waits start over at
+1 second once an attempt runs. AWS backs off the same way up to 5 minutes; the lower cap notices a freed permit
+sooner locally. Under a reserved concurrency of `0`, an event is sent to the `OnFailure` destination or the
+dead-letter queue at once, without an attempt, as AWS does. Its failure record carries status `429` and a
+`TooManyRequestsException` response payload, which is Floci's own: AWS documents no content for it.
+
+When retries are exhausted, event age is exceeded, or the reserved concurrency is `0`:
 
 - If an `OnFailure` destination is configured, the failure record is delivered to the destination.
 - Otherwise, if a `DeadLetterConfig` (`TargetArn`) is configured on the function, the original request payload
@@ -482,8 +489,11 @@ disabled fails with Lambda's error as the resource status reason.
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced function-wide: invocations of every
     version and alias count against the function's reservation, and
-    invocations beyond the reserved value return `TooManyRequestsException`
-    (HTTP 429). Functions without a reserved value share a **per-region**
+    synchronous invocations beyond the reserved value return
+    `TooManyRequestsException` (HTTP 429). Asynchronous invocations beyond it
+    are accepted and queued until a permit frees; under a reservation of zero
+    they go to the failure destination without an attempt (see above).
+    Functions without a reserved value share a **per-region**
     pool. AWS Lambda's "account-level" limit is in fact a
     per-account-per-region quota, and Floci mirrors that by partitioning
     counters on the ARN's region segment. The pool size (default 1000) is
@@ -726,7 +736,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
-| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers), `kubernetes` (pods) or `process` (local processes, see [Process executor](#process-executor)) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR` | *(unset)* | Pod node selector as comma-separated `key=value` entries; an invalid entry fails the cold start to avoid scheduling the pod on unsupported nodes |
@@ -872,7 +882,9 @@ services:
 
 If mounting the Docker socket is not acceptable (for example on a hardened
 Kubernetes cluster), use the [Kubernetes executor](#kubernetes-executor)
-instead — it needs no privileged access and no socket.
+instead. It needs no privileged access and no socket. On a development
+machine without Docker, the [process executor](#process-executor) runs
+`provided.*` functions as local processes.
 
 ### Kubernetes executor
 
@@ -1039,6 +1051,61 @@ entries; only clients of the emulator itself use port 4566.
   namespace at startup; run multiple Floci instances in separate namespaces.
 - Layers published by Floci versions before this feature have no stored
   archive; re-publish them once to make them downloadable by pods.
+
+### Process executor
+
+Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=process` to run each Lambda execution
+environment as a process on the machine Floci runs on, without Docker. It
+follows the [custom runtime](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-custom.html)
+contract: Floci starts the package's `bootstrap` in the package directory, and
+the bootstrap polls the Lambda Runtime API at `AWS_LAMBDA_RUNTIME_API`. Each
+execution environment runs from its own copy of a .zip package, in the system
+temporary directory, so a code update does not change an environment that is
+already running. The copy is deleted when the environment stops.
+
+The process gets:
+
+- `AWS_LAMBDA_RUNTIME_API` on `127.0.0.1`, `_HANDLER`, `LAMBDA_TASK_ROOT` and
+  the other `AWS_LAMBDA_*` variables, as with the other executors.
+- `TZ=:UTC` and `LANG=en_US.UTF-8`, as Lambda sets them. The function's own
+  `Environment` can override both.
+- The function's `Environment` variables, and an AWS SDK endpoint and region
+  pointing at Floci. A function whose execution role Floci knows gets that
+  role's credentials, as with the docker executor.
+- `PATH` from Floci's own environment. No other variable is passed, so Floci's
+  own environment variables, credentials included, do not reach the function.
+  The process can still read anything your user can, such as `~/.aws`.
+
+Its output goes to Floci's log and the function's CloudWatch Logs stream, one
+event per line, with lines longer than 256 KB split into several events.
+Hot-reload functions run from their host directory directly.
+
+The process runs with the permissions of the user Floci runs as, with no
+isolation and no memory limit, so this executor is meant for local
+development only.
+
+Limitations:
+
+- Only `provided.*` runtimes from a .zip package or a hot-reload directory are
+  supported. Other runtimes, container images, functions with layers and
+  functions that mount a file system fail to launch with a clear error.
+- The bootstrap in a .zip package's copy is made executable when it starts,
+  since Floci does not keep file modes when it extracts a package. Other files
+  in the package keep the modes extraction gave them. A hot-reload bootstrap must
+  already be executable.
+- Floci refuses to start with this executor when it runs inside a container,
+  where the processes would run in that container instead of on your machine.
+- Invocations with `LogType=Tail` return no log tail.
+- The bootstrap runs on Linux and macOS only, and must be built for the
+  machine Floci runs on: a binary built for Lambda's Linux runs only on a
+  Linux host of the same architecture. The function's `Architectures` is
+  ignored.
+- Stopping an environment stops its bootstrap and the processes it started.
+  Processes a bootstrap left behind after it exited on its own are not
+  tracked and keep running until you stop them, and so are bootstraps still
+  running when Floci itself is killed, along with their code copies. Nothing
+  removes them when Floci starts again, as the Docker and Kubernetes executors
+  do for their leftovers.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 

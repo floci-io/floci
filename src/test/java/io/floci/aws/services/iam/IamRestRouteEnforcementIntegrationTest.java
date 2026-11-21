@@ -315,17 +315,33 @@ class IamRestRouteEnforcementIntegrationTest {
         as(user, "eks").get(path).then().statusCode(200).body("nodegroup.nodegroupArn", equalTo(nodegroup));
     }
 
+    /** A resource-tag condition reads the tags EKS holds on the cluster a request names. */
+    @Test
+    void anEksResourceTagConditionReadsTheTagsOfTheCluster() {
+        String tagged = "route-eks-data-" + suffix();
+        String other = "route-eks-web-" + suffix();
+        eksCluster(tagged, "{\"team\":\"data\"}");
+        eksCluster(other, "{\"team\":\"web\"}");
+        String user = user("route-eks-tags");
+
+        policy(user, onTeam("Allow", "eks:DescribeCluster", "data"));
+        request(user, "eks", "GET", "/clusters/" + tagged, null).statusCode(200);
+        refused(request(user, "eks", "GET", "/clusters/" + other, null), "eks:DescribeCluster");
+    }
+
     @Test
     void deletedEksAddonRemainsAuthorizedForItsScopedDescribeWaiter() {
         String name = "addon-waiter-" + suffix();
-        eksCluster(name);
+        String cluster = eksCluster(name);
         String base = "/clusters/" + name + "/addons";
         String arn = eks().body("{\"addonName\":\"vpc-cni\"}").post(base).then().statusCode(200)
                 .extract().path("addon.addonArn");
         String user = "addon-waiter-user-" + suffix();
         EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
                 cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
-        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
+        // The Service Reference lists the cluster's Pod Identity associations for DeleteAddon, beside the add-on.
+        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn) + ","
+                + allow("eks:DeleteAddon", cluster.replace(":cluster/", ":podidentityassociation/") + "/*"));
         try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
                 credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
             assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
@@ -370,13 +386,15 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void eachResourceAnEksClusterHoldsIsCheckedAgainstTheArnEksHoldsItUnder() {
-        // Each is looked up as EKS looks it up, so a Deny on its own ARN applies where the action is allowed
-        // on every resource, and a grant on that ARN alone covers it.
+    void eachResourceAnEksClusterHoldsIsCheckedAsTheGeneratedTableReadsIt() {
+        // A Fargate profile and an add-on, whose ARNs end in an id EKS minted, are found as EKS finds them, so a Deny
+        // on their own ARN applies where the action is allowed on every resource, and a grant on that ARN alone
+        // covers them. An update is checked on its cluster, and an access entry or a Pod Identity association with the
+        // parts of its ARN the request does not give open, so a policy names those with a wildcard.
         String user = user("route-eks-held");
         String name = "route-held-" + suffix();
         String base = "/clusters/" + name;
-        eksCluster(name);
+        String cluster = eksCluster(name);
         String role = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", "route-held-" + suffix(),
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow("s3:*", "*") + "]}");
         String profile = eks().body("{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"" + role + "\"}")
@@ -387,20 +405,19 @@ class IamRestRouteEnforcementIntegrationTest {
                 .extract().path("addon.addonArn");
         String update = eks().body("{}").post(base + "/addons/vpc-cni/update").then().statusCode(200)
                 .extract().path("update.id");
-        String entry = eks().body("{\"principalArn\":\"" + role + "\"}").post(base + "/access-entries").then()
-                .statusCode(200).extract().path("accessEntry.accessEntryArn");
+        eks().body("{\"principalArn\":\"" + role + "\"}").post(base + "/access-entries").then().statusCode(200);
         String association = eks().body("{\"namespace\":\"default\",\"serviceAccount\":\"app\",\"roleArn\":\"" + role
                 + "\"}").post(base + "/pod-identity-associations").then().statusCode(200)
                 .extract().path("association.associationArn");
         String[][] routes = {
             {"eks:DescribeFargateProfile", base + "/fargate-profiles/fp", profile},
             {"eks:DescribeAddon", base + "/addons/vpc-cni", addon},
-            // EKS returns an add-on's update without its addonName, so the update is its add-on's.
-            {"eks:DescribeUpdate", base + "/updates/" + update, addon},
-            {"eks:DescribeAccessEntry", base + "/access-entries/" + encoded(role), entry},
+            {"eks:DescribeUpdate", base + "/updates/" + update, cluster},
+            {"eks:DescribeAccessEntry", base + "/access-entries/" + encoded(role),
+                cluster.replace(":cluster/", ":access-entry/") + "/*"},
             {"eks:DescribePodIdentityAssociation",
                 base + "/pod-identity-associations/" + association.substring(association.lastIndexOf('/') + 1),
-                association},
+                cluster.replace(":cluster/", ":podidentityassociation/") + "/*"},
         };
         for (String[] route : routes) {
             policy(user, allow(route[0], "*") + "," + deny(route[0], route[2]));
@@ -432,8 +449,9 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void anEksAccessEntrysPolicyRoutesAreCheckedAsTheirOwnActionsOnTheEntry() {
-        // Associating, listing and disassociating an entry's access policies act on that entry, so a grant on
-        // another entry does not cover them, and one on the entry's own ARN does.
+        // Associating, listing and disassociating an entry's access policies act on the cluster's entries, the parts
+        // of an entry's ARN the request does not give open, so a grant on another cluster's entries does not cover
+        // them, and one on this cluster's does.
         String user = user("route-eks-entry");
         String name = "route-entry-" + suffix();
         String base = "/clusters/" + name + "/access-entries";
@@ -445,8 +463,9 @@ class IamRestRouteEnforcementIntegrationTest {
                 "route-other-" + suffix(), trust);
         String entry = eks().body("{\"principalArn\":\"" + role + "\"}").post(base).then().statusCode(200)
                 .extract().path("accessEntry.accessEntryArn");
-        String other = eks().body("{\"principalArn\":\"" + otherRole + "\"}").post(base).then().statusCode(200)
-                .extract().path("accessEntry.accessEntryArn");
+        eks().body("{\"principalArn\":\"" + otherRole + "\"}").post(base).then().statusCode(200);
+        String entries = entry.substring(0, entry.indexOf(":access-entry/")) + ":access-entry/" + name + "/*";
+        String other = entries.replace("/" + name + "/", "/" + name + "-other/");
         String policies = base + "/" + encoded(role) + "/access-policies";
         String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
         String associate = "{\"policyArn\":\"" + admin + "\",\"accessScope\":{\"type\":\"cluster\"}}";
@@ -460,7 +479,7 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then(),
                 "eks:DisassociateAccessPolicy");
 
-        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entry + "\"}");
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entries + "\"}");
         as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then().statusCode(200);
         as(user, "eks").urlEncodingEnabled(false).get(policies).then().statusCode(200)
                 .body("associatedAccessPolicies[0].policyArn", equalTo(admin));
@@ -472,19 +491,24 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void eksTaggingIsCheckedAgainstTheCallersClusterOfThatName() {
-        // EKS tags the caller's own cluster named after the ARN's last /, whatever account the ARN names, so a
-        // grant on another account's cluster of that name does not cover it, and one on the caller's own does.
+    void eksTaggingIsCheckedOnTheArnItCarriesAndTagsOnlyThatResource() {
+        // A tagging request is checked on the ARN its modeled route carries, and on the caller's resource of that name
+        // when the ARN names another account; EKS tags only the resource whose ARN is the whole ARN, so another
+        // account's ARN tags nothing.
         String user = user("route-eks-tags");
         String cluster = eksCluster("route-tagged-" + suffix());
         String foreign = cluster.replace(ACCOUNT, "111122223333");
         String body = "{\"tags\":{\"team\":\"a\"}}";
 
         policy(user, allow("eks:TagResource", foreign));
-        refused(as(user, "eks").body(body).post("/tags/" + foreign).then(), "eks:TagResource");
+        refused(as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(foreign)).then(),
+                "eks:TagResource");
+        policy(user, allow("eks:TagResource", foreign) + "," + allow("eks:TagResource", cluster));
+        as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(foreign)).then().statusCode(404);
         policy(user, allow("eks:TagResource", cluster));
-        as(user, "eks").body(body).post("/tags/" + foreign).then().statusCode(not(403));
-        eks().get("/tags/" + cluster).then().statusCode(200).body("tags.team", equalTo("a"));
+        as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(cluster)).then().statusCode(200);
+        eks().urlEncodingEnabled(false).get("/tags/" + encoded(cluster)).then().statusCode(200)
+                .body("tags.team", equalTo("a"));
     }
 
     @Test
@@ -525,8 +549,13 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its ARN. */
     private String eksCluster(String name) {
+        return eksCluster(name, "{}");
+    }
+
+    /** A cluster an administrator creates with {@code tags}, a JSON map, removed afterwards; its ARN. */
+    private String eksCluster(String name, String tags) {
         String arn = eks().body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT
-                + ":role/route-cluster\",\"accessConfig\":{\"authenticationMode\":\"API\"}}")
+                + ":role/route-cluster\",\"accessConfig\":{\"authenticationMode\":\"API\"},\"tags\":" + tags + "}")
                 .post("/clusters").then().statusCode(200).extract().path("cluster.arn");
         cleanup.register(() -> eks().delete("/clusters/" + name));
         return arn;
@@ -1561,13 +1590,17 @@ class IamRestRouteEnforcementIntegrationTest {
         String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
                 + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
 
+        String links = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/*";
+
         // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
-        // own is no grant on it.
-        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        // own is no grant on it. The link it makes is the caller's, and is checked too.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)) + "," + allow(action, links));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, "*") + "," + deny(action, sink));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink) + "," + allow(action, links));
         String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
         cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
     }

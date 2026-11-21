@@ -32,6 +32,10 @@ public class DbCluster {
     private String parameterGroupName;
     private String dbSubnetGroupName;
     private String vpcId;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    // Null until a request names them; the emitted XML then falls back to the defaults.
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -48,6 +52,7 @@ public class DbCluster {
     private String engineMode;
     private boolean storageEncrypted;
     private int backupRetentionPeriod = 1;
+    private boolean deletionProtection;
     private boolean copyTagsToSnapshot;
     private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
     private String kmsKeyId;
@@ -162,6 +167,19 @@ public class DbCluster {
     public boolean isMultiAz() { return multiAz; }
     public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
 
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
+        this.vpcSecurityGroupIds = vpcSecurityGroupIds != null ? new ArrayList<>(vpcSecurityGroupIds) : new ArrayList<>();
+    }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) {
+        this.preferredMaintenanceWindow = preferredMaintenanceWindow;
+    }
+
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {
         this.subnetAvailabilityZones = subnetAvailabilityZones != null
@@ -211,6 +229,9 @@ public class DbCluster {
 
     public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
     public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }

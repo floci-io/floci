@@ -97,8 +97,8 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
-| `DeleteDBCluster` | Delete a cluster |
-| `ModifyDBCluster` | Update cluster settings |
+| `DeleteDBCluster` | Delete a cluster; refused with `InvalidParameterCombination` while deletion protection is on |
+| `ModifyDBCluster` | Update cluster settings, including deletion protection |
 | `CreateDBParameterGroup` | Create a parameter group |
 | `DescribeDBParameterGroups` | List parameter groups |
 | `DeleteDBParameterGroup` | Delete a parameter group |
@@ -187,6 +187,19 @@ usual default, a 30-minute window starting where the given one ends); a window g
 checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
 
+`CreateDBCluster` and `ModifyDBCluster` store `VpcSecurityGroupIds` (a cluster given none gets its
+VPC's default security group), `PreferredBackupWindow` and `PreferredMaintenanceWindow`. Windows are
+checked like an instance's and the maintenance window is returned with lowercase day names.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds` and
+`PreferredBackupWindow` the same way, and a restored cluster given no group is put in its VPC's
+default security group.
+`AWS::RDS::DBCluster` applies `VpcSecurityGroupIds`, `PreferredBackupWindow` and
+`PreferredMaintenanceWindow` the same way, and a cluster whose template names no groups gets its VPC's
+default security group. `ModifyDBCluster` leaves the groups alone unless it names them.
+A CloudFormation update that drops `VpcSecurityGroupIds` the previous template declared puts the
+cluster back on its VPC's default security group, as AWS does; groups the stack never declared are left
+alone, and `DeletionProtection` and the two windows keep their stored values.
+
 !!! note "Stopping and starting"
 
     `StopDBInstance` and `StopDBCluster` follow the user guide: the response reports `stopping`
@@ -234,10 +247,12 @@ checked against the instance's other window. Modifications apply immediately —
 
 ## Cluster settings read-back
 
-`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot` and the enabled
-CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration` enable
-and disable deltas; omitted fields preserve their values, including an explicit
+`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot`, `DeletionProtection`
+and the enabled CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration`
+enable and disable deltas; omitted fields preserve their values, including an explicit
 false snapshot-copy flag. Create, modify and describe return the stored settings.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` also set `DeletionProtection`
+on the new cluster, defaulting to false.
 
 Aurora member instances retain `PromotionTier` from create and modify, defaulting
 to 1 and accepting 0 through 15. Both the instance response and the cluster member

@@ -119,7 +119,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body(body("nope", FROM, "x", "https://example.com/ok"))
         .when().put(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test
@@ -136,7 +137,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void deleteMissing_throwsNotFound() {
         given().header("Authorization", AUTH)
         .when().delete(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test

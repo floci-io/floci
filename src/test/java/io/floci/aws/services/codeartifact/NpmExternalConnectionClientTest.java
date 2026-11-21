@@ -80,44 +80,41 @@ class NpmExternalConnectionClientTest {
         byte[] content = "{\"name\":\"widget\"}".getBytes(StandardCharsets.UTF_8);
         when(response.statusCode()).thenReturn(200);
         when(response.body()).thenReturn(new ByteArrayInputStream(content));
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+        when(anySend(transport))
                 .thenThrow(new IOException("Connection reset"))
                 .thenReturn(response);
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         Optional<NpmExternalConnectionClient.FetchedAsset> result =
                 retryClient.fetchPackument("fake", null, "widget");
 
         assertTrue(result.isPresent());
         assertArrayEquals(content, result.get().content());
-        verify(transport, times(2)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        anySend(verify(transport, times(2)));
     }
 
     @Test
     void fetchPackumentDoesNotRetryARequestTimeout() throws Exception {
         HttpClient transport = mock(HttpClient.class);
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+        when(anySend(transport))
                 .thenThrow(new HttpTimeoutException("request timed out"));
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
 
-        verify(transport).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        anySend(verify(transport));
     }
 
     @Test
     void fetchPackumentStopsAfterTwoFailedTransportAttempts() throws Exception {
         HttpClient transport = mock(HttpClient.class);
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+        when(anySend(transport))
                 .thenThrow(new IOException("Connection reset"));
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
 
-        verify(transport, times(2)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        anySend(verify(transport, times(2)));
     }
 
     @Test
@@ -126,13 +123,12 @@ class NpmExternalConnectionClientTest {
         HttpResponse<InputStream> response = mock(HttpResponse.class);
         when(response.statusCode()).thenReturn(404);
         when(response.body()).thenReturn(new ByteArrayInputStream(new byte[0]));
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenReturn(response);
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        when(anySend(transport)).thenReturn(response);
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
 
-        verify(transport).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        anySend(verify(transport));
     }
 
     @Test
@@ -143,28 +139,26 @@ class NpmExternalConnectionClientTest {
         when(response.statusCode()).thenReturn(200);
         when(response.body()).thenReturn(body);
         when(body.transferTo(any())).thenThrow(new IOException("Connection reset while reading"));
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenReturn(response);
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        when(anySend(transport)).thenReturn(response);
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
 
-        verify(transport).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        anySend(verify(transport));
         verify(body).close();
     }
 
     @Test
     void fetchPackumentPreservesInterruptionWithoutRetrying() throws Exception {
         HttpClient transport = mock(HttpClient.class);
-        when(transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+        when(anySend(transport))
                 .thenThrow(new InterruptedException("cancelled"));
-        NpmExternalConnectionClient retryClient =
-                new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+        NpmExternalConnectionClient retryClient = clientWithTransport(transport);
 
         try {
             assertTrue(retryClient.fetchPackument("fake", null, "widget").isEmpty());
             assertTrue(Thread.currentThread().isInterrupted());
-            verify(transport).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+            anySend(verify(transport));
         } finally {
             Thread.interrupted();
         }
@@ -297,6 +291,14 @@ class NpmExternalConnectionClientTest {
                 client.fetchTarball("public:npmjs", null, "widget", "1.0.0");
 
         assertFalse(result.isPresent());
+    }
+
+    private static NpmExternalConnectionClient clientWithTransport(HttpClient transport) {
+        return new NpmExternalConnectionClient(transport, Map.of("fake", "http://127.0.0.1"));
+    }
+
+    private static HttpResponse<InputStream> anySend(HttpClient transport) throws IOException, InterruptedException {
+        return transport.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
     }
 
     private static void respondEmpty(HttpExchange exchange, int status) throws IOException {

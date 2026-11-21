@@ -505,6 +505,26 @@ public final class CfnRollback {
     }
 
     /**
+     * Carries the snapshot of an in-place update whose own undo did not complete onto the previous
+     * resource the engine restores, for a provisioner's {@code mergeFailedUpdateResourceTracking}:
+     * with the state the update started from, a ContinueUpdateRollback tries the restore again
+     * instead of finding nothing to undo. An undo that completed spent its snapshot and left no
+     * {@link #UPDATE_ROLLBACK_FAILURE_ATTR}, so nothing is carried.
+     */
+    public static void carryFailedUndoSnapshot(StackResource previous, StackResource attempted,
+                                               String... snapshotAttrs) {
+        if (!attempted.getAttributes().containsKey(UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            return;
+        }
+        for (String attr : snapshotAttrs) {
+            String snapshot = attempted.getAttributes().get(attr);
+            if (snapshot != null) {
+                previous.getAttributes().put(attr, snapshot);
+            }
+        }
+    }
+
+    /**
      * Runs the steps that follow a create or change a reused entity in place. If one of them
      * throws, what this provision did is undone before the failure propagates: a created entity is
      * deleted again by {@code undoCreate}, a reused one is put back by {@code undoInPlace}, which

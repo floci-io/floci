@@ -2,6 +2,8 @@ package io.floci.aws.services.emrserverless;
 
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.ConflictException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -52,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -482,6 +485,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final Map<String, SparkExecutors.Capacity> capacities = new ConcurrentHashMap<>();
     // Where Floci reaches the Spark UI of each EMR Serverless Spark run's driver, by run, while its container runs.
     private final Map<String, ContainerLifecycleManager.EndpointInfo> driverUis = new ConcurrentHashMap<>();
+    // The runs asked to interrupt their driver, which the thread watching each sends it SIGTERM for.
+    private final Set<String> interrupts = ConcurrentHashMap.newKeySet();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -556,6 +561,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job, progress))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(environment(awsEnvironment, job.environment()));
+            if (job.interruptible()) {
+                container.withInit();
+            }
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
                 List<String> hive = hiveArguments(job, endpoint, executorEnvironment);
@@ -712,6 +720,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             return Outcome.couldNotStart(e.getMessage());
         } finally {
             driverUis.remove(job.runId());
+            interrupts.remove(job.runId());
             // The executors go with their driver, however the run ended, and their workers' share of the
             // application's capacity with them.
             if (executors != null) {
@@ -722,6 +731,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             String unclaimed = launches.end(job.runId(), launch);
             if (unclaimed != null) {
+                killInterruptible(job, unclaimed);
                 lifecycleManager.stopAndRemove(unclaimed, logHandle, STOP_TIMEOUT_SECONDS);
             } else if (logHandle != null) {
                 // Floci's teardown claimed the driver, but the log stream is still this run's to close.
@@ -760,6 +770,50 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // run() reads it once the driver's container is up and at each look at the driver after, and
             // removes the driver itself: a stop makes no Docker call, so no Docker error can lose it.
             launch.requestStop();
+        }
+    }
+
+    /**
+     * Asks the thread watching the run's running driver to send its container SIGTERM, which the container's init
+     * process passes on to the driver ({@link Job#asInterruptible}), and to let the run end as the driver does. Like
+     * {@link #stop}, it makes no Docker call, so the caller is never held up by Docker. A run whose driver has not
+     * started yet is not interrupted here: its caller reports it cancelled until then.
+     */
+    @Override
+    public void interrupt(String runId) {
+        if (launches.get(runId) != null) {
+            interrupts.add(runId);
+        }
+    }
+
+    // Sends the driver's container SIGTERM; one Docker cannot send it to is stopped instead, so the run still ends.
+    private void sendSigterm(String containerId, Job job, ContainerLaunches.Launch launch) {
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).withSignal("SIGTERM").exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: the next look finds it ended.
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not send SIGTERM to the driver of Spark run {0}; stopping it", job.runId());
+            launch.requestStop();
+        }
+    }
+
+    /**
+     * Sends an interruptible job's driver container SIGKILL, where it still runs, before it is stopped: Docker's stop
+     * sends SIGTERM first, which the container's init process passes on to the driver, so a driver stopped at once
+     * would get a SIGTERM to handle ({@link Job#asInterruptible}).
+     */
+    private void killInterruptible(Job job, String containerId) {
+        if (!job.interruptible()) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: nothing to kill.
+        } catch (RuntimeException e) {
+            // Docker's stop that follows sends SIGKILL at its end anyway.
+            LOG.warnv(e, "Could not kill the driver of Spark run {0}", job.runId());
         }
     }
 
@@ -1808,6 +1862,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                              SparkExecutors executors) throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
         while (!launch.stopRequested() && !progress.cancelled()) {
+            if (interrupts.remove(job.runId())) {
+                sendSigterm(containerId, job, launch);
+            }
             if (executors != null) {
                 executors.follow();
             }
@@ -1845,6 +1902,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         }
         // Closed however the read ends, which ends Docker's stream and the compressors.
         try (DriverOutput output = new DriverOutput()) {
+            killInterruptible(job, containerId);
             lifecycleManager.stop(containerId, STOP_TIMEOUT_SECONDS);
             lifecycleManager.getDockerClient().logContainerCmd(containerId)
                     .withStdOut(true)

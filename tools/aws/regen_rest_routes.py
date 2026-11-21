@@ -10,9 +10,16 @@ A request no rule maps is the operation whose route it matches, checked as the a
 request on each route and compares the action the registry gives with that one.
 
 The credential scopes in `HAND_ROUTED` are authorized by the registry's rules alone, each for its
-reason, and their routes are vendored for the coverage test only. Within any other scope, two
-operations on one route would leave a request matching it no single operation, so the generation
-fails on them. Supported shared-controller alternatives are generated beside the modeled URI, with
+reason, and their routes are vendored for the coverage test only. Operations sharing a route are told
+apart by what botocore models their requests as carrying: the query parameters and headers of the
+members their input requires (`requires`: S3's UploadPart, on `PUT /{Bucket}/{Key+}` with PutObject,
+requires `partNumber` and `uploadId`, CopyObject the `x-amz-copy-source` header), and a deprecated
+operation (`deprecated`) yields to a current one of the same route and conditions. An operation whose
+every request botocore's endpoint rules send to another service's endpoint, signed for it, is that
+service's (`signedElsewhere`: S3's ListDirectoryBuckets, signed `s3express`). Within any scope, the
+operations of a route must leave every request one operation: no two current ones requiring the same, and
+what any two require together required by one of them, the route requiring all a request carries being its
+operation (`shared_routes`). The generation fails otherwise. Supported shared-controller alternatives are generated beside the modeled URI, with
 member-location overrides for the bare route, and its own method where that is not the operation's. These
 alternatives describe existing Floci compatibility paths, not additional botocore operations.
 
@@ -37,6 +44,7 @@ Run from anywhere in the repo:
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import re
 import sys
@@ -334,8 +342,10 @@ def carried_documented(current: str) -> dict[str, dict]:
 METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 
 
-def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] | None = None) -> dict:
-    """The vendored document from each loaded model, and the routes of each documented endpoint."""
+def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] | None = None,
+          elsewhere: dict[str, dict[str, str]] | None = None) -> dict:
+    """The vendored document from each loaded model, and the routes of each documented endpoint. `elsewhere` gives
+    each model's operations signed for another service (`signed_elsewhere`)."""
     routes = {}
     denial_statuses = {}
     for name in sorted(models):
@@ -344,8 +354,11 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             raise SystemExit(f"error: {name} is not a REST model")
         shared = SHARED_ROUTES.get(name, frozenset())
         spanning = ARN_SPANNING_ROUTES.get(name, frozenset())
+        signed = (elsewhere or {}).get(name, {})
         operations = {}
         for operation in sorted(model["operations"]):
+            if operation in signed:
+                continue
             http = model["operations"][operation]["http"]
             request_uri = http["requestUri"]
             if operation in shared or operation in spanning:
@@ -361,6 +374,8 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             "apiVersion": model["metadata"]["apiVersion"],
             "operations": operations,
         }
+        if signed:
+            routes[name]["signedElsewhere"] = dict(sorted(signed.items()))
         status = access_denied_status(model)
         if status is not None:
             scope = MODELS[name]
@@ -373,9 +388,10 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             raise SystemExit(f"error: {name} is both a botocore model and a documented endpoint")
         routes[name] = model
     routes = dict(sorted(routes.items()))
+    with_conditions(routes, models)
     shared = shared_routes(routes)
     if shared:
-        raise SystemExit("error: one route names more than one operation in a scope the rules do not route alone: "
+        raise SystemExit("error: one route names more than one operation a request cannot tell apart: "
                          + "; ".join(shared))
     return {
         "_source": {
@@ -385,6 +401,79 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
         "handRouted": dict(sorted(HAND_ROUTED.items())),
         "models": routes,
     }
+
+
+def with_conditions(routes: dict[str, dict], models: dict[str, dict]) -> None:
+    """Each operation of a route that names several within its scope given what botocore models its request as
+    carrying: the query parameters and headers of the members its input requires (`requires`), and whether botocore
+    marks it `deprecated`. One operation in several models of a scope, on one route, is one operation."""
+    named: dict[tuple, list[tuple[str, str]]] = {}
+    for name, model in routes.items():
+        for operation, route in model["operations"].items():
+            key = (model["credentialScope"],) + route_key(route["method"], route["requestUri"])
+            named.setdefault(key, []).append((name, operation))
+    for operations in named.values():
+        if len({operation for _, operation in operations}) < 2:
+            continue
+        for name, operation in operations:
+            if name not in models:
+                continue
+            spec = models[name]["operations"][operation]
+            shape = models[name].get("shapes", {}).get(spec.get("input", {}).get("shape", ""), {})
+            required = set(shape.get("required", []))
+            located = [(member.get("location"), member.get("locationName", member_name))
+                       for member_name, member in shape.get("members", {}).items() if member_name in required]
+            query = sorted(where for location, where in located if location == "querystring")
+            headers = sorted(where.lower() for location, where in located if location == "header")
+            route = routes[name]["operations"][operation]
+            if query or headers:
+                route["requires"] = {**({"query": query} if query else {}), **({"headers": headers} if headers else {})}
+            if spec.get("deprecated"):
+                route["deprecated"] = True
+
+
+def signed_elsewhere(models: dict[str, dict], rulesets: dict[str, dict], partitions: dict | None) -> dict[str, dict]:
+    """The operations of each model that botocore's endpoint rules send, for every request, to another service's
+    endpoint, signed for it: those whose static context parameters (`staticContextParams`) alone choose the endpoint,
+    no member of their own bound to one (`contextParam`), and whose endpoint's auth scheme names another signing name
+    than the model's. S3's ListDirectoryBuckets goes to s3express-control, signed `s3express`; WriteGetObjectResponse
+    to its own endpoint, signed `s3-object-lambda`. Resolved by botocore's own endpoint provider, in us-east-1."""
+    if partitions is None:
+        return {}
+    from botocore.endpoint_provider import EndpointProvider  # pinned botocore (tools/aws/requirements.txt)
+    found: dict[str, dict[str, str]] = {}
+    for name, model in sorted(models.items()):
+        if name not in rulesets:
+            continue
+        provider = EndpointProvider(rulesets[name], partitions)
+        own = model["metadata"].get("signingName", model["metadata"].get("endpointPrefix"))
+        for operation, spec in sorted(model["operations"].items()):
+            static = {key: value["value"] for key, value in (spec.get("staticContextParams") or {}).items()}
+            shape = model.get("shapes", {}).get(spec.get("input", {}).get("shape", ""), {})
+            if not static or any("contextParam" in member for member in shape.get("members", {}).values()):
+                continue
+            endpoint = provider.resolve_endpoint(Region="us-east-1", **static)
+            schemes = endpoint.properties.get("authSchemes") or []
+            signing = schemes[0].get("signingName", own) if schemes else own
+            if signing != own:
+                found.setdefault(name, {})[operation] = signing
+    return found
+
+
+def load_rulesets(data: Path) -> tuple[dict[str, dict], dict | None]:
+    """Each model's botocore endpoint rule set, where it has one, and botocore's partitions."""
+    rulesets = {}
+    for name in MODELS:
+        directory = latest_model_dir(data, name)
+        for file in ("endpoint-rule-set-1.json", "endpoint-rule-set-1.json.gz"):
+            path = directory / file
+            if path.is_file():
+                opener = gzip.open if file.endswith(".gz") else open
+                with opener(path, "rt", encoding="utf-8") as f:
+                    rulesets[name] = json.load(f)
+                break
+    partitions = data / "partitions.json"
+    return rulesets, json.loads(partitions.read_text(encoding="utf-8")) if partitions.is_file() else None
 
 
 def bare_tags_route(method: str) -> dict:
@@ -405,18 +494,38 @@ def route_key(method: str, request_uri: str) -> tuple:
 
 
 def shared_routes(routes: dict[str, dict]) -> list[str]:
-    """The routes that name more than one operation within a scope `HAND_ROUTED` does not name."""
-    named: dict[tuple, set[str]] = {}
+    """The routes that name operations a request cannot tell apart within a scope. Operations of one method, path and
+    query are told apart by what their requests must carry (`requires`), the route requiring all a request carries
+    being its operation; so no two of them may require the same, unless all but one are deprecated, and what any two
+    require together must be what one of them requires: then the operations a request satisfies always include one
+    requiring all the others do. S3's PutObject, CopyObject (`x-amz-copy-source`), UploadPart (`partNumber` and
+    `uploadId`) and UploadPartCopy (all three) qualify; two operations requiring `a` and `b`, with none requiring both,
+    do not."""
+    grouped: dict[tuple, dict[frozenset, list[tuple[str, bool]]]] = {}
     for name, model in routes.items():
-        if model["credentialScope"] in HAND_ROUTED:
-            continue
         for operation, route in model["operations"].items():
             for variant in [route, *route.get("alternatives", [])]:
+                requires = route.get("requires", {}) if variant is route else {}
                 key = (model["credentialScope"],) + route_key(variant.get("method", route["method"]),
                                                               variant["requestUri"])
-                named.setdefault(key, set()).add(operation)
-    return [f"{key[0]} {key[1]} {'/'.join(key[2])}: {', '.join(sorted(operations))}"
-            for key, operations in sorted(named.items()) if len(operations) > 1]
+                needs = frozenset([f"?{parameter}" for parameter in requires.get("query", [])]
+                                  + [f"{header}:" for header in requires.get("headers", [])])
+                entry = (operation, variant is route and bool(route.get("deprecated")))
+                operations = grouped.setdefault(key, {}).setdefault(needs, [])
+                if entry not in operations:
+                    operations.append(entry)
+    found = []
+    for key, by_needs in sorted(grouped.items()):
+        named = sorted({operation for operations in by_needs.values() for operation, _ in operations})
+        if len(named) < 2:
+            continue
+        same = [operations for operations in by_needs.values()
+                if len({operation for operation, _ in operations}) > 1
+                and len({operation for operation, deprecated in operations if not deprecated}) != 1]
+        unjoined = [(a, b) for a in by_needs for b in by_needs if (a | b) not in by_needs]
+        if same or unjoined:
+            found.append(f"{key[0]} {key[1]} {'/'.join(key[2])}: {', '.join(named)}")
+    return found
 
 
 def load_models(data: Path) -> dict[str, dict]:
@@ -439,6 +548,8 @@ def render(doc: dict) -> str:
             lines.append(f'      "accessDeniedStatus": {model["accessDeniedStatus"]},')
         if "documented" in model:
             lines.append(f'      "documented": {json.dumps(model["documented"])},')
+        if "signedElsewhere" in model:
+            lines.append(f'      "signedElsewhere": {json.dumps(model["signedElsewhere"])},')
         lines.append('      "operations": {')
         operations = list(model["operations"].items())
         for position, (operation, route) in enumerate(operations):
@@ -486,7 +597,9 @@ def main(argv: list[str] | None = None) -> int:
     documented = {name: build_documented(spec) for name, spec in DOCUMENTED.items()} if args.fetch_documented \
         else carried_documented(current)
     data, provenance = resolve_botocore_data(args.botocore_data)
-    fresh = render(build(load_models(data), provenance, documented))
+    models = load_models(data)
+    rulesets, partitions = load_rulesets(data)
+    fresh = render(build(models, provenance, documented, signed_elsewhere(models, rulesets, partitions)))
 
     if args.check:
         if strip_source(current) != strip_source(fresh):

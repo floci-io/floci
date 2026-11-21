@@ -6,6 +6,9 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.services.ses.SesV2Requests.ENTRY;
+import static io.floci.aws.services.ses.SesV2Requests.TO;
+import static io.floci.aws.services.ses.SesV2Requests.post;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -23,19 +26,15 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class SesSendTemplateLookupOrderIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String AUTH_V1 =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String UNVERIFIED = "sender@unverified-template-order.floci.test";
     private static final String VERIFIED = "sender@template-order.floci.test";
-    private static final String TO = "success@simulator.amazonses.com";
     private static final String GHOST_CONFIG_SET = "template-order-ghost-config-set";
     private static final String GHOST_TEMPLATE =
             "{\"Template\": {\"TemplateName\": \"template-order-ghost\", \"TemplateData\": \"{}\"}}";
     private static final String INLINE_TEMPLATE =
             "{\"Template\": {\"TemplateContent\": {\"Subject\": \"s\", \"Text\": \"b\"}, \"TemplateData\": \"{}\"}}";
-    private static final String VALID_ENTRY = "{\"Destination\": {\"ToAddresses\": [\"" + TO + "\"]}}";
     private static final String NOT_VERIFIED_MESSAGE =
             "Email address is not verified. The following identities failed the check in region US-EAST-1: ";
     private static final String V1_GHOST_TEMPLATE = "template-order-v1-ghost";
@@ -52,16 +51,6 @@ class SesSendTemplateLookupOrderIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    private static ValidatableResponse post(String path, String body) {
-        return given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .post(path)
-        .then();
     }
 
     private static ValidatableResponse bulk(String sender, String content, String members, String entries) {
@@ -136,44 +125,44 @@ class SesSendTemplateLookupOrderIntegrationTest {
 
     @Test
     void sendBulkEmail_unverifiedSenderPrecedesUnknownTemplate() {
-        assertNotVerified(bulk(UNVERIFIED, GHOST_TEMPLATE, "", VALID_ENTRY), UNVERIFIED);
+        assertNotVerified(bulk(UNVERIFIED, GHOST_TEMPLATE, "", ENTRY), UNVERIFIED);
     }
 
     @Test
     void sendBulkEmail_unverifiedSenderPrecedesUnknownTemplateArn() {
         assertNotVerified(bulk(UNVERIFIED, "{\"Template\": {\"TemplateArn\": "
                 + "\"arn:aws:ses:us-east-1:000000000000:template/template-order-ghost\", \"TemplateData\": \"{}\"}}",
-                "", VALID_ENTRY), UNVERIFIED);
+                "", ENTRY), UNVERIFIED);
     }
 
     @Test
     void sendBulkEmail_unknownConfigurationSetPrecedesUnverifiedSender() {
         assertConfigSetNotFound(bulk(UNVERIFIED, INLINE_TEMPLATE,
-                "\"ConfigurationSetName\": \"" + GHOST_CONFIG_SET + "\", ", VALID_ENTRY));
+                "\"ConfigurationSetName\": \"" + GHOST_CONFIG_SET + "\", ", ENTRY));
     }
 
     @Test
     void sendBulkEmail_verifiedSender_unknownTemplate() {
-        assertTemplateNotFound(bulk(VERIFIED, GHOST_TEMPLATE, "", VALID_ENTRY));
+        assertTemplateNotFound(bulk(VERIFIED, GHOST_TEMPLATE, "", ENTRY));
     }
 
     @Test
     void sendBulkEmail_unknownConfigurationSetPrecedesUnknownTemplate() {
         assertConfigSetNotFound(bulk(VERIFIED, GHOST_TEMPLATE,
-                "\"ConfigurationSetName\": \"" + GHOST_CONFIG_SET + "\", ", VALID_ENTRY));
+                "\"ConfigurationSetName\": \"" + GHOST_CONFIG_SET + "\", ", ENTRY));
     }
 
     @Test
     void sendBulkEmail_unverifiedFeedbackForwardingAddressPrecedesUnknownTemplate() {
         assertNotVerified(bulk(VERIFIED, GHOST_TEMPLATE,
-                "\"FeedbackForwardingEmailAddress\": \"" + UNVERIFIED + "\", ", VALID_ENTRY), UNVERIFIED);
+                "\"FeedbackForwardingEmailAddress\": \"" + UNVERIFIED + "\", ", ENTRY), UNVERIFIED);
     }
 
     @Test
     void sendBulkEmail_unknownTemplatePrecedesMalformedEntryAndReplyTo() {
         assertTemplateNotFound(bulk(VERIFIED, GHOST_TEMPLATE, "",
                 "{\"Destination\": {\"ToAddresses\": [\"bad\"]}}"));
-        assertTemplateNotFound(bulk(VERIFIED, GHOST_TEMPLATE, "\"ReplyToAddresses\": [\"bad\"], ", VALID_ENTRY));
+        assertTemplateNotFound(bulk(VERIFIED, GHOST_TEMPLATE, "\"ReplyToAddresses\": [\"bad\"], ", ENTRY));
     }
 
     @Test

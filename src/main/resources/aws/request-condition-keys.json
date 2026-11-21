@@ -51,6 +51,16 @@
       "route53:ChangeResourceRecordSetsActions",
       "route53:ChangeResourceRecordSetsNormalizedRecordNames",
       "route53:ChangeResourceRecordSetsRecordTypes"
+    ],
+    "sts:AssumeRole": [
+      "sts:ExternalId",
+      "sts:RoleSessionName"
+    ],
+    "sts:AssumeRoleWithSAML": [
+      "sts:RoleSessionName"
+    ],
+    "sts:AssumeRoleWithWebIdentity": [
+      "sts:RoleSessionName"
     ]
   },
   "members": {
@@ -120,6 +130,19 @@
       "route53:ChangeResourceRecordSetsRecordTypes": [
         "ChangeBatch.Changes.Change.ResourceRecordSet.Type"
       ]
+    },
+    "sts:AssumeRole": {
+      "sts:ExternalId": [
+        "ExternalId"
+      ],
+      "sts:RoleSessionName": [
+        "RoleSessionName"
+      ]
+    },
+    "sts:AssumeRoleWithWebIdentity": {
+      "sts:RoleSessionName": [
+        "RoleSessionName"
+      ]
     }
   },
   "memberShapes": {
@@ -150,12 +173,20 @@
       "ChangeBatch.Changes.Change.Action": "ChangeAction",
       "ChangeBatch.Changes.Change.ResourceRecordSet.Name": "DNSName",
       "ChangeBatch.Changes.Change.ResourceRecordSet.Type": "RRType"
+    },
+    "sts:AssumeRole": {
+      "ExternalId": "externalIdType",
+      "RoleSessionName": "roleSessionNameType"
+    },
+    "sts:AssumeRoleWithWebIdentity": {
+      "RoleSessionName": "roleSessionNameType"
     }
   },
   "protocols": {
     "eks": "rest-json",
     "lambda": "rest-json",
     "redshift": "query",
-    "route53": "rest-xml"
+    "route53": "rest-xml",
+    "sts": "query"
   }
 }

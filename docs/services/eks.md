@@ -397,7 +397,7 @@ entry, install the built-in node pools, serve the EBS provisioner or create load
 
 ### Scalar and collection inputs
 
-`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes `<version>-eks-1`.
+`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes the release of the recommended EKS optimized AMI for that version and AMI type, the `<patch version>-<build date>` value SSM publishes under its `recommended/release_version` (see [SSM](ssm.md#public-ami-parameters)). A node group whose launch template names a custom AMI reports that AMI id instead, as AWS does, and an AMI type the image catalog has no recommended AMI for, such as Bottlerocket or Windows, keeps `<version>-eks-1`.
 
 ### Structured inputs
 
@@ -1054,7 +1054,7 @@ When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issue
 - `iss` matches the cluster's issuer exactly
 - `aud` contains `sts.amazonaws.com`
 - `exp` / `nbf`, with 60s of clock-skew tolerance
-- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` with exact, case-sensitive equality
+- the role's trust policy: `Principal.Federated` and the `Condition` block, comparing `oidc:sub` / `oidc:aud` / `sts:RoleSessionName` with exact, case-sensitive equality
 
 The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token, `ExpiredTokenException` (400) for an expired one, or `AccessDenied` (403) when the trust policy does not permit the subject.
 

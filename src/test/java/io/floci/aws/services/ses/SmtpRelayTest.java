@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.NestedMime;
 import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
@@ -18,6 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,6 +27,9 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class SmtpRelayTest {
+
+    /** Far more than mime4j needs to parse {@link NestedMime#OVERFLOWS_THE_WRITER} layers. */
+    private static final long PARSE_STACK_BYTES = 256L << 20;
 
     @Mock MailClient mailClient;
 
@@ -39,6 +44,21 @@ class SmtpRelayTest {
 
     private static SmtpRelay.RawRelayMessage raw(String from, List<String> destinations, String rawMessage) {
         return new SmtpRelay.RawRelayMessage(from, null, destinations, rawMessage, null);
+    }
+
+    /**
+     * Parses on a thread with a stack of its own, so the parse of a message the writer cannot serialize
+     * succeeds however small the test JVM's stack is: whether mime4j's recursive parser gets through
+     * {@link NestedMime#OVERFLOWS_THE_WRITER} layers depends on the stack it runs on, and a CI runner's
+     * default thread stack is not enough.
+     */
+    private static SmtpRelay.RawRelayMessage parsedOnALargeStack(String rawMime) throws InterruptedException {
+        AtomicReference<SmtpRelay.RawRelayMessage> parsed = new AtomicReference<>();
+        Runnable parse = () -> parsed.set(raw("from@example.com", List.of("to@example.com"), rawMime));
+        Thread parser = new Thread(null, parse, "nested-mime-parse", PARSE_STACK_BYTES);
+        parser.start();
+        parser.join();
+        return parsed.get();
     }
 
     private SmtpRelay enabledRelay() {
@@ -323,6 +343,28 @@ class SmtpRelayTest {
 
         assertDoesNotThrow(() -> relay.relayRaw(raw("from@example.com",
                 List.of("to@example.com"), "Subject: X\r\n\r\nBody")));
+    }
+
+    @Test
+    void relayRaw_nestingThatOverflowsTheParser_isSkippedNotThrown() {
+        SmtpRelay relay = new SmtpRelay(mailClient, true);
+        String rawMime = NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_PARSER);
+
+        assertDoesNotThrow(() -> relay.relayRaw(raw("from@example.com", List.of("to@example.com"), rawMime)));
+
+        verify(mailClient, never()).sendMail(any(MailMessage.class));
+    }
+
+    @Test
+    void relayRaw_nestingThatParsesButOverflowsTheWriter_isSkippedNotThrown() throws InterruptedException {
+        SmtpRelay relay = new SmtpRelay(mailClient, true);
+        SmtpRelay.RawRelayMessage nested = parsedOnALargeStack(
+                NestedMime.rfc822Layers(NestedMime.OVERFLOWS_THE_WRITER));
+        assertNotNull(nested.message());
+
+        assertDoesNotThrow(() -> relay.relayRaw(nested));
+
+        verify(mailClient, never()).sendMail(any(MailMessage.class));
     }
 
     @Test
