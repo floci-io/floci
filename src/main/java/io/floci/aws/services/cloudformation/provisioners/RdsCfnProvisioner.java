@@ -246,9 +246,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Puts back the VPC security groups an update that kept the instance changed, and answers whether
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
-     * instance gone since the update fails the rollback, and a retried one tries again.
+     * instance gone since the update fails the rollback, and a retried one tries again. A record
+     * carrying the {@code cluster} flag puts back a DB cluster's groups the same way.
      */
-    // Also restores a DB cluster's groups, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
@@ -673,6 +673,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             String[] windows = BackupWindows.effectiveWindows(true, backupWindow, maintenanceWindow, null, null);
             backupWindow = windows[0];
             maintenanceWindow = windows[1];
+        } else {
+            // validated against the stored windows before the modify, so a bad window changes nothing
+            BackupWindows.effectiveWindows(false, backupWindow, maintenanceWindow,
+                    cluster.getPreferredBackupWindow(), cluster.getPreferredMaintenanceWindow());
         }
         List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         if (cluster != null) {

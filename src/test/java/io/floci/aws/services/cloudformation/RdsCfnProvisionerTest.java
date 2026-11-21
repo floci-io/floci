@@ -371,6 +371,25 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void anUpdateWindowOverlappingTheStoredOneFailsBeforeTheClusterIsModified() {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(existing.getPreferredMaintenanceWindow()).thenReturn("mon:05:00-mon:06:00");
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), any(), any(), any(), any(), any())).thenReturn(existing);
+
+        StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","MasterUserPassword":"changed",
+                 "PreferredBackupWindow":"05:00-06:00"}
+                """, "us-east-1", "mycluster", Map.of("DBClusterIdentifier", "mycluster"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("must not overlap"), r.getStatusReason());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).setDbClusterRequestSettings(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void dbClusterEnableHttpEndpointOnANonAuroraEngineFailsBeforeCreating() {
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"dataapi","Engine":"postgres","EnableHttpEndpoint":true}
