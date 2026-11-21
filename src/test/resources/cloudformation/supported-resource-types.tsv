@@ -40,6 +40,7 @@ AWS::Backup::BackupVault	BackupVaultCfnProvisioner
 AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
 AWS::Batch::JobDefinition	BatchCfnProvisioner
 AWS::Batch::JobQueue	BatchCfnProvisioner
+AWS::Bedrock::ApplicationInferenceProfile	BedrockCfnProvisioner
 AWS::BedrockAgentCore::Memory	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::Runtime	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
@@ -60,6 +61,7 @@ AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CloudWatch::CompositeAlarm	CloudWatchCompositeAlarmCfnProvisioner
 AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
+AWS::CodeDeploy::Application	CodeDeployCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
 AWS::CodePipeline::Webhook	CodePipelineCfnProvisioner
@@ -107,6 +109,7 @@ AWS::EFS::FileSystem	EfsCfnProvisioner
 AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
+AWS::EMRServerless::Application	EmrServerlessCfnProvisioner
 AWS::ElastiCache::CacheCluster	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ReplicationGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ServerlessCache	ElastiCacheServerlessCfnProvisioner

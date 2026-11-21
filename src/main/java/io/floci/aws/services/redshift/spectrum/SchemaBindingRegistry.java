@@ -24,11 +24,17 @@ abstract class SchemaBindingRegistry<B extends SchemaBinding> implements Resetta
     }
 
     public synchronized void bind(B binding) {
-        String key = key(binding.clusterKey(), binding.databaseName(), binding.schemaName());
+        String key = key(binding.clusterKey(), binding.databaseName(), binding.bindingName());
         if (bindings.getForAccount(binding.accountId(), key).isPresent()) {
             throw new SpectrumSqlException("42P06", "schema \"" + binding.schemaName() + "\" already exists");
         }
         bindings.putForAccount(binding.accountId(), key, binding);
+        bindings.flush();
+    }
+
+    public synchronized void replace(B binding) {
+        bindings.putForAccount(binding.accountId(),
+                key(binding.clusterKey(), binding.databaseName(), binding.bindingName()), binding);
         bindings.flush();
     }
 

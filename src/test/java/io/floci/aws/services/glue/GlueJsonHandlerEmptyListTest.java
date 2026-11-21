@@ -1,16 +1,15 @@
 package io.floci.aws.services.glue;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,7 +37,7 @@ class GlueJsonHandlerEmptyListTest {
     void setUp() {
         mapper = new ObjectMapper();
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         GlueSchemaRegistryService schemaRegistryService =
                 new GlueSchemaRegistryService(storageFactory, regionResolver);
         GlueService glueService = new GlueService(
@@ -76,18 +75,5 @@ class GlueJsonHandlerEmptyListTest {
         assertEquals(0, body.get(listKey).size(), listKey + " must be empty");
         assertFalse(body.has("NextToken"), action + " response must omit NextToken");
         assertEquals(1, body.size(), action + " response must contain only " + listKey);
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory("000000000000");
-        }
     }
 }

@@ -140,7 +140,7 @@ class SsmTimeoutDockerIntegrationTest {
             instance.setDockerContainerId(container.containerId());
             when(ec2.findInstanceById("i-timeout")).thenReturn(instance);
             when(ec2.isInstanceContainerRunning("i-timeout")).thenReturn(true);
-            SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(docker, ec2);
+            SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(docker, docker, ec2);
             if (!descendantsOnly) {
                 for (int code : List.of(124, 137, 143)) {
                     SsmDirectCommandExecutor.ExecutionResult result = executor.executeIfSupported("i-timeout",

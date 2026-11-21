@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
@@ -51,7 +51,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * one (2.7 GB) and the Spark one (3.5 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EmrHiveStepsNightlyIntegrationTest {
@@ -149,7 +149,7 @@ class EmrHiveStepsNightlyIntegrationTest {
 
         // A query that groups its rows through a shuffle, its tasks giving the hosts they ran on: the primary node,
         // whose NodeManager runs them on a cluster without core nodes, not the step's container. Core and task nodes
-        // running a job's containers are EmrDockerRunnerDockerIntegrationTest's, as a cluster with Hive starts slower.
+        // running a job's containers are EmrDockerRunnerNightlyIntegrationTest's, as a cluster with Hive starts slower.
         assertEquals("COMPLETED", hiveStep("-e", "create external table kv (k string, v int) row format delimited"
                 + " fields terminated by ',' location '" + s3Uri("data/rows/") + "';"
                 + " insert overwrite directory '" + s3Uri("out/tez/") + "' row format delimited fields terminated"

@@ -6,8 +6,9 @@ import java.util.List;
 import java.util.Map;
 
 public sealed interface ExternalStatement permits ExternalStatement.CreateSchema, ExternalStatement.CreateKinesisSchema,
-        ExternalStatement.CreateTable, ExternalStatement.AddPartitions, ExternalStatement.DropSchema,
-        ExternalStatement.DropTable {
+        ExternalStatement.CreateMskSchema, ExternalStatement.CreateTable, ExternalStatement.AddPartitions,
+        ExternalStatement.DropSchema, ExternalStatement.DropTable, ExternalStatement.CreateStreamingView,
+        ExternalStatement.RefreshView, ExternalStatement.DropView {
     /** Read-only copy that keeps statement order, so Glue payloads are stable across runs. */
     private static <V> Map<String, V> ordered(Map<String, V> source) {
         return Collections.unmodifiableMap(new LinkedHashMap<>(source));
@@ -23,6 +24,8 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     /** {@code region} is null when the statement names none, which leaves the cluster's own Region. */
     record CreateKinesisSchema(String schemaName, String region, String iamRoleArn,
                                boolean ifNotExists) implements ExternalStatement { }
+    record CreateMskSchema(String schemaName, String iamRoleArn, String authentication,
+                           String clusterArn, boolean ifNotExists) implements ExternalStatement { }
     record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
                        List<ColumnDefinition> partitionColumns, TableFormat format, String location,
                        String delimiter, String serde, Map<String, String> properties,
@@ -47,4 +50,12 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     /** {@code cascade} is true only when the statement said CASCADE; RESTRICT is the default, as in PostgreSQL and Redshift. */
     record DropSchema(String schemaName, boolean ifExists, boolean cascade) implements ExternalStatement { }
     record DropTable(String schemaName, String tableName, boolean ifExists, boolean cascade) implements ExternalStatement { }
+    /**
+     * {@code CREATE MATERIALIZED VIEW ... AS SELECT ...}; whether it reads a stream is for the schema bindings to
+     * say. {@code viewSchema} is null when the name is unqualified. {@code select} is the query as written.
+     */
+    record CreateStreamingView(String viewSchema, String viewName, boolean autoRefresh,
+                               String select) implements ExternalStatement { }
+    record RefreshView(String viewSchema, String viewName) implements ExternalStatement { }
+    record DropView(String viewSchema, String viewName, boolean ifExists, boolean cascade) implements ExternalStatement { }
 }

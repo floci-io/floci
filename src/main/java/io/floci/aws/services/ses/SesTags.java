@@ -52,9 +52,45 @@ final class SesTags {
      * prefix reserved. A {@code null}/empty list is a no-op.
      */
     static void validate(List<Tag> tags) {
+        validate(tags, true);
+    }
+
+    /**
+     * {@link #validate} without the reserved {@code aws:} prefix, for an operation that refuses such
+     * a key at another point and in its own words (see {@link #requireNoSystemKeys}).
+     */
+    static void validateIgnoringSystemKeys(List<Tag> tags) {
+        validate(tags, false);
+    }
+
+    private static void validate(List<Tag> tags, boolean refuseSystemKeys) {
         if (tags == null || tags.isEmpty()) {
             return;
         }
+        requireCountAndCharset(tags);
+        // The aws: key prefix is checked after the character set (probe-confirmed).
+        if (refuseSystemKeys) {
+            requireNoSystemKeys(tags, SYSTEM_TAG_MESSAGE);
+        }
+        requireLengthsAndDistinctKeys(tags);
+    }
+
+    /**
+     * Refuses a key with the reserved {@code aws:} prefix (case-insensitive). Only the key is checked,
+     * a value starting with {@code aws:} is allowed.
+     */
+    static void requireNoSystemKeys(List<Tag> tags, String message) {
+        if (tags == null) {
+            return;
+        }
+        for (Tag tag : tags) {
+            if (tag != null && tag.key() != null && tag.key().regionMatches(true, 0, "aws:", 0, 4)) {
+                throw new AwsException("BadRequestException", message, 400);
+            }
+        }
+    }
+
+    private static void requireCountAndCharset(List<Tag> tags) {
         if (tags.size() > MAX_TAGS) {
             throw new AwsException("BadRequestException", MAX_TAGS_MESSAGE, 400);
         }
@@ -64,13 +100,9 @@ final class SesTags {
                 throw new AwsException("BadRequestException", CHARSET_MESSAGE, 400);
             }
         }
-        // The aws: key prefix (case-insensitive) is reserved for system tags; only the key is checked
-        // — a value starting with aws: is allowed. Checked after the character set (probe-confirmed).
-        for (Tag tag : tags) {
-            if (tag.key() != null && tag.key().regionMatches(true, 0, "aws:", 0, 4)) {
-                throw new AwsException("BadRequestException", SYSTEM_TAG_MESSAGE, 400);
-            }
-        }
+    }
+
+    private static void requireLengthsAndDistinctKeys(List<Tag> tags) {
         // Length violations are reported together in the AWS Smithy form, value before key, with a
         // 1-based tag index. Smithy length constraints count Unicode code points, not UTF-16 code
         // units, so a supplementary-plane character counts as one.

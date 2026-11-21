@@ -75,7 +75,7 @@ class EcsJsonHandlerVolumesFromTest {
     }
 
     @Test
-    void containerDefinitionOmitsVolumesFromWhenNotProvided() throws Exception {
+    void containerDefinitionReadsBackAnEmptyVolumesFromWhenNotProvided() throws Exception {
         JsonNode request = objectMapper.readTree("""
                 {
                   "family": "plain-family",
@@ -89,6 +89,10 @@ class EcsJsonHandlerVolumesFromTest {
         JsonNode app = objectMapper.valueToTree(response.getEntity())
                 .path("taskDefinition").path("containerDefinitions").get(0);
 
-        assertTrue(app.path("volumesFrom").isMissingNode());
+        // The parser always sets volumesFrom, and the register-task-definition guide example
+        // carries it back as [] for a container without one, so an omitted field reads back as
+        // an empty array rather than staying absent.
+        JsonNode volumesFrom = app.path("volumesFrom");
+        assertTrue(volumesFrom.isArray() && volumesFrom.isEmpty());
     }
 }

@@ -132,7 +132,11 @@ floci:
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
     max-connections: 1024                    # Docker client connection pool for short calls
-    streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
+    streaming-max-connections: 3072          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
+    pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
+    breaker-failure-threshold: 3             # Consecutive Docker call attempts (each retry counts) failing at the transport before Floci pings the daemon and fails calls fast if it is gone; 0 = off
+    breaker-probe-interval-seconds: 5        # Seconds between pings while the daemon is unreachable
+    max-concurrent-launches: 0               # Most container creates and starts at once; 0 = twice the CPUs, at least 4
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -207,6 +211,7 @@ floci:
       enabled: true
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
+      seed-deployer-access-key-id: floci  # Access key ID of the seeded deployer's key
 
     networkfirewall:
       enabled: true
@@ -223,7 +228,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       shell-less-backend: false               # true = image has no shell or CLI: flags as container arguments, snapshots via SAVE over RESP + Docker archive API
-      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup (used with shell-less-backend)
+      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup; a restore places the snapshot under it
 
     rds:
       enabled: true

@@ -2,8 +2,6 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.eks.model.Addon;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.PodIdentityAssociationSummary;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,8 +47,7 @@ class EksPodIdentityWebhookTest {
         Cluster cluster = new Cluster();
         cluster.setName(CLUSTER_NAME);
         when(eks.findPreRegionalCluster(ACCOUNT_ID, CLUSTER_NAME)).thenReturn(Optional.of(cluster));
-        when(addons.describe(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON)))
-                .thenReturn(inlineMock(Addon.class));
+        when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true);
         when(associations.list(any(), anyString(), anyString(), any(), any()))
                 .thenReturn(new EksPodIdentityAssociationService.Page(
                         List.of(inlineMock(PodIdentityAssociationSummary.class)), null));
@@ -154,8 +151,7 @@ class EksPodIdentityWebhookTest {
 
     @Test
     void clusterWithoutThePodIdentityAgentAddonIsNotPatched() throws Exception {
-        when(addons.describe(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON)))
-                .thenThrow(new AwsException("ResourceNotFoundException", "No addon", 404));
+        when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(false);
 
         Map<String, Object> review = webhook.review(CLUSTER_NAME, ACCOUNT_ID,
                 admissionReview(pod("checkout", List.of(Map.of("name", "app")))));

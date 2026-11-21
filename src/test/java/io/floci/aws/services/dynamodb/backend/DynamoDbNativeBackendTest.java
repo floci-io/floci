@@ -72,6 +72,7 @@ class DynamoDbNativeBackendTest {
         });
         EmulatorConfig streamConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(streamConfig.services().dynamodb().streamShardCount()).thenReturn(1);
+        when(streamConfig.services().dynamodb().streamMaxRecords()).thenReturn(1000);
         DynamoDbStreamService streams = new DynamoDbStreamService(mapper, storageFactory, streamConfig);
         DynamoDbService service = new DynamoDbService(storageFactory, new RegionResolver(REGION, ACCOUNT), streams,
                 forwarder, null, mapper, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));

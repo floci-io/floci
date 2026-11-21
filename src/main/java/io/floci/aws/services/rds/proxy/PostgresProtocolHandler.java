@@ -1,17 +1,12 @@
 package io.floci.aws.services.rds.proxy;
 
-import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.SSLSocket;
 import java.io.BufferedOutputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,17 +14,14 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
@@ -39,11 +31,12 @@ import java.util.function.BiConsumer;
  *
  * <p>Flow:
  * <ol>
- *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation)
+ *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation), refusing one sent
+ *       without TLS when {@code rds.force_ssl} requires it
  *   <li>Challenge client with AuthenticationCleartextPassword
  *   <li>Read client password
  *   <li>Validate (IAM SigV4 or plain password)
- *   <li>Connect to backend with MD5 or SCRAM-SHA-256 auth
+ *   <li>Connect to backend with cleartext, MD5 or SCRAM-SHA-256 auth, checking SCRAM's server signature
  *   <li>Buffer backend messages until ReadyForQuery
  *   <li>For IAM logins, hand the session over to the role named in the token, then apply the
  *       client's startup parameters as that role
@@ -216,12 +209,26 @@ public class PostgresProtocolHandler {
                                       boolean forwardStartupParameters, boolean databaseIamAuthentication,
                                       StartupObserver startupObserver,
                                       SessionRoleHandover roleHandover) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, roleHandover, false);
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover,
+                                      boolean requireSsl) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
         StartupMessage startup = readStartupMessage(client, backendConnector, databaseIamAuthentication,
-                tlsCertificates, handshakeTimeoutMillis);
+                tlsCertificates, handshakeTimeoutMillis, requireSsl);
         if (startup == null) {
             closeQuietly(client);
             return null;
@@ -617,7 +624,7 @@ public class PostgresProtocolHandler {
 
     private static StartupMessage readStartupMessage(Socket socket, BackendConnector backendConnector,
             boolean forwardCancel, RdsProxyTlsCertificates tlsCertificates,
-            int handshakeTimeoutMillis) throws IOException {
+            int handshakeTimeoutMillis, boolean requireSsl) throws IOException {
         Socket currentSocket = socket;
         while (true) {
             InputStream in = currentSocket.getInputStream();
@@ -653,10 +660,15 @@ public class PostgresProtocolHandler {
             }
 
             Map<String, String> params = PostgresWire.startupParameters(startup.body());
-            return new StartupMessage(currentSocket,
-                    params.getOrDefault("user", "postgres"),
-                    params.get("database"),
-                    params);
+            String user = params.getOrDefault("user", "postgres");
+            if (requireSsl && !(currentSocket instanceof SSLSocket)) {
+                sendErrorResponse(out, "FATAL", "28000", "no pg_hba.conf entry for host \""
+                        + currentSocket.getInetAddress().getHostAddress() + "\", user \"" + user
+                        + "\", database \"" + params.getOrDefault("database", user) + "\", no encryption");
+                out.flush();
+                return null;
+            }
+            return new StartupMessage(currentSocket, user, params.get("database"), params);
         }
     }
 
@@ -732,7 +744,7 @@ public class PostgresProtocolHandler {
             return null;
         }
         if (type != 'p') {
-            LOG.warnv("Expected PasswordMessage ('p'), got {0}", (char) type);
+            LOG.warnv("Expected PasswordMessage (''p''), got {0}", (char) type);
             return null;
         }
         int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 5, MAX_HANDSHAKE_PACKET_LENGTH, "password message");
@@ -768,52 +780,44 @@ public class PostgresProtocolHandler {
         return responseMessage('E', "FATAL", "08006", "Backend database authentication failed");
     }
 
+    /**
+     * Answers the backend's authentication requests through {@link BackendAuthenticator}, in its
+     * general mode: trust, cleartext, MD5 or SCRAM-SHA-256, whose server signature must be proved
+     * before an AuthenticationOk is taken. False, with the cause logged but no secret, when the
+     * backend asks for something the proxy cannot or will not answer.
+     */
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
-        int type = readAuthenticationType(in);
-        if (type != 'R') {
-            LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
-            return false;
+        BackendAuthenticator authenticator = new BackendAuthenticator(username, password);
+        String packetName = "backend authentication message";
+        while (true) {
+            int type = readAuthenticationType(in);
+            if (type != 'R') {
+                LOG.warnv("Expected Authentication (''R'') from backend, got type={0}", type);
+                return false;
+            }
+            byte[] body = PostgresWire.readBody(in, 8, MAX_HANDSHAKE_PACKET_LENGTH, packetName);
+            Optional<PostgresWire.Message> answer;
+            try {
+                answer = authenticator.answer(new PostgresWire.Message((byte) 'R', body));
+            } catch (IOException e) {
+                LOG.warnv("Backend PostgreSQL authentication failed: {0}", e.getMessage());
+                return false;
+            }
+            int authType = PostgresWire.int32(body, 0);
+            if (authType == 0) {
+                return true;
+            }
+            if (answer.isPresent()) {
+                PostgresWire.write(out, answer.get());
+                out.flush();
+            }
+            packetName = switch (authType) {
+                case 10 -> "SASL continue message";
+                case 11 -> "SASL final message";
+                default -> "authentication response";
+            };
         }
-
-        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "backend authentication message");
-        int authType = PostgresWire.readInt32(in);
-
-        if (authType == 0) {
-            // Trust auth — no password needed
-            return true;
-        }
-
-        if (authType == 3) {
-            // CleartextPassword
-            sendPasswordMessage(out, password);
-            out.flush();
-            return readAuthOk(in);
-        }
-
-        if (authType == 5) {
-            // MD5Password — read 4-byte salt
-            byte[] salt = new byte[4];
-            PostgresWire.readFully(in, salt);
-            String md5pw = computeMd5Password(password, username, salt);
-            sendPasswordMessage(out, md5pw);
-            out.flush();
-            return readAuthOk(in);
-        }
-
-        if (authType == 10) {
-            // SCRAM-SHA-256 — drain the mechanisms list and perform SCRAM handshake
-            byte[] mechanismsBytes = new byte[length - 8];
-            PostgresWire.readFully(in, mechanismsBytes);
-            return performScramSha256(in, out, username, password);
-        }
-
-        LOG.warnv("Unsupported backend PostgreSQL auth type: {0}", authType);
-        if (length > 8) {
-            byte[] extra = new byte[length - 8];
-            PostgresWire.readFully(in, extra);
-        }
-        return false;
     }
 
     /**
@@ -841,168 +845,6 @@ public class PostgresProtocolHandler {
         byte[] errorResponse() {
             return errorResponse;
         }
-    }
-
-    // ── SCRAM-SHA-256 ─────────────────────────────────────────────────────────
-
-    private static boolean performScramSha256(InputStream in, OutputStream out,
-                                              String username, String password) throws IOException {
-        // Step 1: Send SASLInitialResponse with client-first-message
-        String clientNonce = generateNonce();
-        String clientFirstMessageBare = "n=" + username + ",r=" + clientNonce;
-        String clientFirstMessage = "n,," + clientFirstMessageBare;
-        byte[] firstMsgBytes = clientFirstMessage.getBytes(StandardCharsets.UTF_8);
-
-        // Body: mechanism-name '\0' Int32(msg-length) msg-bytes
-        ByteArrayOutputStream saslInit = new ByteArrayOutputStream();
-        saslInit.write("SCRAM-SHA-256".getBytes(StandardCharsets.UTF_8));
-        saslInit.write(0);
-        saslInit.write((firstMsgBytes.length >> 24) & 0xFF);
-        saslInit.write((firstMsgBytes.length >> 16) & 0xFF);
-        saslInit.write((firstMsgBytes.length >> 8) & 0xFF);
-        saslInit.write(firstMsgBytes.length & 0xFF);
-        saslInit.write(firstMsgBytes);
-        PostgresWire.write(out, 'p', saslInit.toByteArray());
-        out.flush();
-
-        // Step 2: Read AuthenticationSASLContinue (authType=11)
-        if (readAuthenticationType(in) != 'R') {
-            return false;
-        }
-        int len2 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL continue message");
-        if (PostgresWire.readInt32(in) != 11) {
-            return false;
-        }
-        byte[] serverFirstBytes = new byte[len2 - 8];
-        PostgresWire.readFully(in, serverFirstBytes);
-        String serverFirstMessage = new String(serverFirstBytes, StandardCharsets.UTF_8);
-
-        // Parse server-first-message: r=<nonce>,s=<base64-salt>,i=<iterations>
-        Map<String, String> sp = parseScramParams(serverFirstMessage);
-        String serverNonce = sp.get("r");
-        byte[] salt = Base64.getDecoder().decode(sp.get("s"));
-        int iterations = Integer.parseInt(sp.get("i"));
-
-        if (serverNonce == null || !serverNonce.startsWith(clientNonce)) {
-            LOG.warn("SCRAM: server nonce does not start with client nonce");
-            return false;
-        }
-
-        // Step 3: Compute client-final-message with proof
-        // c = base64("n,,") = "biws" (GS2 header, no channel binding)
-        String clientFinalWithoutProof = "c=biws,r=" + serverNonce;
-        String authMessage = clientFirstMessageBare + "," + serverFirstMessage + "," + clientFinalWithoutProof;
-
-        byte[] saltedPassword = pbkdf2HmacSha256(password, salt, iterations);
-        byte[] clientKey = hmacSha256(saltedPassword, "Client Key");
-        byte[] storedKey = Digests.sha256(clientKey);
-        byte[] clientSignature = hmacSha256(storedKey, authMessage.getBytes(StandardCharsets.UTF_8));
-        byte[] clientProof = xor(clientKey, clientSignature);
-
-        String clientFinalMessage = clientFinalWithoutProof
-                + ",p=" + Base64.getEncoder().encodeToString(clientProof);
-
-        // Send SASLResponse: just the final message bytes
-        PostgresWire.write(out, 'p', clientFinalMessage.getBytes(StandardCharsets.UTF_8));
-        out.flush();
-
-        // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
-        if (readAuthenticationType(in) != 'R') {
-            return false;
-        }
-        int len3 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL final message");
-        if (PostgresWire.readInt32(in) != 12) {
-            return false;
-        }
-        byte[] serverFinalBytes = new byte[len3 - 8];
-        PostgresWire.readFully(in, serverFinalBytes);
-
-        // Step 5: Read final AuthenticationOK
-        return readAuthOk(in);
-    }
-
-    private static String generateNonce() {
-        byte[] bytes = new byte[18];
-        new SecureRandom().nextBytes(bytes);
-        return Base64.getEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private static Map<String, String> parseScramParams(String msg) {
-        Map<String, String> params = new HashMap<>();
-        for (String part : msg.split(",")) {
-            int eq = part.indexOf('=');
-            if (eq > 0) {
-                params.put(part.substring(0, eq), part.substring(eq + 1));
-            }
-        }
-        return params;
-    }
-
-    private static byte[] pbkdf2HmacSha256(String password, byte[] salt, int iterations) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
-            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-            return skf.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new RuntimeException("PBKDF2-HMAC-SHA256 failed", e);
-        }
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) {
-        return hmacSha256(key, data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static byte[] hmacSha256(byte[] key, byte[] data) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(data);
-        } catch (Exception e) {
-            throw new RuntimeException("HMAC-SHA256 failed", e);
-        }
-    }
-
-    private static byte[] xor(byte[] a, byte[] b) {
-        byte[] result = new byte[a.length];
-        for (int i = 0; i < a.length; i++) {
-            result[i] = (byte) (a[i] ^ b[i]);
-        }
-        return result;
-    }
-
-    // ── MD5 password ──────────────────────────────────────────────────────────
-
-    private static boolean readAuthOk(InputStream in) throws IOException {
-        int type = readAuthenticationType(in);
-        if (type != 'R') {
-            LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
-            return false;
-        }
-        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "authentication response");
-        int authType = PostgresWire.readInt32(in);
-        if (length > 8) {
-            byte[] extra = new byte[length - 8];
-            PostgresWire.readFully(in, extra);
-        }
-        return authType == 0;
-    }
-
-    private static void sendPasswordMessage(OutputStream out, String password) throws IOException {
-        byte[] pwBytes = password.getBytes(StandardCharsets.UTF_8);
-        // 'p' + Int32(4 + pwLen + 1) + password + null
-        PostgresWire.write(out, 'p', pwBytes, new byte[]{0});
-    }
-
-    private static String computeMd5Password(String password, String username, byte[] salt) {
-        MessageDigest md5 = Digests.md5Digest();
-        md5.update(password.getBytes(StandardCharsets.UTF_8));
-        md5.update(username.getBytes(StandardCharsets.UTF_8));
-        String hex1 = HexFormat.of().formatHex(md5.digest());
-
-        md5.reset();
-        md5.update(hex1.getBytes(StandardCharsets.UTF_8));
-        md5.update(salt);
-        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     // ── Post-auth buffering ───────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -94,6 +95,7 @@ public class MwaaEnvironmentManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final LaunchedContainerAwsEnv awsEnv;
     private final Ec2Service ec2Service;
     /** The VPC address each Airflow container holds, returned once the container is gone. */
@@ -104,12 +106,14 @@ public class MwaaEnvironmentManager {
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
+                                  RegionResolver regionResolver,
                                   LaunchedContainerAwsEnv awsEnv,
                                   Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.awsEnv = awsEnv;
         this.ec2Service = ec2Service;
         this.vpcLeases = new VpcContainerLeases(ec2Service, "MWAA environment",
@@ -134,7 +138,7 @@ public class MwaaEnvironmentManager {
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
 
-        String dbContainerName = dbContainerName(config, environment);
+        String dbContainerName = dbContainerName(environment);
         String dbVolume = dbContainerName;
         lifecycleManager.removeIfExists(dbContainerName);
         lifecycleManager.ensureVolume(dbVolume);
@@ -172,7 +176,7 @@ public class MwaaEnvironmentManager {
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent, byte[] requirementsContent) {
         String name = environment.getName();
-        String airflowContainerName = airflowContainerName(config, environment);
+        String airflowContainerName = airflowContainerName(environment);
         String dagsVolume = airflowContainerName + "-dags";
         String logsVolume = airflowContainerName + "-logs";
 
@@ -383,8 +387,8 @@ public class MwaaEnvironmentManager {
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
-        String airflowContainerName = airflowContainerName(config, environment);
-        lifecycleManager.removeVolume(dbContainerName(config, environment));
+        String airflowContainerName = airflowContainerName(environment);
+        lifecycleManager.removeVolume(dbContainerName(environment));
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
@@ -419,7 +423,7 @@ public class MwaaEnvironmentManager {
         Collection<ContainerNetwork> networks;
         try {
             InspectContainerResponse inspect = lifecycleManager.getDockerClient()
-                    .inspectContainerCmd(airflowContainerName(config, environment)).exec();
+                    .inspectContainerCmd(airflowContainerName(environment)).exec();
             containerId = inspect.getId();
             networks = inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null
                     ? List.of() : inspect.getNetworkSettings().getNetworks().values();
@@ -602,21 +606,17 @@ public class MwaaEnvironmentManager {
 
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
-     *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
-     *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
-    static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(config, environment) + "-db");
+     *  Docker-backed service (EKS, RDS, ...). */
+    String dbContainerName(Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
     }
 
-    static String airflowContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config,
-                "mwaa-" + environmentIdentity(config, environment) + "-airflow");
+    String airflowContainerName(Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-airflow");
     }
 
-    private static String environmentIdentity(EmulatorConfig config, Environment environment) {
-        String defaultRegion = config != null ? config.defaultRegion() : null;
-        return environmentAccount(environment) + "." + environmentRegion(environment, defaultRegion) + "."
-                + environment.getName();
+    private String environmentIdentity(Environment environment) {
+        return environmentAccount(environment) + "." + regionOf(environment) + "." + environment.getName();
     }
 
     static String environmentAccount(Environment environment) {
@@ -625,13 +625,9 @@ public class MwaaEnvironmentManager {
                 : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
     }
 
+    /** The Region the environment's ARN names, and the default Region for one without an ARN. */
     private String regionOf(Environment environment) {
-        return environmentRegion(environment, config.defaultRegion());
-    }
-
-    /** The region the environment's ARN names; {@code defaultRegion} answers for one without an ARN. */
-    static String environmentRegion(Environment environment, String defaultRegion) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), defaultRegion);
+        return regionResolver.regionOf(environment.getArn());
     }
 
     /**

@@ -1,5 +1,7 @@
 package io.floci.aws.services.dsql.dataplane;
 
+import io.floci.aws.core.common.PostgresWire;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -9,8 +11,8 @@ import java.nio.charset.StandardCharsets;
  * Renders the DSQL bootstrap script for the database, owner role and admin role of one cluster.
  * The script's placeholders: {@code {{database}}}, {@code {{owner}}} and {@code {{admin}}} as
  * identifiers, always quoted; {@code {{owner_literal}}}, {@code {{admin_literal}}},
- * {@code {{connect_role_literal}}} and {@code {{role_prefix}}} as SQL string literals
- * ({@code 'dabc_'}, or {@code ''} for no prefix); {@code {{external}}} as the SQL boolean
+ * {@code {{connect_role_literal}}} and {@code {{role_prefix}}} as SQL escape-string literals
+ * ({@code E'dabc_'}, or {@code E''} for no prefix); {@code {{external}}} as the SQL boolean
  * {@code true} or {@code false}.
  */
 final class DsqlBootstrap {
@@ -34,13 +36,13 @@ final class DsqlBootstrap {
                     + rolePrefix + ", not \"" + connectRole + "\"");
         }
         return template()
-                .replace("{{database}}", identifier(database))
-                .replace("{{owner_literal}}", literal(owner))
-                .replace("{{owner}}", identifier(owner))
-                .replace("{{admin_literal}}", literal(admin))
-                .replace("{{admin}}", identifier(admin))
-                .replace("{{connect_role_literal}}", literal(connectRole))
-                .replace("{{role_prefix}}", literal(rolePrefix))
+                .replace("{{database}}", PostgresWire.quoteIdentifier(database))
+                .replace("{{owner_literal}}", PostgresWire.quoteLiteral(owner))
+                .replace("{{owner}}", PostgresWire.quoteIdentifier(owner))
+                .replace("{{admin_literal}}", PostgresWire.quoteLiteral(admin))
+                .replace("{{admin}}", PostgresWire.quoteIdentifier(admin))
+                .replace("{{connect_role_literal}}", PostgresWire.quoteLiteral(connectRole))
+                .replace("{{role_prefix}}", PostgresWire.quoteLiteral(rolePrefix))
                 .replace("{{external}}", Boolean.toString(external));
     }
 
@@ -53,14 +55,5 @@ final class DsqlBootstrap {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    /** Always quoted, so no name needs checking against PostgreSQL's reserved words. */
-    private static String identifier(String name) {
-        return '"' + name.replace("\"", "\"\"") + '"';
-    }
-
-    private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
     }
 }

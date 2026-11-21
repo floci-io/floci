@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -18,7 +18,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
-@TestProfile(ServiceEnablementIntegrationTest.DisabledServicesProfile.class)
+@TestProfile(ServicesOffSettingsProfile.class)
 class ServiceEnablementIntegrationTest {
 
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
@@ -301,23 +301,5 @@ class ServiceEnablementIntegrationTest {
     private static String authorization(String service) {
         return "AWS4-HMAC-SHA256 Credential=test/20260411/us-east-1/" + service
                 + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef";
-    }
-
-    public static final class DisabledServicesProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.acm.enabled", "false",
-                    "floci.services.codeartifact.enabled", "false",
-                    "floci.services.dynamodb.enabled", "false",
-                    "floci.services.ecs.enabled", "false",
-                    "floci.services.fis.enabled", "false",
-                    "floci.services.lambda.enabled", "false",
-                    "floci.services.opensearch.enabled", "false",
-                    "floci.services.rds-data.enabled", "false",
-                    "floci.services.sqs.enabled", "false",
-                    "floci.services.swf.enabled", "false"
-            );
-        }
     }
 }

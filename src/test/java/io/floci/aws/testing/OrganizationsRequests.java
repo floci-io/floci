@@ -18,8 +18,13 @@ public final class OrganizationsRequests {
 
     /** One call, named by its action, carrying {@code body} as its payload. */
     public static RequestSpecification request(String accountId, String action, String body) {
+        return request(accountId, "us-east-1", action, body);
+    }
+
+    /** As above; signed for {@code region}, as a client configured for that Region signs it. */
+    public static RequestSpecification request(String accountId, String region, String action, String body) {
         return given()
-                .header("Authorization", EnforcementFixtures.auth(accountId, "organizations"))
+                .header("Authorization", EnforcementFixtures.auth(accountId, region, "organizations"))
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .contentType(CONTENT_TYPE)
                 .body(body);

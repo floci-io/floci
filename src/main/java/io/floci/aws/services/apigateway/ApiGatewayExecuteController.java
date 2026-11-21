@@ -48,8 +48,10 @@ import io.floci.aws.services.apigatewayv2.model.IntegrationSubtype;
 import io.floci.aws.services.apigatewayv2.model.Route;
 import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
 import io.floci.aws.services.apigatewayv2.proxy.CloudMapInstanceResolver;
+import io.floci.aws.services.apigatewayv2.proxy.ContextValueResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
 import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
+import io.floci.aws.services.apigatewayv2.proxy.ResponseParameterMapper;
 import io.floci.aws.services.apigatewayv2.websocket.ConnectionInfo;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
@@ -152,6 +154,8 @@ public class ApiGatewayExecuteController {
     private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
     private final HttpProxyInvoker httpProxyInvoker;
     private final ServiceCallAuthorizer serviceCallAuthorizer;
+    private final ResponseParameterMapper responseParameterMapper =
+            new ResponseParameterMapper(new ContextValueResolver());
 
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
                                        ApiGatewayV2Service apiGatewayV2Service,
@@ -3261,8 +3265,8 @@ public class ApiGatewayExecuteController {
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());
 
-        io.floci.aws.services.apigatewayv2.proxy.ProxyResult result =
-                httpProxyInvoker.invoke(effective, ctx);
+        io.floci.aws.services.apigatewayv2.proxy.ProxyResult result = responseParameterMapper.apply(
+                integration.getResponseParameters(), httpProxyInvoker.invoke(effective, ctx), ctx);
 
         Response.ResponseBuilder rb = Response.status(result.statusCode());
         if (result.body() != null) rb.entity(result.body());

@@ -92,6 +92,30 @@ class RdsDataControllerIntegrationTest {
             .body("__type", equalTo("BadRequestException"));
     }
 
+    // Catches: the model's 64-character limit on database checked only after the resource lookup;
+    // AWS checks the request's shape first, so a missing resource does not hide it.
+    @Test
+    void executeRefusesADatabaseNameLongerThanTheModelAllows() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:missing",
+                  "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
+                  "database": "%s",
+                  "sql": "select 1"
+                }
+                """.formatted("d".repeat(65)))
+        .when()
+            .post("/Execute")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "BadRequestException")
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("database must be at most 64 characters."));
+    }
+
     @Test
     void commitUnknownTransactionReturnsTypedJsonError() {
         given()

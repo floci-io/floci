@@ -25,6 +25,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -51,6 +52,34 @@ class Ec2NetworkInterfaceIpv6IntegrationTest {
             assertTrue(inSubnet(fixture, address), address);
         }
         assertEquals(addresses, addresses(describe(fixture, created.networkInterfaceId())));
+    }
+
+    @Test
+    void reportsTheFirstIpv6AddressOnCreateAndDescribe() {
+        Fixture fixture = fixture();
+        NetworkInterface created = fixture.client().createNetworkInterface(request -> request
+                .subnetId(fixture.subnet()).ipv6AddressCount(2)).networkInterface();
+        cleanup.register(() -> fixture.client().deleteNetworkInterface(request -> request
+                .networkInterfaceId(created.networkInterfaceId())));
+
+        List<String> assigned = addresses(created);
+        assertEquals(assigned.getFirst(), created.ipv6Address());
+        assertEquals(assigned.getFirst(), describe(fixture, created.networkInterfaceId()).ipv6Address());
+        fixture.client().unassignIpv6Addresses(request -> request
+                .networkInterfaceId(created.networkInterfaceId()).ipv6Addresses(assigned.getFirst()));
+        assertEquals(assigned.get(1), describe(fixture, created.networkInterfaceId()).ipv6Address());
+    }
+
+    @Test
+    void omitsTheTopLevelIpv6AddressWhenNoneRemain() {
+        Fixture fixture = fixture();
+        String eni = create(fixture, request -> { });
+        assertNull(describe(fixture, eni).ipv6Address());
+        List<String> assigned = fixture.client().assignIpv6Addresses(request -> request
+                .networkInterfaceId(eni).ipv6AddressCount(1)).assignedIpv6Addresses();
+        fixture.client().unassignIpv6Addresses(request -> request
+                .networkInterfaceId(eni).ipv6Addresses(assigned));
+        assertNull(describe(fixture, eni).ipv6Address());
     }
 
     // Catches: an explicit Ipv6AddressCount of 0 read as "not given", so the subnet's AssignIpv6AddressOnCreation

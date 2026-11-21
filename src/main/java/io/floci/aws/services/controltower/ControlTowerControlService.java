@@ -98,6 +98,20 @@ public class ControlTowerControlService {
                 .orElseThrow(() -> notFound("The request references an enabled control that does not exist."));
     }
 
+    /**
+     * The tags of the enabled control whose ARN is {@code arn} in {@code region}, found as the tag handlers find it, by
+     * the ARN it records among the Region's controls in the request's account. {@link ControlTowerStoredResourceArns}
+     * asks it.
+     */
+    public Map<String, String> storedTags(String region, String arn) {
+        return controls.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(control -> arn.equals(control.getArn()))
+                .findFirst()
+                .map(EnabledControl::getTags)
+                .<Map<String, String>>map(LinkedHashMap::new)
+                .orElse(Map.of());
+    }
+
     public synchronized Map<String, String> listTags(String region, String arn) {
         Map<String, String> tags = get(region, arn).getTags();
         return tags == null ? Map.of() : tags;

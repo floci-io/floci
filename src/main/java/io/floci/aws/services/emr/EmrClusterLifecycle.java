@@ -76,8 +76,11 @@ final class EmrClusterLifecycle {
         /** {@code step} of {@code cluster} has just gone RUNNING. */
         void start(EmrCluster cluster, EmrStep step, String region);
 
-        /** {@code step}, which was RUNNING, has just been cancelled. */
-        void stop(EmrStep step);
+        /**
+         * {@code step}, which was RUNNING, has just been cancelled: with {@code terminateProcess} its process is killed
+         * at once, and else sent SIGTERM and left to end.
+         */
+        void stop(EmrStep step, boolean terminateProcess);
     }
 
     /**
@@ -171,9 +174,19 @@ final class EmrClusterLifecycle {
      * ({@link #stepEnded}), and keeps its place among the running steps meanwhile: "Canceling a running step does
      * not allow a pending step to start running, assuming no change to stepConcurrencyLevel". One that completes
      * by time, nothing running it, is CANCELLED at once and makes room for the next PENDING one.
+     *
+     * <p>The Management Guide's "Cancel steps": with {@code SEND_INTERRUPT}, the default, "EMR sends a SIGTERM signal
+     * to the step", which may catch it "to terminate descendant step processes or wait for them to complete"; with
+     * {@code TERMINATE_PROCESS} ({@code terminateProcess}) "EMR sends a SIGKILL signal to the step and all its
+     * descendant processes which terminates them immediately". A step whose SEND_INTERRUPT cancel is pending is
+     * killed by a TERMINATE_PROCESS one.
      */
-    String cancel(EmrCluster cluster, EmrStep step, Instant now, String region) {
+    String cancel(EmrCluster cluster, EmrStep step, Instant now, String region, boolean terminateProcess) {
         if (CANCEL_PENDING.equals(step.getState())) {
+            if (terminateProcess && step.isInterrupted()) {
+                step.setInterrupted(false);
+                execution.stop(step, true);
+            }
             return null;
         }
         boolean running = RUNNING.equals(step.getState()) && cancelsRunningSteps(cluster.getReleaseLabel());
@@ -182,8 +195,9 @@ final class EmrClusterLifecycle {
         }
         if (running && !timed(step)) {
             step.setState(CANCEL_PENDING);
+            step.setInterrupted(!terminateProcess);
             events.queue(events.stepCancelPending(cluster, step, now), region);
-            execution.stop(step);
+            execution.stop(step, terminateProcess);
             return null;
         }
         cancelStep(cluster, step, now, region);
@@ -334,6 +348,8 @@ final class EmrClusterLifecycle {
      */
     void stepEnded(EmrCluster cluster, EmrStep step, String failure, Instant at, String region) {
         if (CANCEL_PENDING.equals(step.getState())) {
+            // Its driver has ended, so there is nothing left to kill.
+            step.setInterrupted(false);
             cancelStep(cluster, step, at, region);
             runSteps(cluster, at, region);
             return;
@@ -403,12 +419,14 @@ final class EmrClusterLifecycle {
     }
 
     private void cancelStep(EmrCluster cluster, EmrStep step, Instant at, String region) {
-        boolean running = RUNNING.equals(step.getState());
+        // Running, or left to end after a SIGTERM: a step its cluster's end cancels has its process killed.
+        boolean going = RUNNING.equals(step.getState()) || step.isInterrupted();
         step.setState(CANCELLED);
+        step.setInterrupted(false);
         step.setEndDateTime(at);
         events.queue(events.stepStatusChange(cluster, step, CANCELLED), region);
-        if (running && !timed(step)) {
-            execution.stop(step);
+        if (going && !timed(step)) {
+            execution.stop(step, true);
         }
     }
 

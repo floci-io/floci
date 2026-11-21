@@ -5,10 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
-import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
@@ -111,8 +107,6 @@ public class IamConditionContextResolver {
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
-    private final Instance<CloudWatchLogsService> logsService;
-    private final Instance<CloudWatchLogsCrossAccountService> crossAccountService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
     private final Instance<RequestConditionSpelling> requestConditionSpellings;
@@ -132,8 +126,6 @@ public class IamConditionContextResolver {
     public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
-                                       Instance<CloudWatchLogsService> logsService,
-                                       Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
                                        Instance<RequestConditionSpelling> requestConditionSpellings,
@@ -143,7 +135,7 @@ public class IamConditionContextResolver {
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
+        this(dynamoDbFacade, ec2Service, s3Service, iamService,
                 lambdaWebService, requestConditionSpellings, storedResourceArns, requestContext, regionResolver,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
@@ -151,8 +143,6 @@ public class IamConditionContextResolver {
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
-                                Instance<CloudWatchLogsService> logsService,
-                                Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
                                 Instance<RequestConditionSpelling> requestConditionSpellings,
@@ -165,8 +155,6 @@ public class IamConditionContextResolver {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
-        this.logsService = logsService;
-        this.crossAccountService = crossAccountService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
         this.requestConditionSpellings = requestConditionSpellings;
@@ -298,81 +286,35 @@ public class IamConditionContextResolver {
         };
     }
 
-    /** Logs tag operations and group mutations use the handler's resource and request scope. */
+    /**
+     * The tags a CloudWatch Logs call asks to attach or remove, read as its handler reads them: a tagged
+     * {@code CreateLogGroup}'s and a {@code TagResource}'s {@code tags} as {@code aws:RequestTag/<key>} and
+     * {@code aws:TagKeys}, an {@code UntagResource}'s {@code tagKeys} as {@code aws:TagKeys}. The tags of what the
+     * request names come from Logs' {@link StoredResourceArns}, as for every namespace the table reads.
+     */
     private Map<String, List<String>> logsConditionContext(String action, ContainerRequestContext ctx) {
-        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action)
-                || LogGroupTagTarget.supports(action) || "logs:CreateLogGroup".equals(action) || "logs:DeleteLogGroup".equals(action)
-                || "logs:PutRetentionPolicy".equals(action) || "logs:DeleteRetentionPolicy".equals(action))) {
+        if (!("logs:CreateLogGroup".equals(action) || "logs:TagResource".equals(action)
+                || "logs:UntagResource".equals(action))) {
             return null;
         }
         JsonNode body = bufferedJsonBody(ctx);
         if (body == null) {
             return null;
         }
-        if ("logs:CreateLogGroup".equals(action)) {
-            JsonNode tags = body.path("tags");
-            if (!tags.isObject() || tags.isEmpty()) {
-                return null;
-            }
-            Map<String, List<String>> conditions = new LinkedHashMap<>();
-            List<String> keys = new ArrayList<>();
-            tags.properties().forEach(entry -> {
-                keys.add(entry.getKey());
-                conditions.put("aws:RequestTag/" + entry.getKey(), List.of(entry.getValue().asText()));
-            });
-            conditions.put("aws:TagKeys", keys);
-            return conditions;
-        }
-        boolean direct = LogGroupTagTarget.supports(action);
-        boolean destination = direct && CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(
-                body.path("resourceArn").asText());
-        if (destination ? !crossAccountService.isResolvable() : !logsService.isResolvable()) {
-            return null;
-        }
-        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        if ("logs:TagResource".equals(action) && body.path("tags").isObject()) {
-            List<String> keys = new ArrayList<>();
-            body.path("tags").fields().forEachRemaining(entry -> {
+        List<String> keys = new ArrayList<>();
+        if ("logs:UntagResource".equals(action)) {
+            body.path("tagKeys").forEach(key -> keys.add(key.asText()));
+        } else if (body.path("tags").isObject()) {
+            body.path("tags").properties().forEach(entry -> {
                 keys.add(entry.getKey());
                 conditions.put(REQUEST_TAG_PREFIX + entry.getKey(), List.of(entry.getValue().asText()));
             });
-            if (!keys.isEmpty()) {
-                conditions.put("aws:TagKeys", keys);
-            }
-        } else if ("logs:UntagResource".equals(action)) {
-            List<String> keys = new ArrayList<>();
-            body.path("tagKeys").forEach(key -> keys.add(key.asText()));
-            if (!keys.isEmpty()) {
-                conditions.put("aws:TagKeys", keys);
-            }
         }
-        if (direct && CloudWatchLogsDeliveryService.isDeliveryResourceArn(body.path("resourceArn").asText())) {
-            // A delivery source, destination or delivery: its request tags apply, its own tags are not read.
-            return conditions.isEmpty() ? null : conditions;
+        if (!keys.isEmpty()) {
+            conditions.put("aws:TagKeys", keys);
         }
-        Map<String, String> tags;
-        try {
-            if (destination) {
-                tags = crossAccountService.get().listDestinationTags(body.path("resourceArn").asText(), region);
-            } else {
-                String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
-                        : body.path("logGroupName").asText();
-                tags = logsService.get().listTagsLogGroup(group, region);
-            }
-        } catch (AwsException e) {
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            // Leave the handler to report a missing resource; unexpected lookup errors must not hide a deny.
-            return conditions.isEmpty() ? null : conditions;
-        }
-        if (tags == null || tags.isEmpty()) {
-            return conditions.isEmpty() ? null : conditions;
-        }
-        tags.forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
-                List.of(value == null ? "" : value)));
-        return conditions;
+        return conditions.isEmpty() ? null : conditions;
     }
 
     /** The condition key whose value a delegation can decide rather than the request. */
@@ -1127,7 +1069,10 @@ public class IamConditionContextResolver {
             return context;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
-        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+        // A snapshot's and an image's ARN carries no account (arn:aws:ec2:<region>::snapshot/<id>), which is not a
+        // foreign one: EC2 reads the id in the caller's account, as it reads every other one.
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region())
+                || AwsArnUtils.isForeignAccount(arn, accountId)) {
             return context;
         }
         String[] parts = arn.resource().split("/", 2);

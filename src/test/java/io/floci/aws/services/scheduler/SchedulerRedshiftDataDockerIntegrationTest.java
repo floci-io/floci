@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.scheduler.model.Schedule;
 import io.floci.aws.services.sqs.SqsService;
@@ -148,7 +149,7 @@ class SchedulerRedshiftDataDockerIntegrationTest {
         SchedulerService scopedSchedulerService = mock(SchedulerService.class);
         when(scopedSchedulerService.listAllSchedules()).thenReturn(List.of(schedule));
         ScheduleDispatcher dispatcher = new ScheduleDispatcher(
-                scopedSchedulerService, scheduleInvoker, sqsService, config);
+                scopedSchedulerService, scheduleInvoker, sqsService, config, new RegionResolver(config));
         testDispatchers.add(dispatcher);
         return dispatcher;
     }

@@ -1222,9 +1222,13 @@ public class IotService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404));
     }
 
-    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
-        getConnection(clientId);
-        return paginate(mqttBrokerService.listSubscriptions(clientId), maxResults, nextToken);
+    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken, String region) {
+        validateMqttClientId(clientId);
+        String accountId = regionResolver.getAccountId();
+        if (!mqttBrokerService.hasSession(accountId, region, clientId)) {
+            throw new AwsException("ResourceNotFoundException", "MQTT client has no session: " + clientId, 404);
+        }
+        return paginate(mqttBrokerService.listSubscriptions(accountId, region, clientId), maxResults, nextToken);
     }
 
     public void sendDirectMessage(String clientId, String topic, byte[] payload) {
@@ -1799,7 +1803,7 @@ public class IotService {
      * action that failed, with the original payload as published.
      */
     private void executeTopicRule(IotTopicRule rule, String topic, byte[] originalPayload, byte[] document) {
-        String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
+        String ruleRegion = regionResolver.regionOf(rule.getRuleArn());
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
             String type = actionType(action);

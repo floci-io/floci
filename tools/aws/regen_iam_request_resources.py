@@ -96,10 +96,8 @@ of its own name with that action's resource types when the reference has that ac
 the reference lists one client's operations per namespace, and
 OpenSearch Service's are the `es` client's alone, while the `opensearch` client's are named after `es` actions.
 
-Every operation in `NAMESPACES` is read, whether Floci serves it or not. In a namespace in `HAND_BUILT`, whose
-other operations keep their existing resource builders, so are the operations `READ_IN_HAND_BUILT` lists, which
-follow the rule unchanged: a family of a hand-built namespace whose requests name their resources the
-way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
+Every operation in `NAMESPACES` is read, whether Floci serves it or not. `HAND_BUILT` are the namespaces
+`ResourceArnBuilder` builds resources for itself, whose operations are read only where `MEASURED` gives them, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
 `ID_TARGETS` is Floci's coverage of id-list namespaces, the types of each it reads by id (EC2's instances and
@@ -107,7 +105,8 @@ network resources): a resource ARN's variable names its list member, with the re
 it acts on (`Resources`) as a fallback. A list a type's variable names is the request's targets only when the
 request names nothing else the action acts on. Botocore supplies its serialized EC2 Query name (including queryName
 and capitalization), and the id prefix botocore gives each type, in its documentation ("the instance ID (for
-example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), distinguishes them. Each generated
+example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), distinguishes them. Cited EC2 API
+examples supply a missing VPC endpoint prefix. Each generated
 `targets` entry preserves the request's order and duplicates, including a wildcard for each unsupported id; only
 resolved ARNs use the corresponding target's condition context. Every other request of those namespaces is read by
 the ordinary rules, its EC2 Query wire names (`ec2Query`) from botocore. `resourceTagKeys` gives every type of the
@@ -228,7 +227,10 @@ whose ARN is all an id its service mints is named by the members its service fin
 documents as its key ("Scalable targets are uniquely identified by the combination of resource ID, scalable
 dimension, and namespace"), or else a name of it where no request of the namespace gives the id (a Redshift
 Serverless namespace by its `namespaceName`), and the reader asks the service for the ARN they find, or else checks
-the ARN with its id open, as for a create. A member naming a resource the reference gives no type, whose botocore
+the ARN with its id open, as for a create. An id of a nested record also finds the containing resource and the
+resource ids held beside it: a NetworkInterface's Attachment holds AttachmentId beside InstanceId. Each selected
+reference type is found by that id, with the same typed caller fallback when no stored record exists. A member
+naming a resource the reference gives no type, whose botocore
 record holds it beside members named after types the action acts on, names those through it (`through`): a Data
 API session's `SessionData` holds its `SessionId` beside the `ClusterIdentifier` or `WorkgroupName` it runs on, and
 the reader asks the service for the ARN of the caller's resource at the other end, or else names none. A member
@@ -266,7 +268,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fetch_athena_glue_ddl_permissions
-from regen_iam_authorized_actions import authorized_actions_from, fetch_references
+from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
+                                          load_s3_required, s3_query_parameters, vendored_sections)
 from regen_iam_passed_roles import (
     NAMESPACE_RE,
     OPERATION_RE,
@@ -293,25 +296,12 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
-              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
+              "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
+              "ec2-instance-connect")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
-              "resource-groups", "s3", "sns", "sqs", "sts")
-
-# Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
-_LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
-                  "by the member the rule reads, while ResourceArnBuilder keeps building the log group and stream ARNs")
-READ_IN_HAND_BUILT: dict[str, str] = {
-    f"logs:{operation}": _LOGS_DELIVERY
-    for operation in ("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource", "DescribeDeliverySources",
-                      "PutDeliveryDestination", "GetDeliveryDestination", "DeleteDeliveryDestination",
-                      "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery", "UpdateDeliveryConfiguration",
-                      "DeleteDelivery", "DescribeDeliveries")
-}
-READ_IN_HAND_BUILT["logs:PutDestination"] = (
-    "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
-    "reads from the generated request-resource table")
+HAND_BUILT = ("apigateway", "bedrock", "dynamodb", "iam", "kms", "s3")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -366,6 +356,21 @@ _SNAPSHOT_KEY_EVIDENCE = (
     "customer managed key, a user must have permission to call the following operations on the customer managed key', "
     "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
 MEASURED: dict[str, tuple[list[dict], str]] = {
+    "dsql:ListClusters": (
+        [{"type": "Cluster", "fill": {}}],
+        "AWS's AccessDenied message recorded verbatim in https://github.com/floci-io/floci/pull/6328 (Aurora DSQL, "
+        "eu-west-1, 2026-10-23): a session policy denying dsql:CreateCluster and dsql:ListClusters refused both "
+        "'... on resource: arn:aws:dsql:eu-west-1:<account>:cluster/* with an explicit deny in a session policy'; the "
+        "Service Reference lists no resource type for ListClusters"),
+    "eks:CreateCluster": (
+        [{"type": "cluster", "fill": {"ClusterName": "name"}}],
+        "the Amazon EKS User Guide, 'Amazon EKS identity-based policy examples', 'Create a Kubernetes cluster on the "
+        "AWS Cloud' (https://docs.aws.amazon.com/eks/latest/userguide/security-iam-id-based-policy-examples.html): "
+        "'This example policy includes the minimum permissions required to create an Amazon EKS cluster named "
+        "my-cluster in the us-west-2 AWS Region', its statement allowing 'eks:CreateCluster' on "
+        "'arn:aws:eks:us-west-2:111122223333:cluster/my-cluster', and 'If you see a warning that says The actions in "
+        "your policy do not support resource-level permissions and require you to choose All resources in the AWS "
+        "Management Console, it can be safely ignored'; the Service Reference lists no resource type for the action"),
     "dynamodb:ListTables": (
         [{"type": "table", "fill": {}}],
         "real AWS probes in https://github.com/floci-io/floci/pull/7336 (27 policy cases with real AWS STS role "
@@ -432,7 +437,6 @@ NOT_COVERED: dict[str, str] = {
     "detective": _REST,
     "dlm": _REST,
     "dms": _LATER,
-    "ec2-instance-connect": _LATER,
     "elasticache": _LATER,
     "elasticbeanstalk": "not read yet: an environment's ARN carries its application's name, "
                         "`environment/<application>/<name>`, while most of its requests name it by EnvironmentName "
@@ -478,9 +482,10 @@ KNOWN_VARIABLES = {"Partition", "Region", "Account"}
 # Floci's coverage of id-list namespaces: the types of each it reads by id, which ResourceArnBuilder and the condition
 # resolver resolve with their stored tags. It states no AWS fact: the model supplies each list member and its wire
 # name, the Service Reference the action's types and ARN formats, and botocore's documentation and examples the id
-# prefix of each type (`id_prefixes`). Other ids keep a wildcard entry until their coverage grows; every request
+# prefix of each type (`id_prefixes`), supplemented by cited API examples when botocore has none. Other ids keep
+# a wildcard entry until their coverage grows; every request
 # without those lists is read by the ordinary rules.
-ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-table", "security-group")}
+ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-table", "security-group", "vpc-endpoint")}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
@@ -558,11 +563,30 @@ def related(a: str, b: str) -> bool:
 # --------------------------------------------------------------------------- #
 # The Service Reference
 # --------------------------------------------------------------------------- #
+def action_mapping(documents: list[dict]) -> dict[str, dict[str, str]]:
+    """The action each operation is checked as where it is not its own name, as the authorized-actions file gives it
+    (`regen_iam_authorized_actions.authorized_actions`), an operation the S3 user guide gives a version choice taking
+    its action without a version, whose types are the same, and one several clients share its namesake client's
+    (`namesake_by_model`, and the S3 user guide's for S3's requests)."""
+    page = load_s3_required()
+    models = json.loads(ROUTES_FILE.read_text(encoding="utf-8"))["models"] if ROUTES_FILE.exists() else {}
+    query = s3_query_parameters() if any(document.get("Name") == "s3" for document in documents) else None
+    mapped = authorized_actions(documents, page, models, query)
+    sections = vendored_sections(documents, page, models, query, mapped)
+    for namespace, operations in sections["versioned"].items():
+        for operation, choice in operations.items():
+            mapped.setdefault(namespace, {}).setdefault(operation, choice["without"])
+    for namespace, clients in sections["authorizedByModel"].items():
+        for operation, action in clients.get(namespace, {}).items():
+            mapped.setdefault(namespace, {}).setdefault(operation, action)
+    return mapped
+
+
 def checked_actions(documents: list[dict]) -> dict[str, dict]:
     """Each operation of each namespace, as `<namespace>:<Operation>`, with the action Floci checks it
     as, that action's resource types (null when the namespace has no action of that name) and the
     operation's SDK clients."""
-    mapped = authorized_actions_from(documents)
+    mapped = action_mapping(documents)
     found = {}
     for document in documents:
         namespace = document["Name"]
@@ -764,8 +788,9 @@ def with_absent_account(resources: list[dict], formats: dict[str, str], accounts
 # Words that end a type's name in a member's documentation: "The name of the pipeline to start".
 DOC_STOP = {"to", "that", "you", "for", "which", "created", "from", "in", "of", "about", "whose", "with", "on",
             "belonging", "being", "the", "a", "an", "is", "are", "and", "or", "by", "used", "will", "should", "can", ""}
-# "The name of the pipeline", "Specifies the name or the CloudTrail ARN of the trail", "The ID of the delivery".
-DOC_NAMES_RE = re.compile(r"^(?:specifies )?(?:the |a |an )?(?:unique )?(?:name|id|identifier)"
+# "The name of the pipeline", "Specifies the name or the CloudTrail ARN of the trail", "The ID of the delivery", "The URL of
+# the queue".
+DOC_NAMES_RE = re.compile(r"^(?:specifies )?(?:the |a |an )?(?:unique )?(?:name|id|identifier|url)"
                           r"(?: or (?:the )?(?:[a-z]+ )?arn)? (?:of|for) (?:the |a |an )?(?P<phrase>.+)$")
 # "A list of service-generated unique DB Instance Ids belonging to the DB Cluster".
 DOC_LIST_RE = re.compile(r"^(?:a |the )?(?:list of )?(?:service-generated |unique )*(?P<phrase>[a-z][a-z0-9 -]*?) "
@@ -796,12 +821,14 @@ def doc_head(lead: str) -> tuple[str, str | None]:
 
 
 def doc_kind(lead: str) -> str | None:
-    """Whether the documentation says the member is a name or an id; None when it says neither."""
+    """Whether the documentation says the member is a name, an id or a URL; None when it says none of them."""
     head, _ = doc_head(lead)
     if re.search(r"\bname(?: or (?:the )?(?:\w+ )?arn)?$", head):
         return "name"
     if re.search(r"\b(?:id|identifier|ids|identifiers)(?: or (?:the )?(?:\w+ )?arn)?$", head):
         return "id"
+    if re.search(r"\burl$", head):
+        return "url"
     return None
 
 
@@ -821,7 +848,8 @@ def spelled(kind: str, arn: str) -> str | None:
 def doc_names(lead: str, kind: str, formats: dict[str, str]) -> bool:
     """Whether a member's documentation says it names a resource of the type, by the type's name or its format's
     leading resource word, word for word and followed by a word that ends it: "The name of the stream processor you
-    want to delete" names a `streamprocessor`, "The ID of the pipeline execution" no `pipeline`."""
+    want to delete" names a `streamprocessor`, "The ID of the pipeline execution" no `pipeline`. A hyphenated word
+    before it qualifies it: "The URL of a dead-letter queue" names a `queue`."""
     word = RESOURCE_PART_RE.match(formats.get(kind, ""))
     targets = {re.sub(r"[^a-z0-9]", "", kind.lower())} | ({re.sub(r"[^a-z0-9]", "", word.group(1).lower())} if word else set())
     for regex in (DOC_NAMES_RE, DOC_LIST_RE):
@@ -829,19 +857,31 @@ def doc_names(lead: str, kind: str, formats: dict[str, str]) -> bool:
         if not match:
             continue
         words = re.split(r"[\s,;()]+", match.group("phrase"))
-        joined = ""
-        for index, piece in enumerate(words[:4]):
-            joined += re.sub(r"[^a-z0-9]", "", piece)
-            if joined in targets:
-                return regex is DOC_LIST_RE or re.sub(r"[^a-z0-9]", "", words[index + 1] if index + 1 < len(words) else "") in DOC_STOP
-            if not any(target.startswith(joined) for target in targets):
-                break
+        starts = [0, 1] if len(words) > 1 and "-" in words[0] else [0]
+        for start in starts:
+            joined = ""
+            for index, piece in enumerate(words[start:start + 4], start):
+                joined += re.sub(r"[^a-z0-9]", "", piece)
+                if joined in targets:
+                    return regex is DOC_LIST_RE or re.sub(r"[^a-z0-9]", "", words[index + 1] if index + 1 < len(words) else "") in DOC_STOP
+                if not any(target.startswith(joined) for target in targets):
+                    break
     return False
+
+
+def _without_service_name(lead: str, model: dict) -> str:
+    """A documentation lead without the model's own service name before the word it qualifies, as botocore's metadata
+    spells it: "the url of the amazon sqs queue to delete" reads "the url of the queue to delete"."""
+    for name in (model["metadata"].get("serviceFullName"), model["metadata"].get("serviceAbbreviation")):
+        if name:
+            lead = re.sub(r"\b" + re.escape(name.lower()) + r" (?=[a-z])", "", lead)
+    return lead
 
 
 def documented_members(models: dict[str, dict], operation: str) -> dict[str, dict]:
     """The request's members holding a string or a list of strings, top-level and fields of a top-level structure,
-    each with its documentation's lead, its pattern and whether it is nested, by name or `Name.Field`."""
+    each with its documentation's lead, without its service's own name (`_without_service_name`), its pattern and
+    whether it is nested, by name or `Name.Field`."""
     found: dict[str, dict] = {}
     for model in models.values():
         spec = model["operations"].get(operation)
@@ -863,7 +903,8 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                     continue
                 element = model["shapes"][item_shape["member"]["shape"]] if item_shape["type"] == "list" else item_shape
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
-                                        "lead": _lead(item.get("documentation") or item_shape.get("documentation")),
+                                        "lead": _without_service_name(_lead(item.get("documentation")
+                                                                            or item_shape.get("documentation")), model),
                                         "arnValue": bool(re.search(
                                             r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
                                             _lead_text(item.get("documentation") or item_shape.get("documentation")))),
@@ -1005,6 +1046,18 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         opened = current is not None and current.get("fill") == {} and "made" not in current
         fill = dict(current["fill"]) if current else {}
         unfilled = [v for v in variables if v not in fill]
+        # An optional id and name documented as mutually exclusive selectors name the same stored resource.
+        # Keep the id path, and resolve the name only when that id is absent (EC2 launch templates).
+        if not creating and len(variables) == 1 and not unfilled and kind_of(variables[0]) == "id":
+            selector = fill[variables[0]]
+            optional = optional_members(models, name)
+            names = [path for path, fact in facts.items()
+                     if path in optional and not fact["nested"] and not fact["path"].endswith("[]")
+                     and doc_kind(fact["lead"]) == "name" and doc_names(fact["lead"], kind, formats)
+                     and "either" in (_member_documentation(models, name, path) or "").lower()
+                     and "but not both" in (_member_documentation(models, name, path) or "").lower()]
+            if selector in optional and len(names) == 1:
+                resources.append({"type": kind, "fill": {}, "find": names, "when": {selector: [None]}})
         if len(unfilled) != 1:
             continue
         variable = unfilled[0]
@@ -1031,6 +1084,9 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                         and not (creating and said != kind_of(variable) and kind_of(variable) != "identifier"):
                     candidates.append(("fill", fact["path"]))
                 elif len(variables) == 1 and not fact["path"].endswith("[]"):
+                    # A create asking for "A name for" its new resource does not select an existing id.
+                    if creating and made == stem(kind) and fact["lead"].startswith("a name for "):
+                        continue
                     candidates.append(("find", fact["path"]))
             elif aliased != effective and related(aliased, kind_stem) and compatible(field, variable):
                 candidates.append(("fill", fact["path"]))
@@ -1692,7 +1748,7 @@ def _kinds(resource: dict) -> list[str]:
 
 
 def kind_of(name: str) -> str:
-    """Whether a name ends as a name, an id, or an identifier (which is either), or neither."""
+    """Whether a name ends as a name, an id, or an identifier (which is either), a URL, or none of them."""
     lower = name.lower()
     if re.search(r"identifiers?$", lower):
         return "identifier"
@@ -1700,6 +1756,8 @@ def kind_of(name: str) -> str:
         return "name"
     if re.search(r"ids?$", lower):
         return "id"
+    if re.search(r"urls?$", lower):
+        return "url"
     return ""
 
 
@@ -2009,7 +2067,8 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
     <p>A re-encryption decrypts under the key its path names and encrypts under the key its body names, so both are
     acted on and both are checked. A member that names a resource of the type, with a word before it saying which of
     them it is, fills the type's variable as well, when botocore's shape for it takes an alias as well as the type's
-    ARN, which the service resolves (Payment Cryptography's `KeyArnOrKeyAliasType`)."""
+    ARN, which the service resolves (Payment Cryptography's `KeyArnOrKeyAliasType`). Paired Add/Remove ID lists
+    of the same modeled shape also name separate resources, including the resources being removed."""
     found = []
     for kind in types:
         if kind not in kept or kind not in filled or not filled[kind]:
@@ -2027,7 +2086,13 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
                           and stem(member).endswith(stem(variable)) and stem(selected).endswith(stem(variable))
                           and (shapes or {}).get(member) == (shapes or {}).get(selected)
                           and stem((shapes or {}).get(member, "")) == stem(variable))
-            if not sibling_id and (member not in aliased or not names_type(member, kind_stem)):
+            paired_lists = (len(filled[kind]) == 1 and members[member].endswith("[]")
+                            and members.get(selected, "").endswith("[]")
+                            and {member.removesuffix("s"), selected.removesuffix("s")}
+                            == {"Add" + variable, "Remove" + variable}
+                            and (shapes or {}).get(member) is not None
+                            and shapes[member] == shapes.get(selected))
+            if not sibling_id and not paired_lists and (member not in aliased or not names_type(member, kind_stem)):
                 continue
             if not compatible(member, variable):
                 continue
@@ -2121,7 +2186,9 @@ def id_prefixes(models: dict[str, dict], kinds: tuple[str, ...],
 def namespace_id_prefixes(namespace: str, models: dict[str, dict],
                           examples: dict[str, dict] | None = None) -> dict[str, str] | None:
     """`id_prefixes` of the types `ID_TARGETS` reads by id in the namespace; None for a namespace it reads none of."""
-    return id_prefixes(models, ID_TARGETS[namespace], examples) if namespace in ID_TARGETS else None
+    if namespace not in ID_TARGETS:
+        return None
+    return id_prefixes(models, ID_TARGETS[namespace], examples)
 
 
 def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict],
@@ -2133,7 +2200,7 @@ def id_targets(operation: str, types: list[str], formats: dict[str, str], models
     configured = ID_TARGETS.get(namespace_of(operation))
     if configured is None:
         return None
-    known = known if known is not None else id_prefixes(models, configured)
+    known = known if known is not None else namespace_id_prefixes(namespace_of(operation), models)
     found = None
     for model in models.values():
         spec = model["operations"].get(operation.split(":", 1)[1], {})
@@ -2473,6 +2540,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_nested_record_find(resources, types, formats, members, models)
     resources = with_find_scope(resources, models, name, formats)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
     resources = with_integer_members(resources, formats, models, name)
@@ -3005,6 +3073,44 @@ def with_found(resources: list[dict], types: list[str], formats: dict[str, str],
     return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
 
 
+def with_nested_record_find(resources: list[dict], types: list[str], formats: dict[str, str],
+                            members: dict[str, str], models: dict[str, dict]) -> list[dict]:
+    """An id of a nested record linking two reference types selects both resource endpoints.
+
+    A NetworkInterface holds an Attachment whose AttachmentId and InstanceId identify its attachment and the
+    instance at its other end. Only a record named exactly after a reference type, holding its own id, supplies
+    this relationship; request wrappers and unrelated sibling fields do not. Existing explicit selectors win.
+    """
+    candidates: dict[str, set[str]] = {}
+    for model in models.values():
+        shapes = model["shapes"]
+        for shape_name, shape in shapes.items():
+            parents = [kind for kind in types if stem(shape_name) == stem(kind)]
+            fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+            if not parents or not any(kind_of(field) == "id" and stem(field) == stem(shape_name)
+                                      for field in fields):
+                continue
+            for child_name, spec in fields.items():
+                child = shapes[spec["shape"]]
+                nested = child.get("members", {}) if child.get("type") == "structure" else {}
+                for key, key_spec in nested.items():
+                    if members.get(key) != key or kind_of(key) != "id" or stem(key) != stem(child_name) \
+                            or shapes[key_spec["shape"]]["type"] != "string" \
+                            or any(stem(key) == stem(kind) for kind in formats):
+                        continue
+                    reached = set(parents) | {kind for field, field_spec in nested.items()
+                                              if field != key and kind_of(field) == "id"
+                                              and shapes[field_spec["shape"]]["type"] == "string"
+                                              for kind in types if stem(field) == stem(kind)}
+                    if len(reached) < 2:
+                        continue
+                    for kind in reached:
+                        candidates.setdefault(kind, set()).add(key)
+    selected = {kind for resource in resources for kind in resource.get("types", [resource.get("type")])}
+    return resources + [{"type": kind, "fill": {}, "find": sorted(keys)}
+                        for kind, keys in sorted(candidates.items()) if kind not in selected and len(keys) == 1]
+
+
 def with_find_scope(resources: list[dict], models: dict[str, dict], operation: str,
                     formats: dict[str, str]) -> list[dict]:
     """A found name is scoped by a request member its record says is associated with that resource."""
@@ -3160,7 +3266,7 @@ def with_rest_operations(upstream: dict[str, dict], documents: list[dict],
     reports a vendored one as no longer listed. The reference lists the operations of one client of a namespace:
     OpenSearch Service's are the `es` client's alone, while the `opensearch` client's are named after `es` actions all
     the same."""
-    mapped = authorized_actions_from(documents)
+    mapped = action_mapping(documents)
     actions = {document["Name"]: {action["Name"].lower(): action for action in document.get("Actions", [])}
                for document in documents}
     found = dict(upstream)
@@ -3369,24 +3475,15 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
 
 
 def reads(operation: str) -> bool:
-    """Read whole namespaces, and in a namespace otherwise built by hand the operations `READ_IN_HAND_BUILT` lists
-    and those `MEASURED` gives."""
+    """Read whole namespaces, and in a namespace otherwise built by hand the operations `MEASURED` gives."""
     namespace = namespace_of(operation)
-    return namespace in NAMESPACES or namespace in HAND_BUILT and (operation in READ_IN_HAND_BUILT
-                                                                     or operation in MEASURED)
+    return namespace in NAMESPACES or namespace in HAND_BUILT and operation in MEASURED
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
-    """Every operation `READ_IN_HAND_BUILT` lists or `MEASURED` gives is one the file reads, and no namespace is in
-    two places."""
-    stale = [f"READ_IN_HAND_BUILT names {operation}, which the reference does not give" for operation in READ_IN_HAND_BUILT
-              if operation not in covered]
-    stale += [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
-              if operation not in covered]
-    stale += [f"MEASURED gives {operation}, which READ_IN_HAND_BUILT reads by the rules" for operation in MEASURED
-              if operation in READ_IN_HAND_BUILT]
-    stale += [f"READ_IN_HAND_BUILT names {operation}, outside HAND_BUILT" for operation in READ_IN_HAND_BUILT
-              if namespace_of(operation) not in HAND_BUILT]
+    """Every operation `MEASURED` gives is one the file reads, and no namespace is in two places."""
+    stale = [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
+             if operation not in covered]
     for left, right in (("NAMESPACES", "HAND_BUILT"), ("NAMESPACES", "NOT_COVERED"), ("HAND_BUILT", "NOT_COVERED")):
         stale += [f"{namespace} is in both {left} and {right}"
                   for namespace in sorted(set(globals()[left]) & set(globals()[right]))]
@@ -3850,8 +3947,7 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
             untrue.append(f"AWS no longer gives {namespace}'s {', '.join(changed)} the ARN format the file does")
     added = sorted(operation for operation in upstream
                    if namespace_of(operation) in vendored["namespaces"]
-                   and (namespace_of(operation) not in vendored["handBuilt"] or operation in READ_IN_HAND_BUILT
-                        or operation in MEASURED)
+                   and (namespace_of(operation) not in vendored["handBuilt"] or operation in MEASURED)
                    and operation not in vendored["operations"])
     return untrue, added
 

@@ -99,7 +99,7 @@ class RdsBackendEndpointRefreshIntegrationTest {
         ContainerDetector detector = mock(ContainerDetector.class);
         when(detector.isRunningInContainer()).thenReturn(true);
         lifecycleManager = new ContainerLifecycleManager(
-                dockerClient, mock(ImageCacheService.class), detector, mock(EmulatorConfig.class));
+                dockerClient, dockerClient, mock(ImageCacheService.class), detector, mock(EmulatorConfig.class));
     }
 
     @AfterAll

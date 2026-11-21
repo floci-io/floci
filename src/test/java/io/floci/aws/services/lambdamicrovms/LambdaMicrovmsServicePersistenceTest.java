@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.PersistentStorage;
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -125,6 +128,54 @@ class LambdaMicrovmsServicePersistenceTest {
         assertEquals("1.0", response.path("imageVersion").asText());
         assertBuildInputs(response, "replacement", "2.0");
         assertEquals(beforeRead, Files.readString(file));
+    }
+
+    @Test
+    void versionUpdateTimeSurvivesReloadWithoutChangingOtherVersionsOrTheParent() {
+        createAndUpdateVersionedImage();
+        LambdaMicrovmsService first = process();
+        Instant otherVersionTime = first.getVersion(REGION, "versioned-image", "2.0").updatedAt;
+        Instant parentTime = first.getImage(REGION, "versioned-image").updatedAt;
+        Instant changed = first.updateVersionStatus(REGION, "versioned-image", "1.0", "INACTIVE").updatedAt;
+
+        LambdaMicrovmsService reloaded = process();
+        assertNotNull(changed);
+        assertEquals(changed, reloaded.getVersion(REGION, "versioned-image", "1.0").updatedAt);
+        assertEquals(otherVersionTime, reloaded.getVersion(REGION, "versioned-image", "2.0").updatedAt);
+        assertEquals(parentTime, reloaded.getImage(REGION, "versioned-image").updatedAt);
+        assertThrows(AwsException.class,
+                () -> reloaded.updateVersionStatus(REGION, "versioned-image", "1.0", "INVALID"));
+        assertEquals(changed, process().getVersion(REGION, "versioned-image", "1.0").updatedAt);
+    }
+
+    @Test
+    void legacyVersionTimeStaysAtCreationAfterParentUpdateAndReload() throws IOException {
+        createAndUpdateVersionedImage();
+        Path file = storageDir.resolve("lambda-microvm-images.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode stored = mapper.readTree(file.toFile());
+        for (JsonNode versions : stored.findValues("versions")) {
+            for (JsonNode version : versions) {
+                ((ObjectNode) version).remove("updatedAt");
+            }
+        }
+        mapper.writeValue(file.toFile(), stored);
+        String beforeRead = Files.readString(file);
+        JsonNode initial = versionResponse(process(), "1.0");
+        assertEquals(initial.path("createdAt"), initial.path("updatedAt"));
+        assertEquals(beforeRead, Files.readString(file));
+
+        LambdaMicrovmsService reloaded = process();
+        reloaded.updateImage(REGION, "versioned-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:replacement",
+                "arn:aws:iam::000000000000:role/replacement", "s3://artifacts/newest.zip", null,
+                "3.0", LambdaMicrovmsService.RuntimeSettings.defaults());
+        String afterUpdate = Files.readString(file);
+        LambdaMicrovmsService restarted = process();
+        assertNull(restarted.getVersion(REGION, "versioned-image", "1.0").updatedAt);
+        assertEquals(initial.path("createdAt"), versionResponse(restarted, "1.0").path("updatedAt"));
+        assertEquals(initial.path("createdAt"), versionResponse(process(), "1.0").path("updatedAt"));
+        assertEquals(afterUpdate, Files.readString(file));
     }
 
     private void createAndUpdateVersionedImage() {

@@ -860,7 +860,9 @@ public class ElbV2QueryHandler {
         xml.elem("TargetGroupArn", tg.getTargetGroupArn());
         xml.elem("TargetGroupName", tg.getTargetGroupName());
         xml.elem("Protocol", safe(tg.getProtocol()));
-        xml.elem("ProtocolVersion", safe(tg.getProtocolVersion()));
+        if (isHttpProtocol(tg.getProtocol())) {
+            xml.elem("ProtocolVersion", safe(tg.getProtocolVersion()));
+        }
         if (tg.getPort() != null) xml.elem("Port", String.valueOf(tg.getPort()));
         xml.elem("VpcId", safe(tg.getVpcId()));
         xml.elem("HealthCheckProtocol", safe(tg.getHealthCheckProtocol()));
@@ -870,8 +872,10 @@ public class ElbV2QueryHandler {
         if (tg.getHealthCheckTimeoutSeconds() != null) xml.elem("HealthCheckTimeoutSeconds", String.valueOf(tg.getHealthCheckTimeoutSeconds()));
         if (tg.getHealthyThresholdCount() != null) xml.elem("HealthyThresholdCount", String.valueOf(tg.getHealthyThresholdCount()));
         if (tg.getUnhealthyThresholdCount() != null) xml.elem("UnhealthyThresholdCount", String.valueOf(tg.getUnhealthyThresholdCount()));
-        xml.elem("HealthCheckPath", safe(tg.getHealthCheckPath()));
-        xml.start("Matcher").elem("HttpCode", safe(tg.getMatcher())).end("Matcher");
+        if (isHttpProtocol(tg.getHealthCheckProtocol())) {
+            xml.elem("HealthCheckPath", safe(tg.getHealthCheckPath()));
+            xml.start("Matcher").elem("HttpCode", safe(tg.getMatcher())).end("Matcher");
+        }
         xml.start("LoadBalancerArns");
         for (String lbArn : tg.getLoadBalancerArns()) {
             xml.start("member").raw(lbArn).end("member");
@@ -880,6 +884,10 @@ public class ElbV2QueryHandler {
         xml.elem("TargetType", safe(tg.getTargetType()));
         xml.elem("IpAddressType", safe(tg.getIpAddressType()));
         return xml.build();
+    }
+
+    private static boolean isHttpProtocol(String protocol) {
+        return "HTTP".equals(protocol) || "HTTPS".equals(protocol);
     }
 
     private String listenerXml(Listener l) {

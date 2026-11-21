@@ -13,6 +13,7 @@ import io.floci.aws.services.appsync.AppSyncService;
 import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.backup.BackupService;
 import io.floci.aws.services.batch.BatchService;
+import io.floci.aws.services.bedrock.BedrockService;
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService;
 import io.floci.aws.services.cloudformation.provisioners.AcmCfnProvisioner;
@@ -33,6 +34,7 @@ import io.floci.aws.services.cloudformation.provisioners.AutoScalingScalingPolic
 import io.floci.aws.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.BedrockAgentCoreCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.BedrockCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -44,6 +46,7 @@ import io.floci.aws.services.cloudformation.provisioners.CloudTrailCfnProvisione
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.CodeDeployCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoIdentityProviderCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
@@ -73,6 +76,7 @@ import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EmrServerlessCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EventsV2CfnProvisioner;
@@ -130,6 +134,7 @@ import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.floci.aws.services.codedeploy.CodeDeployService;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.configservice.AwsConfigService;
 import io.floci.aws.services.docdb.DocDbService;
@@ -149,6 +154,8 @@ import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
 import io.floci.aws.services.elasticache.ElastiCacheService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
+import io.floci.aws.services.emrserverless.EmrServerlessService;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.firehose.FirehoseService;
@@ -272,6 +279,9 @@ final class CfnProvisionerFixture {
         private Route53Service route53Service;
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
+        private CodeDeployService codeDeployService;
+        private EmrServerlessService emrServerlessService;
+        private EmrServerlessJobRunService emrServerlessJobRunService;
         private TransferService transferService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
@@ -297,6 +307,7 @@ final class CfnProvisionerFixture {
         private CloudMapService cloudMapService;
         private EventBridgeV2Service eventBridgeV2Service;
         private GuardDutyService guardDutyService;
+        private BedrockService bedrockService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -554,6 +565,12 @@ final class CfnProvisionerFixture {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
                 discovered.add(new SchedulerScheduleCfnProvisioner(schedulerService));
             }
+            if (codeDeployService != null) {
+                discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
+            }
+            if (emrServerlessService != null && emrServerlessJobRunService != null) {
+                discovered.add(new EmrServerlessCfnProvisioner(emrServerlessService, emrServerlessJobRunService));
+            }
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
             }
@@ -578,6 +595,9 @@ final class CfnProvisionerFixture {
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
+            }
+            if (bedrockService != null) {
+                discovered.add(new BedrockCfnProvisioner(bedrockService));
             }
             if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
                 discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
@@ -776,6 +796,21 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder codeDeploy(CodeDeployService v) {
+            this.codeDeployService = v;
+            return this;
+        }
+
+        public Builder emrServerless(EmrServerlessService v) {
+            this.emrServerlessService = v;
+            return this;
+        }
+
+        public Builder emrServerlessJobRuns(EmrServerlessJobRunService v) {
+            this.emrServerlessJobRunService = v;
+            return this;
+        }
+
         public Builder transfer(TransferService v) {
             this.transferService = v;
             return this;
@@ -938,6 +973,11 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder bedrock(BedrockService v) {
+            this.bedrockService = v;
             return this;
         }
 

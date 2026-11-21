@@ -11,6 +11,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudtrail.model.AdvancedEventSelector;
@@ -32,6 +34,7 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -42,13 +45,17 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 @ApplicationScoped
-public class CloudTrailService {
+public class CloudTrailService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
     private static final String EVENT_VERSION = "1.11";
     private static final String S3_EVENT_SOURCE = ServicePrincipals.of("s3");
+    /** What a trail's ARN resource starts with, its name following. */
+    private static final String TRAIL_RESOURCE = "trail/";
     static final int MAX_PENDING_RECORDS_PER_TRAIL = 1024;
     static final long MAX_PENDING_BYTES_PER_TRAIL = 4L * 1024L * 1024L;
 
@@ -133,7 +140,7 @@ public class CloudTrailService {
                     "Trail " + name + " already exists.", 400);
         }
         String arn = AwsArnUtils.Arn.of("cloudtrail", region, regionResolver.getAccountId(),
-                "trail/" + name).toString();
+                TRAIL_RESOURCE + name).toString();
         Trail trail = new Trail(
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
@@ -382,6 +389,42 @@ public class CloudTrailService {
         return findEntryByArnOrThrow(resourceId).tags();
     }
 
+    @Override
+    public String namespace() {
+        return "cloudtrail";
+    }
+
+    /** A request names a trail by its name or its ARN, the name being the end of its ARN: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the trail whose ARN is {@code arn}, in the request's account, where the tag handlers read: an ARN of
+     * another account names none. Read in place under the trail's home Region, which its ARN names, and its name, a
+     * trail stored before storage was account-aware included, and matched on the whole ARN. A tag CloudTrail holds
+     * with no value, which AddTags allows, reads as the empty string, so a condition compares a string. A trail is
+     * stored whole and its tags never change in place, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudtrail")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId())
+                || !parsed.resource().startsWith(TRAIL_RESOURCE)) {
+            return Map.of();
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(store, parsed.accountId(),
+                        regionKey(parsed.region(), parsed.resource().substring(TRAIL_RESOURCE.length())))
+                .filter(entry -> arn.equals(entry.trail().trailArn()))
+                .ifPresent(entry -> entry.tags().forEach((key, value) -> tags.put(key, value == null ? "" : value)));
+        return tags;
+    }
+
     private CloudTrailEntry findEntryByArnOrThrow(String resourceId) {
         String key = findKeyByArnOrThrow(resourceId);
         return store.get(key).orElseThrow(() -> new AwsException(
@@ -399,7 +442,7 @@ public class CloudTrailService {
             throw new AwsException("CloudTrailARNInvalidException",
                     resourceId + " is not a valid ARN.", 400);
         }
-        if (!"cloudtrail".equals(arn.service()) || !arn.resource().startsWith("trail/")) {
+        if (!"cloudtrail".equals(arn.service()) || !arn.resource().startsWith(TRAIL_RESOURCE)) {
             throw new AwsException("CloudTrailARNInvalidException",
                     resourceId + " is not a valid trail ARN.", 400);
         }
@@ -1045,7 +1088,7 @@ public class CloudTrailService {
         ObjectNode identity = mapper.createObjectNode();
         String accountId = regionResolver.getAccountId();
 
-        if (accessKeyId == null || "test".equals(accessKeyId)) {
+        if (accessKeyId == null || LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             identity.put("type", "IAMUser");
             identity.put("principalId", "AIDA" + repeat('A', 17));
             identity.put("arn", regionResolver.buildGlobalArn("iam", accountId, "root"));

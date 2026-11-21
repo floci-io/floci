@@ -127,6 +127,50 @@ final class PaymentCryptographyKeyRules {
     }
 
     /**
+     * The key a request names, and the rules it has to satisfy before it does any work.
+     *
+     * <p>The key is the one the request names in the region the request is for, and it has
+     * to be there and enabled: a key the service does not hold is the not-found error, and
+     * a key that is disabled does no work.
+     *
+     * @param service the service the key is held by
+     * @param identifier the key the request names
+     * @param region the region the request is for
+     * @return the key
+     */
+    static PaymentCryptographyKey requiredKey(PaymentCryptographyService service, String identifier,
+                                              String region) {
+        PaymentCryptographyKey key = service.findKey(region, identifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
+        }
+        requireEnabled(key);
+        return key;
+    }
+
+    /**
+     * The Triple DES algorithm an AS2805 key has to have.
+     *
+     * <p>AS2805's cryptography is all TDES: the ceremony runs over Single DES blocks, the
+     * key variants are DES key variants, and the random numbers the standard names are
+     * whole DES blocks. A key of another family is refused rather than read as bytes it is
+     * not.
+     *
+     * @param algorithmName the algorithm of the key
+     * @param role what the key is, for the message
+     * @return the algorithm
+     */
+    static PaymentCryptographyKeyAlgorithm requireTdes(String algorithmName, String role) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(algorithmName);
+        if (algorithm == null || !algorithm.isTdes()) {
+            throw new AwsException("ValidationException",
+                    "an AS2805 key is a TDES key, but the " + role + " is " + algorithmName, 400);
+        }
+        return algorithm;
+    }
+
+    /**
      * The mode of use a key has to have to derive from it.
      *
      * <p>A derivation reads the key, so the key has to allow it. A key with no modes

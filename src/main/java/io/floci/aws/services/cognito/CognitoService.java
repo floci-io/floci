@@ -270,7 +270,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
+                new CognitoMessageDispatcher(sesService, snsService, regionResolver),
                 certificateManager,
                 clock,
                 emulatorConfig.services().cognito().enforceTokenValidityLimits(),
@@ -4338,7 +4338,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         }
         if (!domains.isEmpty()) {
             // A prefix domain is <prefix>.auth.<region>.amazoncognito.<partition suffix>.
-            String region = AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(pool.getArn());
             return domains.get(0).getDomain() + ".auth." + region + "."
                     + AwsRegions.dnsSuffixFor(region).replaceFirst("^amazonaws", "amazoncognito");
         }
@@ -6710,7 +6710,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         String encryptedCode;
         try {
             encryptedCode = customSenderCodeEncryptor.encrypt((String) pool.getLambdaConfig().get("KMSKeyID"),
-                    pool.getId(), code, AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion()));
+                    pool.getId(), code, regionResolver.regionOf(pool.getArn()));
         } catch (AwsException e) {
             // Measured (eu-west-1, 2026-10-16): a disabled key and one pending deletion fail the
             // request, sign-in included, with these CodeDeliveryFailureExceptions.

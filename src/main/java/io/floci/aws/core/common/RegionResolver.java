@@ -302,6 +302,19 @@ public class RegionResolver {
     }
 
     /**
+     * The Region {@code arn} names: the default Region for a record stored without an ARN, or with one that names
+     * none, as records stored before their service kept them per Region are.
+     */
+    public String regionOf(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, getDefaultRegion());
+    }
+
+    /** Whether a resource whose ARN is {@code arn} is of the request's Region, as {@link #regionOf} reads it. */
+    public boolean inRequestRegion(String arn) {
+        return getRegion().equals(regionOf(arn));
+    }
+
+    /**
      * Returns the account ID for the current request when called from a request context,
      * or the configured default account ID otherwise (async workers, startup, tests).
      */

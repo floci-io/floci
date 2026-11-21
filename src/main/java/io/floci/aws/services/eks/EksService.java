@@ -1,6 +1,8 @@
 package io.floci.aws.services.eks;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -35,6 +37,7 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.CreateFargateProfileRequest;
 import io.floci.aws.services.eks.model.CreateNodeGroupRequest;
@@ -50,6 +53,10 @@ import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpdateParam;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -87,10 +94,11 @@ import java.util.stream.Collectors;
 public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaunchListener {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
 
-    private static final List<String> ALL_LOG_TYPES = List.of(
+    public static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
     );
 
@@ -123,6 +131,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
     // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
     private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
+    /** Held by every tag change, so two of them on one resource cannot lose one another's tags. */
+    private final Object tagLock = new Object();
     private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
     /** {@code <account>/<cluster key>} of each cluster a CreateCluster call is building. */
     private final Set<String> clustersBeingCreated = ConcurrentHashMap.newKeySet();
@@ -417,8 +427,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 continue;
             }
             // The cluster's own region, from its ARN: the issuer must match the one create mints there.
-            String issuer = oidcService.newIssuerUrl(
-                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
+            String issuer = oidcService.newIssuerUrl(regionResolver.regionOf(cluster.getArn()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, clusterKey(cluster), issuer);
             putClusterForAccount(accountId, cluster);
@@ -665,11 +674,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void migrateLegacyKeys() {
         migrateLegacyEntries(storage, this::clusterKey);
         migrateLegacyEntries(nodeGroupStorage, group -> group.getClusterName() == null ? null
-                : nodeGroupKey(clusterKey(AwsArnUtils.regionOrDefault(group.getNodegroupArn(), config.defaultRegion()),
+                : nodeGroupKey(clusterKey(regionResolver.regionOf(group.getNodegroupArn()),
                         group.getClusterName()), group.getNodegroupName()));
         migrateLegacyEntries(fargateProfileStorage, profile -> profile.getClusterName() == null ? null
-                : fargateProfileKey(clusterKey(AwsArnUtils.regionOrDefault(profile.getFargateProfileArn(),
-                        config.defaultRegion()), profile.getClusterName()), profile.getFargateProfileName()));
+                : fargateProfileKey(clusterKey(regionResolver.regionOf(profile.getFargateProfileArn()),
+                        profile.getClusterName()), profile.getFargateProfileName()));
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
             Cluster cluster = entry.value();
             if (cluster.getName() != null && cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null) {
@@ -759,13 +768,46 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /**
+     * Refuses the EKS Auto Mode configurations AWS refuses, with its errors. Its compute, block storage
+     * and load balancing capabilities "must all be enabled or disabled in the same request", and node
+     * pools launch their nodes with the node role, so a compute configuration naming pools names it.
+     */
+    private static void validateAutoMode(ComputeConfig compute, StorageConfig storage,
+                                         KubernetesNetworkConfig network) {
+        boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
+        boolean blockStorageEnabled = storage != null && storage.blockStorage() != null
+                && Boolean.TRUE.equals(storage.blockStorage().enabled());
+        boolean loadBalancingEnabled = network != null && network.getElasticLoadBalancing() != null
+                && Boolean.TRUE.equals(network.getElasticLoadBalancing().enabled());
+        if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
+            throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
+                    + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
+                    + "all either fully enabled or fully disabled.", 400);
+        }
+        if (compute == null) {
+            return;
+        }
+        boolean hasNodePools = compute.nodePools() != null && !compute.nodePools().isEmpty();
+        boolean hasNodeRole = compute.nodeRoleArn() != null && !compute.nodeRoleArn().isEmpty();
+        if (hasNodePools && !hasNodeRole) {
+            throw new AwsException("InvalidParameterException",
+                    "When Compute Config nodeRoleArn is null or empty, nodePool list cannot be populated", 400);
+        }
+        if (hasNodeRole && !hasNodePools) {
+            throw new AwsException("InvalidParameterException",
+                    "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.", 400);
+        }
+    }
+
     private Cluster createReservedCluster(CreateClusterRequest request, String name) {
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
                 ? "CONFIG_MAP" : requestedAccess.authenticationMode();
-        if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(authenticationMode)) {
+        if (!AUTHENTICATION_MODE_RANK.containsKey(authenticationMode)) {
             throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
         }
+        validateAutoMode(request.getComputeConfig(), request.getStorageConfig(), request.getKubernetesNetworkConfig());
         AccessConfig accessConfig = new AccessConfig(authenticationMode,
                 requestedAccess == null || requestedAccess.bootstrapClusterCreatorAdminPermissions() == null
                         || requestedAccess.bootstrapClusterCreatorAdminPermissions());
@@ -777,6 +819,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         Cluster cluster = new Cluster();
         cluster.setName(name);
         cluster.setAccessConfig(accessConfig);
+        cluster.setComputeConfig(request.getComputeConfig());
+        cluster.setStorageConfig(request.getStorageConfig());
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
@@ -815,7 +859,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
 
-        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        // The checks below run before the cluster security group is created, so a request they refuse
+        // leaves no group behind for a stack's VPC rollback to trip over.
+        String ipFamily = resolveIpFamily(request.getKubernetesNetworkConfig());
+        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId, ipFamily);
+        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
+        KubernetesNetworkConfig networkConfig = buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr);
+        Logging logging = buildLogging(request.getLogging());
+        List<EncryptionConfig> encryptionConfig = buildEncryptionConfig(request.getEncryptionConfig());
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
             try {
@@ -830,11 +881,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         cluster.setResourcesVpcConfig(vpcConfig);
-        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
-        cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr));
+        cluster.setKubernetesNetworkConfig(networkConfig);
         cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
-        cluster.setLogging(buildLogging(request.getLogging()));
-        cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
+        cluster.setLogging(logging);
+        cluster.setEncryptionConfig(encryptionConfig);
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
@@ -983,6 +1033,229 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         } catch (AwsException expected) {
             // The handler answers this lookup with the same error, so the route names no resource to act on.
             return Optional.empty();
+        }
+    }
+
+    static final List<String> DEFAULT_PUBLIC_ACCESS_CIDRS = List.of("0.0.0.0/0");
+
+    private static final Map<String, Integer> AUTHENTICATION_MODE_RANK =
+            Map.of("CONFIG_MAP", 0, "API_AND_CONFIG_MAP", 1, "API", 2);
+
+    /**
+     * UpdateClusterConfig for {@code resourcesVpcConfig} endpoint access, {@code logging} and
+     * {@code accessConfig.authenticationMode}. AWS accepts more members and lets the subnets and security
+     * groups change; floci applies these three families and refuses a different subnet or security group list.
+     * Each family the request names is stored as its own {@link Update} and all are returned in order. The
+     * REST endpoint refuses a request naming more than one family, as EKS does, so it returns the only one. The
+     * request is kept with the first update, and a repeat of its {@code clientRequestToken} returns that update.
+     * The cluster is written through the delete-safe writer, so a concurrent delete is not undone.
+     */
+    public synchronized List<Update> updateClusterConfig(String name, UpdateClusterConfigRequest request) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        EksAddonService.requireActiveCluster(cluster);
+        if (request == null || (request.resourcesVpcConfig() == null && request.logging() == null
+                && request.accessConfig() == null)) {
+            throw new AwsException("InvalidParameterException",
+                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig only", 400);
+        }
+        String token = request.clientRequestToken();
+        if (token != null && !token.isBlank()) {
+            Optional<EksAddonService.StoredUpdate> previous = addons.findConfigUpdateByToken(cluster, token);
+            if (previous.isPresent()) {
+                if (updateParametersMatch(previous.get().request(), request)) {
+                    return List.of(previous.get().update());
+                }
+                throw new AwsException("InvalidParameterException", EksAddonService.TOKEN_REUSED, 400);
+            }
+        }
+        // Validated whole before anything is written, so a refused request changes nothing.
+        ResourcesVpcConfig vpc = cluster.getResourcesVpcConfig();
+        ResourcesVpcConfig requestedVpc = request.resourcesVpcConfig();
+        Boolean storedPublic = vpc == null || vpc.getEndpointPublicAccess() == null ? Boolean.TRUE : vpc.getEndpointPublicAccess();
+        Boolean storedPrivate = vpc == null || vpc.getEndpointPrivateAccess() == null ? Boolean.FALSE : vpc.getEndpointPrivateAccess();
+        List<String> storedCidrs = vpc == null || vpc.getPublicAccessCidrs() == null
+                ? DEFAULT_PUBLIC_ACCESS_CIDRS : vpc.getPublicAccessCidrs();
+        Boolean publicAccess = storedPublic;
+        Boolean privateAccess = storedPrivate;
+        List<String> cidrs = storedCidrs;
+        if (requestedVpc != null) {
+            requireSameMembers("subnetIds", requestedVpc.getSubnetIds(), vpc == null ? null : vpc.getSubnetIds());
+            requireSameMembers("securityGroupIds", requestedVpc.getSecurityGroupIds(),
+                    vpc == null ? null : vpc.getSecurityGroupIds());
+            publicAccess = requestedVpc.getEndpointPublicAccess() != null
+                    ? requestedVpc.getEndpointPublicAccess() : publicAccess;
+            privateAccess = requestedVpc.getEndpointPrivateAccess() != null
+                    ? requestedVpc.getEndpointPrivateAccess() : privateAccess;
+            // The stored cluster's ipFamily, as CreateCluster checks the same list against the requested one.
+            KubernetesNetworkConfig stored = cluster.getKubernetesNetworkConfig();
+            requireValidPublicAccessCidrs(requestedVpc.getPublicAccessCidrs(),
+                    stored == null || stored.getIpFamily() == null ? "ipv4" : stored.getIpFamily());
+            cidrs = requestedVpc.getPublicAccessCidrs() != null ? requestedVpc.getPublicAccessCidrs() : cidrs;
+            requireEndpointChange(vpc != null, storedPublic, storedPrivate, storedCidrs, publicAccess, privateAccess, cidrs);
+        }
+        Logging logging = request.logging() == null || request.logging().getClusterLogging() == null
+                ? null : buildLogging(mergedLogging(cluster.getLogging(), request.logging()));
+        if (logging != null && enabledLogTypes(logging).equals(enabledLogTypes(cluster.getLogging()))) {
+            throw new AwsException("InvalidParameterException", "No changes needed for the logging config provided", 400);
+        }
+        String mode = cluster.getAccessConfig() == null || cluster.getAccessConfig().authenticationMode() == null
+                ? "CONFIG_MAP" : cluster.getAccessConfig().authenticationMode();
+        String requestedMode = request.accessConfig() == null ? null : request.accessConfig().authenticationMode();
+        if (requestedMode != null) {
+            requireForwardAuthenticationMode(mode, requestedMode);
+        }
+
+        Boolean finalPublicAccess = publicAccess;
+        Boolean finalPrivateAccess = privateAccess;
+        List<String> finalCidrs = cidrs;
+        List<Update> updates = new ArrayList<>();
+        String accountId = regionResolver.getAccountId();
+        boolean[] saved = {false};
+        saveClusterIfNotDeleting(accountId, clusterKey(cluster), current -> {
+            saved[0] = true;
+            ResourcesVpcConfig currentVpc = current.getResourcesVpcConfig();
+            if (requestedVpc != null && currentVpc != null) {
+                currentVpc.setEndpointPublicAccess(finalPublicAccess);
+                currentVpc.setEndpointPrivateAccess(finalPrivateAccess);
+                currentVpc.setPublicAccessCidrs(finalCidrs);
+                List<UpdateParam> params = new ArrayList<>();
+                params.add(new UpdateParam("EndpointPublicAccess", String.valueOf(finalPublicAccess)));
+                params.add(new UpdateParam("EndpointPrivateAccess", String.valueOf(finalPrivateAccess)));
+                if (requestedVpc.getPublicAccessCidrs() != null) {
+                    params.add(new UpdateParam("PublicAccessCidrs", json(finalCidrs)));
+                }
+                updates.add(addons.recordUpdate(current, "EndpointAccessUpdate", params, null, updates.isEmpty() ? request : null));
+            }
+            if (logging != null) {
+                current.setLogging(logging);
+                updates.add(addons.recordUpdate(current, "LoggingUpdate",
+                        List.of(new UpdateParam("ClusterLogging", json(logging))), null,
+                        updates.isEmpty() ? request : null));
+            }
+            if (requestedMode != null) {
+                current.setAccessConfig(new AccessConfig(requestedMode,
+                        current.getAccessConfig() == null ? null : current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+                updates.add(addons.recordUpdate(current, "AccessConfigUpdate",
+                        List.of(new UpdateParam("AuthenticationMode", requestedMode)), null,
+                        updates.isEmpty() ? request : null));
+            }
+        });
+        if (!saved[0]) {
+            throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
+        }
+        if (updates.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig.authenticationMode only", 400);
+        }
+        LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
+                updates.stream().map(Update::type).toList());
+        return updates;
+    }
+
+    private static boolean updateParametersMatch(UpdateClusterConfigRequest existing, UpdateClusterConfigRequest request) {
+        if (existing == null) {
+            return false;
+        }
+        ResourcesVpcConfig a = existing.resourcesVpcConfig();
+        ResourcesVpcConfig b = request.resourcesVpcConfig();
+        boolean sameVpc = a == null || b == null ? a == b
+                : Objects.equals(a.getSubnetIds(), b.getSubnetIds())
+                        && Objects.equals(a.getSecurityGroupIds(), b.getSecurityGroupIds())
+                        && Objects.equals(a.getEndpointPublicAccess(), b.getEndpointPublicAccess())
+                        && Objects.equals(a.getEndpointPrivateAccess(), b.getEndpointPrivateAccess())
+                        && Objects.equals(a.getPublicAccessCidrs(), b.getPublicAccessCidrs());
+        return sameVpc && Objects.equals(existing.logging(), request.logging())
+                && Objects.equals(existing.accessConfig(), request.accessConfig());
+    }
+
+    /** The cluster's current settings with the request applied on top, in the shape createCluster validates. */
+    private static Logging mergedLogging(Logging current, Logging requested) {
+        List<LogSetup> merged = new ArrayList<>();
+        if (current != null && current.getClusterLogging() != null) {
+            merged.addAll(current.getClusterLogging());
+        }
+        merged.addAll(requested.getClusterLogging());
+        return new Logging(merged);
+    }
+
+    private static String json(Object value) {
+        try {
+            return MAPPER.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalFailure", "Could not serialize the update parameter", 500);
+        }
+    }
+
+    /**
+     * Puts back values an update changed, with no AWS rules applied: a stack rollback may move the
+     * authentication mode backwards, which UpdateClusterConfig refuses.
+     */
+    public synchronized void restoreClusterConfig(String name, ResourcesVpcConfig endpoint, Logging logging,
+                                                  String authenticationMode) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
+            if (endpoint != null && current.getResourcesVpcConfig() != null) {
+                current.getResourcesVpcConfig().setEndpointPublicAccess(endpoint.getEndpointPublicAccess());
+                current.getResourcesVpcConfig().setEndpointPrivateAccess(endpoint.getEndpointPrivateAccess());
+                current.getResourcesVpcConfig().setPublicAccessCidrs(endpoint.getPublicAccessCidrs());
+            }
+            if (logging != null) {
+                current.setLogging(logging);
+            }
+            if (authenticationMode != null && current.getAccessConfig() != null) {
+                current.setAccessConfig(new AccessConfig(authenticationMode,
+                        current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+            }
+        });
+    }
+
+    /** The log types a {@link Logging} setting enables; empty for a null setting. */
+    public static Set<String> enabledLogTypes(Logging logging) {
+        Set<String> enabled = new HashSet<>();
+        if (logging != null && logging.getClusterLogging() != null) {
+            for (LogSetup setup : logging.getClusterLogging()) {
+                if (setup != null && setup.getTypes() != null && Boolean.TRUE.equals(setup.getEnabled())) {
+                    enabled.addAll(setup.getTypes());
+                }
+            }
+        }
+        return enabled;
+    }
+
+    /** EKS refuses an endpoint update that leaves both endpoints off or changes nothing. */
+    private static void requireEndpointChange(boolean stored, Boolean storedPublic, Boolean storedPrivate,
+                                              List<String> storedCidrs, Boolean publicAccess, Boolean privateAccess,
+                                              List<String> cidrs) {
+        if (Boolean.FALSE.equals(publicAccess) && Boolean.FALSE.equals(privateAccess)) {
+            throw new AwsException("InvalidParameterException",
+                    "You must enable private access to disable public access", 400);
+        }
+        if (stored && publicAccess.equals(storedPublic) && privateAccess.equals(storedPrivate)
+                && new HashSet<>(cidrs).equals(new HashSet<>(storedCidrs))) {
+            throw new AwsException("InvalidParameterException",
+                    "Cluster is already at the desired configuration with endpointPrivateAccess: " + privateAccess
+                            + " , endpointPublicAccess: " + publicAccess
+                            + ", and Public Endpoint Restrictions: [" + String.join(",", cidrs) + "]", 400);
+        }
+    }
+
+    private static void requireSameMembers(String member, List<String> requested, List<String> current) {
+        if (requested != null && !new HashSet<>(requested).equals(new HashSet<>(current == null ? List.of() : current))) {
+            throw new AwsException("InvalidParameterException",
+                    "Floci does not support changing " + member + " through UpdateClusterConfig", 400);
+        }
+    }
+
+    private static void requireForwardAuthenticationMode(String current, String requested) {
+        Integer to = AUTHENTICATION_MODE_RANK.get(requested);
+        if (to == null) {
+            throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
+        }
+        Integer from = AUTHENTICATION_MODE_RANK.get(current);
+        // EKS moves the mode one step forward only: CONFIG_MAP, API_AND_CONFIG_MAP, API.
+        if (from == null || to != from + 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Unsupported authentication mode update from " + current + " to " + requested, 400);
         }
     }
 
@@ -1227,14 +1500,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         nodeGroup.setModifiedAt(now);
         String resolvedVersion = request.getVersion() != null ? request.getVersion() : cluster.getVersion();
         nodeGroup.setVersion(resolvedVersion);
-        nodeGroup.setReleaseVersion(request.getReleaseVersion() != null
-                ? request.getReleaseVersion() : resolvedVersion + "-eks-1");
+        String amiType = request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64";
+        nodeGroup.setReleaseVersion(defaultReleaseVersion(request.getReleaseVersion(), launchTemplateData,
+                resolvedVersion, amiType));
         nodeGroup.setStatus(NodegroupStatus.ACTIVE);
         nodeGroup.setCapacityType(request.getCapacityType() != null ? request.getCapacityType() : "ON_DEMAND");
         nodeGroup.setScalingConfig(request.getScalingConfig() != null ? request.getScalingConfig() : defaultScalingConfig());
         nodeGroup.setInstanceTypes(request.getInstanceTypes() != null ? request.getInstanceTypes() : List.of("t3.medium"));
         nodeGroup.setSubnets(request.getSubnets() != null ? request.getSubnets() : List.of());
-        nodeGroup.setAmiType(request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64");
+        nodeGroup.setAmiType(amiType);
         nodeGroup.setNodeRole(request.getNodeRole());
         nodeGroup.setDiskSize(request.getDiskSize() != null ? request.getDiskSize() : 20);
         nodeGroup.setResources(defaultNodeGroupResources(nodegroupName));
@@ -1387,6 +1661,23 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 ? null : group.getInstanceTypes().getFirst();
         String selectedType = clusterManager.selectNodeInstanceType(requestedType);
         return selectedType != null ? selectedType : EksClusterManager.DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    /**
+     * The release a node group reports: the one requested, else the custom AMI its launch template
+     * names, else the release of the recommended EKS optimized AMI for its version and AMI type.
+     */
+    private String defaultReleaseVersion(String requested, LaunchTemplateData launchTemplateData,
+                                         String kubernetesVersion, String amiType) {
+        if (requested != null) {
+            return requested;
+        }
+        if (launchTemplateData != null && launchTemplateData.getImageId() != null
+                && !launchTemplateData.getImageId().isBlank()) {
+            return launchTemplateData.getImageId();
+        }
+        return EksAmiReleaseVersions.recommended(clusterManager == null ? null : clusterManager.imageCatalog(),
+                kubernetesVersion, amiType).orElse(kubernetesVersion + "-eks-1");
     }
 
     private LaunchTemplateData validateLaunchTemplate(String region, Object launchTemplateObj) {
@@ -1591,9 +1882,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     /**
      * Applies {@code edit} to the tags of the resource {@code resourceArn} names and returns them.
      * TagResource takes a cluster, node group, Fargate profile, add-on, pod identity association or
-     * access entry ARN; each child ARN names its cluster as the segment after the resource type.
+     * access entry ARN; each child ARN names its cluster as the segment after the resource type, and the
+     * resource found is the one whose ARN is the whole of {@code resourceArn}. One change at a time, each
+     * giving the resource a new map, so a lookup that takes no lock reads one whole set.
      */
     private Map<String, String> retag(String resourceArn, UnaryOperator<Map<String, String>> edit) {
+        synchronized (tagLock) {
+            return retagHoldingLock(resourceArn, edit);
+        }
+    }
+
+    private Map<String, String> retagHoldingLock(String resourceArn, UnaryOperator<Map<String, String>> edit) {
         String resource = AwsArnUtils.isArnFor(resourceArn, "eks") ? AwsArnUtils.parse(resourceArn).resource() : "";
         String[] parts = resource.split("/", -1);
         boolean child = !"cluster".equals(parts[0]);
@@ -1611,23 +1910,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return next;
         };
+        TaggableReads reads = new TaggableReads(storage::get, nodeGroupStorage::get, fargateProfileStorage::get);
         Optional<Map<String, String>> tags = switch (parts[0]) {
-            case "cluster" -> storage.get(clusterKey).map(cluster -> applyTags(cluster.getTags(), change, next -> {
-                cluster.setTags(new HashMap<>(next));
-                storage.put(clusterKey, cluster);
-            }));
-            case "nodegroup" -> nodeGroupStorage.get(nodeGroupKey(clusterKey, childName))
-                    .filter(nodegroup -> resourceArn.equals(nodegroup.getNodegroupArn()))
-                    .map(nodegroup -> applyTags(nodegroup.getTags(), change, next -> {
-                        nodegroup.setTags(new HashMap<>(next));
-                        nodeGroupStorage.put(nodeGroupKey(clusterKey, childName), nodegroup);
-                    }));
-            case "fargateprofile" -> fargateProfileStorage.get(fargateProfileKey(clusterKey, childName))
-                    .filter(profile -> resourceArn.equals(profile.getFargateProfileArn()))
-                    .map(profile -> applyTags(profile.getTags(), change, next -> {
-                        profile.setTags(new HashMap<>(next));
-                        fargateProfileStorage.put(fargateProfileKey(clusterKey, childName), profile);
-                    }));
+            case "cluster", "nodegroup", "fargateprofile" ->
+                    taggable(parts[0], clusterKey, childName, resourceArn, reads)
+                            .map(found -> applyTags(found.tags(), change, found.retag()));
             case "addon" -> addons == null ? Optional.empty() : storage.get(clusterKey)
                     .flatMap(cluster -> addons.retag(cluster, childName, resourceArn, change));
             case "podidentityassociation" -> podIdentityAssociations == null ? Optional.empty()
@@ -1639,6 +1926,74 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         };
         return tags.orElseThrow(() -> new AwsException("NotFoundException",
                 "Resource not found: " + resourceArn, 404));
+    }
+
+    /**
+     * The tags of the cluster, node group, Fargate profile, add-on, Pod Identity association or access entry whose
+     * ARN is {@code arn} in {@code account}, read in place where the tag handlers read them and matched on the whole
+     * ARN each records; none when there is no such resource.
+     */
+    Map<String, String> tagsInAccount(String account, String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        if (parts.length < 2 || parts[1].isEmpty()) {
+            return Map.of();
+        }
+        String clusterKey = clusterKey(parsed.region(), parts[1]);
+        String child = parts.length > 2 ? parts[2] : "";
+        TaggableReads reads = new TaggableReads(
+                key -> AccountAwareStorageBackend.readInAccount(storage, account, key),
+                key -> AccountAwareStorageBackend.readInAccount(nodeGroupStorage, account, key),
+                key -> AccountAwareStorageBackend.readInAccount(fargateProfileStorage, account, key));
+        Optional<Cluster> cluster = reads.cluster().apply(clusterKey);
+        Optional<Map<String, String>> tags = switch (parts[0]) {
+            case "cluster", "nodegroup", "fargateprofile" -> taggable(parts[0], clusterKey, child, arn, reads)
+                    .map(Taggable::tags);
+            case "addon" -> addons == null ? Optional.empty()
+                    : cluster.flatMap(found -> addons.tagsInAccount(account, found, child, arn));
+            case "podidentityassociation" -> podIdentityAssociations == null ? Optional.empty()
+                    : cluster.flatMap(found -> podIdentityAssociations.tagsInAccount(account, found, child, arn));
+            case "access-entry" -> accessEntries == null ? Optional.empty()
+                    : cluster.flatMap(found -> accessEntries.tagsInAccount(account, found, arn));
+            default -> Optional.empty();
+        };
+        return tags.orElse(Map.of());
+    }
+
+    /** How a cluster, node group or Fargate profile is read by its key: in the request's account, or in a given one. */
+    private record TaggableReads(Function<String, Optional<Cluster>> cluster,
+                                 Function<String, Optional<Nodegroup>> nodegroup,
+                                 Function<String, Optional<FargateProfile>> fargateProfile) {}
+
+    /** A cluster, node group or Fargate profile found for its tags: the tags it holds, and how to store new ones. */
+    private record Taggable(Map<String, String> tags, Consumer<Map<String, String>> retag) {}
+
+    /**
+     * The cluster, node group or Fargate profile of {@code type} whose ARN is the whole of {@code arn}, read through
+     * {@code reads} by its cluster's key and its own name. Tag changes and tag reads both find it here, so they agree
+     * on which resource an ARN names.
+     */
+    private Optional<Taggable> taggable(String type, String clusterKey, String name, String arn, TaggableReads reads) {
+        return switch (type) {
+            case "cluster" -> reads.cluster().apply(clusterKey).filter(cluster -> arn.equals(cluster.getArn()))
+                    .map(cluster -> new Taggable(cluster.getTags(), next -> {
+                        cluster.setTags(new HashMap<>(next));
+                        storage.put(clusterKey, cluster);
+                    }));
+            case "nodegroup" -> reads.nodegroup().apply(nodeGroupKey(clusterKey, name))
+                    .filter(nodegroup -> arn.equals(nodegroup.getNodegroupArn()))
+                    .map(nodegroup -> new Taggable(nodegroup.getTags(), next -> {
+                        nodegroup.setTags(new HashMap<>(next));
+                        nodeGroupStorage.put(nodeGroupKey(clusterKey, name), nodegroup);
+                    }));
+            case "fargateprofile" -> reads.fargateProfile().apply(fargateProfileKey(clusterKey, name))
+                    .filter(profile -> arn.equals(profile.getFargateProfileArn()))
+                    .map(profile -> new Taggable(profile.getTags(), next -> {
+                        profile.setTags(new HashMap<>(next));
+                        fargateProfileStorage.put(fargateProfileKey(clusterKey, name), profile);
+                    }));
+            default -> Optional.empty();
+        };
     }
 
     /** The TagMap limits: at most 50 tags, keys of 1 to 128 characters and values of at most 256. */
@@ -1682,17 +2037,44 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         String vpcId = null;
         for (String subnetId : vpcConfig.getSubnetIds()) {
+            String subnetVpcId;
             try {
-                vpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
+                subnetVpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
             } catch (AwsException e) {
                 throw new AwsException("InvalidParameterException",
                         "Subnet ID '" + subnetId + "' does not exist", 400);
             }
+            if (vpcId != null && !vpcId.equals(subnetVpcId)) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' is in VPC '" + subnetVpcId
+                                + "', not in VPC '" + vpcId + "' of the other subnets", 400);
+            }
+            vpcId = subnetVpcId;
         }
         return vpcId;
     }
 
-    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId) {
+    /** The public access CIDR checks CreateCluster and UpdateClusterConfig share. */
+    private static void requireValidPublicAccessCidrs(List<String> cidrs, String ipFamily) {
+        if (cidrs == null) {
+            return;
+        }
+        for (String cidr : cidrs) {
+            if (!SecurityGroupPolicy.validCidr(cidr)) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                + cidr, 400);
+            }
+            if (cidr.contains(":") && !"ipv6".equals(ipFamily)) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                + cidr + ". IPv6 blocks cannot be added to IPv4 clusters.", 400);
+            }
+        }
+    }
+
+    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId,
+                                                      String ipFamily) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
         if (request != null) {
             response.setSubnetIds(request.getSubnetIds() != null ? request.getSubnetIds() : List.of());
@@ -1707,15 +2089,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
+            requireValidPublicAccessCidrs(request.getPublicAccessCidrs(), ipFamily);
             response.setPublicAccessCidrs(
-                    request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
+                    request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : DEFAULT_PUBLIC_ACCESS_CIDRS);
         } else {
             response.setSubnetIds(List.of());
             response.setSecurityGroupIds(List.of());
             response.setVpcId("");
             response.setEndpointPublicAccess(Boolean.TRUE);
             response.setEndpointPrivateAccess(Boolean.FALSE);
-            response.setPublicAccessCidrs(List.of("0.0.0.0/0"));
+            response.setPublicAccessCidrs(DEFAULT_PUBLIC_ACCESS_CIDRS);
         }
         return response;
     }
@@ -1789,8 +2172,18 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         config.setServiceIpv4Cidr(resolvedCidr);
-        config.setIpFamily(request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
+        config.setIpFamily(resolveIpFamily(request));
+        config.setElasticLoadBalancing(request != null ? request.getElasticLoadBalancing() : null);
         return config;
+    }
+
+    private static String resolveIpFamily(KubernetesNetworkConfig request) {
+        String ipFamily = request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4";
+        if (!"ipv4".equals(ipFamily) && !"ipv6".equals(ipFamily)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid ipFamily '" + ipFamily + "'. Valid values: ipv4 | ipv6", 400);
+        }
+        return ipFamily;
     }
 
     static Logging defaultLogging() {
@@ -1855,8 +2248,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     "Only one encryption configuration is allowed", 400);
         }
         EncryptionConfig config = requestedConfigs.getFirst();
-        if (config == null || config.getResources() == null || config.getResources().isEmpty()
-                || !List.of("secrets").equals(config.getResources())) {
+        // AWS: Resources is optional, "this field no longer affects which resources are encrypted", and
+        // "secrets" is the only supported value.
+        boolean resourcesOmitted = config != null && (config.getResources() == null || config.getResources().isEmpty());
+        if (config == null || !(resourcesOmitted || List.of("secrets").equals(config.getResources()))) {
             throw new AwsException("InvalidParameterException",
                     "Invalid k8s resource and provider for encryption", 400);
         }

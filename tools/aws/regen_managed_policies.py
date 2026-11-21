@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -53,9 +54,11 @@ DATASET_DOCUMENTS = "aws/managedpolicies"
 REFERENCE_PAGE = "https://docs.aws.amazon.com/aws-managed-policy/latest/reference/{name}.html"
 
 # Deprecated policies that stay resolvable. AWS keeps a deprecated policy attachable to the
-# entities that already had it, and Floci resolved AWSLambdaFullAccess before the catalog was
-# generated (#2194), so dropping it would break configurations that work today.
-RETAINED = ("AWSLambdaFullAccess",)
+# entities that already had it, so a policy Floci already served stays in the catalog once the
+# dataset deprecates it: dropping it would break the attachments stored for it. Floci resolved
+# AWSLambdaFullAccess before the catalog was generated (#2194); the dataset deprecated the two
+# AWS IoT Events policies after Floci had vendored them.
+RETAINED = ("AWSIoTEventsFullAccess", "AWSIoTEventsReadOnlyAccess", "AWSLambdaFullAccess")
 
 HEADER = """\
 # AWS managed policy catalog.
@@ -292,6 +295,40 @@ def self_check(resources: Path) -> list[str]:
     return problems
 
 
+def drift_summary(vendored: tuple[list[dict], dict, dict], fresh: tuple[list[dict], dict, dict],
+                  dataset: Path) -> str:
+    """What a fresh generation changes, so a failing check says whether the dataset moved on or the
+    vendored files were edited: the policies it adds and removes, and how many it changes."""
+    old_entries = {entry["name"]: entry for entry in vendored[0]}
+    new_entries = {entry["name"]: entry for entry in fresh[0]}
+    added, removed = sorted(new_entries.keys() - old_entries.keys()), sorted(old_entries.keys() - new_entries.keys())
+    changed = sorted(name for name in old_entries.keys() & new_entries.keys()
+                     if old_entries[name] != new_entries[name]
+                     or vendored[1].get(name) != fresh[1].get(name) or vendored[2].get(name) != fresh[2].get(name))
+    commit = dataset_commit(dataset)
+    lines = [f"  dataset {dataset}" + (f" at {commit}" if commit else "")
+             + f": {len(added)} added, {len(removed)} removed, {len(changed)} changed"]
+    for label, names in (("added", added), ("removed", removed), ("changed", changed)):
+        if names:
+            lines.append(f"  {label}: {', '.join(names[:5])}" + (f" and {len(names) - 5} more" if len(names) > 5 else ""))
+    return "\n".join(lines)
+
+
+def dataset_commit(dataset: Path) -> str | None:
+    """The short commit of the iam-dataset checkout, or None when the directory is not the root of a
+    git checkout of its own. Copied dataset files under this repository would otherwise be labelled
+    with this repository's commit."""
+    try:
+        result = subprocess.run(["git", "-C", str(dataset), "rev-parse", "--show-toplevel", "--short", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = result.stdout.split()
+    if result.returncode != 0 or len(lines) != 2 or Path(lines[0]).resolve() != dataset.resolve():
+        return None
+    return lines[1]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored files differ from a fresh generation")
@@ -324,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         if stale:
             print(f"error: {', '.join(stale)} under {rel} differ from a fresh generation. "
                   "Run 'make aws-data-sync' and commit the result.")
+            print(drift_summary(read_vendored(args.resources), (catalog, documents, versions), args.dataset))
             return 1
         print(f"{rel}: managed-policy catalog is up to date ({len(catalog)} policies)")
         return 0

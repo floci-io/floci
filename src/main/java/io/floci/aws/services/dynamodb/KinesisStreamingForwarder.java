@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.DelayedTaskScheduler;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.KinesisStreamingDestination;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
@@ -58,13 +59,6 @@ public class KinesisStreamingForwarder {
     static final long INITIAL_BACKOFF_MS = 250;
     static final long MAX_BACKOFF_MS = 8000;
 
-    /** Schedules drain runs; abstracted so tests can drive drains deterministically. */
-    interface Scheduler {
-        void schedule(Runnable task, long delayMillis);
-
-        void shutdown();
-    }
-
     enum Health { HEALTHY, RETRYING, GAVE_UP }
 
     record PendingRecord(String accountId, String region, String streamName, String tableName,
@@ -102,7 +96,7 @@ public class KinesisStreamingForwarder {
 
     private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
-    private final Scheduler scheduler;
+    private final DelayedTaskScheduler scheduler;
     private final ConcurrentHashMap<String, DestinationState> states = new ConcurrentHashMap<>();
 
     @Inject
@@ -111,19 +105,19 @@ public class KinesisStreamingForwarder {
     }
 
     /** Test seam: inject a deterministic Scheduler so drains run on demand rather than on real timers. */
-    KinesisStreamingForwarder(KinesisService kinesisService, ObjectMapper objectMapper, Scheduler scheduler) {
+    KinesisStreamingForwarder(KinesisService kinesisService, ObjectMapper objectMapper, DelayedTaskScheduler scheduler) {
         this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
         this.scheduler = scheduler;
     }
 
-    private static Scheduler defaultScheduler() {
+    private static DelayedTaskScheduler defaultScheduler() {
         ScheduledExecutorService exec = Executors.newScheduledThreadPool(2, r -> {
             Thread t = new Thread(r, "cdc-forward-drain");
             t.setDaemon(true);
             return t;
         });
-        return new Scheduler() {
+        return new DelayedTaskScheduler() {
             @Override
             public void schedule(Runnable task, long delayMillis) {
                 exec.schedule(task, delayMillis, TimeUnit.MILLISECONDS);

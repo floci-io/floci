@@ -47,6 +47,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 /**
  * Verifies header and query SigV4 signatures on every request outside S3
  * when {@code floci.auth.validate-signatures} is enabled, so a request signed with the wrong
@@ -115,10 +118,6 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
 
     /** REST-XML resources the catalog does not list: S3 Control answers in S3's XML. */
     private static final Set<Class<?>> UNCATALOGUED_REST_XML = Set.of(S3ControlController.class);
-
-    /** The well-known local-dev pair, honoured as every other SigV4 check in Floci honours it. */
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
 
     private static final String MISMATCH_MESSAGE = "The request signature we calculated does not match "
             + "the signature you provided. Check your AWS Secret Access Key and signing method. "

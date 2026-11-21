@@ -1568,7 +1568,9 @@ public class EcsContainerManager {
         }
         boolean allRemoved = true;
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
-            if (stopAndConfirmRemoved(entry.getValue())) {
+            // A container that survived removal still holds its link-local address, which must not
+            // go to the next task.
+            if (lifecycleManager.stopAndConfirmRemoved(entry.getValue(), null, 5, true)) {
                 handle.recordContainerRemoved(entry.getKey());
             } else {
                 allRemoved = false;
@@ -1589,25 +1591,6 @@ public class EcsContainerManager {
                 return;
             }
             releaseTaskLinkLocalAddresses(handle.getTaskArn());
-        }
-    }
-
-    /**
-     * Stops and removes a container, reporting whether it is really gone.
-     *
-     * <p>{@code stopAndRemove} logs a failed removal and returns normally, which is the right
-     * default for callers that only want the container off the machine on a best-effort basis. It
-     * is not enough here: a container that survived removal still holds its link-local address,
-     * and releasing it would hand the same address to the next task. The strict variant throws on
-     * that case, which is the signal this needs.
-     */
-    private boolean stopAndConfirmRemoved(String dockerId) {
-        try {
-            lifecycleManager.stopAndRemoveStrict(dockerId, null, 5, true);
-            return true;
-        } catch (RuntimeException e) {
-            LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
-            return false;
         }
     }
 

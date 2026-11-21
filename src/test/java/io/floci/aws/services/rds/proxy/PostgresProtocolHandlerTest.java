@@ -1,6 +1,7 @@
 package io.floci.aws.services.rds.proxy;
 
 import io.floci.aws.config.FlociCertificateAuthority;
+import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
@@ -33,11 +34,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,6 +49,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -209,9 +213,12 @@ class PostgresProtocolHandlerTest {
     void rejectsOversizedSaslContinuationMessage() throws Exception {
         ByteArrayOutputStream backendInput = new ByteArrayOutputStream();
         DataOutputStream backendOut = new DataOutputStream(backendInput);
+        byte[] mechanisms = PostgresWire.cStringBytes("SCRAM-SHA-256");
         backendOut.writeByte('R');
-        backendOut.writeInt(8);
+        backendOut.writeInt(8 + mechanisms.length + 1);
         backendOut.writeInt(10);
+        backendOut.write(mechanisms);
+        backendOut.writeByte(0);
         backendOut.writeByte('R');
         backendOut.writeInt(1_048_577);
 
@@ -223,6 +230,50 @@ class PostgresProtocolHandlerTest {
 
         assertEquals("PostgreSQL SASL continue message length exceeds the 1048576 byte limit: 1048577",
                 error.getMessage());
+    }
+
+    @Test
+    void logsInToAScramBackendThatProvesItsSignature() throws Exception {
+        MemorySocket client = new MemorySocket(startupAndPassword());
+
+        PostgresProtocolHandler.AuthenticatedSession session = authenticateAgainst(client,
+                server -> mockScramBackend(server, "adminpass", false));
+
+        assertNotNull(session);
+        DataInputStream clientIn = new DataInputStream(
+                new ByteArrayInputStream(client.getOutputStream().toByteArray()));
+        readCleartextPasswordChallenge(clientIn);
+        readAuthenticationOk(clientIn);
+        readReadyForQuery(clientIn);
+        session.backend().close();
+    }
+
+    @Test
+    void refusesAScramBackendWhoseServerSignatureIsWrong() throws Exception {
+        MemorySocket client = new MemorySocket(startupAndPassword());
+
+        PostgresProtocolHandler.AuthenticatedSession session = authenticateAgainst(client,
+                server -> mockScramBackend(server, "adminpass", true));
+
+        assertNull(session);
+        DataInputStream clientIn = new DataInputStream(
+                new ByteArrayInputStream(client.getOutputStream().toByteArray()));
+        readCleartextPasswordChallenge(clientIn);
+        Map<Character, String> error = readErrorResponse(clientIn);
+        assertEquals("FATAL", error.get('S'));
+        assertEquals("08006", error.get('C'));
+        assertEquals("Backend database authentication failed", error.get('M'));
+    }
+
+    @Test
+    void logsInToAnMd5Backend() throws Exception {
+        MemorySocket client = new MemorySocket(startupAndPassword());
+
+        PostgresProtocolHandler.AuthenticatedSession session = authenticateAgainst(client,
+                server -> mockMd5Backend(server, "dbadmin", "adminpass"));
+
+        assertNotNull(session);
+        session.backend().close();
     }
 
     @ParameterizedTest
@@ -384,6 +435,66 @@ class PostgresProtocolHandlerTest {
             }
 
             assertEquals("missing_db", backendDatabase.get());
+        }
+    }
+
+    @Test
+    void forceSslRefusesPlaintextStartupBeforeContactingTheBackend() throws Exception {
+        try (ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
+
+            AtomicReference<Object> outcome = new AtomicReference<>();
+            Thread authThread = Thread.ofVirtual().start(() -> outcome.set(authenticateRequiringSsl(proxyClient)));
+
+            DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+            writeStartup(clientOut, "dbadmin", "appdb");
+            DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+            Map<Character, String> error = readErrorResponse(clientIn);
+
+            assertEquals("FATAL", error.get('S'));
+            assertEquals("28000", error.get('C'));
+            assertEquals("no pg_hba.conf entry for host \"" + ourClient.getLocalAddress().getHostAddress()
+                    + "\", user \"dbadmin\", database \"appdb\", no encryption", error.get('M'));
+            assertEquals(-1, clientIn.read(), "the proxy closes the refused connection");
+            authThread.join(5_000);
+            assertFalse(authThread.isAlive(), "authThread did not terminate");
+            assertEquals("no session", outcome.get());
+        }
+    }
+
+    @Test
+    void forceSslAcceptsStartupOverTls() throws Exception {
+        try (ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
+
+            Thread authThread = Thread.ofVirtual().start(() -> authenticateRequiringSsl(proxyClient));
+
+            DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+            writeSslRequest(clientOut);
+            assertEquals('S', new DataInputStream(ourClient.getInputStream()).readUnsignedByte());
+            try (SSLSocket sslClient = trustedClientSocket(ourClient)) {
+                sslClient.startHandshake();
+                writeStartup(new DataOutputStream(sslClient.getOutputStream()), "dbadmin", "appdb");
+                readCleartextPasswordChallenge(new DataInputStream(sslClient.getInputStream()));
+            } finally {
+                authThread.join(5_000);
+                assertFalse(authThread.isAlive(), "authThread did not terminate");
+            }
+        }
+    }
+
+    private Object authenticateRequiringSsl(Socket proxyClient) {
+        try {
+            PostgresProtocolHandler.AuthenticatedSession session = PostgresProtocolHandler.authenticate(
+                    proxyClient, NEVER_CONNECT, "dbadmin", "adminpass", "postgres",
+                    false, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                    (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                    true, true, (user, database, parameters) -> { }, null, true);
+            return session == null ? "no session" : session;
+        } catch (IOException e) {
+            return e;
         }
     }
 
@@ -2511,6 +2622,120 @@ class PostgresProtocolHandlerTest {
                 out.writeByte('I');
                 out.flush();
             }
+        }
+    }
+
+    @FunctionalInterface
+    private interface MockBackend {
+        void serve(ServerSocket server) throws Exception;
+    }
+
+    /** Authenticates {@code client} with the proxy against {@code backend}, and fails on the backend's failure. */
+    private PostgresProtocolHandler.AuthenticatedSession authenticateAgainst(MemorySocket client,
+                                                                          MockBackend backend) throws Exception {
+        try (ServerSocket server = new ServerSocket(0)) {
+            AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    backend.serve(server);
+                } catch (Throwable e) {
+                    backendFailure.set(e);
+                }
+            });
+            PostgresProtocolHandler.AuthenticatedSession session = PostgresProtocolHandler.authenticate(
+                    client, () -> connectTestSocket("localhost", server.getLocalPort()),
+                    "dbadmin", "adminpass", "postgres",
+                    false, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                    (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+            backendThread.join(5_000);
+            assertFalse(backendThread.isAlive(), "backend thread did not terminate");
+            assertNull(backendFailure.get(), () -> "backend failed: " + backendFailure.get());
+            return session;
+        }
+    }
+
+    private static void writeAuthentication(DataOutputStream out, int code, byte[]... parts) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(PostgresWire.int32(code));
+        for (byte[] part : parts) {
+            body.write(part);
+        }
+        writeMessage(out, 'R', body.toByteArray());
+    }
+
+    private static byte[] readPasswordMessageBody(DataInputStream in) throws IOException {
+        assertEquals('p', in.readByte());
+        return in.readNBytes(in.readInt() - 4);
+    }
+
+    private static void readBackendStartup(DataInputStream in) throws IOException {
+        int length = in.readInt();
+        assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
+        in.readNBytes(length - 8);
+    }
+
+    /**
+     * A backend that logs the proxy in with SCRAM-SHA-256: it checks the client's proof, then sends
+     * its own signature, or, with {@code forgeSignature}, one that does not match and nothing after.
+     */
+    private static void mockScramBackend(ServerSocket server, String password, boolean forgeSignature)
+            throws Exception {
+        try (Socket socket = acceptTestSocket(server)) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            readBackendStartup(in);
+            writeAuthentication(out, 10, PostgresWire.cStringBytes("SCRAM-SHA-256"), new byte[] {0});
+
+            byte[] initial = readPasswordMessageBody(in);
+            PostgresWire.CString mechanism = PostgresWire.cString(initial, 0);
+            assertEquals("SCRAM-SHA-256", mechanism.value());
+            String clientFirst = new String(initial, mechanism.next() + 4, initial.length - mechanism.next() - 4,
+                    StandardCharsets.UTF_8);
+            String clientFirstBare = clientFirst.substring("n,,".length());
+            String nonce = clientFirstBare.substring(clientFirstBare.indexOf("r=") + 2) + "backend";
+            byte[] salt = "floci-test-salt!".getBytes(StandardCharsets.UTF_8);
+            String serverFirst = "r=" + nonce + ",s=" + Base64.getEncoder().encodeToString(salt) + ",i=4096";
+            writeAuthentication(out, 11, serverFirst.getBytes(StandardCharsets.UTF_8));
+
+            String clientFinal = new String(readPasswordMessageBody(in), StandardCharsets.UTF_8);
+            int proofAt = clientFinal.indexOf(",p=");
+            byte[] proof = Base64.getDecoder().decode(clientFinal.substring(proofAt + 3));
+            byte[] authMessage = (clientFirstBare + "," + serverFirst + "," + clientFinal.substring(0, proofAt))
+                    .getBytes(StandardCharsets.UTF_8);
+            byte[] salted = BackendAuthenticator.saltedPassword(password, salt, 4096);
+            byte[] clientKey = BackendAuthenticator.hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
+            byte[] clientSignature = BackendAuthenticator.hmac(
+                    MessageDigest.getInstance("SHA-256").digest(clientKey), authMessage);
+            for (int i = 0; i < clientKey.length; i++) {
+                assertEquals(clientKey[i], (byte) (proof[i] ^ clientSignature[i]), "client proof");
+            }
+            byte[] serverSignature = forgeSignature ? new byte[32] : BackendAuthenticator.hmac(
+                    BackendAuthenticator.hmac(salted, "Server Key".getBytes(StandardCharsets.UTF_8)), authMessage);
+            writeAuthentication(out, 12,
+                    ("v=" + Base64.getEncoder().encodeToString(serverSignature)).getBytes(StandardCharsets.UTF_8));
+            if (forgeSignature) {
+                // The proxy refuses the login here and closes the connection, so no AuthenticationOk is sent.
+                in.readAllBytes();
+                return;
+            }
+            writeAuthentication(out, 0);
+            writeReadyForQuery(out);
+        }
+    }
+
+    /** A backend that logs the proxy in with MD5, checking its answer. */
+    private static void mockMd5Backend(ServerSocket server, String user, String password) throws Exception {
+        try (Socket socket = acceptTestSocket(server)) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            readBackendStartup(in);
+            byte[] salt = {9, 8, 7, 6};
+            writeAuthentication(out, 5, salt);
+
+            String expected = BackendAuthenticator.md5Answer(user, password, salt);
+            assertArrayEquals(PostgresWire.cStringBytes(expected), readPasswordMessageBody(in));
+            writeAuthentication(out, 0);
+            writeReadyForQuery(out);
         }
     }
 

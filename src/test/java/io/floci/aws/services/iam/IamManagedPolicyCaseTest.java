@@ -171,7 +171,8 @@ class IamManagedPolicyCaseTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null, boundaries, Clock.systemUTC());
+                new RegionResolver("us-east-1", "000000000000"), false, "floci", null, boundaries,
+                Clock.systemUTC());
     }
 
     @Test

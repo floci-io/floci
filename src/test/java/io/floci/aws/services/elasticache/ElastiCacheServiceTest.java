@@ -8,6 +8,7 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerHandle;
@@ -124,7 +125,7 @@ class ElastiCacheServiceTest {
         clusterFormation = mock(ValkeyClusterFormation.class);
         service = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService, provisioningIds);
+                kmsService, mock(CloudWatchLogsService.class), provisioningIds);
     }
 
     @Test
@@ -152,7 +153,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService svc = new ElastiCacheService(cm, pm, mock(ValkeyClusterFormation.class),
                 sf, cfg, mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"),
-                mock(KmsService.class), provisioningIds);
+                mock(KmsService.class), mock(CloudWatchLogsService.class), provisioningIds);
 
         svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null, "us-east-1");
 
@@ -1210,7 +1211,7 @@ class ElastiCacheServiceTest {
         when(config.hostname()).thenReturn(Optional.of("localhost"));
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class), new ElastiCacheProvisioningIds());
+                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class), mock(CloudWatchLogsService.class), new ElastiCacheProvisioningIds());
     }
 
     private static void stubPerNodeContainers(ElastiCacheContainerManager containerManager) {
@@ -1962,7 +1963,7 @@ class ElastiCacheServiceTest {
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
         svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
         pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");
@@ -2081,7 +2082,7 @@ class ElastiCacheServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
@@ -2131,7 +2132,7 @@ class ElastiCacheServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
@@ -2473,7 +2474,7 @@ class ElastiCacheServiceTest {
     private ElastiCacheService serviceAfterRestart() {
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService, provisioningIds);
+                kmsService, mock(CloudWatchLogsService.class), provisioningIds);
     }
 
     private ElastiCacheMemcachedService memcachedService() {

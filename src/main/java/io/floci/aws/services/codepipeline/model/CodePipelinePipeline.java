@@ -21,7 +21,7 @@ public class CodePipelinePipeline {
     private Double created;
     private Double updated;
     private JsonNode declaration;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private Map<String, TransitionState> transitions = new LinkedHashMap<>();
 
     public String getAccountId() {

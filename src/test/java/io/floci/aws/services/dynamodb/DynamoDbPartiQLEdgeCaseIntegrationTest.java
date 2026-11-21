@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -18,6 +19,7 @@ import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -889,6 +891,142 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 "NOT sk='1' OR flag='one'")) {
             statement(select + where).statusCode(200);
         }
+    }
+
+    @Test
+    @Order(35)
+    void readsTheWholeTableForABranchThatNamesTheSortKeyTwice() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+
+        statement(select + "pk='ranges' AND sk >= '1' AND sk <= '2'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("1", "2"));
+        statement(select + "pk='ranges' AND ((sk >= '1' AND sk <= '2') OR sk = '1')")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("1", "2"));
+        statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '2' OR flag = 'one')")
+            .statusCode(200)
+            .body("Items.sk.S", contains("1"));
+        for (int count : List.of(9, 16)) {
+            String pairs = IntStream.range(0, count)
+                    .mapToObj(n -> "(sk = 's" + n + "' OR flag = '" + n + "')")
+                    .collect(Collectors.joining(" AND "));
+            statement(select + "pk='ranges' AND " + pairs).statusCode(200).body("Items", empty());
+        }
+        for (String where : List.of("pk='ranges' AND sk = '1' AND sk = '2'",
+                "pk=true AND sk >= '1' AND sk <= '2'", "pk=1 AND sk >= '1' AND sk <= '2'",
+                "pk='ranges' AND sk >= 1 AND sk <= '2'",
+                "pk=true AND ((sk >= 'b' AND sk <= 'c') OR sk = 'a')",
+                "pk=true AND (sk = 's0' OR flag = '0') AND (sk = 's1' OR flag = '1')",
+                "pk='ranges' AND ((sk >= 'b' AND sk <= 'c') OR sk = 1)")) {
+            statement(select + where).statusCode(200).body("Items", empty());
+        }
+
+        statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '1' OR flag = 'one')")
+            .statusCode(400)
+            .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
+        for (String where : List.of("pk=true AND (sk = 'a' OR (sk >= 'b' AND sk <= 'c'))",
+                "pk=true AND (flag = '0' OR sk = 's0') AND (sk = 's1' OR flag = '1')")) {
+            statement(select + where)
+                .statusCode(400)
+                .body("message", equalTo("Key value must be of type S, N, or B. Key name: pk, Key type: BOOL"));
+        }
+        statement(select + "pk='ranges' AND sk >= '1' AND sk <= '2' ORDER BY sk DESC")
+            .statusCode(400)
+            .body("message", equalTo(
+                    "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
+    }
+
+    @Test
+    @Order(36)
+    void readsTheWholeIndexForABranchThatNamesItsSortKeyTwice() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "partiql-edge-cases-index-sort",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"S"},
+                    {"AttributeName":"g","AttributeType":"S"},
+                    {"AttributeName":"gs","AttributeType":"S"},
+                    {"AttributeName":"l","AttributeType":"S"}
+                  ],
+                  "KeySchema": [
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "GlobalSecondaryIndexes": [{
+                    "IndexName": "gix",
+                    "KeySchema": [{"AttributeName":"g","KeyType":"HASH"},{"AttributeName":"gs","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }],
+                  "LocalSecondaryIndexes": [{
+                    "IndexName": "lix",
+                    "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"l","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+            .statusCode(200);
+        for (List<String> item : List.of(List.of("r1", "a", "0"), List.of("r2", "b", "1"), List.of("r3", "c", "2"))) {
+            request("DynamoDB_20120810.PutItem", """
+                    {"TableName":"partiql-edge-cases-index-sort","Item":{"pk":{"S":"p"},"sk":{"S":"%1$s"},
+                     "g":{"S":"ga"},"gs":{"S":"%2$s"},"l":{"S":"%2$s"},"x":{"S":"%3$s"}}}
+                    """.formatted(item.get(0), item.get(1), item.get(2)))
+                .statusCode(200);
+        }
+        String gsi = "SELECT sk FROM \"partiql-edge-cases-index-sort\".\"gix\" WHERE ";
+        String lsi = "SELECT sk FROM \"partiql-edge-cases-index-sort\".\"lix\" WHERE ";
+
+        statement(gsi + "g = 'ga' AND gs >= 'a' AND gs <= 'b'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("r1", "r2"));
+        statement(lsi + "pk = 'p' AND l >= 'a' AND l <= 'b'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("r1", "r2"));
+        for (String select : List.of(gsi + "g = 1 AND gs >= 'a' AND gs <= 'b'",
+                gsi + "g = 'ga' AND (gs = 'a' OR x = '0') AND (gs = 'b' OR x = '1')",
+                lsi + "pk = 1 AND l >= 'a' AND l <= 'b'",
+                lsi + "pk = 'p' AND (l = 'a' OR x = '0') AND (l = 'b' OR x = '1')")) {
+            statement(select).statusCode(200).body("Items", empty());
+        }
+
+        for (String select : List.of(gsi + "g = 1 AND gs >= 'a'", gsi + "g = 1 AND sk >= 'r1' AND sk <= 'r2'")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key g"));
+        }
+        for (String select : List.of(lsi + "pk = 1 AND l >= 'a'", lsi + "pk = 1 AND sk >= 'r1' AND sk <= 'r2'")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key pk"));
+        }
+        statement(gsi + "g = 'ga' AND (gs = 'a' OR x = '0') AND (gs = 'a' OR x = '1')")
+            .statusCode(400)
+            .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
+        for (String select : List.of(gsi + "g = 'ga' AND gs >= 'a' AND gs <= 'b' ORDER BY gs DESC",
+                lsi + "pk = 'p' AND l >= 'a' AND l <= 'b' ORDER BY l DESC")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo(
+                        "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
+        }
+    }
+
+    @Test
+    @Order(37)
+    void listsUnprojectedColumnsInTheSameOrderWhateverTheStatementOrder() {
+        String refused = "One or more parameter values were invalid: Global secondary index gsi-inc does not project ";
+        Map<List<String>, String> lists = Map.of(
+                List.of("nonproj", "lsiSk"), "[nonproj, lsiSk]",
+                List.of("lsiSk", "nonproj"), "[nonproj, lsiSk]",
+                List.of("alpha", "beta", "gamma", "delta"), "[delta, alpha, gamma, beta]",
+                List.of("x1", "x2", "x3", "x10", "x20"), "[x10, x20, x1, x2, x3]");
+
+        lists.forEach((columns, list) -> statement("SELECT " + String.join(", ", columns)
+                + " FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE gsiPk = 'y'")
+            .statusCode(400)
+            .body("message", equalTo(refused + list)));
     }
 
     private static void putItem(String pk, String attributes) {

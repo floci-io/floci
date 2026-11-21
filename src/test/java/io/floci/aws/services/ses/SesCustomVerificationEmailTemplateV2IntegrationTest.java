@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -118,7 +119,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body(body("nope", FROM, "x", "https://example.com/ok"))
         .when().put(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test
@@ -135,7 +137,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void deleteMissing_throwsNotFound() {
         given().header("Authorization", AUTH)
         .when().delete(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test
@@ -163,7 +166,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void sendWithTemplateCarryingTheTestSignature_isRecordedWithoutItsBodyAndNotRelayed() {
         // The signature comes from the scanner so it never appears in test source; the JSON needs
         // its one backslash escaped.
-        String content = SesContentScan.signature().replace("\\", "\\\\");
+        String content = SesTestSignature.value().replace("\\", "\\\\");
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
                     {"TemplateName": "cvet-v2-scan", "FromEmailAddress": "%s", "TemplateSubject": "scan",

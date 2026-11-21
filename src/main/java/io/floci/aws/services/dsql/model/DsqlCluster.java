@@ -22,7 +22,7 @@ public class DsqlCluster {
     private String status;
     private Instant creationTime;
     private boolean deletionProtectionEnabled;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private String kmsEncryptionKey;
     private String endpoint;
     private String clientToken;
@@ -32,6 +32,8 @@ public class DsqlCluster {
     private String witnessRegion;
     private List<String> linkedClusterArns;
     private boolean databaseReady;
+    private String backendSecret;
+    private List<String> pendingBackendRoles;
 
     public String getIdentifier() { return identifier; }
     public void setIdentifier(String identifier) { this.identifier = identifier; }
@@ -70,4 +72,18 @@ public class DsqlCluster {
     /** Whether the cluster's database answers, which a multi-Region cluster waits for after peering. */
     public boolean isDatabaseReady() { return databaseReady; }
     public void setDatabaseReady(boolean databaseReady) { this.databaseReady = databaseReady; }
+    /**
+     * The cluster's own secret on an external PostgreSQL server, base64 of 32 random bytes, from
+     * which each backend role's password is derived. Stored with the cluster; no API answer carries it.
+     */
+    public String getBackendSecret() { return backendSecret; }
+    public void setBackendSecret(String backendSecret) { this.backendSecret = backendSecret; }
+    /**
+     * The backend roles a deletion drops, saved before anything is dropped, so a deletion finished
+     * on a later start drops the same roles once the database that recorded them is gone.
+     */
+    public List<String> getPendingBackendRoles() { return pendingBackendRoles; }
+    public void setPendingBackendRoles(List<String> pendingBackendRoles) {
+        this.pendingBackendRoles = pendingBackendRoles;
+    }
 }

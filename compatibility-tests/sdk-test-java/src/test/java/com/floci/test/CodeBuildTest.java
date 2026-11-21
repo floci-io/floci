@@ -36,6 +36,7 @@ import software.amazon.awssdk.services.codebuild.model.SourceType;
 import software.amazon.awssdk.services.codebuild.model.StartBuildResponse;
 import software.amazon.awssdk.services.codebuild.model.Tag;
 import software.amazon.awssdk.services.codebuild.model.UpdateProjectResponse;
+import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 
@@ -48,7 +49,10 @@ class CodeBuildTest {
     private static final String CODEBUILD_TEST_IMAGE =
             "busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d";
 
+    private static final String SERVICE_ROLE = "codebuild-role";
+
     static CodeBuildClient codebuild;
+    static IamClient iam;
     static String reportGroupArn;
     static String sourceCredentialsArn;
     static String buildId;
@@ -56,11 +60,24 @@ class CodeBuildTest {
     @BeforeAll
     static void setup() {
         codebuild = TestFixtures.codeBuildClient();
+        // CodeBuild refuses to run a build whose service role it cannot assume.
+        iam = TestFixtures.iamClient();
+        iam.createRole(r -> r
+                .roleName(SERVICE_ROLE)
+                .assumeRolePolicyDocument("""
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                        "Principal":{"Service":"codebuild.amazonaws.com"},
+                        "Action":"sts:AssumeRole"}]}"""));
     }
 
     @AfterAll
     static void teardown() {
-        codebuild.close();
+        try {
+            iam.deleteRole(r -> r.roleName(SERVICE_ROLE));
+        } finally {
+            iam.close();
+            codebuild.close();
+        }
     }
 
     @Test
@@ -81,7 +98,7 @@ class CodeBuildTest {
                         .image("aws/codebuild/standard:7.0")
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role")
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role")
                 .tags(Tag.builder().key("env").value("test").build()));
 
         assertThat(resp.project().name()).isEqualTo("sdk-test-project");
@@ -216,7 +233,7 @@ class CodeBuildTest {
                         .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role"));
     }
 
     @Test
@@ -349,7 +366,7 @@ class CodeBuildTest {
                         .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role"));
     }
 
     @Test

@@ -49,6 +49,32 @@ class EksTokenValidatorTest {
         assertFalse(validator.validate(token, CLUSTER_NAME));
     }
 
+    /** The deployer's secret is the public part, so its key is refused whatever ID it was seeded under. */
+    @Test
+    void validateRejectsTheSeededDeployerCredentialUnderAConfiguredAccessKeyId() throws Exception {
+        String accessKeyId = "AKIAFLOCIDEPLOYER001";
+        String secretAccessKey = "floci";
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey(accessKeyId, secretAccessKey);
+        EksTokenValidator validator = new EksTokenValidator(iamService);
+        String token = SigV4TokenTestHelper.createEksToken(
+                CLUSTER_NAME, accessKeyId, secretAccessKey, Instant.now(), 60);
+
+        assertFalse(validator.validate(token, CLUSTER_NAME));
+    }
+
+    /** An access key that holds the deployer's default ID with a secret of its own is no public credential. */
+    @Test
+    void validateAcceptsAnAccessKeyHoldingTheDeployersDefaultIdWithItsOwnSecret() throws Exception {
+        String accessKeyId = "floci";
+        String secretAccessKey = "existing-secret";
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey(accessKeyId, secretAccessKey);
+        EksTokenValidator validator = new EksTokenValidator(iamService);
+        String token = SigV4TokenTestHelper.createEksToken(
+                CLUSTER_NAME, accessKeyId, secretAccessKey, Instant.now(), 60);
+
+        assertTrue(validator.validate(token, CLUSTER_NAME));
+    }
+
     @Test
     void validateRejectsTamperedSignature() throws Exception {
         EksTokenValidator validator = validator();
