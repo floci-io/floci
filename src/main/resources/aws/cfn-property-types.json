@@ -12,6 +12,7 @@
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::EKS::Cluster": "AWS::EKS::Cluster",
+    "AWS::EMR::Cluster": "AWS::EMR::Cluster",
     "AWS::EMR::SecurityConfiguration": "AWS::EMR::SecurityConfiguration",
     "AWS::EMR::Studio": "AWS::EMR::Studio",
     "AWS::EMR::StudioSessionMapping": "AWS::EMR::StudioSessionMapping",
@@ -1954,6 +1955,569 @@
       "members": {
         "Enabled": "Boolean"
       }
+    },
+    "AWS::EMR::Cluster": {
+      "type": "structure",
+      "members": {
+        "MasterPublicDNS": "String",
+        "AdditionalInfo": "Json",
+        "Applications": "AWS::EMR::Cluster.Applications",
+        "AutoScalingRole": "String",
+        "AutoTerminationPolicy": "AWS::EMR::Cluster/AutoTerminationPolicy",
+        "BootstrapActions": "AWS::EMR::Cluster.BootstrapActions",
+        "Configurations": "AWS::EMR::Cluster.Configurations",
+        "CustomAmiId": "String",
+        "EbsRootVolumeSize": "Integer",
+        "Id": "String",
+        "Instances": "AWS::EMR::Cluster/JobFlowInstancesConfig",
+        "JobFlowRole": "String",
+        "KerberosAttributes": "AWS::EMR::Cluster/KerberosAttributes",
+        "LogEncryptionKmsKeyId": "String",
+        "LogUri": "String",
+        "ManagedScalingPolicy": "AWS::EMR::Cluster/ManagedScalingPolicy",
+        "Name": "String",
+        "ReleaseLabel": "String",
+        "OSReleaseLabel": "String",
+        "ScaleDownBehavior": "String",
+        "SecurityConfiguration": "String",
+        "ServiceRole": "String",
+        "StepConcurrencyLevel": "Integer",
+        "Steps": "AWS::EMR::Cluster.Steps",
+        "VisibleToAllUsers": "Boolean",
+        "EbsRootVolumeIops": "Integer",
+        "EbsRootVolumeThroughput": "Integer",
+        "PlacementGroupConfigs": "AWS::EMR::Cluster.PlacementGroupConfigs",
+        "Tags": "AWS::EMR::Cluster.Tags",
+        "MonitoringConfiguration": "AWS::EMR::Cluster/MonitoringConfiguration",
+        "SessionEnabled": "Boolean"
+      },
+      "required": [
+        "Instances",
+        "ServiceRole",
+        "JobFlowRole",
+        "Name"
+      ]
+    },
+    "AWS::EMR::Cluster.Applications": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/Application"
+    },
+    "AWS::EMR::Cluster.BootstrapActions": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/BootstrapActionConfig"
+    },
+    "AWS::EMR::Cluster.Configurations": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/EMRConfiguration"
+    },
+    "AWS::EMR::Cluster.PlacementGroupConfigs": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/PlacementGroupConfig"
+    },
+    "AWS::EMR::Cluster.Steps": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/StepConfig"
+    },
+    "AWS::EMR::Cluster.Tags": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/Tag"
+    },
+    "AWS::EMR::Cluster/Application": {
+      "type": "structure",
+      "members": {
+        "AdditionalInfo": "AWS::EMR::Cluster/Application.AdditionalInfo",
+        "Args": "AWS::EMR::Cluster/Application.Args",
+        "Name": "String",
+        "Version": "String"
+      }
+    },
+    "AWS::EMR::Cluster/Application.AdditionalInfo": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::EMR::Cluster/Application.Args": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/AutoScalingPolicy": {
+      "type": "structure",
+      "members": {
+        "Constraints": "AWS::EMR::Cluster/ScalingConstraints",
+        "Rules": "AWS::EMR::Cluster/AutoScalingPolicy.Rules"
+      },
+      "required": [
+        "Constraints",
+        "Rules"
+      ]
+    },
+    "AWS::EMR::Cluster/AutoScalingPolicy.Rules": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/ScalingRule"
+    },
+    "AWS::EMR::Cluster/AutoTerminationPolicy": {
+      "type": "structure",
+      "members": {
+        "IdleTimeout": "Integer"
+      }
+    },
+    "AWS::EMR::Cluster/BootstrapActionConfig": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "ScriptBootstrapAction": "AWS::EMR::Cluster/ScriptBootstrapActionConfig"
+      },
+      "required": [
+        "Name",
+        "ScriptBootstrapAction"
+      ]
+    },
+    "AWS::EMR::Cluster/CloudWatchAlarmDefinition": {
+      "type": "structure",
+      "members": {
+        "ComparisonOperator": "String",
+        "Dimensions": "AWS::EMR::Cluster/CloudWatchAlarmDefinition.Dimensions",
+        "EvaluationPeriods": "Integer",
+        "MetricName": "String",
+        "Namespace": "String",
+        "Period": "Integer",
+        "Statistic": "String",
+        "Threshold": "Double",
+        "Unit": "String"
+      },
+      "required": [
+        "ComparisonOperator",
+        "MetricName",
+        "Period",
+        "Threshold"
+      ]
+    },
+    "AWS::EMR::Cluster/CloudWatchAlarmDefinition.Dimensions": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/MetricDimension"
+    },
+    "AWS::EMR::Cluster/CloudWatchLogConfiguration": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Boolean",
+        "LogGroupName": "String",
+        "LogStreamNamePrefix": "String",
+        "EncryptionKeyArn": "String",
+        "LogTypes": "AWS::EMR::Cluster/CloudWatchLogConfiguration.LogTypes"
+      },
+      "required": [
+        "Enabled"
+      ]
+    },
+    "AWS::EMR::Cluster/CloudWatchLogConfiguration.LogTypes": {
+      "type": "map",
+      "value": "AWS::EMR::Cluster/CloudWatchLogConfiguration.LogTypes.*"
+    },
+    "AWS::EMR::Cluster/CloudWatchLogConfiguration.LogTypes.*": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/ComputeLimits": {
+      "type": "structure",
+      "members": {
+        "MaximumCapacityUnits": "Integer",
+        "MaximumCoreCapacityUnits": "Integer",
+        "MaximumOnDemandCapacityUnits": "Integer",
+        "MinimumCapacityUnits": "Integer",
+        "UnitType": "String"
+      },
+      "required": [
+        "MaximumCapacityUnits",
+        "MinimumCapacityUnits",
+        "UnitType"
+      ]
+    },
+    "AWS::EMR::Cluster/EMRConfiguration": {
+      "type": "structure",
+      "members": {
+        "Classification": "String",
+        "ConfigurationProperties": "AWS::EMR::Cluster/EMRConfiguration.ConfigurationProperties",
+        "Configurations": "AWS::EMR::Cluster/EMRConfiguration.Configurations"
+      }
+    },
+    "AWS::EMR::Cluster/EMRConfiguration.ConfigurationProperties": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::EMR::Cluster/EMRConfiguration.Configurations": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/EMRConfiguration"
+    },
+    "AWS::EMR::Cluster/EbsBlockDeviceConfig": {
+      "type": "structure",
+      "members": {
+        "VolumeSpecification": "AWS::EMR::Cluster/VolumeSpecification",
+        "VolumesPerInstance": "Integer"
+      },
+      "required": [
+        "VolumeSpecification"
+      ]
+    },
+    "AWS::EMR::Cluster/EbsConfiguration": {
+      "type": "structure",
+      "members": {
+        "EbsBlockDeviceConfigs": "AWS::EMR::Cluster/EbsConfiguration.EbsBlockDeviceConfigs",
+        "EbsOptimized": "Boolean"
+      }
+    },
+    "AWS::EMR::Cluster/EbsConfiguration.EbsBlockDeviceConfigs": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/EbsBlockDeviceConfig"
+    },
+    "AWS::EMR::Cluster/HadoopJarStepConfig": {
+      "type": "structure",
+      "members": {
+        "Args": "AWS::EMR::Cluster/HadoopJarStepConfig.Args",
+        "Jar": "String",
+        "MainClass": "String",
+        "StepProperties": "AWS::EMR::Cluster/HadoopJarStepConfig.StepProperties"
+      },
+      "required": [
+        "Jar"
+      ]
+    },
+    "AWS::EMR::Cluster/HadoopJarStepConfig.Args": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/HadoopJarStepConfig.StepProperties": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/KeyValue"
+    },
+    "AWS::EMR::Cluster/InstanceFleetConfig": {
+      "type": "structure",
+      "members": {
+        "InstanceTypeConfigs": "AWS::EMR::Cluster/InstanceFleetConfig.InstanceTypeConfigs",
+        "LaunchSpecifications": "AWS::EMR::Cluster/InstanceFleetProvisioningSpecifications",
+        "ResizeSpecifications": "AWS::EMR::Cluster/InstanceFleetResizingSpecifications",
+        "Name": "String",
+        "TargetOnDemandCapacity": "Integer",
+        "TargetSpotCapacity": "Integer"
+      }
+    },
+    "AWS::EMR::Cluster/InstanceFleetConfig.InstanceTypeConfigs": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/InstanceTypeConfig"
+    },
+    "AWS::EMR::Cluster/InstanceFleetProvisioningSpecifications": {
+      "type": "structure",
+      "members": {
+        "OnDemandSpecification": "AWS::EMR::Cluster/OnDemandProvisioningSpecification",
+        "SpotSpecification": "AWS::EMR::Cluster/SpotProvisioningSpecification"
+      }
+    },
+    "AWS::EMR::Cluster/InstanceFleetResizingSpecifications": {
+      "type": "structure",
+      "members": {
+        "SpotResizeSpecification": "AWS::EMR::Cluster/SpotResizingSpecification",
+        "OnDemandResizeSpecification": "AWS::EMR::Cluster/OnDemandResizingSpecification"
+      }
+    },
+    "AWS::EMR::Cluster/InstanceGroupConfig": {
+      "type": "structure",
+      "members": {
+        "AutoScalingPolicy": "AWS::EMR::Cluster/AutoScalingPolicy",
+        "BidPrice": "String",
+        "Configurations": "AWS::EMR::Cluster/InstanceGroupConfig.Configurations",
+        "CustomAmiId": "String",
+        "EbsConfiguration": "AWS::EMR::Cluster/EbsConfiguration",
+        "InstanceCount": "Integer",
+        "InstanceType": "String",
+        "Market": "String",
+        "Name": "String"
+      },
+      "required": [
+        "InstanceCount",
+        "InstanceType"
+      ]
+    },
+    "AWS::EMR::Cluster/InstanceGroupConfig.Configurations": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/EMRConfiguration"
+    },
+    "AWS::EMR::Cluster/InstanceTypeConfig": {
+      "type": "structure",
+      "members": {
+        "BidPrice": "String",
+        "BidPriceAsPercentageOfOnDemandPrice": "Double",
+        "Configurations": "AWS::EMR::Cluster/InstanceTypeConfig.Configurations",
+        "CustomAmiId": "String",
+        "EbsConfiguration": "AWS::EMR::Cluster/EbsConfiguration",
+        "InstanceType": "String",
+        "Priority": "Double",
+        "WeightedCapacity": "Integer"
+      },
+      "required": [
+        "InstanceType"
+      ]
+    },
+    "AWS::EMR::Cluster/InstanceTypeConfig.Configurations": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/EMRConfiguration"
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig": {
+      "type": "structure",
+      "members": {
+        "AdditionalMasterSecurityGroups": "AWS::EMR::Cluster/JobFlowInstancesConfig.AdditionalMasterSecurityGroups",
+        "AdditionalSlaveSecurityGroups": "AWS::EMR::Cluster/JobFlowInstancesConfig.AdditionalSlaveSecurityGroups",
+        "Ec2KeyName": "String",
+        "Ec2SubnetId": "String",
+        "Ec2SubnetIds": "AWS::EMR::Cluster/JobFlowInstancesConfig.Ec2SubnetIds",
+        "EmrManagedMasterSecurityGroup": "String",
+        "EmrManagedSlaveSecurityGroup": "String",
+        "HadoopVersion": "String",
+        "KeepJobFlowAliveWhenNoSteps": "Boolean",
+        "CoreInstanceFleet": "AWS::EMR::Cluster/InstanceFleetConfig",
+        "MasterInstanceFleet": "AWS::EMR::Cluster/InstanceFleetConfig",
+        "TaskInstanceFleets": "AWS::EMR::Cluster/JobFlowInstancesConfig.TaskInstanceFleets",
+        "CoreInstanceGroup": "AWS::EMR::Cluster/InstanceGroupConfig",
+        "MasterInstanceGroup": "AWS::EMR::Cluster/InstanceGroupConfig",
+        "TaskInstanceGroups": "AWS::EMR::Cluster/JobFlowInstancesConfig.TaskInstanceGroups",
+        "Placement": "AWS::EMR::Cluster/PlacementType",
+        "ServiceAccessSecurityGroup": "String",
+        "TerminationProtected": "Boolean",
+        "UnhealthyNodeReplacement": "Boolean"
+      }
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig.AdditionalMasterSecurityGroups": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig.AdditionalSlaveSecurityGroups": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig.Ec2SubnetIds": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig.TaskInstanceFleets": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/InstanceFleetConfig"
+    },
+    "AWS::EMR::Cluster/JobFlowInstancesConfig.TaskInstanceGroups": {
+      "type": "list",
+      "member": "AWS::EMR::Cluster/InstanceGroupConfig"
+    },
+    "AWS::EMR::Cluster/KerberosAttributes": {
+      "type": "structure",
+      "members": {
+        "ADDomainJoinPassword": "String",
+        "ADDomainJoinUser": "String",
+        "CrossRealmTrustPrincipalPassword": "String",
+        "KdcAdminPassword": "String",
+        "Realm": "String"
+      },
+      "required": [
+        "Realm",
+        "KdcAdminPassword"
+      ]
+    },
+    "AWS::EMR::Cluster/KeyValue": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String"
+      }
+    },
+    "AWS::EMR::Cluster/ManagedScalingPolicy": {
+      "type": "structure",
+      "members": {
+        "UtilizationPerformanceIndex": "Integer",
+        "ScalingStrategy": "String",
+        "ComputeLimits": "AWS::EMR::Cluster/ComputeLimits"
+      }
+    },
+    "AWS::EMR::Cluster/MetricDimension": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EMR::Cluster/MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "CloudWatchLogConfiguration": "AWS::EMR::Cluster/CloudWatchLogConfiguration"
+      }
+    },
+    "AWS::EMR::Cluster/OnDemandCapacityReservationOptions": {
+      "type": "structure",
+      "members": {
+        "CapacityReservationPreference": "String",
+        "CapacityReservationResourceGroupArn": "String",
+        "UsageStrategy": "String"
+      }
+    },
+    "AWS::EMR::Cluster/OnDemandProvisioningSpecification": {
+      "type": "structure",
+      "members": {
+        "AllocationStrategy": "String",
+        "CapacityReservationOptions": "AWS::EMR::Cluster/OnDemandCapacityReservationOptions"
+      },
+      "required": [
+        "AllocationStrategy"
+      ]
+    },
+    "AWS::EMR::Cluster/OnDemandResizingSpecification": {
+      "type": "structure",
+      "members": {
+        "TimeoutDurationMinutes": "Integer",
+        "AllocationStrategy": "String",
+        "CapacityReservationOptions": "AWS::EMR::Cluster/OnDemandCapacityReservationOptions"
+      }
+    },
+    "AWS::EMR::Cluster/PlacementGroupConfig": {
+      "type": "structure",
+      "members": {
+        "InstanceRole": "String",
+        "PlacementStrategy": "String"
+      },
+      "required": [
+        "InstanceRole"
+      ]
+    },
+    "AWS::EMR::Cluster/PlacementType": {
+      "type": "structure",
+      "members": {
+        "AvailabilityZone": "String"
+      },
+      "required": [
+        "AvailabilityZone"
+      ]
+    },
+    "AWS::EMR::Cluster/ScalingAction": {
+      "type": "structure",
+      "members": {
+        "Market": "String",
+        "SimpleScalingPolicyConfiguration": "AWS::EMR::Cluster/SimpleScalingPolicyConfiguration"
+      },
+      "required": [
+        "SimpleScalingPolicyConfiguration"
+      ]
+    },
+    "AWS::EMR::Cluster/ScalingConstraints": {
+      "type": "structure",
+      "members": {
+        "MaxCapacity": "Integer",
+        "MinCapacity": "Integer"
+      },
+      "required": [
+        "MaxCapacity",
+        "MinCapacity"
+      ]
+    },
+    "AWS::EMR::Cluster/ScalingRule": {
+      "type": "structure",
+      "members": {
+        "Action": "AWS::EMR::Cluster/ScalingAction",
+        "Description": "String",
+        "Name": "String",
+        "Trigger": "AWS::EMR::Cluster/ScalingTrigger"
+      },
+      "required": [
+        "Action",
+        "Name",
+        "Trigger"
+      ]
+    },
+    "AWS::EMR::Cluster/ScalingTrigger": {
+      "type": "structure",
+      "members": {
+        "CloudWatchAlarmDefinition": "AWS::EMR::Cluster/CloudWatchAlarmDefinition"
+      },
+      "required": [
+        "CloudWatchAlarmDefinition"
+      ]
+    },
+    "AWS::EMR::Cluster/ScriptBootstrapActionConfig": {
+      "type": "structure",
+      "members": {
+        "Args": "AWS::EMR::Cluster/ScriptBootstrapActionConfig.Args",
+        "Path": "String"
+      },
+      "required": [
+        "Path"
+      ]
+    },
+    "AWS::EMR::Cluster/ScriptBootstrapActionConfig.Args": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::EMR::Cluster/SimpleScalingPolicyConfiguration": {
+      "type": "structure",
+      "members": {
+        "AdjustmentType": "String",
+        "CoolDown": "Integer",
+        "ScalingAdjustment": "Integer"
+      },
+      "required": [
+        "ScalingAdjustment"
+      ]
+    },
+    "AWS::EMR::Cluster/SpotProvisioningSpecification": {
+      "type": "structure",
+      "members": {
+        "AllocationStrategy": "String",
+        "BlockDurationMinutes": "Integer",
+        "TimeoutAction": "String",
+        "TimeoutDurationMinutes": "Integer"
+      },
+      "required": [
+        "TimeoutAction",
+        "TimeoutDurationMinutes"
+      ]
+    },
+    "AWS::EMR::Cluster/SpotResizingSpecification": {
+      "type": "structure",
+      "members": {
+        "TimeoutDurationMinutes": "Integer",
+        "AllocationStrategy": "String"
+      }
+    },
+    "AWS::EMR::Cluster/StepConfig": {
+      "type": "structure",
+      "members": {
+        "ActionOnFailure": "String",
+        "HadoopJarStep": "AWS::EMR::Cluster/HadoopJarStepConfig",
+        "Name": "String"
+      },
+      "required": [
+        "HadoopJarStep",
+        "Name"
+      ]
+    },
+    "AWS::EMR::Cluster/Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::EMR::Cluster/VolumeSpecification": {
+      "type": "structure",
+      "members": {
+        "Iops": "Integer",
+        "SizeInGB": "Integer",
+        "Throughput": "Integer",
+        "VolumeType": "String"
+      },
+      "required": [
+        "SizeInGB",
+        "VolumeType"
+      ]
     },
     "AWS::EMR::SecurityConfiguration": {
       "type": "structure",

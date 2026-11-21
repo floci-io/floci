@@ -157,6 +157,7 @@ import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
 import io.floci.aws.services.elasticache.ElastiCacheService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.emr.EmrHandler;
 import io.floci.aws.services.emr.EmrService;
 import io.floci.aws.services.emr.EmrStudioService;
 import io.floci.aws.services.emrcontainers.EmrContainersService;
@@ -287,6 +288,7 @@ final class CfnProvisionerFixture {
         private SchedulerService schedulerService;
         private CodeDeployService codeDeployService;
         private EmrService emrService;
+        private EmrHandler emrHandler;
         private EmrStudioService emrStudioService;
         private EmrContainersService emrContainersService;
         private EmrServerlessService emrServerlessService;
@@ -577,8 +579,8 @@ final class CfnProvisionerFixture {
             if (codeDeployService != null) {
                 discovered.add(new CodeDeployCfnProvisioner(codeDeployService));
             }
-            if (emrService != null) {
-                discovered.add(new EmrCfnProvisioner(emrService));
+            if (emrService != null && emrHandler != null) {
+                discovered.add(new EmrCfnProvisioner(emrService, emrHandler));
             }
             if (emrStudioService != null) {
                 discovered.add(new EmrStudioCfnProvisioner(emrStudioService));
@@ -821,6 +823,11 @@ final class CfnProvisionerFixture {
 
         public Builder emr(EmrService v) {
             this.emrService = v;
+            return this;
+        }
+
+        public Builder emrHandler(EmrHandler v) {
+            this.emrHandler = v;
             return this;
         }
 

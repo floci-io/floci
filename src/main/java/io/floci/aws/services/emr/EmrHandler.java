@@ -167,6 +167,18 @@ public class EmrHandler {
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
 
     private Response handleRunJobFlow(JsonNode request, String region) {
+        EmrCluster created = service.runJobFlow(clusterFrom(request, region), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("JobFlowId", created.getId());
+        response.put("ClusterArn", created.getClusterArn());
+        return Response.ok(response).build();
+    }
+
+    /**
+     * The cluster a RunJobFlow request describes, its members read and checked as RunJobFlow reads them, for this
+     * handler and for CloudFormation's {@code AWS::EMR::Cluster}, which describes a cluster in the same members.
+     */
+    public EmrCluster clusterFrom(JsonNode request, String region) {
         EmrCluster cluster = new EmrCluster();
         cluster.setName(text(request, "Name"));
         cluster.setReleaseLabel(text(request, "ReleaseLabel"));
@@ -210,12 +222,7 @@ public class EmrHandler {
         cluster.setInstanceGroups(groups.isEmpty() && fleets.isEmpty() ? uniformInstanceGroups(instances) : groups);
         cluster.setInstanceFleets(fleets);
         cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
-
-        EmrCluster created = service.runJobFlow(cluster, region);
-        ObjectNode response = objectMapper.createObjectNode();
-        response.put("JobFlowId", created.getId());
-        response.put("ClusterArn", created.getClusterArn());
-        return Response.ok(response).build();
+        return cluster;
     }
 
     private Response handleDescribeCluster(JsonNode request) {

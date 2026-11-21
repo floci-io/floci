@@ -528,6 +528,31 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::EMR::Cluster": [
+    "Steps",
+    "EbsRootVolumeSize",
+    "SecurityConfiguration",
+    "ScaleDownBehavior",
+    "ReleaseLabel",
+    "KerberosAttributes",
+    "ServiceRole",
+    "LogEncryptionKmsKeyId",
+    "Name",
+    "JobFlowRole",
+    "LogUri",
+    "AdditionalInfo",
+    "Applications",
+    "AutoScalingRole",
+    "BootstrapActions",
+    "Configurations",
+    "CustomAmiId",
+    "OSReleaseLabel",
+    "EbsRootVolumeIops",
+    "EbsRootVolumeThroughput",
+    "PlacementGroupConfigs",
+    "MonitoringConfiguration",
+    "SessionEnabled"
+  ],
   "AWS::EMR::SecurityConfiguration": [
     "Name",
     "SecurityConfiguration"
