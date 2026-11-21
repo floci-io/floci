@@ -368,6 +368,31 @@ class DynamoDbStreamLifecycleTest {
     }
 
     @Test
+    void aPageStartsAtTheCursorWhereverItSitsInTheShard() {
+        DynamoDbStreamService streams = streams(Settings.DEFAULTS);
+        String streamArn = enable(streams);
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 40; i++) {
+            put(streams, "item-" + i);
+            expected.add("item-" + i);
+        }
+        List<DynamoDbStreamRecord> held = readAll(streams, streamArn, DynamoDbStreamService.SHARD_ID);
+        assertEquals(expected, keys(held));
+
+        for (int i = 0; i < held.size(); i++) {
+            String sequence = held.get(i).getSequenceNumber();
+            String at = streams.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID, "AT_SEQUENCE_NUMBER",
+                    sequence);
+            assertEquals(expected.subList(i, Math.min(i + 3, expected.size())),
+                    keys(streams.getRecords(at, 3).records()), "at record " + i);
+            String after = streams.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID,
+                    "AFTER_SEQUENCE_NUMBER", sequence);
+            assertEquals(expected.subList(i + 1, Math.min(i + 4, expected.size())),
+                    keys(streams.getRecords(after, 3).records()), "after record " + i);
+        }
+    }
+
+    @Test
     void aStreamMustKeepAtLeastOneRecord() {
         assertThrows(IllegalArgumentException.class, () -> new Settings(1, null, false, false, 0));
     }
