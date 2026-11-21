@@ -125,6 +125,7 @@ import io.floci.aws.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.TransferCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.VerifiedPermissionsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudmap.CloudMapService;
@@ -188,6 +189,7 @@ import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.ssm.SsmService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.transfer.TransferService;
+import io.floci.aws.services.verifiedpermissions.VerifiedPermissionsService;
 import io.floci.aws.services.wafv2.WafV2Service;
 import org.mockito.Mockito;
 
@@ -245,6 +247,7 @@ final class CfnProvisionerFixture {
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
+        private VerifiedPermissionsService verifiedPermissionsService;
         private SecretsManagerService secretsManagerService;
         private EventBridgeService eventBridgeService;
         private ApiGatewayService apiGatewayService;
@@ -386,6 +389,9 @@ final class CfnProvisionerFixture {
             }
             if (kmsService != null) {
                 discovered.add(new KmsCfnProvisioner(kmsService));
+            }
+            if (verifiedPermissionsService != null) {
+                discovered.add(new VerifiedPermissionsCfnProvisioner(verifiedPermissionsService));
             }
             if (ecrService != null) {
                 discovered.add(new EcrCfnProvisioner(ecrService));
@@ -675,6 +681,11 @@ final class CfnProvisionerFixture {
 
         public Builder kms(KmsService v) {
             this.kmsService = v;
+            return this;
+        }
+
+        public Builder verifiedPermissions(VerifiedPermissionsService v) {
+            this.verifiedPermissionsService = v;
             return this;
         }
 

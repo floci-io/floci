@@ -990,6 +990,13 @@
     "ServerId",
     "UserName"
   ],
+  "AWS::VerifiedPermissions::Policy": [
+    "PolicyStoreId"
+  ],
+  "AWS::VerifiedPermissions::PolicyStore": [],
+  "AWS::VerifiedPermissions::PolicyTemplate": [
+    "PolicyStoreId"
+  ],
   "AWS::WAFv2::IPSet": [
     "Name",
     "Scope"
