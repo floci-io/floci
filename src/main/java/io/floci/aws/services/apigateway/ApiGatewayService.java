@@ -1774,6 +1774,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .toList();
     }
 
+    /**
+     * One {@code GetUsagePlans} page: the {@code keyId}-filtered plans, paged by {@code limit} and
+     * {@code position} like the other API Gateway collections.
+     */
+    public PaginatedResult<UsagePlan> getUsagePlanPage(String region, String keyId, Integer limit,
+                                                       String position) {
+        return pageById(getUsagePlans(region, keyId), UsagePlan::getId, limit, position);
+    }
+
     /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {

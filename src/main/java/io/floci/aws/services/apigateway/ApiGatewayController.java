@@ -911,13 +911,11 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans")
-    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId) {
+    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId,
+                                  @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlan> plans = service.getUsagePlans(region, keyId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        plans.forEach(p -> items.add(toUsagePlanNode(p, false)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<UsagePlan> page = service.getUsagePlanPage(region, keyId, pageLimit(limit), position);
+        return pageResponse(page, p -> toUsagePlanNode(p, false));
     }
 
     @GET
