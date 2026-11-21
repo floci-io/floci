@@ -210,6 +210,57 @@ class IamRestRoutesTest {
                 query("list-type", "1")));
     }
 
+    /**
+     * Operations sharing a route are told apart by what botocore requires their request to carry: S3's UploadPart, on
+     * {@code PUT /{Bucket}/{Key+}} with PutObject, requires {@code partNumber} and {@code uploadId}, and CopyObject the
+     * {@code x-amz-copy-source} header. The route requiring more wins when the request carries it all, a header is
+     * matched whatever its case, and with no headers known a route requiring one cannot be told to match.
+     */
+    @Test
+    void operationsSharingARouteAreToldApartByWhatTheirRequestMustCarry() {
+        IamRestRoutes table = routes("""
+                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                  "PutObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"},
+                  "CopyObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"headers": ["x-amz-copy-source"]}},
+                  "UploadPart": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                 "requires": {"query": ["partNumber", "uploadId"]}},
+                  "UploadPartCopy": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
+                                     "requires": {"query": ["partNumber", "uploadId"], "headers": ["x-amz-copy-source"]}}
+                }}}}""");
+        MultivaluedMap<String, String> part = query("partNumber", "1");
+        part.add("uploadId", "u");
+        MultivaluedMap<String, String> copy = new MultivaluedHashMap<>();
+        copy.add("X-Amz-Copy-Source", "b/k");
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals(Optional.of("PutObject"), operation(table, null, none));
+        assertEquals(Optional.of("CopyObject"), operation(table, null, copy));
+        assertEquals(Optional.of("UploadPart"), operation(table, part, none));
+        assertEquals(Optional.of("UploadPartCopy"), operation(table, part, copy));
+        // One of the two query parameters is not enough, and without headers a copy is read as the plain write.
+        assertEquals(Optional.of("PutObject"), operation(table, query("partNumber", "1"), none));
+        assertEquals(Optional.of("PutObject"), table.operation("obj", "PUT", "/b/k", null));
+        assertEquals(Optional.of("objects"), table.match("obj", "PUT", "/b/k", null, false, copy)
+                .map(IamRestRoutes.Match::model));
+    }
+
+    /** A deprecated operation yields to the current one of the same route and conditions. */
+    @Test
+    void aDeprecatedOperationYieldsToTheCurrentOneOfItsRoute() {
+        IamRestRoutes table = routes("""
+                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                  "GetBucketLifecycle": {"method": "GET", "requestUri": "/{Bucket}?lifecycle", "deprecated": true},
+                  "GetBucketLifecycleConfiguration": {"method": "GET", "requestUri": "/{Bucket}?lifecycle"}
+                }}}}""");
+        assertEquals(Optional.of("GetBucketLifecycleConfiguration"),
+                table.operation("obj", "GET", "/b", query("lifecycle", "")));
+    }
+
+    private static Optional<String> operation(IamRestRoutes table, MultivaluedMap<String, String> query,
+                                              MultivaluedMap<String, String> headers) {
+        return table.match("obj", "PUT", "/b/k", query, false, headers).map(IamRestRoutes.Match::operation);
+    }
+
     /** A trailing slash is dropped, as the router drops it, and an encoded slash stays inside its label. */
     @Test
     void aPathIsReadAsTheRouterMatchedIt() {
