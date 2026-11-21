@@ -528,6 +528,27 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::EMR::SecurityConfiguration": [
+    "Name",
+    "SecurityConfiguration"
+  ],
+  "AWS::EMR::Studio": [
+    "AuthMode",
+    "EngineSecurityGroupId",
+    "ServiceRole",
+    "UserRole",
+    "VpcId",
+    "WorkspaceSecurityGroupId",
+    "TrustedIdentityPropagationEnabled",
+    "IdcUserAssignment",
+    "IdcInstanceArn",
+    "EncryptionKeyArn"
+  ],
+  "AWS::EMR::StudioSessionMapping": [
+    "StudioId",
+    "IdentityType",
+    "IdentityName"
+  ],
   "AWS::EMRContainers::VirtualCluster": [
     "ContainerProvider",
     "Name",

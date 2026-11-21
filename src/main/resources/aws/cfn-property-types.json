@@ -12,6 +12,9 @@
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::EKS::Cluster": "AWS::EKS::Cluster",
+    "AWS::EMR::SecurityConfiguration": "AWS::EMR::SecurityConfiguration",
+    "AWS::EMR::Studio": "AWS::EMR::Studio",
+    "AWS::EMR::StudioSessionMapping": "AWS::EMR::StudioSessionMapping",
     "AWS::EMRContainers::VirtualCluster": "AWS::EMRContainers::VirtualCluster",
     "AWS::EMRServerless::Application": "AWS::EMRServerless::Application",
     "AWS::Events::Connection": "AWS::Events::Connection",
@@ -1951,6 +1954,172 @@
       "members": {
         "Enabled": "Boolean"
       }
+    },
+    "AWS::EMR::SecurityConfiguration": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "SecurityConfiguration": "Json"
+      },
+      "required": [
+        "SecurityConfiguration"
+      ]
+    },
+    "AWS::EMR::Studio": {
+      "type": "structure",
+      "members": {
+        "Arn": "AWS::EMR::Studio/Arn",
+        "AuthMode": "String",
+        "DefaultS3Location": "AWS::EMR::Studio.DefaultS3Location",
+        "Description": "AWS::EMR::Studio.Description",
+        "EngineSecurityGroupId": "AWS::EMR::Studio.EngineSecurityGroupId",
+        "Name": "AWS::EMR::Studio.Name",
+        "ServiceRole": "AWS::EMR::Studio/Arn",
+        "StudioId": "AWS::EMR::Studio.StudioId",
+        "SubnetIds": "AWS::EMR::Studio.SubnetIds",
+        "Tags": "AWS::EMR::Studio/Tags",
+        "Url": "AWS::EMR::Studio.Url",
+        "UserRole": "AWS::EMR::Studio/Arn",
+        "VpcId": "AWS::EMR::Studio.VpcId",
+        "WorkspaceSecurityGroupId": "AWS::EMR::Studio.WorkspaceSecurityGroupId",
+        "IdpAuthUrl": "AWS::EMR::Studio.IdpAuthUrl",
+        "IdpRelayStateParameterName": "AWS::EMR::Studio.IdpRelayStateParameterName",
+        "TrustedIdentityPropagationEnabled": "Boolean",
+        "IdcUserAssignment": "String",
+        "IdcInstanceArn": "AWS::EMR::Studio.IdcInstanceArn",
+        "EncryptionKeyArn": "AWS::EMR::Studio/Arn"
+      },
+      "required": [
+        "AuthMode",
+        "EngineSecurityGroupId",
+        "Name",
+        "ServiceRole",
+        "SubnetIds",
+        "VpcId",
+        "WorkspaceSecurityGroupId",
+        "DefaultS3Location"
+      ]
+    },
+    "AWS::EMR::Studio.DefaultS3Location": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 10280,
+      "pattern": "^s3://.*"
+    },
+    "AWS::EMR::Studio.Description": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 256
+    },
+    "AWS::EMR::Studio.EngineSecurityGroupId": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 256,
+      "pattern": "^sg-[a-zA-Z0-9\\-._]+$"
+    },
+    "AWS::EMR::Studio.IdcInstanceArn": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 2048
+    },
+    "AWS::EMR::Studio.IdpAuthUrl": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^https://[0-9a-zA-Z]([-.\\w]*[0-9a-zA-Z])(:[0-9]*)*([?/#].*)?$"
+    },
+    "AWS::EMR::Studio.IdpRelayStateParameterName": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 256
+    },
+    "AWS::EMR::Studio.Name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "[a-zA-Z0-9_-]+"
+    },
+    "AWS::EMR::Studio.StudioId": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 256,
+      "pattern": "^es-[0-9A-Z]+"
+    },
+    "AWS::EMR::Studio.SubnetIds": {
+      "type": "list",
+      "member": "AWS::EMR::Studio/SubnetId"
+    },
+    "AWS::EMR::Studio.Url": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^https://[0-9a-zA-Z]([-.\\w]*[0-9a-zA-Z])(:[0-9]*)*([?/#].*)?$"
+    },
+    "AWS::EMR::Studio.VpcId": {
+      "type": "string",
+      "pattern": "^(vpc-[0-9a-f]{8}|vpc-[0-9a-f]{17})$"
+    },
+    "AWS::EMR::Studio.WorkspaceSecurityGroupId": {
+      "type": "string",
+      "pattern": "^sg-[a-zA-Z0-9\\-._]+$"
+    },
+    "AWS::EMR::Studio/Arn": {
+      "type": "string",
+      "pattern": "^arn:aws(-(cn|us-gov|iso-f|iso-e))?:[a-z-]+:(([a-z]+-)+[0-9])?:([0-9]{12})?:[^.]+$"
+    },
+    "AWS::EMR::Studio/SubnetId": {
+      "type": "string",
+      "pattern": "^(subnet-[a-f0-9]{13})|(subnet-[a-f0-9]{8})\\Z"
+    },
+    "AWS::EMR::Studio/Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "AWS::EMR::Studio/Tag.Key",
+        "Value": "AWS::EMR::Studio/Tag.Value"
+      },
+      "required": [
+        "Value",
+        "Key"
+      ]
+    },
+    "AWS::EMR::Studio/Tag.Key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!aws:)[a-zA-Z+-=._:/]+$"
+    },
+    "AWS::EMR::Studio/Tag.Value": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 256,
+      "pattern": "[a-zA-Z+-=._:/]+$"
+    },
+    "AWS::EMR::Studio/Tags": {
+      "type": "list",
+      "member": "AWS::EMR::Studio/Tag"
+    },
+    "AWS::EMR::StudioSessionMapping": {
+      "type": "structure",
+      "members": {
+        "IdentityName": "String",
+        "IdentityType": "String",
+        "SessionPolicyArn": "AWS::EMR::StudioSessionMapping/IamPolicyArn",
+        "StudioId": "AWS::EMR::StudioSessionMapping.StudioId"
+      },
+      "required": [
+        "StudioId",
+        "IdentityName",
+        "IdentityType",
+        "SessionPolicyArn"
+      ]
+    },
+    "AWS::EMR::StudioSessionMapping.StudioId": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 256,
+      "pattern": "^es-[0-9A-Z]+"
+    },
+    "AWS::EMR::StudioSessionMapping/IamPolicyArn": {
+      "type": "string",
+      "pattern": "^arn:aws(-(cn|us-gov|iso-f|iso-e))?:iam::([0-9]{12})?:policy\\/[^.]+$"
     },
     "AWS::EMRContainers::VirtualCluster": {
       "type": "structure",

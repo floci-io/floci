@@ -347,6 +347,14 @@ class EmrIntegrationTest {
             emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
                     .then().statusCode(200);
         }
+        // A configuration that is no JSON object could not be read when a cluster names it.
+        for (String notAnObject : List.of("not json", "[]")) {
+            emr("CreateSecurityConfiguration", objectMapper.createObjectNode().put("Name", "floci-emr-sec-bad")
+                    .put("SecurityConfiguration", notAnObject).toString())
+                    .then().statusCode(400)
+                    .body("__type", equalTo("InvalidRequestException"))
+                    .body("message", equalTo("SecurityConfiguration must be a JSON object."));
+        }
     }
 
     @Test
