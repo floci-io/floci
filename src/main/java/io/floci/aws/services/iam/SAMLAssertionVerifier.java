@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Verifies the specific SAML assertion contract consumed by STS. */
 final class SAMLAssertionVerifier {
@@ -33,14 +34,19 @@ final class SAMLAssertionVerifier {
     private static final String AUDIENCE = "urn:amazon:webservices";
     static final String ASSERTION_INVALID = "The SAML assertion is invalid.";
     static final String SIGNATURE_INVALID = "Response signature invalid";
+    private static final String ROLE_SESSION_NAME = "https://aws.amazon.com/SAML/Attributes/RoleSessionName";
+    // The pattern AWS names in its error for a RoleSessionName attribute outside it.
+    static final String ROLE_SESSION_NAME_INVALID = "RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}";
+    private static final Pattern ROLE_SESSION_NAME_PATTERN = Pattern.compile("[a-zA-Z_0-9+=,.@-]{2,64}");
     // SAML 2.0 core 5.4.4. AWS rejects any other reference transform as an invalid signature.
     private static final Set<String> ALLOWED_TRANSFORMS = Set.of(
             Transform.ENVELOPED, CanonicalizationMethod.EXCLUSIVE, CanonicalizationMethod.EXCLUSIVE_WITH_COMMENTS);
 
     private SAMLAssertionVerifier() {}
 
+    /** {@code roleSessionName} is null when the assertion carries no RoleSessionName attribute. */
     record Verified(String issuer, String subject, String subjectType, String nameQualifier,
-                    Instant expiration, List<RolePair> roles) {}
+                    Instant expiration, List<RolePair> roles, String roleSessionName) {}
     record RolePair(String roleArn, String principalArn) {}
 
     static Verified verify(String encoded, SAMLProvider provider, Instant now) throws InvalidAssertionException {
@@ -169,14 +175,35 @@ final class SAMLAssertionVerifier {
             if (roles.isEmpty()) {
                 throw invalid("role pair missing");
             }
+            String roleSessionName = roleSessionName(attributes);
             String nameQualifier = Base64.getEncoder().encodeToString(
                     Digests.sha1((issuer + provider.getArn()).getBytes(StandardCharsets.UTF_8)));
-            return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles);
+            return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles, roleSessionName);
         } catch (InvalidAssertionException e) {
             throw e;
         } catch (Exception e) {
             throw new InvalidAssertionException(e);
         }
+    }
+
+    /**
+     * The value of the RoleSessionName attribute, whose name is case-sensitive and which "contains
+     * one AttributeValue element", or null when the assertion has no such attribute.
+     */
+    private static String roleSessionName(NodeList attributes) throws InvalidAssertionException {
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Element attribute = (Element) attributes.item(i);
+            if (!ROLE_SESSION_NAME.equals(attribute.getAttribute("Name"))) {
+                continue;
+            }
+            Element value = first(attribute, SAML, "AttributeValue");
+            String sessionName = value == null ? "" : value.getTextContent();
+            if (!ROLE_SESSION_NAME_PATTERN.matcher(sessionName).matches()) {
+                throw new InvalidAssertionException("role session name", ROLE_SESSION_NAME_INVALID);
+            }
+            return sessionName;
+        }
+        return null;
     }
 
     private static X509Certificate certificate(String encoded) throws Exception {

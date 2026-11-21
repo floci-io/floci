@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.cloudformation.model.Stack;
+import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.testing.CfnStackWaits;
@@ -20,6 +21,8 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -59,7 +62,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     }
 
     @SuppressWarnings("unchecked")
-    private void forgetPolicyId(String stackName, String logicalId) throws ReflectiveOperationException {
+    private StackResource stackResource(String stackName, String logicalId) throws ReflectiveOperationException {
         Object target = cloudFormationService instanceof ClientProxy proxy
                 ? proxy.arc_contextualInstance()
                 : cloudFormationService;
@@ -70,7 +73,11 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
                 .filter(s -> stackName.equals(s.getStackName()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("Stack not found: " + stackName));
-        stack.getResources().get(logicalId).getAttributes().remove("PolicyId");
+        return stack.getResources().get(logicalId);
+    }
+
+    private void forgetPolicyId(String stackName, String logicalId) throws ReflectiveOperationException {
+        stackResource(stackName, logicalId).getAttributes().remove("PolicyId");
     }
 
     @SuppressWarnings("unchecked")
@@ -304,6 +311,136 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     }
 
     @Test
+    void updateRetargetingUsersAndGroupsDetachesRemovedTargets() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-principal-update-" + suffix;
+        String policyName = "mp-principal-update-" + suffix;
+        String oldUser = "mp-old-user-" + suffix;
+        String newUser = "mp-new-user-" + suffix;
+        String oldGroup = "mp-old-group-" + suffix;
+        String newGroup = "mp-new-group-" + suffix;
+        String arn = policyArn(policyName);
+
+        for (String userName : new String[] {oldUser, newUser}) {
+            iam("CreateUser", "UserName", userName);
+        }
+        for (String groupName : new String[] {oldGroup, newGroup}) {
+            iam("CreateGroup", "GroupName", groupName);
+        }
+
+        createStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:GetObject", oldUser, oldGroup));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        updateStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:PutObject", newUser, newGroup));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertFalse(iam("ListAttachedUserPolicies", "UserName", oldUser).contains(arn));
+        assertFalse(iam("ListAttachedGroupPolicies", "GroupName", oldGroup).contains(arn));
+        assertTrue(iam("ListAttachedUserPolicies", "UserName", newUser).contains(arn));
+        assertTrue(iam("ListAttachedGroupPolicies", "GroupName", newGroup).contains(arn));
+    }
+
+    @Test
+    void updateDetachesRenamedUsersAndGroupsByIdentity() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-renamed-update-" + suffix;
+        String policyName = "mp-renamed-update-" + suffix;
+        String oldUser = "mp-user-before-" + suffix;
+        String newUser = "mp-user-after-" + suffix;
+        String oldGroup = "mp-group-before-" + suffix;
+        String newGroup = "mp-group-after-" + suffix;
+        String arn = policyArn(policyName);
+
+        iam("CreateUser", "UserName", oldUser);
+        iam("CreateGroup", "GroupName", oldGroup);
+        createStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:GetObject", oldUser, oldGroup));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        iam("UpdateUser", "UserName", oldUser, "NewUserName", newUser);
+        iam("UpdateGroup", "GroupName", oldGroup, "NewGroupName", newGroup);
+        updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject"));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertFalse(iam("ListAttachedUserPolicies", "UserName", newUser).contains(arn));
+        assertFalse(iam("ListAttachedGroupPolicies", "GroupName", newGroup).contains(arn));
+    }
+
+    @Test
+    void failedGroupAttachOnUpdateRestoresPriorUserAndGroupAttachments()
+            throws ReflectiveOperationException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-principal-rollback-" + suffix;
+        String policyName = "mp-principal-rollback-" + suffix;
+        String oldUser = "mp-old-user-" + suffix;
+        String newUser = "mp-new-user-" + suffix;
+        String oldGroup = "mp-old-group-" + suffix;
+        String newGroup = "mp-new-group-" + suffix;
+        String arn = policyArn(policyName);
+
+        for (String userName : new String[] {oldUser, newUser}) {
+            iam("CreateUser", "UserName", userName);
+        }
+        for (String groupName : new String[] {oldGroup, newGroup}) {
+            iam("CreateGroup", "GroupName", groupName);
+        }
+
+        createStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:GetObject", oldUser, oldGroup));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        doThrow(new AwsException("ServiceFailure", "simulated group attach failure", 500))
+                .when(iamService).attachGroupPolicy(eq(newGroup), eq(arn));
+        updateStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:PutObject", newUser, newGroup));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertTrue(iam("ListAttachedUserPolicies", "UserName", oldUser).contains(arn));
+        assertTrue(iam("ListAttachedGroupPolicies", "GroupName", oldGroup).contains(arn));
+        assertFalse(iam("ListAttachedUserPolicies", "UserName", newUser).contains(arn));
+        assertFalse(iam("ListAttachedGroupPolicies", "GroupName", newGroup).contains(arn));
+        assertTrue(iam("GetPolicy", "PolicyArn", arn).contains("<DefaultVersionId>v1</DefaultVersionId>"));
+        assertEquals("v1", stackResource(stackName, "SessionPolicy")
+                .getAttributes().get("DefaultVersionId"));
+    }
+
+    @Test
+    void failedGroupDetachOnUpdateRestoresEarlierUserDetach() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-principal-detach-" + suffix;
+        String policyName = "mp-principal-detach-" + suffix;
+        String oldUser = "mp-old-user-" + suffix;
+        String newUser = "mp-new-user-" + suffix;
+        String oldGroup = "mp-old-group-" + suffix;
+        String newGroup = "mp-new-group-" + suffix;
+        String arn = policyArn(policyName);
+
+        for (String userName : new String[] {oldUser, newUser}) {
+            iam("CreateUser", "UserName", userName);
+        }
+        for (String groupName : new String[] {oldGroup, newGroup}) {
+            iam("CreateGroup", "GroupName", groupName);
+        }
+
+        createStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:GetObject", oldUser, oldGroup));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        doThrow(new AwsException("ServiceFailure", "simulated group detach failure", 500))
+                .when(iamService).detachGroupPolicy(eq(oldGroup), eq(arn));
+        updateStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:PutObject", newUser, newGroup));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertTrue(iam("ListAttachedUserPolicies", "UserName", oldUser).contains(arn));
+        assertTrue(iam("ListAttachedGroupPolicies", "GroupName", oldGroup).contains(arn));
+        assertFalse(iam("ListAttachedUserPolicies", "UserName", newUser).contains(arn));
+        assertFalse(iam("ListAttachedGroupPolicies", "GroupName", newGroup).contains(arn));
+        assertTrue(iam("GetPolicy", "PolicyArn", arn).contains("<DefaultVersionId>v1</DefaultVersionId>"));
+    }
+
+    @Test
     void updateRefusesToAdoptAPolicyRecreatedUnderTheStackOwnedName() throws ReflectiveOperationException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-mp-recreate-" + suffix;
@@ -387,13 +524,35 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
                 """.formatted(policyName, action, roleList);
     }
 
+    private static String literalPrincipalManagedPolicyTemplate(
+            String policyName, String action, String userName, String groupName) {
+        return """
+                {
+                  "Resources": {
+                    "SessionPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "%s", "Resource": "*"}]
+                        },
+                        "Users": ["%s"],
+                        "Groups": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, action, userName, groupName);
+    }
+
     @Test
     void failedRoleAttachOnUpdateRestoresThePriorVersionAndDetachedRoles() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-mp-partial-" + suffix;
         String policyName = "mp-partial-" + suffix;
         String oldRole = "mp-partial-old-" + suffix;
-        String badRole = "mp-partial-missing-" + suffix;
+        String badRole = "mp-partial-failing-" + suffix;
 
         // Roles are plain IAM entities outside the stack (referenced by literal name, not Ref) so
         // this stack's only resource is the managed policy — isolating the assertion from the
@@ -401,12 +560,16 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        iam("CreateRole", "RoleName", badRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[]}");
 
         createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        // Retarget to a role that does not exist: AttachRolePolicy fails after the update path
-        // has already replaced the default version and detached the old (now-obsolete) role.
+        // The target exists at validation time; a late attach failure exercises compensation
+        // after the update replaced the default version and detached the old role.
+        doThrow(new AwsException("ServiceFailure", "simulated attach failure", 500))
+                .when(iamService).attachRolePolicy(eq(badRole), eq(policyArn(policyName)));
         updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject", badRole));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
@@ -482,19 +645,23 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         String stackName = "cfn-mp-restorefail-" + suffix;
         String policyName = "mp-restorefail-" + suffix;
         String oldRole = "mp-restorefail-old-" + suffix;
-        String badRole = "mp-restorefail-missing-" + suffix;
+        String badRole = "mp-restorefail-failing-" + suffix;
 
         iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        iam("CreateRole", "RoleName", badRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[]}");
 
         createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        // Retargeting to a role that does not exist fails the attach loop after the obsolete-role
-        // detach loop has already detached oldRole. The compensating reattach that restore()
-        // performs for oldRole is made to fail here too, so cleanup itself does not complete —
+        // A late attach failure occurs after the obsolete-role detach loop. The compensating
+        // reattach that restore() performs for oldRole is made to fail here too, so cleanup itself
+        // does not complete:
         // the stack must report UPDATE_ROLLBACK_FAILED, not silently claim UPDATE_ROLLBACK_COMPLETE.
+        doThrow(new AwsException("ServiceFailure", "simulated attach failure", 500))
+                .when(iamService).attachRolePolicy(eq(badRole), eq(policyArn(policyName)));
         doThrow(new AwsException("ServiceFailure", "simulated reattach failure", 500))
                 .when(iamService).attachRolePolicy(eq(oldRole), eq(policyArn(policyName)));
 
@@ -508,11 +675,13 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         String stackName = "cfn-mp-prunefail-" + suffix;
         String policyName = "mp-prunefail-" + suffix;
         String oldRole = "mp-prunefail-old-" + suffix;
-        String badRole = "mp-prunefail-missing-" + suffix;
+        String badRole = "mp-prunefail-failing-" + suffix;
 
         iam("CreateRole", "RoleName", oldRole, "AssumeRolePolicyDocument",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        iam("CreateRole", "RoleName", badRole, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[]}");
 
         createStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:GetObject", oldRole));
         assertStackStatus(stackName, "CREATE_COMPLETE");
@@ -526,8 +695,9 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
             assertStackStatus(stackName, "UPDATE_COMPLETE");
         }
 
-        // Retargeting to a role that does not exist fails the attach loop AFTER the update path
-        // has already pruned v1 (to stay under the cap) and published v6 as the new default.
+        // The late attach failure happens AFTER pruning v1 and publishing v6.
+        doThrow(new AwsException("ServiceFailure", "simulated attach failure", 500))
+                .when(iamService).attachRolePolicy(eq(badRole), eq(policyArn(policyName)));
         updateStack(stackName,
                 literalRoleManagedPolicyTemplate(policyName, "s3:AbortMultipartUpload", badRole));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");

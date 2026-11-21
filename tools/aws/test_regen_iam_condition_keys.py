@@ -13,6 +13,7 @@ MODEL = {"operations": {
     "GetRole": {"input": {"shape": "GetInput"}},
     "CreateServiceSpecificCredential": {"input": {"shape": "CredentialInput"}},
     "CreateDelegationRequest": {"input": {"shape": "DelegationInput"}},
+    "ListDelegationRequests": {"input": {"shape": "ListDelegationInput"}},
     "DeleteUserPolicy": {"input": {"shape": "UserInput"}},
     "ListRoles": {"input": {"shape": "ListInput"}},
 }, "shapes": {
@@ -26,6 +27,9 @@ MODEL = {"operations": {
     "DelegationInput": {"type": "structure", "members": {"Permissions": {"shape": "Permission"},
                                                          "SessionDuration": {"shape": "Days"}}},
     "Permission": {"type": "structure", "members": {"PolicyTemplateArn": {"shape": "Arn"}}},
+    "ListDelegationInput": {"type": "structure", "members": {"OwnerId": {"shape": "Arn"}}},
+    "DelegationRequest": {"type": "structure", "members": {"OwnerId": {"shape": "Arn"},
+                                                           "Permissions": {"shape": "Permission"}}},
     "Arn": {"type": "string"}, "Name": {"type": "string"}, "Days": {"type": "integer"},
 }}
 
@@ -44,7 +48,7 @@ def test_resource_and_action_keys_are_combined_and_unrelated_global_keys_dropped
 
 
 def test_member_is_matched_ignoring_case_only_on_actions_listing_the_key():
-    read, from_target, not_read = classify([("iam:AttachRolePolicy", "iam:PolicyARN")],
+    read, from_target, _, not_read = classify([("iam:AttachRolePolicy", "iam:PolicyARN")],
                                            {"iam:PolicyARN": ["ARN"]}, MODEL)
     assert read == [{"action": "iam:AttachRolePolicy", "key": "iam:PolicyARN", "member": "PolicyArn"}]
     assert from_target == not_read == []
@@ -52,7 +56,7 @@ def test_member_is_matched_ignoring_case_only_on_actions_listing_the_key():
 
 def test_permissions_boundary_without_a_request_member_is_read_from_the_named_role_or_user():
     pairs = [("iam:GetRole", "iam:PermissionsBoundary"), ("iam:DeleteUserPolicy", "iam:PermissionsBoundary")]
-    read, from_target, not_read = classify(pairs, {"iam:PermissionsBoundary": ["ARN"]}, MODEL)
+    read, from_target, _, not_read = classify(pairs, {"iam:PermissionsBoundary": ["ARN"]}, MODEL)
     assert read == not_read == []
     assert from_target == [
         {"action": "iam:DeleteUserPolicy", "key": "iam:PermissionsBoundary", "target": "UserName"},
@@ -69,7 +73,7 @@ def test_unread_pairs_name_their_reason():
              ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays")]
     types = {"iam:RoleTemplateARN": ["ARN"],
              "iam:PassedToService": ["String"], "iam:CredentialAgeDays": ["Numeric"]}
-    read, from_target, not_read = classify(pairs, types, MODEL)
+    read, from_target, _, not_read = classify(pairs, types, MODEL)
     assert read == from_target == []
     assert {(e["action"], e["key"]): e["reason"] for e in not_read} == {
         ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays"): "the key's type is Numeric",
@@ -78,12 +82,13 @@ def test_unread_pairs_name_their_reason():
 
 
 BY_HAND_TYPES = {"iam:DelegationDuration": ["String"], "iam:TemplateArn": ["ARN"],
+                 "iam:DelegationRequestOwner": ["ARN"],
                  "iam:ServiceSpecificCredentialAgeDays": ["Numeric"],
                  "iam:ServiceSpecificCredentialServiceName": ["String"]}
 
 
 def test_by_hand_pairs_read_their_member_including_a_nested_one():
-    read, from_target, not_read = classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, MODEL)
+    read, from_target, _, not_read = classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, MODEL)
     assert from_target == not_read == []
     assert {(e["action"], e["key"]): e["member"] for e in read} == regen_iam_condition_keys.BY_HAND
 
@@ -108,7 +113,7 @@ def test_by_hand_pair_the_reference_no_longer_lists_fails():
         require_by_hand_listed(pairs)
 
 
-def test_vendored_table_reads_nine_keys_on_fourteen_actions_and_the_boundary_of_fifteen_targets():
+def test_vendored_table_reads_ten_keys_on_fifteen_actions_and_the_boundary_of_fifteen_targets():
     document = json.loads(OUTPUT.read_text())
     assert {(e["action"], e["key"]) for e in document["read"]} == {
         *(("iam:" + verb + kind + "Policy", "iam:PolicyARN")
@@ -122,7 +127,8 @@ def test_vendored_table_reads_nine_keys_on_fourteen_actions_and_the_boundary_of_
         ("iam:CreateDelegationRequest", "iam:TemplateArn"),
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialAgeDays"),
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialServiceName"),
-        ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId")}
+        ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId"),
+        ("iam:ListDelegationRequests", "iam:DelegationRequestOwner")}
     assert not [e for e in document["notRead"] if e["key"] == "iam:PermissionsBoundary"]
     targets = {e["action"]: e["target"] for e in document["fromTarget"] if e["key"] == "iam:PermissionsBoundary"}
     assert len(targets) == 15
@@ -153,6 +159,12 @@ def test_check_fails_on_a_hand_edited_member(tmp_path, monkeypatch):
 
 def reference_from_document(document):
     actions = {}
+    formats = {}
+    for entry in document["fromResource"]:
+        name = entry["action"].removeprefix("iam:")
+        action = actions.setdefault(name, {"Name": name, "ActionConditionKeys": [], "Resources": []})
+        action["Resources"].append({"Name": entry["type"], "ConditionKeys": [entry["key"]]})
+        formats[entry["type"]] = entry["arn"]
     for entry in document["read"] + document["fromTarget"] + document["notRead"]:
         name = entry["action"].removeprefix("iam:")
         action = actions.setdefault(name, {"Name": name, "ActionConditionKeys": [], "Resources": []})
@@ -166,7 +178,9 @@ def reference_from_document(document):
         action = actions.setdefault(name, {"Name": name, "ActionConditionKeys": [], "Resources": []})
         action["Annotations"] = {"Properties": {"IsTaggingOnly": True}}
         action["ActionConditionKeys"].append(entry["key"])
-    return {"Resources": [], "Actions": list(actions.values()),
+    return {"Resources": [{"Name": name, "ARNFormats": [arn], "ConditionKeys": []}
+                          for name, arn in sorted(formats.items())],
+            "Actions": list(actions.values()),
             "ConditionKeys": [{"Name": key, "Types": types} for key, types in document["types"].items()]}
 
 
@@ -251,7 +265,7 @@ def test_resource_tags_use_the_same_target_route_and_keep_reasoned_exceptions():
                 ("GetUser", "user"), ("CreateUser", "user"), ("CreateAccessKey", "user"),
                 ("AddRoleToInstanceProfile", "instance-profile"))]}
     pairs, types = action_keys(reference)
-    read, targets, not_read = classify(pairs, types, model, regen_iam_condition_keys.resource_tag_types(reference))
+    read, targets, _, not_read = classify(pairs, types, model, regen_iam_condition_keys.resource_tag_types(reference))
     assert read == []
     assert {(e["action"], e["target"]) for e in targets} == {
         ("iam:GetRole", "RoleName"), ("iam:GetUser", "UserName"), ("iam:CreateAccessKey", "UserName")}
@@ -324,3 +338,45 @@ def test_check_rejects_hand_edited_tag_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(regen_iam_condition_keys, "OUTPUT", edited)
     with pytest.raises(ValueError, match="request tag members differ"):
         regen_iam_condition_keys.main(["--check"])
+
+
+def test_a_key_published_on_a_resource_type_is_read_from_that_resources_record():
+    """The seven delegation actions the reference gives the key through delegation-request read it from the
+    stored request, at the member MEASURED names, rather than being left unread."""
+    document = json.loads(OUTPUT.read_text())
+    rows = {entry["action"]: entry for entry in document["fromResource"]}
+    assert set(rows) == {f"iam:{name}" for name in (
+        "AcceptDelegationRequest", "AssociateDelegationRequest", "CreateDelegationRequest",
+        "GetDelegationRequest", "GetHumanReadableSummary", "RejectDelegationRequest", "SendDelegationToken")}
+    for entry in rows.values():
+        assert entry["key"] == "iam:DelegationRequestOwner"
+        assert entry["type"] == "delegation-request"
+        assert entry["member"] == "OwnerId"
+        assert entry["arn"] == "arn:${Partition}:iam::${Account}:delegation-request/${DelegationRequestId}"
+    unread = {(e["action"], e["key"]) for e in document["notRead"]}
+    assert not [pair for pair in unread if pair[1] == "iam:DelegationRequestOwner"]
+    assert ("iam:ListDelegationRequests", "iam:DelegationRequestOwner") in {
+        (e["action"], e["key"]) for e in document["read"]}
+
+
+def test_a_measured_entry_is_refused_without_a_link_or_a_member_botocore_holds(monkeypatch):
+    """MEASURED is admitted on AWS's own word: the evidence links to itself and botocore's record of the
+    type holds the member it names, as a string."""
+    reference = reference_from_document(json.loads(OUTPUT.read_text()))
+    measured = regen_iam_condition_keys.measured_resources(reference)
+    assert measured, "the reference publishes the key on a resource type"
+
+    monkeypatch.setitem(regen_iam_condition_keys.MEASURED, "iam:DelegationRequestOwner",
+                        ("OwnerId", "a sentence with no link to AWS"))
+    with pytest.raises(ValueError, match="no link to the evidence"):
+        regen_iam_condition_keys.require_measured_admitted(MODEL, measured)
+
+    monkeypatch.setitem(regen_iam_condition_keys.MEASURED, "iam:DelegationRequestOwner",
+                        ("OwnedBy", "https://docs.aws.amazon.com/IAM/latest/UserGuide/"))
+    with pytest.raises(ValueError, match="which botocore's delegation-request record does not hold"):
+        regen_iam_condition_keys.require_measured_admitted(MODEL, measured)
+
+    monkeypatch.setitem(regen_iam_condition_keys.MEASURED, "iam:DelegationRequestOwner",
+                        ("Permissions", "https://docs.aws.amazon.com/IAM/latest/UserGuide/"))
+    with pytest.raises(ValueError, match="not a string member"):
+        regen_iam_condition_keys.require_measured_admitted(MODEL, measured)

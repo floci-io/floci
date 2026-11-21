@@ -28,8 +28,9 @@ import java.util.List;
  *       required.";</li>
  *   <li>the <em>values</em> the elements declare, which an identity-based document is held to: the
  *       version it declares has to be one the language defines, a statement's {@code Effect} has to
- *       be {@code Allow} or {@code Deny} compared literally, and a resource it names has to be
- *       named by ARN or by the wildcard.</li>
+ *       be {@code Allow} or {@code Deny} compared literally, an action it names has to be prefaced
+ *       by a vendor or be the bare wildcard, and a resource it names has to be named by ARN or by
+ *       the wildcard.</li>
  * </ul>
  *
  * <p>A managed policy's document is held to its statements' own elements as well, each statement
@@ -80,6 +81,29 @@ final class IamPolicyDocuments {
      */
     private static final String POLICY_PARSE_FAILED = "The policy failed legacy parsing";
 
+    /**
+     * What a statement naming an action that no vendor prefaces is refused with. AWS words the
+     * clause for actions and condition keys together, and only the actions are read here, a
+     * condition key being a value neither validator reads yet.
+     */
+    private static final String ACTION_WITHOUT_VENDOR =
+            "Actions/Conditions must be prefaced by a vendor, e.g., iam, sdb, ec2, etc.";
+
+    /** Recorded for an identity policy carrying a {@code Principal}, wholly fixed text. */
+    private static final String IDENTITY_WITH_PRINCIPAL = "Policy document should not specify a principal.";
+
+    /** Recorded for a trust policy naming no principal. AWS writes it without a full stop. */
+    private static final String TRUST_WITHOUT_PRINCIPAL = "Missing required field Principal";
+
+    /** Recorded for a trust policy granting an action outside the STS namespace. */
+    private static final String TRUST_WITH_FOREIGN_ACTION =
+            "AssumeRole policy may only specify STS AssumeRole actions.";
+
+    /** The namespace a trust policy's actions belong to. */
+    private static final String STS_NAMESPACE = "sts:";
+
+    private static final String ANY_ACTION = "*";
+
     private static final String ANY_RESOURCE = "*";
 
     private static final String ARN_PREFIX = "arn:";
@@ -115,6 +139,58 @@ final class IamPolicyDocuments {
         if (defect == Grammar.NO_STATEMENTS) {
             throw malformed(TRUST_POLICY_NO_STATEMENTS);
         }
+        checkTrustValues(document);
+    }
+
+    /**
+     * The two rules a trust policy's statements are held to beyond the grammar, both recorded
+     * against a real account on 2026-10-29 as 400 {@code MalformedPolicyDocument} and both applied
+     * on {@code CreateRole} and {@code UpdateAssumeRolePolicy}, which AWS validates alike.
+     *
+     * <p>A statement has to name a principal, since a trust policy that names none can be assumed
+     * by nobody and AWS refuses to store it. It has to name one rather than merely carry the
+     * element, so a {@code Principal} that is null or an empty list is the element absent as far
+     * as this rule reads it, which is how {@link #namesSomething} reads every element and what the
+     * evaluator makes of such a value anyway. {@code NotPrincipal} names none either: the IAM
+     * reference says "You cannot use the {@code NotPrincipal} element in an IAM identity-based
+     * policy nor in an IAM role trust policy", so a statement carrying it and no {@code Principal}
+     * is answered by the sentence recorded for a missing one.
+     *
+     * <p>And the actions it grants have to be STS's. The rule is read on the namespace, which is
+     * what the recording tested, a document granting an action of another service: an
+     * {@code sts:} action this emulator does not model still passes, because which actions AWS
+     * refuses inside that namespace is not recorded, and {@code *} passes as the wildcard that
+     * includes the assume actions. The namespace is read whatever its case, as AWS reads an action
+     * at all: "The prefix and the action name are case insensitive." It is read on {@code Action}
+     * alone, since a statement naming {@code NotAction} grants every action but the ones it names,
+     * the assume actions among them, and no recording says what AWS makes of that. Refusing either
+     * would be a refusal of this emulator's own invention, where the cost of being narrow is only
+     * that a document AWS would refuse is stored.
+     */
+    private static void checkTrustValues(String document) {
+        JsonNode root = parse(document);
+        if (root == null || !root.isObject()) {
+            return;
+        }
+        for (JsonNode statement : statements(root)) {
+            if (!namesSomething(statement, "Principal")) {
+                throw malformed(TRUST_WITHOUT_PRINCIPAL);
+            }
+            for (String action : elementValues(statement, "Action")) {
+                if (!ANY_ACTION.equals(action) && !namesStsNamespace(action)) {
+                    throw malformed(TRUST_WITH_FOREIGN_ACTION);
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether an action value belongs to the namespace a trust policy's actions must come from,
+     * read however the document spells it: AWS reads an action's prefix and name case
+     * insensitively, so {@code STS:AssumeRole} is the action {@code sts:AssumeRole} is.
+     */
+    private static boolean namesStsNamespace(String action) {
+        return action.regionMatches(true, 0, STS_NAMESPACE, 0, STS_NAMESPACE.length());
     }
 
     /**
@@ -187,7 +263,21 @@ final class IamPolicyDocuments {
             if (effect != null && !EFFECTS.contains(effect.asText())) {
                 throw malformed(unreadableEffect);
             }
-            for (String resource : resourceValues(statement)) {
+            // Recorded on CreatePolicy and on the inline writes: an identity policy says who it
+            // is attached to by being attached, so a principal inside it is a document AWS
+            // refuses. Either spelling of the element is one: the IAM reference puts them in one
+            // sentence, "You cannot use the NotPrincipal element in an IAM identity-based policy
+            // nor in an IAM role trust policy", and the recorded sentence is this package's answer
+            // to both, the one AWS gives for the element it was recorded on.
+            if (statement.has("Principal") || statement.has("NotPrincipal")) {
+                throw malformed(IDENTITY_WITH_PRINCIPAL);
+            }
+            for (String action : elementValues(statement, "Action", "NotAction")) {
+                if (!prefacedByVendor(action)) {
+                    throw malformed(ACTION_WITHOUT_VENDOR);
+                }
+            }
+            for (String resource : elementValues(statement, "Resource", "NotResource")) {
                 if (!resource.startsWith(ARN_PREFIX) && !ANY_RESOURCE.equals(resource)) {
                     throw malformed("Resource " + resource + " must be in ARN format or \""
                             + ANY_RESOURCE + "\".");
@@ -267,16 +357,17 @@ final class IamPolicyDocuments {
     }
 
     /**
-     * Every value a statement's resource elements name, in the order the document carries them. A
-     * value that is no string names the text of that value, which is how the {@code Version} and
-     * the {@code Effect} above are already read: a number or a boolean is held to naming a resource
-     * rather than passed over, so {@code 123} and {@code "123"} are refused alike. A null names
-     * nothing, as {@link #namesSomething} reads it, and a list or an object is no value of this
-     * element at all.
+     * Every value a statement names under {@code spellings}, in the order the document carries
+     * them, which is how both pattern elements are read: the actions a statement is about and the
+     * resources they apply to. A value that is no string names the text of that value, which is
+     * how the {@code Version} and the {@code Effect} above are already read: a number or a boolean
+     * is held to naming a value of its element rather than passed over, so {@code 123} and
+     * {@code "123"} are refused alike. A null names nothing, as {@link #namesSomething} reads it,
+     * and a list or an object is no value of these elements at all.
      */
-    private static List<String> resourceValues(JsonNode statement) {
+    private static List<String> elementValues(JsonNode statement, String... spellings) {
         List<String> values = new ArrayList<>();
-        for (String spelling : new String[] {"Resource", "NotResource"}) {
+        for (String spelling : spellings) {
             JsonNode element = statement.get(spelling);
             if (element == null) {
                 continue;
@@ -288,6 +379,20 @@ final class IamPolicyDocuments {
             }
         }
         return values;
+    }
+
+    /**
+     * Whether an action value names the vendor the language asks for. The grammar writes an action
+     * as "a service namespace, a colon, and the name of an action", and an action element may name
+     * the bare wildcard instead, which stands for every action there is. So a value is prefaced
+     * when it carries a namespace before a colon, whatever the name after it spells, the wildcards
+     * the reference admits in an action name included ({@code s3:*} and {@code iam:*AccessKey*} are
+     * its own examples). The namespace is asked for rather than looked up: no sentence says AWS
+     * refuses an action whose vendor it does not publish, and refusing one here would turn a
+     * service this emulator has yet to model into a document nobody can store.
+     */
+    private static boolean prefacedByVendor(String action) {
+        return ANY_ACTION.equals(action) || action.indexOf(':') > 0;
     }
 
     private static JsonNode parse(String document) {

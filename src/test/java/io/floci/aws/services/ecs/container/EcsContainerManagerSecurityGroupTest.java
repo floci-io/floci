@@ -18,14 +18,11 @@ import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
-import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.LogConfiguration;
-import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
-import io.floci.aws.services.ecs.model.PortMapping;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
@@ -37,6 +34,9 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.awsvpcTaskWithoutEni;
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.container;
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.taskDef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -107,7 +107,7 @@ class EcsContainerManagerSecurityGroupTest {
     void awsvpcTaskWithFirewallJoinsHelperNamespaceAndSkipsHostPorts() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -123,7 +123,7 @@ class EcsContainerManagerSecurityGroupTest {
         when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any()))
                 .thenReturn(List.of(sg));
 
-        EcsTaskHandle handle = manager.startTask(awsvpcTask(), awsvpcTaskDef(List.of(new PortMapping(80, 80, "tcp"))),
+        EcsTaskHandle handle = manager.startTask(awsvpcTaskWithoutEni(), taskDef(null, container("app", 80)),
                 List.of(), "us-east-1");
 
         verify(builder).withNetworkMode("container:helper-id");
@@ -145,7 +145,7 @@ class EcsContainerManagerSecurityGroupTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(false);
 
-        manager.startTask(awsvpcTask(), awsvpcTaskDef(List.of(new PortMapping(80, 80, "tcp"))),
+        manager.startTask(awsvpcTaskWithoutEni(), taskDef(null, container("app", 80)),
                 List.of(), "us-east-1");
 
         verify(builder, never()).withNetworkMode(anyString());
@@ -158,7 +158,7 @@ class EcsContainerManagerSecurityGroupTest {
     void stopTaskUnregistersEniAndReleasingTheTaskNetworkDeletesIt() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -176,8 +176,8 @@ class EcsContainerManagerSecurityGroupTest {
         DockerClient stopClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient, dockerClient, stopClient);
 
-        EcsTask task = awsvpcTask();
-        EcsTaskHandle handle = manager.startTask(task, awsvpcTaskDef(List.of()),
+        EcsTask task = awsvpcTaskWithoutEni();
+        EcsTaskHandle handle = manager.startTask(task, taskDef(null, container("app", 0)),
                 List.of(), "us-east-1");
         manager.stopTaskAndCollectExitCodes(handle);
 
@@ -194,7 +194,7 @@ class EcsContainerManagerSecurityGroupTest {
     void firelensRouterAndAppBothJoinTheHelperNamespace() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -237,38 +237,14 @@ class EcsContainerManagerSecurityGroupTest {
         taskDef.setNetworkMode(NetworkMode.awsvpc);
         taskDef.setContainerDefinitions(List.of(app, router));
 
-        manager.startTask(awsvpcTask(), taskDef, List.of(), "us-east-1");
+        manager.startTask(awsvpcTaskWithoutEni(), taskDef, List.of(), "us-east-1");
 
         verify(builder, times(2)).withNetworkMode("container:helper-id");
         verify(builder, times(2)).withLabels(Map.of("io.floci.security-group.workload", "true"));
 
-        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any());
+        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any());
         verify(lifecycleManager).create(any(), any());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
         verify(lifecycleManager).createAndStartEphemeral(any(), any());
-    }
-
-    private static EcsTask awsvpcTask() {
-        AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
-        awsvpc.setSubnets(List.of("subnet-1"));
-        awsvpc.setSecurityGroups(List.of("sg-1"));
-        NetworkConfiguration network = new NetworkConfiguration();
-        network.setAwsvpcConfiguration(awsvpc);
-        EcsTask task = new EcsTask();
-        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
-        task.setNetworkConfiguration(network);
-        return task;
-    }
-
-    private static TaskDefinition awsvpcTaskDef(List<PortMapping> ports) {
-        ContainerDefinition app = new ContainerDefinition();
-        app.setName("app");
-        app.setImage("app:latest");
-        app.setPortMappings(ports);
-        TaskDefinition taskDef = new TaskDefinition();
-        taskDef.setFamily("test-family");
-        taskDef.setNetworkMode(NetworkMode.awsvpc);
-        taskDef.setContainerDefinitions(List.of(app));
-        return taskDef;
     }
 }

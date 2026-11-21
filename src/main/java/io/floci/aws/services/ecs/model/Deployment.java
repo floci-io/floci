@@ -37,6 +37,8 @@ public class Deployment {
      * so this is the single place a generated client can read it back from.
      */
     private Map<String, Object> serviceConnectConfiguration;
+    /** The Cloud Map services behind the configuration's endpoints. */
+    private List<ServiceConnectServiceResource> serviceConnectResources;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -77,5 +79,9 @@ public class Deployment {
     public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
+    public List<ServiceConnectServiceResource> getServiceConnectResources() { return serviceConnectResources; }
+    public void setServiceConnectResources(List<ServiceConnectServiceResource> serviceConnectResources) {
+        this.serviceConnectResources = serviceConnectResources;
     }
 }

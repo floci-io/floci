@@ -58,6 +58,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -420,13 +421,15 @@ public class EmulatorLifecycle {
         runCleanup("Kinesis poller", kinesisPoller::shutdown);
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
+        List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();
             }
         });
         runCleanup("ECS task-role credentials server", () -> {
-            if (config.services().ecs().taskRoleCredentials().enabled()) {
+            // A CodeBuild build starts it on its need whether or not ECS's setting is on.
+            if (config.services().ecs().taskRoleCredentials().enabled() || ecsTaskRoleCredentialsServer.isRunning()) {
                 ecsTaskRoleCredentialsServer.stop();
             }
         });
@@ -447,7 +450,7 @@ public class EmulatorLifecycle {
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
-        ContainerTeardowns.stopAll(containerTeardowns, LOG);
+        ContainerTeardowns.stopPrepared(prepared, LOG);
         runCleanup("DynamoDB backend", dynamoDbRuntime::stop);
         runCleanup("storage shutdown", storageFactory::shutdownAll);
 
@@ -471,6 +474,11 @@ public class EmulatorLifecycle {
             return true;
         }
         EmulatorConfig.EksServiceConfig eks = config.services().eks();
-        return eks != null && eks.enabled() && !eks.mock() && eks.imds();
+        if (eks != null && eks.enabled() && !eks.mock() && eks.imds()) {
+            return true;
+        }
+        // An EMR cluster's containers in the docker runner mode read their nodes' metadata through it.
+        EmulatorConfig.EmrServiceConfig emr = config.services().emr();
+        return emr != null && emr.enabled() && "docker".equalsIgnoreCase(emr.runnerMode());
     }
 }

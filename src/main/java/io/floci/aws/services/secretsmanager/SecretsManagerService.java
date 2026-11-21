@@ -48,7 +48,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -1643,6 +1645,8 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
 
     private void executeManagedRotation(String secretArn, String token, String region,
                                         ManagedSecretRotator rotator) {
+        AtomicReference<String> pendingValue = new AtomicReference<>();
+        AtomicBoolean rollbackFailed = new AtomicBoolean();
         try {
             AtomicInteger committed = new AtomicInteger();
             rotator.rotate(secretArn, region, new ManagedSecretRotator.Rotation() {
@@ -1650,6 +1654,7 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
                 public void commit(Supplier<String> changeBackend, Runnable rollbackBackend) {
                     try {
                         String newValue = changeBackend.get();
+                        pendingValue.set(newValue);
                         synchronized (lockFor(secretArn)) {
                             Secret current = resolveSecret(secretArn, region);
                             putManagedRotationVersion(current, token, current.getCurrentVersionId(), newValue);
@@ -1659,7 +1664,13 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
                         }
                         committed.set(1);
                     } catch (RuntimeException e) {
-                        rollbackBackend.run();
+                        try {
+                            rollbackBackend.run();
+                        } catch (RuntimeException rollbackError) {
+                            rollbackError.addSuppressed(e);
+                            rollbackFailed.set(true);
+                            throw rollbackError;
+                        }
                         throw e;
                     }
                 }
@@ -1671,13 +1682,28 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
             LOG.errorv(e, "Managed rotation failed for secret {0}", secretArn);
             synchronized (lockFor(secretArn)) {
                 Secret current = resolveSecret(secretArn, region);
-                if (current.getVersions() != null) {
+                if (rollbackFailed.get() && pendingValue.get() != null) {
+                    // Backend rollback failed after the backend password changed: keep AWSPENDING with the
+                    // rotated value so the new credential is not lost while AWSCURRENT stays unchanged.
+                    if (current.getVersions() == null) {
+                        current.setVersions(new HashMap<>());
+                    }
+                    SecretVersion pending = current.getVersions().get(token);
+                    if (pending == null) {
+                        pending = new SecretVersion();
+                        pending.setVersionId(token);
+                        pending.setVersionStages(List.of("AWSPENDING"));
+                        pending.setCreatedDate(Instant.now());
+                        current.getVersions().put(token, pending);
+                    }
+                    pending.setSecretString(pendingValue.get());
+                    persist(current, region);
+                } else if (current.getVersions() != null) {
                     SecretVersion pending = current.getVersions().remove(token);
                     if (pending != null) {
                         persist(current, region);
                     }
                 }
-                persist(current, region);
             }
         } finally {
             clearManagedRotation(secretArn, token);

@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CodeBuildRunnerTest {
@@ -35,8 +36,11 @@ class CodeBuildRunnerTest {
         // 2.5 GiB in total: more than a single Java byte array can hold.
         int chunkCount = 320;
         String lastLine = "error: build step failed\n";
-        DockerClient dockerClient = dockerClientStreaming(chunk, chunkCount, lastLine, 2L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
+        DockerClient dockerClient = mock(DockerClient.class);
+        DockerClient streamingDockerClient = mock(DockerClient.class);
+        stubPhase(dockerClient, streamingDockerClient, chunk, chunkCount, lastLine, 2L);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, streamingDockerClient, null, null, null, null, null,
+                null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./build.sh"), 60, new AtomicBoolean(false));
@@ -46,10 +50,39 @@ class CodeBuildRunnerTest {
         assertEquals("Exit code 2: " + expectedTail, result.errorMessage());
     }
 
+    // Catches: a timed-out phase leaving its exec's output stream open, so it held a streaming
+    // connection for as long as the command ran on.
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPhaseThatTimesOutClosesItsOutputStream() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        DockerClient streamingDockerClient = mock(DockerClient.class);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
+        when(createResponse.getId()).thenReturn("exec-1");
+        when(createCmd.exec()).thenReturn(createResponse);
+        when(dockerClient.execCreateCmd("container-1")).thenReturn(createCmd);
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        ResultCallback.Adapter<Frame> neverCompletes = mock(ResultCallback.Adapter.class);
+        when(startCmd.exec(any())).thenReturn(neverCompletes);
+        when(streamingDockerClient.execStartCmd("exec-1")).thenReturn(startCmd);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, streamingDockerClient, null, null, null, null, null,
+                null, null, null, null, null, null, null);
+
+        CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
+                List.of("./build.sh"), 0, new AtomicBoolean(false));
+
+        assertEquals("Phase timed out after 0 minutes", result.errorMessage());
+        verify(neverCompletes).close();
+    }
+
     @Test
     void failureMessageIgnoresLongTrailingWhitespace() {
-        DockerClient dockerClient = dockerClientStreaming(new byte[0], 0, "tests failed" + "\n".repeat(10_000), 1L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
+        DockerClient dockerClient = mock(DockerClient.class);
+        DockerClient streamingDockerClient = mock(DockerClient.class);
+        stubPhase(dockerClient, streamingDockerClient, new byte[0], 0, "tests failed" + "\n".repeat(10_000), 1L);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, streamingDockerClient, null, null, null, null, null,
+                null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./test.sh"), 60, new AtomicBoolean(false));
@@ -65,14 +98,18 @@ class CodeBuildRunnerTest {
         when(config.port()).thenReturn(4566);
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, null, 4811);
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null,
-                config, containerDetector, null, endpoint);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null, null,
+                config, containerDetector, null, endpoint, null, null);
 
         assertEquals("http://host.docker.internal:4811", runner.resolveEndpointUrl());
     }
 
-    private static DockerClient dockerClientStreaming(byte[] chunk, int chunkCount, String lastLine, long exitCode) {
-        DockerClient dockerClient = mock(DockerClient.class);
+    /**
+     * The exec is created and inspected on the control-plane client and its output streamed on the
+     * streaming client, so a phase whose output took a control-plane lease would find no stub.
+     */
+    private static void stubPhase(DockerClient dockerClient, DockerClient streamingDockerClient, byte[] chunk,
+                                  int chunkCount, String lastLine, long exitCode) {
 
         ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
@@ -90,13 +127,12 @@ class CodeBuildRunnerTest {
             callback.onComplete();
             return callback;
         });
-        when(dockerClient.execStartCmd("exec-1")).thenReturn(startCmd);
+        when(streamingDockerClient.execStartCmd("exec-1")).thenReturn(startCmd);
 
         InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
         InspectExecResponse inspectResponse = mock(InspectExecResponse.class);
         when(inspectResponse.getExitCodeLong()).thenReturn(exitCode);
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectCmd);
-        return dockerClient;
     }
 }

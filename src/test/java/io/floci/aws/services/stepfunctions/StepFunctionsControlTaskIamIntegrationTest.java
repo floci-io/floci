@@ -3,7 +3,6 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -40,6 +39,8 @@ import java.util.stream.Stream;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
+import static io.floci.aws.testing.StepFunctionsTestClient.policy;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -511,22 +512,39 @@ class StepFunctionsControlTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
     }
 
+    /**
+     * A stack or stack set CloudFormation does not hold is evaluated with its id open, as the same request made
+     * directly is; allowed there, CloudFormation answers it.
+     */
     @ParameterizedTest
-    @CsvSource({"deleteStack,StackName", "describeStackEvents,StackName", "describeStackSet,StackSetName"})
-    void aStackCloudFormationDoesNotHaveIsLeftToCloudFormation(String api, String member) throws Exception {
+    @CsvSource({"deleteStack,StackName,cloudformation:DeleteStack,stack/%s/*",
+            "describeStackEvents,StackName,cloudformation:DescribeStackEvents,stack/%s/*",
+            "describeStackSet,StackSetName,cloudformation:DescribeStackSet,stackset/%s:*"})
+    void aStackCloudFormationDoesNotHoldIsEvaluatedWithItsIdOpen(String api, String member, String action,
+                                                                 String resource) throws Exception {
+        String name = "no-such-" + UUID.randomUUID();
+        String open = String.format(resource, name);
         Map<String, Object> task = new LinkedHashMap<>(Map.of("Type", "Task",
                 "Resource", "arn:aws:states:::aws-sdk:cloudformation:" + api,
-                "Parameters", Map.of(member, "no-such-" + UUID.randomUUID()), "End", true));
+                "Parameters", Map.of(member, name), "End", true));
 
-        Response completed = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task, role(STATES_TRUST, READ_ONLY)), "{}"));
+        Response refused = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task,
+                role(STATES_TRUST, READ_ONLY)), "{}"));
+        assertFailed(refused, "CloudFormation.AccessDeniedException");
+        assertTrue(refused.jsonPath().getString("cause").contains(open), refused.asString());
 
+        Response completed = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task,
+                role(STATES_TRUST, allow("arn:aws:cloudformation:*:*:" + open, action))), "{}"));
         assertFalse(String.valueOf(completed.jsonPath().getString("error")).endsWith("AccessDeniedException"),
                 completed.asString());
     }
 
-    /** A change set's ARN does not hold its stack's name, so the stack is found through it. */
+    /**
+     * A change set named by its ARN alone gives no {@code StackName}, which the generated request resources fill the
+     * stack from, so it is evaluated on any resource, as the same request made directly is.
+     */
     @Test
-    void aChangeSetNamedByItsArnIsEvaluatedOnItsStack() throws Exception {
+    void aChangeSetNamedByItsArnAloneIsEvaluatedOnAnyResource() throws Exception {
         String name = "sfn-control-" + UUID.randomUUID();
         String stackId = stack(name);
         Response changeSet = cloudFormation("CreateChangeSet", Map.of("StackName", name, "ChangeSetName", "c",
@@ -537,11 +555,12 @@ class StepFunctionsControlTaskIamIntegrationTest {
                 "Parameters", Map.of("ChangeSetName", changeSet.xmlPath()
                         .getString("CreateChangeSetResponse.CreateChangeSetResult.Id")), "End", true));
 
-        assertStackActionIsEvaluatedOnTheStack(task, stackId, "cloudformation:DescribeChangeSet");
+        assertEvaluatedOnAnyResource(task, stackId, "cloudformation:DescribeChangeSet");
     }
 
+    /** A physical resource id alone gives no {@code StackName} either, so it is evaluated on any resource too. */
     @Test
-    void describeStackResourcesNamingAPhysicalIdIsEvaluatedOnItsStack() throws Exception {
+    void describeStackResourcesNamingAPhysicalIdAloneIsEvaluatedOnAnyResource() throws Exception {
         String name = "sfn-control-" + UUID.randomUUID();
         String stackId = stack(name);
         String physicalId = cloudFormation("ListStackResources", Map.of("StackName", name)).xmlPath()
@@ -550,17 +569,18 @@ class StepFunctionsControlTaskIamIntegrationTest {
                 "Resource", "arn:aws:states:::aws-sdk:cloudformation:describeStackResources",
                 "Parameters", Map.of("PhysicalResourceId", physicalId), "End", true));
 
-        assertStackActionIsEvaluatedOnTheStack(task, stackId, "cloudformation:DescribeStackResources");
+        assertEvaluatedOnAnyResource(task, stackId, "cloudformation:DescribeStackResources");
     }
 
-    private void assertStackActionIsEvaluatedOnTheStack(Map<String, Object> task, String stackId, String action)
+    /** Refused under a grant on the stack itself, which does not reach {@code *}, and allowed under one on it. */
+    private void assertEvaluatedOnAnyResource(Map<String, Object> task, String stackId, String action)
             throws Exception {
-        Response refused = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task, role(STATES_TRUST, READ_ONLY)), "{}"));
+        Response refused = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task,
+                role(STATES_TRUST, allow(stackId, action))), "{}"));
         assertFailed(refused, "CloudFormation.AccessDeniedException");
-        assertTrue(refused.jsonPath().getString("cause").contains(stackId), refused.asString());
 
         Response allowed = terminal(start(machine("sfn-control-" + UUID.randomUUID(), task,
-                role(STATES_TRUST, allow(stackId, action))), "{}"));
+                role(STATES_TRUST, allow(ANY_RESOURCE, action))), "{}"));
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
     }
 
@@ -878,22 +898,8 @@ class StepFunctionsControlTaskIamIntegrationTest {
         return task;
     }
 
-    private static String allow(String resource, String... actions) {
-        return policy(List.of(Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", List.of(resource))));
-    }
-
-    private static String policy(List<Map<String, Object>> statements) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-control-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-control-", trust, policy);
     }
 
     private static String machineArn(String name) {

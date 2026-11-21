@@ -49,15 +49,14 @@ create_tdes_key() {
 
 # The public half of a certificate, held by the service as the authority of the party it
 # belongs to. The certificate is self-signed, so it comes in as a root certificate's key.
+# The ARN is printed and the caller registers it for the cleanup: a command substitution
+# runs in a subshell, so a key registered in here would never reach the cleanup.
 import_authority() {
     local certificate="$1"
     local algorithm="$2"
-    local arn
-    arn=$(aws_cmd payment-cryptography import-key \
+    aws_cmd payment-cryptography import-key \
         --key-material "RootCertificatePublicKey={KeyAttributes={KeyAlgorithm=$algorithm,KeyClass=PUBLIC_KEY,KeyUsage=TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE,KeyModesOfUse={Verify=true}},PublicKeyCertificate=$certificate}" \
-        --query 'Key.KeyArn' --output text)
-    CREATED_ARNS="$CREATED_ARNS $arn"
-    echo "$arn"
+        --query 'Key.KeyArn' --output text
 }
 
 @test "Payment Cryptography key exchange: the import parameters carry a token and a certificate" {
@@ -168,6 +167,7 @@ import_authority() {
     # The receiver's authority: the public half of the certificate the block is wrapped
     # under.
     RECEIVER_ARN=$(import_authority "$WRAPPING_CERTIFICATE" RSA_3072)
+    CREATED_ARNS="$CREATED_ARNS $RECEIVER_ARN"
     [ -n "$RECEIVER_ARN" ]
 
     run aws_cmd payment-cryptography get-parameters-for-export \
@@ -181,6 +181,7 @@ import_authority() {
 
     # The sender's authority: the public half of the certificate the block is signed with.
     SENDER_ARN=$(import_authority "$SIGNING_CERTIFICATE" RSA_2048)
+    CREATED_ARNS="$CREATED_ARNS $SENDER_ARN"
     [ -n "$SENDER_ARN" ]
 
     KEY_ARN=$(create_tdes_key)
@@ -197,6 +198,9 @@ import_authority() {
     run aws_cmd payment-cryptography import-key \
         --key-material "Tr34KeyBlock={CertificateAuthorityPublicKeyIdentifier=$SENDER_ARN,SigningKeyCertificate=$SIGNING_CERTIFICATE,ImportToken=$IMPORT_TOKEN,WrappedKeyBlock=$BLOCK,KeyBlockFormat=X9_TR34_2012,RandomNonce=A1B2C3D4E5F60718}"
     assert_success
-    [ -n "$(json_get "$output" '.Key.KeyArn')" ]
+    IMPORTED=$(json_get "$output" '.Key.KeyArn')
+    [ -n "$IMPORTED" ]
+    # The key came into the service, so the cleanup has to take it away again.
+    CREATED_ARNS="$CREATED_ARNS $IMPORTED"
     [ "$(json_get "$output" '.Key.KeyAttributes.KeyUsage')" = "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY" ]
 }

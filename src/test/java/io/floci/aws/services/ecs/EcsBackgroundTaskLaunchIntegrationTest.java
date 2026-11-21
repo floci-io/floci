@@ -7,6 +7,7 @@ import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -20,6 +21,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -31,7 +33,7 @@ import static org.mockito.Mockito.when;
  * so this runs in Quarkus, in Docker mode over a container manager that starts nothing for real.
  */
 @QuarkusTest
-@TestProfile(EcsBackgroundTaskStopIntegrationTest.DockerModeProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EcsBackgroundTaskLaunchIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -53,7 +55,7 @@ class EcsBackgroundTaskLaunchIntegrationTest {
         when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
             startedAs.set(regionResolver.getAccountId());
             EcsTask task = invocation.getArgument(0);
-            return new EcsTaskHandle(task.getTaskArn(), Map.of(), Map.of());
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("app", "docker-app"), Map.of());
         });
         String cluster = "launcher-" + UUID.randomUUID().toString().substring(0, 8);
         RequestScopes.runAs(ACCOUNT, () -> {
@@ -72,7 +74,11 @@ class EcsBackgroundTaskLaunchIntegrationTest {
                 EcsTask::getLastStatus, Duration.ofSeconds(10), "RUNNING");
 
         assertEquals(ACCOUNT, startedAs.get(), "the launch must start the task in its own account");
-        assertEquals(1, RequestScopes.callAs(ACCOUNT, () ->
-                ecsService.describeClusters(List.of(cluster), REGION).getFirst().getRunningTasksCount()));
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals(1,
+                RequestScopes.callAs(ACCOUNT, () -> ecsService.describeClusters(List.of(cluster), REGION)
+                        .getFirst().getRunningTasksCount())));
+        ecsService.reconcile();
+        assertEquals("RUNNING", RequestScopes.callAs(ACCOUNT, () ->
+                ecsService.describeTasks(cluster, List.of(taskArn), REGION).getFirst().getLastStatus()));
     }
 }

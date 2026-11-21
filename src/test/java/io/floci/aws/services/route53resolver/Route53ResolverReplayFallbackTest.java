@@ -41,7 +41,8 @@ class Route53ResolverReplayFallbackTest {
     void setUp() {
         endpointIpRequests = new InMemoryStorage<>();
         service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                endpointIpRequests, new InMemoryStorage<>(),
                 objectMapper);
     }
 
@@ -97,11 +98,11 @@ class Route53ResolverReplayFallbackTest {
         // InternalServiceErrorException says the state is broken.
         ObjectNode created = service.createResolverEndpoint(createRequest("tok-list", "10.0.0.5"), REGION, ACCOUNT);
         String id = created.get("Id").asText();
-        assertEquals(2, service.listResolverEndpointIpAddresses(id).size());
+        assertEquals(2, service.listResolverEndpointIpAddresses(id, REGION).size());
 
         endpointIpRequests.delete(id);
         AwsException broken = assertThrows(AwsException.class,
-                () -> service.listResolverEndpointIpAddresses(id));
+                () -> service.listResolverEndpointIpAddresses(id, REGION));
         assertEquals("InternalServiceErrorException", broken.jsonType());
         assertEquals(400, broken.getHttpStatus());
     }
@@ -123,9 +124,9 @@ class Route53ResolverReplayFallbackTest {
         legacy.set("IpAddressRequests", endpointIpRequests.get(id).orElseThrow().get("IpAddressRequests"));
         endpointIpRequests.put(id, legacy);
 
-        assertEquals(List.of("10.0.0.5", "10.0.0.6"), service.listResolverEndpointIpAddresses(id).stream()
+        assertEquals(List.of("10.0.0.5", "10.0.0.6"), service.listResolverEndpointIpAddresses(id, REGION).stream()
                 .map(a -> a.get("Ip").asText()).sorted().toList());
-        assertEquals("DELETING", service.deleteResolverEndpoint(id).get("Status").asText());
+        assertEquals("DELETING", service.deleteResolverEndpoint(id, REGION).get("Status").asText());
         assertTrue(endpointIpRequests.get(id).isEmpty());
     }
 
@@ -145,7 +146,8 @@ class Route53ResolverReplayFallbackTest {
             }
         };
         Route53ResolverService racing = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), readOnce, new InMemoryStorage<>(), objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                readOnce, new InMemoryStorage<>(), objectMapper);
         ObjectNode created = racing.createResolverEndpoint(createRequest("tok-race", "10.0.0.5"), REGION, ACCOUNT);
         String id = created.get("Id").asText();
         ObjectNode record = objectMapper.createObjectNode();
@@ -157,7 +159,7 @@ class Route53ResolverReplayFallbackTest {
         interfaces.addObject().put("NetworkInterfaceId", "eni-2").put("Ip", "10.0.0.21");
         readOnce.put(id, record);
 
-        assertEquals(List.of("10.0.0.20", "10.0.0.21"), racing.listResolverEndpointIpAddresses(id).stream()
+        assertEquals(List.of("10.0.0.20", "10.0.0.21"), racing.listResolverEndpointIpAddresses(id, REGION).stream()
                 .map(a -> a.path("Ip").asText("missing")).sorted().toList());
     }
 }

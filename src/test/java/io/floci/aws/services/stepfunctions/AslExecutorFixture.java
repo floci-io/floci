@@ -308,7 +308,7 @@ final class AslExecutorFixture {
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
                     redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
                     nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter,
-                    eventBridgeInvoker);
+                    eventBridgeInvoker, null);
         }
     }
 }

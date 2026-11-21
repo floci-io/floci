@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambda.launcher;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.services.lambda.launcher.kubernetes.KubernetesPodLauncher;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,11 +31,20 @@ public class LambdaRuntimeLauncherProducer {
      * HTTP client would be created on a request's Vert.x context and closed with
      * the HTTP server verticles at shutdown, so the WarmPool drain could no longer
      * delete pods ("Client is closed").
+     *
+     * <p>The process executor is refused inside a container, where the host it would run
+     * functions on is that container rather than the machine the user develops on.
      */
     void validateExecutor(@Observes StartupEvent event, EmulatorConfig config,
-                          Instance<KubernetesPodLauncher> kubernetes) {
-        if (requireValidExecutor(config).equals("kubernetes")) {
+                          Instance<KubernetesPodLauncher> kubernetes, ContainerDetector containerDetector) {
+        String executor = requireValidExecutor(config);
+        if (executor.equals("kubernetes")) {
             kubernetes.get().initializeClient();
+        }
+        if (executor.equals("process") && containerDetector.isRunningInContainer()) {
+            throw new IllegalStateException("floci.services.lambda.executor=process runs functions as processes "
+                    + "of the machine Floci runs on, but Floci is running inside a container. "
+                    + "Use the docker or kubernetes executor there.");
         }
     }
 
@@ -50,21 +60,26 @@ public class LambdaRuntimeLauncherProducer {
     @ApplicationScoped
     LambdaRuntimeLauncher launcher(EmulatorConfig config,
                                    Instance<ContainerLauncher> docker,
-                                   Instance<KubernetesPodLauncher> kubernetes) {
+                                   Instance<KubernetesPodLauncher> kubernetes,
+                                   Instance<ProcessLauncher> process) {
         String executor = requireValidExecutor(config);
         if (executor.equals("kubernetes")) {
             LOG.info("Lambda executor: kubernetes (environments run as pods)");
             return kubernetes.get();
+        }
+        if (executor.equals("process")) {
+            LOG.info("Lambda executor: process (environments run as local processes)");
+            return process.get();
         }
         return docker.get();
     }
 
     private static String requireValidExecutor(EmulatorConfig config) {
         String executor = config.services().lambda().executor().trim().toLowerCase(Locale.ROOT);
-        if (!executor.equals("docker") && !executor.equals("kubernetes")) {
+        if (!executor.equals("docker") && !executor.equals("kubernetes") && !executor.equals("process")) {
             throw new IllegalArgumentException(
                     "Unknown floci.services.lambda.executor '" + executor
-                            + "'. Valid values: docker, kubernetes");
+                            + "'. Valid values: docker, kubernetes, process");
         }
         return executor;
     }

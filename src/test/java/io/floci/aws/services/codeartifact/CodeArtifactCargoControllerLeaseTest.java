@@ -53,6 +53,7 @@ class CodeArtifactCargoControllerLeaseTest {
     private CodeArtifactService service;
     private KellnrSidecarClient kellnr;
     private CodeArtifactCargoExternalConnectionImporter externalConnectionImporter;
+    private CodeArtifactCargoUpstreamRepositoryImporter upstreamRepositoryImporter;
     private CodeArtifactCargoController controller;
     private HttpHeaders headers;
 
@@ -61,13 +62,19 @@ class CodeArtifactCargoControllerLeaseTest {
         service = mock(CodeArtifactService.class);
         kellnr = mock(KellnrSidecarClient.class);
         externalConnectionImporter = mock(CodeArtifactCargoExternalConnectionImporter.class);
-        controller = new CodeArtifactCargoController(service, kellnr, externalConnectionImporter, new ObjectMapper());
+        upstreamRepositoryImporter = mock(CodeArtifactCargoUpstreamRepositoryImporter.class);
+        controller = new CodeArtifactCargoController(service, kellnr, externalConnectionImporter,
+                upstreamRepositoryImporter, new ObjectMapper());
         // Default: no external connection configured, so the merge is a pure pass-through of
         // whatever Kellnr's own local lookup returned, exactly what the real importer itself does
         // when cargoExternalConnectionName resolves to null. Individual tests override this to
         // exercise the merge itself.
         when(externalConnectionImporter.mergeExternalVersions(any(), any(), any(), any(), any(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(5));
+        // Same default for the upstream-repository merge: no upstreams configured, pass whatever
+        // the external-connection merge already produced straight through unchanged.
+        when(upstreamRepositoryImporter.mergeUpstreamRepositoryVersions(any(), any(), any(), any(), any(), any(),
+                any())).thenAnswer(invocation -> invocation.getArgument(6));
         headers = mock(HttpHeaders.class);
         // A bare token, no scheme prefix: the real shape a cargo client sends (confirmed from the
         // Cargo Book's own registry-authentication page).
@@ -146,6 +153,31 @@ class CodeArtifactCargoControllerLeaseTest {
                 new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
     }
 
+    /**
+     * The upstream-repository merge chains off whatever the external-connection merge already
+     * produced, not off Kellnr's own raw local bytes directly: this is what lets a version only
+     * the upstream chain has show up even when an external-connection merge already added
+     * something else first.
+     */
+    @Test
+    void sparseIndexLookupServesTheMergedResultFromTheUpstreamRepositoryImporter() {
+        Optional<byte[]> local = Optional.empty();
+        when(kellnr.fetchSparseIndexRaw(REPO_ID, DOMAIN, REPOSITORY, "democrate")).thenReturn(local);
+        byte[] afterExternal = "{\"name\":\"democrate\",\"vers\":\"2.0.0\"}".getBytes(StandardCharsets.UTF_8);
+        when(externalConnectionImporter.mergeExternalVersions(REGION, DOMAIN, OWNER, REPOSITORY, "democrate", local))
+                .thenReturn(Optional.of(afterExternal));
+        byte[] afterUpstream = ("{\"name\":\"democrate\",\"vers\":\"2.0.0\"}\n"
+                + "{\"name\":\"democrate\",\"vers\":\"3.0.0\"}").getBytes(StandardCharsets.UTF_8);
+        when(upstreamRepositoryImporter.mergeUpstreamRepositoryVersions(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "democrate", Optional.of(afterExternal))).thenReturn(Optional.of(afterUpstream));
+
+        Response response = controller.get(headers, DOMAIN, REPOSITORY, "de/mo/democrate");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(new String(afterUpstream, StandardCharsets.UTF_8),
+                new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+    }
+
     @Test
     void downloadReleasesItsLeaseOnAnEarlyNotFound() {
         doThrow(mock(AwsException.class)).when(service).requireContainerBackedVersionDownloadable(
@@ -181,6 +213,35 @@ class CodeArtifactCargoControllerLeaseTest {
         verify(externalConnectionImporter).tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "democrate",
                 "1.0.0");
         assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void downloadFallsThroughToUpstreamRepositoryImportWhenExternalConnectionFindsNothing() {
+        when(kellnr.packageVersionExists(REPO_ID, DOMAIN, REPOSITORY, null, "democrate", "1.0.0"))
+                .thenReturn(false);
+        when(externalConnectionImporter.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "democrate", "1.0.0"))
+                .thenReturn(false);
+
+        controller.get(headers, DOMAIN, REPOSITORY, "api/v1/crates/democrate/1.0.0/download");
+
+        verify(upstreamRepositoryImporter).tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "democrate",
+                "1.0.0");
+    }
+
+    /**
+     * A repository has either an external connection or upstreams, never both: a successful
+     * external-connection import must never fall through to an upstream-repository attempt too.
+     */
+    @Test
+    void downloadNeverAttemptsUpstreamRepositoryImportWhenExternalConnectionAlreadyImported() {
+        when(kellnr.packageVersionExists(REPO_ID, DOMAIN, REPOSITORY, null, "democrate", "1.0.0"))
+                .thenReturn(false);
+        when(externalConnectionImporter.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "democrate", "1.0.0"))
+                .thenReturn(true);
+
+        controller.get(headers, DOMAIN, REPOSITORY, "api/v1/crates/democrate/1.0.0/download");
+
+        verify(upstreamRepositoryImporter, never()).tryImport(any(), any(), any(), any(), any(), any(), any());
     }
 
     /**

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cognitoidentity.model.IdentityPool;
@@ -18,6 +20,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -30,7 +33,7 @@ import java.util.regex.Pattern;
  * that parses either gets the same structure it would from AWS.
  */
 @ApplicationScoped
-public class CognitoIdentityService {
+public class CognitoIdentityService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(CognitoIdentityService.class);
 
@@ -78,9 +81,11 @@ public class CognitoIdentityService {
      * {@code UpdateIdentityPool} takes the whole {@code IdentityPool} shape and replaces the
      * stored pool with it: a member the caller omits is reset to its default rather than
      * carried over. The roles, role mappings and principal-tag maps are set by their own
-     * operations and are not part of the shape, so they survive the replace.
+     * operations and are not part of the shape, so they survive the replace. The shape carries
+     * the tags, so the replace runs one at a time with the tag calls, which never write back a
+     * pool it replaced.
      */
-    public IdentityPool updateIdentityPool(IdentityPool spec, String region) {
+    public synchronized IdentityPool updateIdentityPool(IdentityPool spec, String region) {
         IdentityPool existing = describeIdentityPool(spec.getIdentityPoolId(), region);
         validatePoolConfiguration(spec);
 
@@ -201,22 +206,65 @@ public class CognitoIdentityService {
         return findByArn(resourceArn, region).getIdentityPoolTags();
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+    /**
+     * Gives the pool a new map, one tag call at a time, so a reader holds one whole set and no call loses another's.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags, String region) {
         if (tags == null || tags.isEmpty()) {
             throw new AwsException("InvalidParameterException", "Tags is required.", 400);
         }
         IdentityPool pool = findByArn(resourceArn, region);
-        pool.getIdentityPoolTags().putAll(tags);
+        Map<String, String> updated = new LinkedHashMap<>(pool.getIdentityPoolTags());
+        updated.putAll(tags);
+        pool.setIdentityPoolTags(updated);
         pools.put(storageKey(pool), pool);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+    /** As {@link #tagResource}, a new map one call at a time. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys, String region) {
         if (tagKeys == null || tagKeys.isEmpty()) {
             throw new AwsException("InvalidParameterException", "TagKeys is required.", 400);
         }
         IdentityPool pool = findByArn(resourceArn, region);
-        tagKeys.forEach(pool.getIdentityPoolTags()::remove);
+        Map<String, String> updated = new LinkedHashMap<>(pool.getIdentityPoolTags());
+        tagKeys.forEach(updated::remove);
+        pool.setIdentityPoolTags(updated);
         pools.put(storageKey(pool), pool);
+    }
+
+    @Override
+    public String namespace() {
+        return "cognito-identity";
+    }
+
+    /** A request names an identity pool by the id Cognito minted, which its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the identity pool whose ARN is {@code arn}, in the request's account, where the handlers read: an ARN
+     * of another account names none. Read in place under the Region the ARN names and the pool's id, as the tag
+     * handlers read it, a pool stored before storage was account-aware included, and matched on the whole ARN. Tag
+     * calls give the pool a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cognito-identity")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId())
+                || !parsed.resource().startsWith(ARN_RESOURCE_PREFIX)) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(pools, parsed.accountId(),
+                        storageKey(parsed.region(), parsed.resource().substring(ARN_RESOURCE_PREFIX.length())))
+                .filter(pool -> arn.equals(pool.getArn()))
+                .map(IdentityPool::getIdentityPoolTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

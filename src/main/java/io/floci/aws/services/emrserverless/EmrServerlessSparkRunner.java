@@ -2,6 +2,8 @@ package io.floci.aws.services.emrserverless;
 
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.ConflictException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -52,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -101,6 +104,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // Where a step on its cluster's YARN finds the ResourceManager, as a yarn-site.xml property, a Hadoop client reading
     // yarn-site.xml after core-site.xml.
     private static final String YARN_SITE_VARIABLE = "FLOCI_YARN_SITE";
+    // How a command's Tez, Pig's among them, runs its DAGs, as tez-site.xml properties (see tezSite).
+    private static final String TEZ_SITE_VARIABLE = "FLOCI_TEZ_SITE";
     // The folder of a step's image holding the Hadoop its cluster's nodes run from, which its hadoop command runs from
     // on YARN, as the MapReduce home the local job runner uses has no YARN client to speak of.
     private static final String HADOOP_ROOT_VARIABLE = "FLOCI_HADOOP_ROOT";
@@ -120,6 +125,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // The port of a cluster's NameNode, HDFS's own default, which hdfs:// paths and those without a scheme
     // ("hdfs:// (or no prefix)") reach through the cluster's primary node.
     private static final int HDFS_PORT = 8020;
+    /** The ports of a cluster's MapReduce JobHistory server on its primary node, Hadoop's own defaults. */
+    public static final int JOB_HISTORY_PORT = 10020;
+    public static final int JOB_HISTORY_WEB_PORT = 19888;
+    /** A cluster's Spark History Server's port, "Spark HistoryServer | http://master-public-dns-name:18080/". */
+    public static final int SPARK_HISTORY_WEB_PORT = 18080;
+    /**
+     * Where a cluster's Spark applications keep their event logs, which its Spark History Server reads: "By default,
+     * Amazon EMR stores event logs in the /var/log/spark/apps directory of HDFS".
+     */
+    public static final String SPARK_EVENT_LOGS = "/var/log/spark/apps";
     // Spark's default checkpoint manager goes through Hadoop's FileContext, which refuses an hdfs:// path without a
     // host, though "hdfs:///path-to-data" and "/path-to-data" "would resolve to the same location in HDFS", as the
     // Management Guide puts it; so a streaming query keeps its checkpoints through the file system instead.
@@ -177,6 +192,35 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "exec env \"$@\"");
     /** Writes {@link #SUDO} to /tmp/floci-bin/sudo, a folder that is there already. */
     public static final String SUDO_FILE = String.join("\n", "cat > /tmp/floci-bin/sudo <<'SUDO'", SUDO, "SUDO");
+    /** The variable naming the instance role of an EMR cluster's container, MASTER, CORE or TASK (see NODE_INFO). */
+    public static final String INSTANCE_ROLE_VARIABLE = "FLOCI_INSTANCE_ROLE";
+    /** The file an EMR node's {@code isMaster} is in, which the EMR Management Guide's bootstrap action reads. */
+    public static final String INSTANCE_FILE = "/mnt/var/lib/info/instance.json";
+    /** The file an EMR node's {@code instanceRole} is in, which AWS's Knowledge Center reads with jq. */
+    public static final String EXTRA_INSTANCE_DATA_FILE = "/mnt/var/lib/instance-controller/extraInstanceData.json";
+    // Run as the image's user with the node's role as $1: each file written whole, then moved in place, so a step
+    // starting beside another, which shares its /mnt, reads it whole too.
+    private static final String NODE_INFO_FILES = String.join("\n",
+            "w() { t=$(mktemp \"$1.XXXXXX\") && printf \"%s\\n\" \"$2\" > \"$t\" && chmod 644 \"$t\""
+                    + " && mv -f \"$t\" \"$1\"; }",
+            "m=false; [ \"$1\" != MASTER ] || m=true",
+            "mkdir -p /mnt/var/lib/info /mnt/var/lib/instance-controller"
+                    + " && w " + INSTANCE_FILE + " \"{\\\"isMaster\\\": $m}\""
+                    + " && w " + EXTRA_INSTANCE_DATA_FILE + " \"{\\\"instanceRole\\\": \\\"$1\\\"}\"");
+    /**
+     * Where {@link #INSTANCE_ROLE_VARIABLE} names a role, writes what AWS documents of the files an EMR node keeps
+     * about itself, and only that: {@link #INSTANCE_FILE}'s {@code isMaster}, as the EMR Management Guide's bootstrap
+     * action reads it ("grep isMaster /mnt/var/lib/info/instance.json | grep false" on a node that is not the primary),
+     * and {@link #EXTRA_INSTANCE_DATA_FILE}'s {@code instanceRole}, which AWS's Knowledge Center reads with jq and
+     * compares, lowercased, with master, core and task, given as the API's {@code InstanceRoleType} names it. Written
+     * as the image's user, whose /mnt is, so a folder made there is that user's too, as Hive's metastore, which writes
+     * under /mnt/var/lib, runs as that user.
+     */
+    public static final String NODE_INFO = String.join("\n",
+            "if [ -n \"${" + INSTANCE_ROLE_VARIABLE + ":-}\" ]; then",
+            "  as=; [ \"$(id -u)\" != 0 ] || as=\"setpriv --reuid=hadoop --regid=hadoop --clear-groups\"",
+            "  $as bash -c '" + NODE_INFO_FILES + "' floci \"$" + INSTANCE_ROLE_VARIABLE + "\" || exit",
+            "fi");
     // A Spark configuration of the container's own: a copy of the folder a spark-env export of SPARK_CONF_DIR names,
     // else of the image's, links followed, whose log4j2.properties ends with the job's lines, passed in
     // SPARK_LOG4J2_VARIABLE, a later line winning. What is added to a file starts on a line of its own, as the
@@ -190,18 +234,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "fi",
             "export SPARK_CONF_DIR=\"$conf\"");
     // On a cluster, the hadoop command, and MapReduce in a step's spark-submit, get its HDFS and Floci's S3 too,
-    // through a copy of its Hadoop configuration (the image's, or the folder a spark-env export names), links
-    // followed, whose core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, by a name
-    // relative to the folder, which Spark ships to YARN's containers on a cluster that runs it, then
-    // HADOOP_SITE_VARIABLE's properties, which win (see hadoopSite), and whose mapred-site.xml runs MapReduce in local
-    // mode the same way (see mapredSite). The cluster's hadoop-log4j lines follow the log4j.properties, on a line of
-    // their own, a later key winning, and its hadoop-env exports start the hadoop-env.sh the hadoop command reads,
-    // ahead of the image's own lines, which add to HADOOP_CLASSPATH rather than set it, so a HADOOP_CLASSPATH the
-    // cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs only once its HDFS,
-    // MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop alone, without
-    // MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs
-    // runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs. A step's
-    // command can run sudo, as on EMR, which the image does not have, so it finds Floci's first (see SUDO).
+    // through a copy of its Hadoop configuration (the image's, or the folder a spark-env export names), links followed,
+    // whose core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, by a name relative to
+    // the folder, which Spark ships to YARN's containers on a cluster that runs it, then HADOOP_SITE_VARIABLE's
+    // properties, which win (see hadoopSite), and whose mapred-site.xml runs MapReduce in local mode the same way (see
+    // mapredSite), as a command's tez-site.xml does Tez (see tezSite). The cluster's hadoop-log4j lines follow the
+    // log4j.properties, on a line of their own, a later key winning, and its hadoop-env exports start the hadoop-env.sh
+    // the hadoop command reads, ahead of the image's own lines, which add to HADOOP_CLASSPATH rather than set it, so a
+    // HADOOP_CLASSPATH the cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs
+    // only once its HDFS, MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop
+    // alone, without MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot
+    // run, so hdfs dfs runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has
+    // runs. A step's command can run sudo, as on EMR, which the image does not have, so it finds Floci's first (see
+    // SUDO).
     private static final List<String> HADOOP_CONF_SETUP = List.of(
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
@@ -223,6 +268,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  fi",
             "  if [ -n \"${" + YARN_SITE_VARIABLE + ":-}\" ]; then",
             "    site yarn-site.xml \"$" + YARN_SITE_VARIABLE + "\"",
+            "  fi",
+            "  if [ -n \"${" + TEZ_SITE_VARIABLE + ":-}\" ]; then",
+            "    site tez-site.xml \"$" + TEZ_SITE_VARIABLE + "\"",
             "  fi",
             "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
             "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
@@ -265,6 +313,38 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "    chmod +x /tmp/floci-bin/hadoop /tmp/floci-bin/hadoop-streaming",
             "  fi",
             "fi");
+    /**
+     * The lines a step's command gets after those of Pig's own {@code pig.properties}, a later key winning, in a Pig
+     * configuration of the container's own ({@link #PIG_CONF}), which {@code PIG_CONF_DIR} names; set for a cluster
+     * with Pig.
+     */
+    public static final String PIG_PROPERTIES_VARIABLE = "FLOCI_PIG_PROPERTIES";
+    /** The lines that follow those of that configuration's {@code log4j.properties}, its template's where it has none. */
+    public static final String PIG_LOG4J_VARIABLE = "FLOCI_PIG_LOG4J";
+    /** The lines that start that configuration's {@code pig-env.sh}, which Pig's launcher reads. */
+    public static final String PIG_ENV_VARIABLE = "FLOCI_PIG_ENV";
+    /** Where a step's command has its Pig configuration. */
+    public static final String PIG_CONF = "/tmp/floci-pig-conf";
+    // On a cluster with Pig, a command's pig reads a configuration of its own: a copy of the one PIG_CONF_DIR names, or
+    // Pig's, links followed, whose pig.properties, log4j.properties and pig-env.sh get the cluster's lines.
+    private static final List<String> PIG_CONF_SETUP = List.of(
+            "if [ -n \"${" + PIG_PROPERTIES_VARIABLE + ":-}\" ]; then",
+            "  mkdir -p " + PIG_CONF,
+            "  cp -rL \"${PIG_CONF_DIR:-/usr/lib/pig/conf}/.\" " + PIG_CONF + " 2>/dev/null",
+            "  printf '\\n%s\\n' \"$" + PIG_PROPERTIES_VARIABLE + "\" >> " + PIG_CONF + "/pig.properties",
+            "  if [ -n \"${" + PIG_LOG4J_VARIABLE + ":-}\" ]; then",
+            "    if [ ! -f " + PIG_CONF + "/log4j.properties ]; then",
+            "      cp " + PIG_CONF + "/log4j.properties.template " + PIG_CONF + "/log4j.properties 2>/dev/null",
+            "    fi",
+            "    printf '\\n%s\\n' \"$" + PIG_LOG4J_VARIABLE + "\" >> " + PIG_CONF + "/log4j.properties",
+            "  fi",
+            "  if [ -n \"${" + PIG_ENV_VARIABLE + ":-}\" ]; then",
+            "    { printf '%s\\n' \"$" + PIG_ENV_VARIABLE + "\"; cat " + PIG_CONF + "/pig-env.sh 2>/dev/null; }"
+                    + " > " + PIG_CONF + "/floci-pig-env.sh",
+            "    mv " + PIG_CONF + "/floci-pig-env.sh " + PIG_CONF + "/pig-env.sh",
+            "  fi",
+            "  export PIG_CONF_DIR=" + PIG_CONF,
+            "fi");
     // A step on a cluster, or one whose job has log4j2.properties lines, runs spark-submit after this.
     private static final String SPARK_CONF_WRAPPER = wrapper(SPARK_CONF_COPY, HADOOP_CONF_SETUP);
     // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
@@ -276,7 +356,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
                     + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
             "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\""),
-            HADOOP_CONF_SETUP);
+            HADOOP_CONF_SETUP, PIG_CONF_SETUP);
     // The archives a driver needs in its working directory are put in this folder of its container, each in a
     // numbered folder of its own, which the copy creates.
     private static final String ARCHIVES_FOLDER = "/tmp/floci-archives";
@@ -313,6 +393,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final List<SparkSetting> HIVE_SETTINGS = List.of(
             new SparkSetting("tez.local.mode", "true"),
             new SparkSetting("tez.am.client.am.port-range", "40000-40100"));
+    // A command's Tez where there is no YARN: in local mode, in the JVM that starts it, which has Tez's jars already,
+    // its tasks' output read where it is written, as Pig's own Tez local mode has it.
+    private static final List<SparkSetting> TEZ_LOCAL_SETTINGS = List.of(
+            new SparkSetting("tez.local.mode", "true"),
+            new SparkSetting("tez.ignore.lib.uris", "true"),
+            new SparkSetting("tez.runtime.optimize.local.fetch", "true"));
     // On a cluster, Hive's metastore is the cluster's own, as "Hive records metastore information in a MySQL database
     // on the primary node's file system": the metastore service on its primary node (see EmrClusterStorage), in place
     // of the Glue Data Catalog client the image's hive-site names, or, where that does not run, an embedded Derby
@@ -377,6 +463,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  chmod 755 /tmp/floci-bin/sudo",
             "  export PATH=\"/tmp/floci-bin:$PATH\"",
             "fi",
+            NODE_INFO,
             HIVE_ONE_SDK,
             "export HOME=~" + IMAGE_USER,
             "cd \"$HOME\" || exit",
@@ -396,6 +483,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final ContainerLaunches launches = new ContainerLaunches();
     // What the workers of each application's runs with executors of their own hold, by application, while any runs.
     private final Map<String, SparkExecutors.Capacity> capacities = new ConcurrentHashMap<>();
+    // Where Floci reaches the Spark UI of each EMR Serverless Spark run's driver, by run, while its container runs.
+    private final Map<String, ContainerLifecycleManager.EndpointInfo> driverUis = new ConcurrentHashMap<>();
+    // The runs asked to interrupt their driver, which the thread watching each sends it SIGTERM for.
+    private final Set<String> interrupts = ConcurrentHashMap.newKeySet();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -437,7 +528,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     @Override
     public Outcome run(Job given, Progress progress) {
         String network = containerBuilder.resolveDockerNetwork(Optional.ofNullable(given.dockerNetwork())).orElse(null);
-        Job job = executorsApart(given, network) ? given : given.withExecutors(null);
+        // On the network it resolves to, which tells whether its executors run apart and its driver serves its UI.
+        Job job = (executorsApart(given, network) ? given : given.withExecutors(null)).onNetwork(network);
         ContainerLaunches.Launch launch = launches.begin(job.runId());
         Optional<SessionCreds> credentials = Optional.empty();
         Closeable logHandle = null;
@@ -469,6 +561,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job, progress))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(environment(awsEnvironment, job.environment()));
+            if (job.interruptible()) {
+                container.withInit();
+            }
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
                 List<String> hive = hiveArguments(job, endpoint, executorEnvironment);
@@ -510,8 +605,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 container.withEnv(SPARK_LOG4J2_VARIABLE, sparkLog4j2File(job));
             }
             if (job.storage() != null) {
+                // A step runs on its cluster's primary node, whose files say so.
                 container.withNamedVolume(job.storage().home(), "/home/hadoop")
-                        .withNamedVolume(job.storage().mnt(), "/mnt");
+                        .withNamedVolume(job.storage().mnt(), "/mnt")
+                        .withEnv(INSTANCE_ROLE_VARIABLE, "MASTER");
                 // The primary node's name leads to its HDFS, as the cluster's DNS resolves it.
                 if (job.storage().hdfsHost() != null) {
                     container.withExtraHost(job.storage().hdfsHost(), job.storage().hdfsAddress());
@@ -526,6 +623,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                             .withEnv(YARN_SITE_VARIABLE, siteProperty("yarn.resourcemanager.hostname",
                                     job.storage().resourceManager()));
                 }
+                if (job.command() != null) {
+                    container.withEnv(TEZ_SITE_VARIABLE, tezSite(job, executorEnvironment));
+                }
                 if (job.storage() != null && job.storage().replication() > 0) {
                     container.withEnv(HDFS_SITE_VARIABLE, siteProperty("dfs.replication",
                             String.valueOf(job.storage().replication())));
@@ -535,6 +635,22 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 }
                 if (!job.hadoopEnvironment().isEmpty()) {
                     container.withEnv(HADOOP_ENV_VARIABLE, hadoopEnvFile(job));
+                }
+            }
+            if (job.listenPort() > 0) {
+                // Reached through Floci alone, so published on the host's loopback interface only.
+                container.withLoopbackPortBinding(job.listenPort(), 0);
+            }
+            if (servesDriverUi(job)) {
+                container.withLoopbackPortBinding(SparkExecutors.DRIVER_UI_PORT, 0);
+                if (job.keepsEventLogs()) {
+                    // Its event logs, where the release's image writes them, in a volume of its own that its Spark
+                    // History Server reads once it has ended; Docker fills a new volume with the image's folder, its
+                    // owner the image's user.
+                    String volume = EmrServerlessHistories.volume(config, job.runId());
+                    lifecycleManager.ensureVolume(volume, EmrServerlessHistories.labels(config, job.runId(),
+                            job.accountId(), job.region(), EmrServerlessHistories.VOLUME_COMPONENT));
+                    container.withNamedVolume(volume, EmrServerlessHistories.EVENT_LOGS);
                 }
             }
             ContainerSpec spec = container
@@ -551,10 +667,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             launch.started(containerId);
             // A cluster's HDFS is on a network of its own, which only its steps join; on YARN the executors there reach
             // the driver at the name its container has on it.
+            // With an address there, the cluster's instance metadata relay answers it as the cluster's primary node.
             if (onYarn) {
-                lifecycleManager.ensureConnected(containerId, job.storage().hdfsNetwork(), driverHost(job));
+                lifecycleManager.ensureConnected(containerId, job.storage().hdfsNetwork(), driverHost(job),
+                        job.storage().metadataAddress());
             } else if (job.storage() != null && job.storage().hdfsNetwork() != null) {
-                lifecycleManager.connectToNetwork(containerId, job.storage().hdfsNetwork());
+                lifecycleManager.connectToNetwork(containerId, job.storage().hdfsNetwork(),
+                        job.storage().metadataAddress());
             }
             // A stop, a reset or a shutdown while the image was pulled, the trust store copied or the archives put
             // in is read now, before the driver starts; one before an archive or while it streams in puts in no
@@ -564,9 +683,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (stopped.getAsBoolean()) {
                 return Outcome.halted();
             }
-            lifecycleManager.startCreated(containerId, spec);
+            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
+            // Found before the run is told it runs, so that a link to its UI then finds it.
+            ContainerLifecycleManager.EndpointInfo driverUi = servesDriverUi(job)
+                    ? info.getEndpoint(SparkExecutors.DRIVER_UI_PORT) : null;
+            if (driverUi != null) {
+                driverUis.put(job.runId(), driverUi);
+            }
             progress.started();
+            if (job.listenPort() > 0) {
+                ContainerLifecycleManager.EndpointInfo listening = info.getEndpoint(job.listenPort());
+                progress.listening(listening.host(), listening.port());
+            }
             if (job.executors() != null) {
                 capacity = joinCapacity(job.executors().application());
                 executors = new SparkExecutors(job.executors(), driver(containerId),
@@ -590,6 +719,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             LOG.warnv(e, "Spark run {0} of {1} could not run", job.runId(), job.service());
             return Outcome.couldNotStart(e.getMessage());
         } finally {
+            driverUis.remove(job.runId());
+            interrupts.remove(job.runId());
             // The executors go with their driver, however the run ended, and their workers' share of the
             // application's capacity with them.
             if (executors != null) {
@@ -600,6 +731,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             String unclaimed = launches.end(job.runId(), launch);
             if (unclaimed != null) {
+                killInterruptible(job, unclaimed);
                 lifecycleManager.stopAndRemove(unclaimed, logHandle, STOP_TIMEOUT_SECONDS);
             } else if (logHandle != null) {
                 // Floci's teardown claimed the driver, but the log stream is still this run's to close.
@@ -610,12 +742,78 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> driverUi(String runId) {
+        return Optional.ofNullable(driverUis.get(runId));
+    }
+
+    @Override
+    public boolean servesDriverUis(String dockerNetwork) {
+        return ownNetwork(containerBuilder.resolveDockerNetwork(Optional.ofNullable(dockerNetwork)).orElse(null));
+    }
+
+    /**
+     * Whether a job's driver serves its Spark UI for Floci to open: an EMR Serverless Spark run's or session's, which
+     * GetDashboardForJobRun and GetResourceDashboard link to while it runs, on a network where its container has an
+     * address of its own, as on the host's network every driver's UI would be on the host's port. The release's image
+     * turns the UI off ({@code spark.ui.enabled false} in its {@code spark-defaults}); a run's own settings may still
+     * do so.
+     */
+    static boolean servesDriverUi(Job job) {
+        return EmrServerlessJobRunService.SERVICE.equals(job.service()) && job.engine() == Engine.SPARK
+                && ownNetwork(job.dockerNetwork());
+    }
+
+    @Override
     public void stop(String runId) {
         ContainerLaunches.Launch launch = launches.get(runId);
         if (launch != null) {
             // run() reads it once the driver's container is up and at each look at the driver after, and
             // removes the driver itself: a stop makes no Docker call, so no Docker error can lose it.
             launch.requestStop();
+        }
+    }
+
+    /**
+     * Asks the thread watching the run's running driver to send its container SIGTERM, which the container's init
+     * process passes on to the driver ({@link Job#asInterruptible}), and to let the run end as the driver does. Like
+     * {@link #stop}, it makes no Docker call, so the caller is never held up by Docker. A run whose driver has not
+     * started yet is not interrupted here: its caller reports it cancelled until then.
+     */
+    @Override
+    public void interrupt(String runId) {
+        if (launches.get(runId) != null) {
+            interrupts.add(runId);
+        }
+    }
+
+    // Sends the driver's container SIGTERM; one Docker cannot send it to is stopped instead, so the run still ends.
+    private void sendSigterm(String containerId, Job job, ContainerLaunches.Launch launch) {
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).withSignal("SIGTERM").exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: the next look finds it ended.
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not send SIGTERM to the driver of Spark run {0}; stopping it", job.runId());
+            launch.requestStop();
+        }
+    }
+
+    /**
+     * Sends an interruptible job's driver container SIGKILL, where it still runs, before it is stopped: Docker's stop
+     * sends SIGTERM first, which the container's init process passes on to the driver, so a driver stopped at once
+     * would get a SIGTERM to handle ({@link Job#asInterruptible}).
+     */
+    private void killInterruptible(Job job, String containerId) {
+        if (!job.interruptible()) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(containerId).exec();
+        } catch (NotFoundException | ConflictException e) {
+            // Gone, or no longer running: nothing to kill.
+        } catch (RuntimeException e) {
+            // Docker's stop that follows sends SIGKILL at its end anyway.
+            LOG.warnv(e, "Could not kill the driver of Spark run {0}", job.runId());
         }
     }
 
@@ -663,6 +861,24 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         } catch (RuntimeException e) {
             LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeLeftoverDriver(String service, String runId) {
+        if (launches.get(runId) != null) {
+            return;
+        }
+        try {
+            lifecycleManager.findByName(ContainerStorageHelper.dockerName(config, service + "-" + runId))
+                    .ifPresent(container -> {
+                        lifecycleManager.removeIfExists(container.getId());
+                        LOG.infov("Removed {0} Spark driver {1} of {2}, left running by an earlier Floci process",
+                                service, container.getId(), runId);
+                    });
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove the {0} Spark driver of {1} an earlier Floci process left: {2}", service,
+                    runId, e.getMessage());
         }
     }
 
@@ -800,8 +1016,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      */
     static boolean executorsApart(Job job, String network) {
         return job.executors() != null && job.engine() == Engine.SPARK && job.command() == null
-                && job.storage() == null && !"host".equals(network)
-                && (network == null || !network.startsWith("container:"));
+                && job.storage() == null && ownNetwork(network);
+    }
+
+    // Whether a container on the network has an address of its own, rather than the host's or another container's.
+    private static boolean ownNetwork(String network) {
+        return !"host".equals(network) && (network == null || !network.startsWith("container:"));
     }
 
     private static String newSecret() {
@@ -1172,7 +1392,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A MapReduce job on the cluster's YARN: its application master and tasks find Hadoop in the nodes' layout, which
     // yarn.application.classpath's default does not name, and S3A's AWS SDK, reach Floci with the step's AWS environment,
     // and are sized for a NodeManager as Spark's executors are. The image's core-site.xml names the LZO codec, so its
-    // jars come too.
+    // jars come too. Its client asks the cluster's JobHistory server about it once its application master has ended.
     private static List<SparkSetting> yarnMapReduceSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
         List<String> classPath = new ArrayList<>(hadoopLayout(root));
@@ -1187,23 +1407,73 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("mapreduce.reduce.env", environment),
                 new SparkSetting("yarn.app.mapreduce.am.resource.mb", "1024"),
                 new SparkSetting("mapreduce.map.memory.mb", "768"),
-                new SparkSetting("mapreduce.reduce.memory.mb", "768"));
+                new SparkSetting("mapreduce.reduce.memory.mb", "768"),
+                jobHistory(job), jobHistoryWeb(job));
     }
 
-    // Hive's Tez on the cluster's YARN. The image's tez-site.xml names EMR Serverless's own plugins, whose stock
-    // counterparts are in the same jars, named here as Tez's own defaults are; its port ranges and addresses are
-    // placeholders EMR Serverless fills, its compression needs a native library the image lacks, and a task's two
-    // virtual cores never match the one YARN's default scheduler grants, so Tez would give each container back. An
-    // application master says where it is by ${env.NM_HOST}, which is left for its own node to fill in: the settings
-    // are read on the step's side first, and $NM_HOST or an env of the step's would be filled in there.
+    // The cluster's MapReduce JobHistory server on its primary node, which a MapReduce job's client asks about it once
+    // its application master has ended, and its web pages.
+    private static SparkSetting jobHistory(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_PORT);
+    }
+
+    private static SparkSetting jobHistoryWeb(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.webapp.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_WEB_PORT);
+    }
+
+    /**
+     * The {@code tez-site.xml} properties a step's command gets, so that Tez, which Pig runs a script on by default,
+     * runs its DAGs on its cluster's YARN, as Hive's does there, or, where there is no YARN to run them on, in the JVM
+     * that starts them, without the jars a YARN container is given.
+     */
+    static String tezSite(Job job, List<String> executorEnvironment) {
+        List<SparkSetting> settings = new ArrayList<>();
+        if (onYarn(job)) {
+            settings.addAll(tezOnYarnSettings(job, executorEnvironment, List.of()));
+            settings.add(new SparkSetting("tez.task.resource.memory.mb", "768"));
+        } else {
+            settings.addAll(TEZ_LOCAL_SETTINGS);
+        }
+        List<String> properties = new ArrayList<>();
+        settings.forEach(setting -> properties.add(siteProperty(setting.key(), setting.value())));
+        return String.join("\n", properties);
+    }
+
+    // Hive's Tez on the cluster's YARN, sized as its tasks are by Hive's own settings: a task's two virtual cores never
+    // match the one YARN's default scheduler grants, so Tez would give each container back. A query that runs MapReduce
+    // instead, its hive.execution.engine set to mr, asks the cluster's JobHistory server about its jobs.
     private static List<SparkSetting> hiveOnYarnSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
-        List<String> classPath = new ArrayList<>(List.of("$PWD/*", root + "/hive/lib/hive-exec.jar", root + "/tez/*",
-                root + "/tez/lib/*"));
-        classPath.addAll(hadoopLayout(root));
-        String environment = containerEnvironment(executorEnvironment, "HIVE_HOME=" + root + "/hive",
-                "TEZ_HOME=" + root + "/tez");
-        return List.of(
+        List<SparkSetting> settings = new ArrayList<>(tezOnYarnSettings(job, executorEnvironment,
+                List.of(root + "/hive/lib/hive-exec.jar"), "HIVE_HOME=" + root + "/hive"));
+        settings.add(new SparkSetting("hive.tez.container.size", "768"));
+        settings.add(new SparkSetting("hive.tez.cpu.vcores", "1"));
+        settings.add(jobHistory(job));
+        settings.add(jobHistoryWeb(job));
+        return settings;
+    }
+
+    // Tez on the cluster's YARN, its containers given classPath, then Tez's and Hadoop's jars, and variables, then
+    // TEZ_HOME. The image's tez-site.xml names EMR Serverless's own plugins, whose stock counterparts are in the same
+    // jars, named here as Tez's own defaults are; its port ranges and addresses are placeholders EMR Serverless fills,
+    // and its compression needs a native library the image lacks. An application master says where it is by
+    // ${env.NM_HOST}, which is left for its own node to fill in: the settings are read on the step's side first, and
+    // $NM_HOST or an env of the step's would be filled in there. Where the cluster's primary node runs the YARN
+    // timeline server, the application master logs its DAGs there, through the timeline server's REST interface, which
+    // the Tez UI reads.
+    private static List<SparkSetting> tezOnYarnSettings(Job job, List<String> executorEnvironment,
+                                                        List<String> classPath, String... variables) {
+        String root = hadoopRoot(job);
+        List<String> containerClassPath = new ArrayList<>(List.of("$PWD/*"));
+        containerClassPath.addAll(classPath);
+        containerClassPath.addAll(List.of(root + "/tez/*", root + "/tez/lib/*"));
+        containerClassPath.addAll(hadoopLayout(root));
+        List<String> containerVariables = new ArrayList<>(List.of(variables));
+        containerVariables.add("TEZ_HOME=" + root + "/tez");
+        String environment = containerEnvironment(executorEnvironment, containerVariables.toArray(String[]::new));
+        List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("yarn.resourcemanager.hostname", job.storage().resourceManager()),
                 new SparkSetting("tez.local.mode", "false"),
                 new SparkSetting("tez.framework.client", "org.apache.tez.client.TezYarnClient"),
@@ -1223,14 +1493,20 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("tez.shuffle.bind-host", "0.0.0.0"),
                 new SparkSetting("tez.lib.uris", "file://" + root + "/tez/,file://" + root + "/tez/lib/"),
                 new SparkSetting("tez.use.cluster.hadoop-libs", "false"),
-                new SparkSetting("tez.cluster.additional.classpath.prefix", String.join(":", classPath)),
+                new SparkSetting("tez.cluster.additional.classpath.prefix", String.join(":", containerClassPath)),
                 new SparkSetting("tez.am.launch.env", environment),
                 new SparkSetting("tez.task.launch.env", environment),
                 new SparkSetting("tez.am.resource.memory.mb", "1024"),
-                new SparkSetting("hive.tez.container.size", "768"),
-                new SparkSetting("hive.tez.cpu.vcores", "1"),
                 new SparkSetting("tez.runtime.intermediate-output.should-compress", "false"),
-                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false"));
+                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false")));
+        String timeline = job.storage().timelineServer();
+        if (timeline != null) {
+            settings.add(new SparkSetting("tez.history.logging.service.class",
+                    "org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService"));
+            settings.add(new SparkSetting("yarn.timeline-service.enabled", "true"));
+            settings.add(new SparkSetting("yarn.timeline-service.hostname", timeline));
+        }
+        return settings;
     }
 
     // The folders holding Hadoop on a cluster's nodes, as a class path's entries; the LZO codec's beside them.
@@ -1272,8 +1548,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * is left out, as its line would run what it holds.
      */
     static String hadoopEnvFile(Job job) {
+        return exportLines(job.hadoopEnvironment());
+    }
+
+    /**
+     * An export of each of {@code variables}, as given, in single quotes, with no shell expansion. A name a shell cannot
+     * export is left out, as its line would run what it holds.
+     */
+    public static String exportLines(Map<String, String> variables) {
         List<String> lines = new ArrayList<>();
-        job.hadoopEnvironment().forEach((name, value) -> {
+        variables.forEach((name, value) -> {
             if (SHELL_NAME.matcher(name).matches()) {
                 lines.add("export " + name + "='" + value.replace("'", "'\\''") + "'");
             }
@@ -1281,8 +1565,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return String.join("\n", lines);
     }
 
-    // Each property as a line Properties.load reads back as it is.
-    private static String propertiesLines(Map<String, String> properties) {
+    /** Each property as a line {@code Properties.load} reads back as it is. */
+    public static String propertiesLines(Map<String, String> properties) {
         List<String> lines = new ArrayList<>();
         properties.forEach((key, value) ->
                 lines.add(propertiesEscaped(key, true) + " = " + propertiesEscaped(value, false)));
@@ -1297,7 +1581,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A wrapper's script: the lines of each part, in order, then what it runs.
     @SafeVarargs
     private static String wrapper(List<String>... parts) {
-        List<String> lines = new ArrayList<>();
+        List<String> lines = new ArrayList<>(List.of(NODE_INFO));
         for (List<String> part : parts) {
             lines.addAll(part);
         }
@@ -1434,10 +1718,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (onYarn(job)) {
             settings.addAll(yarnSettings(job, executorEnvironment));
         }
-        // The driver's UI, which Floci follows the driver through; its kill links, which any container on the network
-        // reaches, are turned off after the run's own settings (SparkExecutors.DRIVER_WRAPPER).
-        if (job.executors() != null) {
+        // The driver's UI, which a dashboard link opens, and which Floci follows a driver with executors of its own
+        // through. Its kill links, which any container on the network reaches, are off: for a driver with executors of
+        // its own, after the run's own settings (SparkExecutors.DRIVER_WRAPPER); for any other, unless the run turns
+        // them on.
+        if (servesDriverUi(job)) {
             settings.add(new SparkSetting("spark.ui.enabled", "true"));
+            if (job.executors() == null) {
+                settings.add(new SparkSetting("spark.ui.killEnabled", "false"));
+            }
         }
         job.sparkDefaults().forEach((key, value) -> settings.add(new SparkSetting(key, value)));
         return settings;
@@ -1460,8 +1749,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A step's Spark on its cluster's YARN: the ResourceManager on the primary node; Spark's jars from the node's image,
     // which is the step's; executors and a cluster-mode driver sized for the NodeManager rather than the image's 14 GB
     // ("determined by the core and task instance types" on EMR), which the cluster's spark-defaults and the step's own
-    // options replace; a client-mode driver reached at the container's name on the cluster's network; and the step's
-    // AWS environment for each executor and a cluster-mode driver, as its container has it.
+    // options replace; a client-mode driver reached at the container's name on the cluster's network; where the
+    // primary node runs a Spark History Server, as on a cluster with Spark, its event logs in the cluster's HDFS, where
+    // the server reads them, which the application's tracking URL leads to once it has ended; and the step's AWS
+    // environment for each executor and a cluster-mode driver, as its container has it.
     private static List<SparkSetting> yarnSettings(Job job, List<String> executorEnvironment) {
         List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("spark.hadoop.yarn.resourcemanager.hostname", job.storage().resourceManager()),
@@ -1472,6 +1763,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("spark.driver.cores", "1"),
                 new SparkSetting("spark.driver.host", driverHost(job)),
                 new SparkSetting("spark.driver.bindAddress", "0.0.0.0")));
+        String history = job.storage().sparkHistoryServer();
+        if (history != null) {
+            settings.add(new SparkSetting("spark.eventLog.enabled", "true"));
+            settings.add(new SparkSetting("spark.eventLog.dir", "hdfs://" + SPARK_EVENT_LOGS));
+            settings.add(new SparkSetting("spark.yarn.historyServer.address", history + ":" + SPARK_HISTORY_WEB_PORT));
+        }
         for (String variable : executorEnvironment) {
             int equals = variable.indexOf('=');
             String name = variable.substring(0, equals);
@@ -1565,6 +1862,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                              SparkExecutors executors) throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
         while (!launch.stopRequested() && !progress.cancelled()) {
+            if (interrupts.remove(job.runId())) {
+                sendSigterm(containerId, job, launch);
+            }
             if (executors != null) {
                 executors.follow();
             }
@@ -1602,6 +1902,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         }
         // Closed however the read ends, which ends Docker's stream and the compressors.
         try (DriverOutput output = new DriverOutput()) {
+            killInterruptible(job, containerId);
             lifecycleManager.stop(containerId, STOP_TIMEOUT_SECONDS);
             lifecycleManager.getDockerClient().logContainerCmd(containerId)
                     .withStdOut(true)

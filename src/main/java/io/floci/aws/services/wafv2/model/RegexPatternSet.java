@@ -9,7 +9,7 @@ import java.util.Map;
 
 /** WAF v2 regex pattern set. {@code regularExpressionList} holds the regex strings. */
 @RegisterForReflection
-public class RegexPatternSet {
+public class RegexPatternSet implements WafV2Resource {
 
     private String id;
     private String name;

@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -15,7 +16,10 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.VpcContainerLeases;
 import io.floci.aws.services.mwaa.model.Environment;
+import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -70,6 +75,8 @@ public class MwaaEnvironmentManager {
     private static final String STARTUP_ENV_PATH = REQUIREMENTS_DIR + "/mwaa-startup.env";
     /** A first {@code pip install} of a real requirements file can take minutes. */
     private static final int REQUIREMENTS_INSTALL_TIMEOUT_SECONDS = 900;
+    /** The Airflow web UI admin Floci creates, and the identity a web login token signs in as. */
+    static final String AIRFLOW_ADMIN_USER = "admin";
     private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
     private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
             "connections", Set.of("add", "delete"),
@@ -88,19 +95,29 @@ public class MwaaEnvironmentManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final Ec2Service ec2Service;
+    /** The VPC address each Airflow container holds, returned once the container is gone. */
+    private final VpcContainerLeases vpcLeases;
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
-                                  LaunchedContainerAwsEnv awsEnv) {
+                                  RegionResolver regionResolver,
+                                  LaunchedContainerAwsEnv awsEnv,
+                                  Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.awsEnv = awsEnv;
+        this.ec2Service = ec2Service;
+        this.vpcLeases = new VpcContainerLeases(ec2Service, "MWAA environment",
+                () -> lifecycleManager.getDockerClient());
     }
 
     /**
@@ -121,7 +138,7 @@ public class MwaaEnvironmentManager {
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
 
-        String dbContainerName = dbContainerName(config, environment);
+        String dbContainerName = dbContainerName(environment);
         String dbVolume = dbContainerName;
         lifecycleManager.removeIfExists(dbContainerName);
         lifecycleManager.ensureVolume(dbVolume);
@@ -159,7 +176,7 @@ public class MwaaEnvironmentManager {
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent, byte[] requirementsContent) {
         String name = environment.getName();
-        String airflowContainerName = airflowContainerName(config, environment);
+        String airflowContainerName = airflowContainerName(environment);
         String dagsVolume = airflowContainerName + "-dags";
         String logsVolume = airflowContainerName + "-logs";
 
@@ -168,8 +185,8 @@ public class MwaaEnvironmentManager {
         lifecycleManager.ensureVolume(logsVolume);
 
         String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
-        String adminUser = "admin";
         String adminPassword = generateSecret(24);
+        environment.setAirflowAdminPassword(adminPassword);
         String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
 
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
@@ -183,9 +200,10 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__FERNET_KEY=" + generateFernetKey(),
                 "AIRFLOW__WEBSERVER__SECRET_KEY=" + generateSecret(32),
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
-                "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
+                "_AIRFLOW_WWW_USER_USERNAME=" + AIRFLOW_ADMIN_USER,
                 "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
         env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
+        env.addAll(signInRateLimitEnv(airflowVersion, environment.getAirflowConfigurationOptions()));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(airflowContainerName)
@@ -217,6 +235,7 @@ public class MwaaEnvironmentManager {
         String containerId = lifecycleManager.create(spec);
         ContainerInfo info;
         try {
+            joinVpcNetwork(environment, containerId);
             // Real MWAA documents startup scripts using "sudo yum install ..." as the baseline way
             // to install OS packages — sudo is assumed to just work for the airflow user. The stock
             // apache/airflow image ships sudo but requires a password, so without this grant every
@@ -249,6 +268,7 @@ public class MwaaEnvironmentManager {
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
             lifecycleManager.removeIfExists(containerId);
+            releaseVpcLeaseIfGone(containerId);
             throw e;
         }
         environment.setAirflowContainerId(info.containerId());
@@ -362,15 +382,78 @@ public class MwaaEnvironmentManager {
         String name = environment.getName();
         if (environment.getAirflowContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
+            releaseVpcLeaseIfGone(environment.getAirflowContainerId());
         }
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
-        String airflowContainerName = airflowContainerName(config, environment);
-        lifecycleManager.removeVolume(dbContainerName(config, environment));
+        String airflowContainerName = airflowContainerName(environment);
+        lifecycleManager.removeVolume(dbContainerName(environment));
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
+    }
+
+    /**
+     * Puts the Airflow container on the VPC network of the environment's {@code NetworkConfiguration}, at an
+     * address leased from its first subnet, before the container starts: Amazon MWAA runs the environment's
+     * workers in those subnets, so its DAGs reach what the VPC holds (an EC2 instance, a database) by private
+     * address. The container keeps the network it was created on, which holds its metadata database. Without
+     * Docker-backed VPC networks, or for subnets EC2 does not know, it stays there alone. The subnet is checked and
+     * the lease recorded while EC2 holds its subnet references, so a DeleteSubnet cannot pass its dependency check
+     * between the two ({@link #holdsSubnet}).
+     */
+    void joinVpcNetwork(Environment environment, String containerId) {
+        // Provisioning can run outside the CreateEnvironment request, so the environment's account is named.
+        vpcLeases.join(environmentAccount(environment), regionOf(environment), null, firstSubnet(environment),
+                containerId, environment.getName());
+    }
+
+    /**
+     * Re-claims the VPC address an environment's Airflow container still holds after Floci restarts, when it was
+     * kept running ({@code keep-running-on-shutdown}): the address leases are in memory, so without this EC2 could
+     * hand the same address to an instance and Docker would refuse it. The container is found by its name.
+     */
+    void reclaimVpcAddress(Environment environment) {
+        String subnetId = firstSubnet(environment);
+        if (ec2Service == null || subnetId == null) {
+            return;
+        }
+        String containerId;
+        Collection<ContainerNetwork> networks;
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(airflowContainerName(environment)).exec();
+            containerId = inspect.getId();
+            networks = inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null
+                    ? List.of() : inspect.getNetworkSettings().getNetworks().values();
+        } catch (NotFoundException expected) {
+            // The container did not outlive the restart, so there is no address to re-claim.
+            return;
+        }
+        vpcLeases.reclaim(environmentAccount(environment), regionOf(environment), subnetId, containerId,
+                networks.stream().map(ContainerNetwork::getIpAddress).toList(), environment.getName());
+    }
+
+    /** Whether a live Airflow container of the account holds an address in the subnet. */
+    boolean holdsSubnet(String accountId, String region, String subnetId) {
+        return vpcLeases.holdsSubnet(accountId, region, subnetId);
+    }
+
+    /** Whether a live Airflow container of the account is on the VPC's network. */
+    boolean holdsVpc(String accountId, String region, String vpcId) {
+        return vpcLeases.holdsVpc(accountId, region, vpcId);
+    }
+
+    private static String firstSubnet(Environment environment) {
+        NetworkConfiguration network = environment.getNetworkConfiguration();
+        List<String> subnetIds = network == null ? null : network.getSubnetIds();
+        return subnetIds == null || subnetIds.isEmpty() ? null : subnetIds.getFirst();
+    }
+
+    /** Gives the container's VPC address back once Docker no longer has the container. */
+    private void releaseVpcLeaseIfGone(String containerId) {
+        vpcLeases.releaseIfGone(containerId);
     }
 
     /** Writes {@code content} to {@code DAGS_MOUNT/relativePath} inside the Airflow container. */
@@ -523,21 +606,17 @@ public class MwaaEnvironmentManager {
 
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
-     *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
-     *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
-    static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(config, environment) + "-db");
+     *  Docker-backed service (EKS, RDS, ...). */
+    String dbContainerName(Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
     }
 
-    static String airflowContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config,
-                "mwaa-" + environmentIdentity(config, environment) + "-airflow");
+    String airflowContainerName(Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-airflow");
     }
 
-    private static String environmentIdentity(EmulatorConfig config, Environment environment) {
-        String defaultRegion = config != null ? config.defaultRegion() : null;
-        return environmentAccount(environment) + "." + environmentRegion(environment, defaultRegion) + "."
-                + environment.getName();
+    private String environmentIdentity(Environment environment) {
+        return environmentAccount(environment) + "." + regionOf(environment) + "." + environment.getName();
     }
 
     static String environmentAccount(Environment environment) {
@@ -546,13 +625,9 @@ public class MwaaEnvironmentManager {
                 : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
     }
 
+    /** The Region the environment's ARN names, and the default Region for one without an ARN. */
     private String regionOf(Environment environment) {
-        return environmentRegion(environment, config.defaultRegion());
-    }
-
-    /** The region the environment's ARN names; {@code defaultRegion} answers for one without an ARN. */
-    static String environmentRegion(Environment environment, String defaultRegion) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), defaultRegion);
+        return regionResolver.regionOf(environment.getArn());
     }
 
     /**
@@ -564,6 +639,22 @@ public class MwaaEnvironmentManager {
      */
     static String pythonTagFor(String airflowVersion) {
         return isAtLeast(airflowVersion, 2, 11) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Turns off Airflow's sign-in rate limit, which counts sign-ins by client address (5 per 40 seconds by default):
+     * every sign-in reaches Airflow from the web proxy's one address, each {@code /aws_mwaa/login} and each UI login
+     * it forwards, so the limit would count every client of the environment together. The option moved from
+     * {@code webserver} to {@code fab} in Airflow 2.9. An {@code AirflowConfigurationOptions} entry setting it in
+     * either section is kept.
+     */
+    static List<String> signInRateLimitEnv(String airflowVersion, Map<String, String> options) {
+        if (options != null && (options.containsKey("webserver.auth_rate_limited")
+                || options.containsKey("fab.auth_rate_limited"))) {
+            return List.of();
+        }
+        return List.of((isAtLeast(airflowVersion, 2, 9) ? "AIRFLOW__FAB__" : "AIRFLOW__WEBSERVER__")
+                + "AUTH_RATE_LIMITED=False");
     }
 
     static boolean isAtLeast(String airflowVersion, int major, int minor) {
@@ -806,7 +897,6 @@ public class MwaaEnvironmentManager {
         return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds)
                 .throwIfTimedOut(containerId);
     }
-
 
     private static String generateSecret(int bytes) {
         byte[] buf = new byte[bytes];

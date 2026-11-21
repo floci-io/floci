@@ -132,6 +132,44 @@ class SignerIamEnforcementIntegrationTest {
                 .then().statusCode(403);
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Signer holds on the profile a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller read that team's profile and not another's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheProfile() {
+        String tagged = teamProfile("Tagged" + SUFFIX);
+        String other = teamProfile("Untagged" + SUFFIX);
+        given().header("Authorization", auth(ACCOUNT, "signer"))
+                .contentType("application/json")
+                .body("{\"tags\":{\"team\":\"data\"}}")
+                .when().post("/tags/arn:aws:signer:us-east-1:" + ACCOUNT + ":/signing-profiles/" + tagged)
+                .then().statusCode(204);
+        String key = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Action":"signer:GetSigningProfile","Resource":"*",
+                "Condition":{"StringEquals":{"aws:ResourceTag/team":"data"}}}]}
+                """);
+
+        given().header("Authorization", auth(key, "signer"))
+                .when().get("/signing-profiles/" + tagged)
+                .then().statusCode(200).body("profileName", equalTo(tagged));
+
+        given().header("Authorization", auth(key, "signer"))
+                .when().get("/signing-profiles/" + other)
+                .then().statusCode(403);
+    }
+
+    /** A profile of the fixture account named {@code name}, tagged with the web team; its name. */
+    private static String teamProfile(String name) {
+        given().header("Authorization", auth(ACCOUNT, "signer"))
+                .contentType("application/json")
+                .body("{\"platformId\":\"AWSLambda-SHA384-ECDSA\",\"tags\":{\"team\":\"web\"}}")
+                .when().put("/signing-profiles/" + name)
+                .then().statusCode(200);
+        return name;
+    }
+
     private String userWithPolicy(String policy) {
         String user = "signer-iam-" + UUID.randomUUID();
         String key = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), user)

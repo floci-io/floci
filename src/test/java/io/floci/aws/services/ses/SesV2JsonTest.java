@@ -64,8 +64,26 @@ class SesV2JsonTest {
         assertEquals("SendingPausedException", SesV2Json.remapV1Exception(new AwsException(
                 "ConfigurationSetSendingPausedException", "m", 400)).getErrorCode());
 
+        AwsException restatedByCallers = new AwsException(
+                "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400);
+        assertSame(restatedByCallers, SesV2Json.remapV1Exception(restatedByCallers));
+
         AwsException untouched = new AwsException("NotFoundException", "already v2", 404);
         assertSame(untouched, SesV2Json.remapV1Exception(untouched));
+    }
+
+    @Test
+    void remapCvetException_restatesAMissingTemplateAndRemapsTheRest() {
+        AwsException missing = SesV2Json.remapCvetException(new AwsException(
+                "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400), "welcome");
+        assertEquals("NotFoundException", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+        assertEquals("Custom verification email template <welcome> does not exist", missing.getMessage());
+
+        AwsException other = SesV2Json.remapCvetException(
+                new AwsException("InvalidParameterValue", "m", 400), "welcome");
+        assertEquals("BadRequestException", other.getErrorCode());
+        assertEquals("m", other.getMessage());
     }
 
     @Test

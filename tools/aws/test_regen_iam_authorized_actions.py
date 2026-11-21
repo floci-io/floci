@@ -538,3 +538,191 @@ def test_the_round_trip_lists_the_operations_authorized_by_method(tmp_path):
                               {"GetStage": ["api", "apiv2"]})
     given = saved_sources(tmp_path / "later", ANCHOR_SERVICES + [later])
     assert r.main(["--verify", "--source-dir", str(given), "--output", str(output), "--routes", str(routes)]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The S3 user guide's required actions, the namesake client and spellings
+# --------------------------------------------------------------------------- #
+S3_MODELS = {
+    "s3": {"credentialScope": "s3", "operations": {
+        "GetPublicAccessBlock": {"method": "GET", "requestUri": "/{Bucket}?publicAccessBlock"},
+        "PutPublicAccessBlock": {"method": "PUT", "requestUri": "/{Bucket}?publicAccessBlock"}}},
+    "s3control": {"credentialScope": "s3", "operations": {
+        "GetPublicAccessBlock": {"method": "GET", "requestUri": "/v20180820/configuration/publicAccessBlock"},
+        "PutPublicAccessBlock": {"method": "PUT", "requestUri": "/v20180820/configuration/publicAccessBlock"},
+        "GetAccessPointPolicy": {"method": "GET", "requestUri": "/v20180820/accesspoint/{name}/policy"}}},
+}
+VERSION_SENTENCES = {
+    "s3:GetObject": "Required if you want to get an object without specifying versionId in the request.",
+    "s3:GetObjectVersion": "Required if you want to get a specific version of an object by specifying versionId "
+                           "in the request.",
+}
+S3_PAGE = {
+    "ListObjectsV2": {"section": "Bucket operations and permissions", "required": ["s3:ListBucket"]},
+    "CopyObject": {"section": "Object operations and permissions", "required": ["s3:PutObject"],
+                   "either": {"actions": ["s3:GetObject", "s3:GetObjectVersion"], "sentences": VERSION_SENTENCES}},
+    "GetObject": {"section": "Object operations and permissions",
+                  "either": {"actions": ["s3:GetObject", "s3:GetObjectVersion"], "sentences": VERSION_SENTENCES}},
+    "GetPublicAccessBlock (Bucket-level)": {"section": "Bucket operations and permissions",
+                                            "required": ["s3:GetBucketPublicAccessBlock"]},
+    "PutPublicAccessBlock (Account-level)": {"section": "Account operations and permissions",
+                                             "required": ["s3:PutAccountPublicAccessBlock"]},
+    # The page's own error: S3 Control's account-level GetPublicAccessBlock, headed as another operation.
+    "GetAccessPointPolicy (Account-level)": {"section": "Account operations and permissions",
+                                             "required": ["s3:GetAccountPublicAccessBlock"]},
+    # A row several operations share is not one operation's.
+    "CreateStorageLensGroup, TagResource": {"section": "Account operations and permissions",
+                                            "required": ["s3:CreateStorageLensGroup", "s3:TagResource"]},
+}
+# The query parameters botocore gives each operation's request (`s3_query_parameters`).
+S3_QUERY = {"GetObject": ["partNumber", "versionId"], "CopyObject": [], "DeleteObjects": [],
+            **{operation: ["versionId"] for operation in (
+                "GetObjectAnnotation", "PutObjectAnnotation", "DeleteObjectAnnotation", "ListObjectAnnotations")}}
+
+
+def test_the_s3_user_guide_gives_an_operation_its_one_required_action():
+    actions, _, _ = r.s3_required(S3_PAGE, S3_MODELS, S3_QUERY)
+    assert actions == {"CopyObject": "s3:PutObject", "ListObjectsV2": "s3:ListBucket"}
+
+
+def test_an_operation_both_models_have_takes_the_pages_action_for_one_models_requests():
+    _, by_model, _ = r.s3_required(S3_PAGE, S3_MODELS, S3_QUERY)
+    # The Account-level row is S3 Control's, any other S3's. GetAccessPointPolicy is S3 Control's alone, so its level
+    # tells nothing apart; the measured entry gives the account-level GetPublicAccessBlock the page mislabels.
+    assert by_model == {"s3": {
+        "s3": {"GetPublicAccessBlock": "s3:GetBucketPublicAccessBlock"},
+        "s3control": {"GetPublicAccessBlock": "s3:GetAccountPublicAccessBlock",
+                      "PutPublicAccessBlock": "s3:PutAccountPublicAccessBlock"}}}
+
+
+def test_an_either_row_is_a_choice_by_the_parameter_its_sentences_name_unless_the_operation_requires_its_own():
+    _, _, versioned = r.s3_required(S3_PAGE, S3_MODELS, S3_QUERY)
+    assert versioned["s3"]["GetObject"] == {"parameter": "versionId", "without": "s3:GetObject",
+                                            "with": "s3:GetObjectVersion"}
+    # CopyObject's own action is s3:PutObject; its Either is about the source it copies.
+    assert "CopyObject" not in versioned["s3"]
+    assert versioned["s3"]["GetObjectAnnotation"]["with"] == "s3:GetObjectVersionAnnotation"
+
+
+def test_a_version_choice_is_read_only_where_botocore_gives_its_parameter_in_the_query():
+    deletes = {"section": "Object operations and permissions",
+               "either": {"actions": ["s3:DeleteObject", "s3:DeleteObjectVersion"], "sentences": {
+                   "s3:DeleteObject": "Required if you want to remove an object without specifying versionId in the "
+                                      "request.",
+                   "s3:DeleteObjectVersion": "Required if you want to remove a specific version of an object by "
+                                             "specifying versionId in the request."}}}
+    # DeleteObjects names each version in its body, so a request's query never says which it deletes.
+    _, _, versioned = r.s3_required({**S3_PAGE, "DeleteObjects": deletes}, S3_MODELS, S3_QUERY)
+    assert "DeleteObjects" not in versioned["s3"]
+    assert "GetObject" in versioned["s3"]
+
+
+def test_every_version_choice_is_listed_wherever_the_request_names_the_version():
+    deletes = {"section": "Object operations and permissions",
+               "either": {"actions": ["s3:DeleteObject", "s3:DeleteObjectVersion"], "sentences": {
+                   "s3:DeleteObject": "Required if you want to remove an object without specifying versionId in the "
+                                      "request.",
+                   "s3:DeleteObjectVersion": "Required if you want to remove a specific version of an object by "
+                                             "specifying versionId in the request."}}}
+    choices = r.s3_version_choices({**S3_PAGE, "DeleteObjects": deletes})
+    # DeleteObjects names its versions in its body, so it has no query choice, but its choice is still the page's.
+    assert choices["DeleteObjects"] == {"parameter": "versionId", "without": "s3:DeleteObject",
+                                        "with": "s3:DeleteObjectVersion"}
+    assert choices["GetObject"]["with"] == "s3:GetObjectVersion"
+    # CopyObject requires an action of its own, so its Either row is about its source, not its version.
+    assert "CopyObject" not in choices
+
+
+def test_a_measured_version_choice_by_a_parameter_botocore_gives_no_query_is_refused():
+    with pytest.raises(ValueError):
+        r.s3_required(S3_PAGE, S3_MODELS, {**S3_QUERY, "GetObjectAnnotation": []})
+
+
+def test_an_account_level_row_whose_s3_control_route_names_a_resource_is_refused():
+    named = {**S3_MODELS, "s3control": {"credentialScope": "s3", "operations": {
+        **S3_MODELS["s3control"]["operations"],
+        "PutPublicAccessBlock": {"method": "PUT", "requestUri": "/v20180820/bucket/{name}/publicAccessBlock"}}}}
+    with pytest.raises(ValueError):
+        r.s3_required(S3_PAGE, named, S3_QUERY)
+
+
+def test_the_query_parameters_are_read_from_botocores_s3_model(tmp_path):
+    directory = tmp_path / "s3" / "2006-03-01"
+    directory.mkdir(parents=True)
+    (directory / "service-2.json").write_text(json.dumps({
+        "operations": {"GetObject": {"input": {"shape": "GetObjectRequest"}},
+                       "DeleteObjects": {"input": {"shape": "DeleteObjectsRequest"}}},
+        "shapes": {"GetObjectRequest": {"members": {
+                       "Bucket": {"location": "uri", "locationName": "Bucket"},
+                       "VersionId": {"location": "querystring", "locationName": "versionId"}}},
+                   "DeleteObjectsRequest": {"members": {"Delete": {"locationName": "Delete"}}}}}), encoding="utf-8")
+    assert r.s3_query_parameters(tmp_path) == {"GetObject": ["versionId"], "DeleteObjects": []}
+
+
+def test_the_vendored_sections_are_assembled_in_one_place():
+    s3 = with_sdk_clients(service("s3", {"GetObject": ["s3:GetObject", "s3:GetObjectVersion"]},
+                                  ["GetObject", "GetObjectVersion"]), "s3", "s3control")
+    memorydb = service("memorydb", {"CreateACL": ["memorydb:CreateAcl"]}, ["CreateAcl"])
+    sections = r.vendored_sections([s3, memorydb], S3_PAGE, S3_MODELS, S3_QUERY, {})
+    assert set(sections) == {"authorizedByModel", "versioned", "spellings"}
+    assert sections["versioned"]["s3"]["GetObject"]["with"] == "s3:GetObjectVersion"
+    assert sections["authorizedByModel"]["s3"]["s3control"]["PutPublicAccessBlock"] == "s3:PutAccountPublicAccessBlock"
+    assert sections["spellings"] == {"memorydb": {"CreateACL": "memorydb:CreateAcl"}}
+    # A rename already gives the spelling, so the section does not repeat it.
+    assert r.vendored_sections([memorydb], S3_PAGE, S3_MODELS, S3_QUERY,
+                               {"memorydb": {"CreateACL": "memorydb:CreateAcl"}})["spellings"] == {"memorydb": {}}
+
+
+def test_a_measured_entry_with_no_link_or_one_the_page_gives_is_refused(monkeypatch):
+    with pytest.raises(ValueError):
+        r.s3_required({**S3_PAGE, "GetPublicAccessBlock (Account-level)": {
+            "section": "Account operations and permissions", "required": ["s3:GetAccountPublicAccessBlock"]}},
+            S3_MODELS, S3_QUERY)
+    monkeypatch.setattr(r, "MEASURED_BY_MODEL", {("s3", "s3control", "GetPublicAccessBlock"): (
+        "s3:GetAccountPublicAccessBlock", "the actions table says so")})
+    with pytest.raises(ValueError):
+        r.s3_required(S3_PAGE, S3_MODELS, S3_QUERY)
+
+
+def test_the_page_answers_an_s3_operation_the_reference_does_not_and_a_disagreement_fails():
+    s3 = service("s3", {"ListObjectsV2": ["s3:ListBucket", "s3:GetObjectAcl"], "CopyObject": ["s3:PutObject"]},
+                 ["ListBucket", "GetObjectAcl", "PutObject"])
+    assert r.authorized_actions([s3], S3_PAGE, S3_MODELS, S3_QUERY) == {
+        "s3": {"CopyObject": "s3:PutObject", "ListObjectsV2": "s3:ListBucket"}}
+    disagreeing = service("s3", {"ListObjectsV2": ["s3:GetObjectAcl"]}, ["ListBucket", "GetObjectAcl"])
+    # An operation both models have is answered for S3's requests alone, not in the map every model's request reads.
+    shared = service("s3", {"GetPublicAccessBlock": ["s3:GetBucketPublicAccessBlock"]}, ["GetBucketPublicAccessBlock"])
+    assert r.authorized_actions([with_sdk_clients(shared, "s3", "s3control")], S3_PAGE, S3_MODELS, S3_QUERY) == {}
+    with pytest.raises(ValueError):
+        r.authorized_actions([disagreeing], S3_PAGE, S3_MODELS, S3_QUERY)
+    # References without S3's read nothing of the page.
+    assert r.authorized_actions(ANCHOR_SERVICES, S3_PAGE, S3_MODELS, S3_QUERY) == r.authorized_actions_from(ANCHOR_SERVICES)
+
+
+def test_the_namesake_client_takes_the_one_answer_of_an_operation_several_clients_list():
+    lifecycle = with_sdk_clients(service("s3", {"GetBucketLifecycleConfiguration": [
+        "s3:GetLifecycleConfiguration", "s3express:GetLifecycleConfiguration"]}, ["GetLifecycleConfiguration"]),
+        "s3", "s3control")
+    assert r.namesake_by_model([lifecycle], {"s3", "s3control"}) == {
+        "s3": {"s3": {"GetBucketLifecycleConfiguration": "s3:GetLifecycleConfiguration"}}}
+    # A client whose routes are not vendored cannot be told from its request's route.
+    assert r.namesake_by_model([lifecycle], {"s3"}) == {}
+
+
+def test_an_action_spelled_otherwise_than_its_operation_keeps_the_references_spelling():
+    memorydb = service("memorydb", {"CreateACL": ["memorydb:CreateAcl"], "CreateCluster": ["memorydb:CreateCluster"]},
+                       ["CreateAcl", "CreateCluster"])
+    assert r.spellings([memorydb]) == {"memorydb": {"CreateACL": "memorydb:CreateAcl"}}
+
+
+def test_the_new_sections_are_built_only_for_references_with_s3_and_validated():
+    document = r.build(ANCHOR_SERVICES, "a test", [], page=S3_PAGE, models=S3_MODELS)
+    assert document["authorizedByModel"] == {} and document["versioned"] == {}
+    assert r.validate(document, []) == []
+    broken = dict(document, authorizedByModel={"s3": {"s3control": {"GetPublicAccessBlock": "sqs:SendMessage"}}},
+                  versioned={"s3": {"GetObject": {"parameter": "versionId", "without": "s3:GetObject"}}},
+                  spellings={"memorydb": {"CreateACL": "memorydb:CreateCluster"}})
+    problems = r.validate(broken, [])
+    assert any("authorizedByModel" in problem for problem in problems)
+    assert any("versioned" in problem for problem in problems)
+    assert any("spellings" in problem for problem in problems)

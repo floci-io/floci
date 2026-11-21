@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 
 /**
  * Applies a DynamoDB ProjectionExpression to a result item, returning a new
@@ -41,13 +42,29 @@ final class ProjectionEvaluator {
         if (item == null || !hasProjection(projectionExpression)) {
             return (ObjectNode) item;
         }
+        return projector(projectionExpression, exprAttrNames).apply(item);
+    }
+
+    /**
+     * Validates and reads the expression once and returns a function that projects an item
+     * as {@link #project} does, for a read that projects every item it returns.
+     */
+    static Function<JsonNode, ObjectNode> projector(String projectionExpression, JsonNode exprAttrNames) {
+        if (!hasProjection(projectionExpression)) {
+            return item -> (ObjectNode) item;
+        }
         validateExpression(projectionExpression, exprAttrNames);
         PathTrie root = new PathTrie();
         for (List<Token> path : readPaths(projectionExpression)) {
             root.insert(resolvePath(path, exprAttrNames));
         }
-        ObjectNode projected = projectMapEntries(item, root);
-        return projected != null ? projected : MAPPER.createObjectNode();
+        return item -> {
+            if (item == null) {
+                return null;
+            }
+            ObjectNode projected = projectMapEntries(item, root);
+            return projected != null ? projected : MAPPER.createObjectNode();
+        };
     }
 
     /**

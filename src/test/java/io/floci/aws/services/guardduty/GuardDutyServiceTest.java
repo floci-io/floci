@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -53,6 +54,47 @@ class GuardDutyServiceTest {
                 detector.getServiceRole());
         assertEquals(detector.getCreatedAt(), detector.getUpdatedAt());
         assertNull(detector.getFeatures());
+    }
+
+    /**
+     * IAM's lookup reads the tags of the detector the ARN names, as the tag calls leave them, and nothing for another
+     * account's, another Region's or an unknown detector, or an ARN of another service.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheDetectorTheArnNames() throws Exception {
+        Detector detector = service.createDetector(REGION, ACCOUNT,
+                request("{\"enable\":true,\"tags\":{\"team\":\"web\"}}"));
+        String arn = "arn:aws:guardduty:" + REGION + ":" + ACCOUNT + ":detector/" + detector.getId();
+        service.tagResource(arn, Map.of("team", "data", "env", "dev"));
+        service.untagResource(arn, List.of("env"));
+
+        assertEquals("guardduty", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertTrue(service.storedTags(arn.replace(ACCOUNT, "111122223333")).isEmpty());
+        assertTrue(service.storedTags(arn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(arn.replace(detector.getId(), "missing")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:securityhub:us-east-1:000000000000:hub/default").isEmpty());
+    }
+
+    /**
+     * A detector stored before storage was account-aware is read in place, the lookup migrating nothing, and an ARN of
+     * an account other than the request's reads nothing.
+     */
+    @Test
+    void storedTagsReadAPreAccountAwareDetectorInPlace() throws Exception {
+        InMemoryStorage<String, Detector> raw = new InMemoryStorage<>();
+        GuardDutyService legacyState = new GuardDutyService(new AccountAwareStorageBackend<>(raw, null, ACCOUNT),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        Detector detector = legacyState.createDetector(REGION, ACCOUNT,
+                request("{\"enable\":true,\"tags\":{\"team\":\"data\"}}"));
+        String key = REGION + "::" + detector.getId();
+        raw.put(key, raw.get(ACCOUNT + "/" + key).orElseThrow());
+        raw.delete(ACCOUNT + "/" + key);
+        String arn = "arn:aws:guardduty:" + REGION + ":" + ACCOUNT + ":detector/" + detector.getId();
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(arn));
+        assertTrue(legacyState.storedTags(arn.replace(ACCOUNT, "111122223333")).isEmpty());
+        assertEquals(Set.of(key), raw.keys());
     }
 
     @Test

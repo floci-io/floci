@@ -16,7 +16,7 @@ public class Queue {
     private String queueUrl;
     private String accountId;
     private Map<String, String> attributes;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private Instant createdTimestamp;
     private Instant lastModifiedTimestamp;
 

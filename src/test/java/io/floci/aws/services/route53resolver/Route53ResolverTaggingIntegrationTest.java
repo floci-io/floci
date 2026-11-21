@@ -1,6 +1,7 @@
 package io.floci.aws.services.route53resolver;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.Route53ResolverRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
@@ -9,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -26,7 +26,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class Route53ResolverTaggingIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/route53resolver/aws4_request";
     private static final String OTHER_ACCOUNT_AUTH =
@@ -42,14 +41,7 @@ class Route53ResolverTaggingIntegrationTest {
     }
 
     private static ValidatableResponse call(String auth, String action, String body) {
-        return given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver." + action)
-            .header("Authorization", auth)
-            .body(body)
-        .when()
-            .post("/")
-        .then();
+        return Route53ResolverRequests.call(action, body, auth);
     }
 
     private static String createEndpoint(String tagsJson) {

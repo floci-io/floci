@@ -3,9 +3,16 @@ package io.floci.aws.services.lambda;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.PartitionCleanup;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.lambda.LambdaClient;
+import software.amazon.awssdk.services.lambda.model.PublishLayerVersionResponse;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -22,6 +29,20 @@ public final class LambdaLayerFixtures {
             zip.closeEntry();
         }
         return bytes.toByteArray();
+    }
+
+    public static PublishLayerVersionResponse publishLayerVersion(
+            LambdaClient client, String name, String account, Region region, URI endpoint, PartitionCleanup cleanup)
+            throws IOException {
+        byte[] archive = layerArchive();
+        PublishLayerVersionResponse published = client.publishLayerVersion(request -> request.layerName(name)
+                .content(content -> content.zipFile(SdkBytes.fromByteArray(archive))));
+        cleanup.register(() -> {
+            try (LambdaClient owner = AwsTestClients.create(LambdaClient.builder(), account, region, endpoint)) {
+                owner.deleteLayerVersion(request -> request.layerName(name).versionNumber(published.version()));
+            }
+        });
+        return published;
     }
 
     public static LambdaLayerService accountScopedService(

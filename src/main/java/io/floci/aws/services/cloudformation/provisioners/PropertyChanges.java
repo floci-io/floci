@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.services.cloudformation.CfnCreateOnlyProperties;
 
 import java.util.Collections;
@@ -75,13 +76,14 @@ public record PropertyChanges(Map<String, PropertyChange> byName, boolean requir
                                           JsonNode priorProperties, JsonNode properties,
                                           JsonNode comparedPrior, JsonNode comparedCurrent,
                                           Boolean engineReplacement) {
+        boolean currentIsObject = properties != null && properties.isObject();
+        // A dropped Properties block removes every property in it, as the engine reads it.
         boolean replaces = engineReplacement != null
                 ? engineReplacement
                 : update && resourceType != null && priorProperties != null && priorProperties.isObject()
-                        && properties != null && properties.isObject()
-                        && CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, priorProperties, properties);
+                        && CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, priorProperties,
+                                currentIsObject ? properties : JsonNodeFactory.instance.objectNode());
         Map<String, PropertyChange> changes = new LinkedHashMap<>();
-        boolean currentIsObject = properties != null && properties.isObject();
         if (!update || priorProperties == null || !priorProperties.isObject()) {
             if (currentIsObject) {
                 properties.fieldNames().forEachRemaining(name -> changes.put(name,

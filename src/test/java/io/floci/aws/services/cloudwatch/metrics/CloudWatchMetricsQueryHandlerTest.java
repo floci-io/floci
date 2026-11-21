@@ -8,8 +8,12 @@ import io.floci.aws.services.cloudwatch.metricstreams.CloudWatchMetricStreamsSer
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,8 +25,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,6 +50,186 @@ class CloudWatchMetricsQueryHandlerTest {
             metricsService, mock(CloudWatchDashboardsService.class),
             mock(CloudWatchMetricStreamsService.class));
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aLargeMixedBatchDoesNotRescanEveryFormFieldForEachDatum(boolean weighted) {
+        MultivaluedMap<String, String> params = spy(new MultivaluedHashMap<String, String>());
+        params.putSingle("Namespace", "LargeBatch");
+        for (String list : List.of("MetricData", "EntityMetricData.member.2.MetricData")) {
+            for (int index = 1; index <= 500; index++) {
+                String prefix = list + ".member." + index + ".";
+                params.putSingle(prefix + "MetricName", "Metric" + index);
+                if (weighted) {
+                    params.putSingle(prefix + "Values.member.1", Integer.toString(index));
+                    params.putSingle(prefix + "Counts.member.1", "2");
+                } else {
+                    params.putSingle(prefix + "Value", Integer.toString(index));
+                }
+            }
+        }
+
+        handler.handle("PutMetricData", params, REGION);
+
+        ArgumentCaptor<List<MetricDatum>> datums = ArgumentCaptor.forClass(List.class);
+        verify(metricsService).putMetricData(eq("LargeBatch"), datums.capture(), eq(REGION));
+        assertEquals(1000, datums.getValue().size());
+        assertEquals(500.0, datums.getValue().getLast().getValue());
+        if (weighted) {
+            assertEquals(2.0, datums.getValue().getLast().getSampleCount());
+            assertEquals(1000.0, datums.getValue().getLast().getSum());
+        }
+        // Bound whole-map scans independently of the number of datums; no timing assertion.
+        verify(params, atMost(3)).keySet();
+        verify(params, atMost(3)).entrySet();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MetricData", "EntityMetricData.member.2.MetricData"})
+    void anUnknownStatisticMemberStillRequiresTheCompleteStatisticSet(String list) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        String prefix = list + ".member.1.";
+        params.putSingle("Namespace", "InvalidValues");
+        params.putSingle(prefix + "MetricName", "Partial");
+        params.putSingle(prefix + "StatisticValues.Unknown", "1");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The parameter " + prefix + "StatisticValues.SampleCount is required.", error.getMessage());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MetricData", "EntityMetricData.member.2.MetricData"})
+    void sparseValidMembersAreParsedInNumericOrder(String list) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "SparseBatch");
+        for (int index : new int[]{999999999, 3, 1}) {
+            params.putSingle(list + ".member." + index + ".MetricName", "Metric" + index);
+            params.putSingle(list + ".member." + index + ".Value", "1");
+        }
+
+        handler.handle("PutMetricData", params, REGION);
+
+        ArgumentCaptor<List<MetricDatum>> datums = ArgumentCaptor.forClass(List.class);
+        verify(metricsService).putMetricData(eq("SparseBatch"), datums.capture(), eq(REGION));
+        assertEquals(List.of("Metric1", "Metric3", "Metric999999999"),
+                datums.getValue().stream().map(MetricDatum::getMetricName).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MetricData", "EntityMetricData.member.2.MetricData"})
+    void invalidStatisticsAfterAGapRejectTheWholeBatch(String list) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "SparseBatch");
+        params.putSingle(list + ".member.1.MetricName", "Good");
+        params.putSingle(list + ".member.1.Value", "1");
+        String prefix = list + ".member.3.";
+        params.putSingle(prefix + "MetricName", "Invalid");
+        params.putSingle(prefix + "StatisticValues.SampleCount", "2");
+        params.putSingle(prefix + "StatisticValues.Sum", "six");
+        params.putSingle(prefix + "StatisticValues.Minimum", "1");
+        params.putSingle(prefix + "StatisticValues.Maximum", "2");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MetricData", "EntityMetricData.member.2.MetricData"})
+    void aMissingMetricNameAfterAGapRejectsTheWholeBatch(String list) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "SparseBatch");
+        params.putSingle(list + ".member.1.MetricName", "Good");
+        params.putSingle(list + ".member.1.Value", "1");
+        params.putSingle(list + ".member.3.Value", "2");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The parameter " + list + ".member.3.MetricName is required.", error.getMessage());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MetricData.member.9999999999", "EntityMetricData.member.2.MetricData.member.9999999999",
+            "EntityMetricData.member.9999999999.MetricData.member.1"})
+    void oversizedMemberIndexesRejectTheWholeBatchWithoutIntegerOverflow(String prefix) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "SparseBatch");
+        params.putSingle("MetricData.member.1.MetricName", "Good");
+        params.putSingle("MetricData.member.1.Value", "1");
+        params.putSingle(prefix + ".MetricName", "TooLarge");
+        params.putSingle(prefix + ".Value", "2");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    private static MultivaluedMap<String, String> statisticRequest() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "InvalidValues");
+        params.putSingle("MetricData.member.1.MetricName", "First");
+        params.putSingle("MetricData.member.1.Value", "1");
+        params.putSingle("MetricData.member.2.MetricName", "Invalid");
+        params.putSingle("MetricData.member.2.StatisticValues.SampleCount", "2");
+        params.putSingle("MetricData.member.2.StatisticValues.Sum", "6");
+        params.putSingle("MetricData.member.2.StatisticValues.Minimum", "2");
+        params.putSingle("MetricData.member.2.StatisticValues.Maximum", "4");
+        return params;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SampleCount", "Sum", "Minimum", "Maximum"})
+    void incompleteStatisticsRejectTheWholeBatch(String missing) {
+        MultivaluedMap<String, String> params = statisticRequest();
+        String path = "MetricData.member.2.StatisticValues." + missing;
+        params.remove(path);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The parameter " + path + " is required.", error.getMessage());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "not-a-number", "NaN", "Infinity", "1e109", "-1e109"})
+    void malformedNumericValuesAreNotStoredAsZero(String value) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "InvalidValues");
+        params.putSingle("MetricData.member.1.MetricName", "Invalid");
+        params.putSingle("MetricData.member.1.Value", value);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
+    @Test
+    void scalarAndStatisticsAreNotSilentlyReducedToStatistics() {
+        MultivaluedMap<String, String> params = statisticRequest();
+        params.putSingle("MetricData.member.2.Value", "7");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", params, REGION));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("InvalidParameterCombinationException", error.jsonType());
+        verify(metricsService, never()).putMetricData(anyString(), any(), anyString());
+    }
+
     @Test
     void putMetricAlarmDefaultsActionsEnabledToTrueWhenOmitted() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
@@ -53,7 +240,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertTrue(captor.getValue().isActionsEnabled());
     }
 
@@ -68,7 +255,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertFalse(captor.getValue().isActionsEnabled());
     }
 
@@ -86,7 +273,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertEquals(3, captor.getValue().getEvaluationPeriods());
         assertNull(captor.getValue().getDatapointsToAlarm());
     }
@@ -103,8 +290,44 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertEquals(2, captor.getValue().getDatapointsToAlarm());
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {"abc, TestAlarm", "60.0, TestAlarm", "' ', TestAlarm", "abc, -"})
+    void aValueThatIsNoIntegerIsAnInvalidParameterValue(String interval, String name) {
+        MultivaluedMap<String, String> params = alarmParams(name, interval);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", params, REGION));
+
+        assertEquals("InvalidParameterValue", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        verify(metricsService, never()).putMetricAlarm(any(), anyString(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {"-, -", "'', -", "60, 60", "' 60 ', 60",
+            "99999999999999999999, 99999999999999999999"})
+    void anIntegerReachesTheServiceAndAnEmptyValueIsNone(String interval, String expected) {
+        handler.handle("PutMetricAlarm", alarmParams("TestAlarm", interval), REGION);
+
+        verify(metricsService).putMetricAlarm(any(MetricAlarm.class), eq(REGION),
+                expected == null ? isNull() : eq(new BigInteger(expected)));
+    }
+
+    private static MultivaluedMap<String, String> alarmParams(String name, String interval) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        if (name != null) {
+            params.putSingle("AlarmName", name);
+        }
+        params.putSingle("MetricName", "M");
+        params.putSingle("Namespace", "NS");
+        if (interval != null) {
+            params.putSingle("EvaluationInterval", interval);
+        }
+        return params;
     }
 
     // The JSON handler forwards the Unit filter now; this pins the Query path to the same

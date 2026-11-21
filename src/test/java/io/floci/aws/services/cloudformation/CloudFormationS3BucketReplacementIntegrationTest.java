@@ -1,11 +1,19 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.executeAndAwaitUpdate;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.replacement;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -154,6 +162,69 @@ class CloudFormationS3BucketReplacementIntegrationTest {
         deleteStack(stackName);
     }
 
+    /**
+     * In the account regional namespace the bucket is named {@code <prefix>-<account>-<region>-an}
+     * and that name is its physical id and {@code Ref}; changing the prefix replaces the bucket and
+     * deletes the one under the old derived name once the update commits.
+     */
+    @Test
+    void anAccountRegionalPrefixNamesTheBucketAndChangingItReplacesTheBucket() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "s3-nsp-" + suffix;
+        String oldBucket = "nsp-a-" + suffix + "-000000000000-us-east-1-an";
+        String newBucket = "nsp-b-" + suffix + "-000000000000-us-east-1-an";
+
+        createStack(stackName, prefixTemplate("\"BucketNamePrefix\": \"nsp-a-" + suffix + "\", "
+                + "\"BucketNamespace\": \"account-regional\""));
+        assertEquals(oldBucket, output(describeStack(stackName), "BucketRef"));
+        assertBucketPresent(oldBucket);
+
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            createUpdateChangeSet(client, stackName, "prefix", prefixTemplate("\"BucketNamePrefix\": \"nsp-b-"
+                    + suffix + "\", \"BucketNamespace\": \"account-regional\""));
+            assertEquals(List.of("True"), replacement(client, stackName, "prefix", "Bucket"));
+            executeAndAwaitUpdate(client, stackName, "prefix");
+        }
+
+        assertEquals(newBucket, output(describeStack(stackName), "BucketRef"));
+        assertBucketPresent(newBucket);
+        assertBucketMissing(oldBucket);
+
+        deleteStack(stackName);
+    }
+
+    /**
+     * A prefix together with {@code BucketName}, a prefix without the account regional namespace
+     * and a prefix with an uppercase letter are all rejected: the resource fails and the stack
+     * rolls back. S3 names "can only consist of lowercase letters, numbers, periods (.), and
+     * hyphens (-)".
+     */
+    @Test
+    void aPrefixWithABucketNameOrOutsideTheAccountRegionalNamespaceFailsTheCreate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        List<String> invalid = List.of(
+                "\"BucketName\": \"nsp-both-" + suffix + "\", \"BucketNamePrefix\": \"nsp-both\", "
+                        + "\"BucketNamespace\": \"account-regional\"",
+                "\"BucketNamePrefix\": \"nsp-global-" + suffix + "\"",
+                "\"BucketNamePrefix\": \"Repl-Upper\", \"BucketNamespace\": \"account-regional\"");
+        for (int i = 0; i < invalid.size(); i++) {
+            String stackName = "s3-nsp-bad-" + i + "-" + suffix;
+            sendCreateStack(stackName, prefixTemplate(invalid.get(i)));
+            CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
+            deleteStack(stackName);
+        }
+    }
+
+    private static String prefixTemplate(String properties) {
+        return """
+            {
+              "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": { %s } } },
+              "Outputs": { "BucketRef": { "Value": { "Ref": "Bucket" } } }
+            }
+            """.formatted(properties);
+    }
+
     private static String inPlaceTemplate(String bucketName, String versioningStatus, String extraResources) {
         return """
             {
@@ -182,11 +253,15 @@ class CloudFormationS3BucketReplacementIntegrationTest {
     }
 
     private static void createStack(String stackName, String body) {
+        sendCreateStack(stackName, body);
+        await(stackName, "CREATE_COMPLETE");
+    }
+
+    private static void sendCreateStack(String stackName, String body) {
         given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack").formParam("Version", "2010-05-15")
             .formParam("StackName", stackName).formParam("TemplateBody", body)
         .when().post("/").then().statusCode(200);
-        await(stackName, "CREATE_COMPLETE");
     }
 
     private static void updateStack(String stackName, String body) {

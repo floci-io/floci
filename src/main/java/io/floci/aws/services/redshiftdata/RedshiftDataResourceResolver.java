@@ -103,8 +103,9 @@ class RedshiftDataResourceResolver {
         RedshiftServerlessService.WorkgroupTarget workgroup =
                 serverlessService.getWorkgroupTarget(request.get("WorkgroupName").asText(), region);
         String accountId = AwsArnUtils.parse(workgroup.arn()).accountId();
+        String backendKey = accountId + ":" + RedshiftServerlessRuntime.backendId(region, workgroup.workgroupName());
         SpectrumSession spectrum = new SpectrumSession(accountId,
-                accountId + ":" + RedshiftServerlessRuntime.backendId(region, workgroup.workgroupName()), database,
+                backendKey, database,
                 workgroup.iamRoleArns(), false);
         if (!database.equals(workgroup.database())) {
             throw validation("Database " + database + " does not exist in workgroup " + workgroup.workgroupName()
@@ -116,7 +117,6 @@ class RedshiftDataResourceResolver {
         int port = hasProxy ? proxyPort : workgroup.port();
         if (!hasText(request, "SecretArn")) {
             String iamUser = resolveIamDbUser();
-            String backendKey = accountId + ":" + RedshiftServerlessRuntime.backendId(region, workgroup.workgroupName());
             DbIdentity identity = new DbIdentity(iamUser, true, List.of());
             return new DatabaseTarget(workgroup.arn(), host, port, database,
                     workgroup.masterUsername(), workgroup.masterPassword(), spectrum, null,
@@ -129,7 +129,7 @@ class RedshiftDataResourceResolver {
             user = workgroup.masterUsername();
         }
         return new DatabaseTarget(workgroup.arn(), host, port, database,
-                user, creds.password(), spectrum, null, user, workgroup.workgroupName());
+                user, creds.password(), spectrum, null, user, workgroup.workgroupName(), null, backendKey);
     }
 
     private String resolveIamDbUser() {

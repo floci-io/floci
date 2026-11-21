@@ -39,6 +39,11 @@ public class EmrCluster {
     private boolean autoTerminate;
     private boolean unhealthyNodeReplacement;
     private boolean keepJobFlowAliveWhenNoSteps;
+    // RunJobFlow's SessionEnabled: whether the cluster takes Spark Connect sessions.
+    private boolean sessionEnabled;
+    // Whether its security configuration turned on runtime roles as it was created; null for a cluster stored before
+    // Floci kept it.
+    private Boolean runtimeRoleEnabled;
     private int normalizedInstanceHours;
     private int stepConcurrencyLevel = 1;
     private int ebsRootVolumeSize;
@@ -53,6 +58,10 @@ public class EmrCluster {
     private String bootstrapImage;
     // Whether that image holds what a node needs to run YARN, which an image from an earlier Floci may not; Floci's own.
     private boolean bootstrapImageRunsYarn;
+    // The image each core or task node's own bootstrap left, which it runs from, by node id, and those of the nodes the
+    // cluster no longer has, which one being decommissioned may still run from, until the cluster ends; Floci's own.
+    private Map<String, String> nodeBootstrapImages = new LinkedHashMap<>();
+    private List<String> retiredBootstrapImages = new ArrayList<>();
     // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
     // own, as the API has none.
     private boolean storageCreated;
@@ -70,7 +79,7 @@ public class EmrCluster {
     private Instant terminatingDateTime;
     // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
     private List<EmrErrorDetail> errorDetails = new ArrayList<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
     private List<EmrInstanceFleet> instanceFleets = new ArrayList<>();
@@ -187,6 +196,16 @@ public class EmrCluster {
     public String getBootstrapImage() { return bootstrapImage; }
     public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
 
+    public Map<String, String> getNodeBootstrapImages() { return nodeBootstrapImages; }
+    public void setNodeBootstrapImages(Map<String, String> nodeBootstrapImages) {
+        this.nodeBootstrapImages = nodeBootstrapImages != null ? nodeBootstrapImages : new LinkedHashMap<>();
+    }
+
+    public List<String> getRetiredBootstrapImages() { return retiredBootstrapImages; }
+    public void setRetiredBootstrapImages(List<String> retiredBootstrapImages) {
+        this.retiredBootstrapImages = retiredBootstrapImages != null ? retiredBootstrapImages : new ArrayList<>();
+    }
+
     public boolean isBootstrapImageRunsYarn() { return bootstrapImageRunsYarn; }
     public void setBootstrapImageRunsYarn(boolean bootstrapImageRunsYarn) {
         this.bootstrapImageRunsYarn = bootstrapImageRunsYarn;
@@ -233,4 +252,10 @@ public class EmrCluster {
 
     public List<EmrInstanceFleet> getInstanceFleets() { return instanceFleets; }
     public void setInstanceFleets(List<EmrInstanceFleet> instanceFleets) { this.instanceFleets = instanceFleets; }
+
+    public boolean isSessionEnabled() { return sessionEnabled; }
+    public void setSessionEnabled(boolean sessionEnabled) { this.sessionEnabled = sessionEnabled; }
+
+    public Boolean getRuntimeRoleEnabled() { return runtimeRoleEnabled; }
+    public void setRuntimeRoleEnabled(Boolean runtimeRoleEnabled) { this.runtimeRoleEnabled = runtimeRoleEnabled; }
 }

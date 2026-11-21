@@ -292,6 +292,13 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
         String resourceId = ctx.path("resourceId").asText(null);
         assertNotNull(resourceId, "requestContext.resourceId must be non-null");
         assertFalse(resourceId.isEmpty(), "requestContext.resourceId must be non-empty");
+
+        assertEquals("localhost", ctx.path("domainName").asText(null));
+        assertEquals("localhost", ctx.path("domainPrefix").asText(null));
+        assertFalse(ctx.path("extendedRequestId").asText("").isEmpty(),
+                "requestContext.extendedRequestId must be non-empty");
+        assertFalse(ctx.path("requestTime").asText("").isEmpty(), "requestContext.requestTime must be non-empty");
+        assertTrue(ctx.path("requestTimeEpoch").asLong() > 0, "requestContext.requestTimeEpoch must be set");
     }
 
     @Test

@@ -1,14 +1,22 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
+import io.floci.aws.services.athena.model.QueryExecutionContext;
 import io.floci.aws.services.athena.model.QueryExecutionState;
 import io.floci.aws.services.athena.model.ResultConfiguration;
 import io.floci.aws.services.athena.model.ResultSet;
+import io.floci.aws.services.athena.model.WorkGroupTag;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
+import io.floci.aws.services.glue.model.Column;
+import io.floci.aws.services.glue.model.StorageDescriptor;
+import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.vertx.core.Vertx;
@@ -23,6 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -30,6 +39,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -41,6 +52,9 @@ class AthenaServiceTest {
 
     private Vertx vertx;
     private FlociDuckClient duckClient;
+    private GlueService glueService;
+    private GlueViewDdlBuilder ddlBuilder;
+    private AthenaIcebergStatements icebergStatements;
     private S3Service s3Service;
     private AthenaService service;
 
@@ -53,10 +67,11 @@ class AthenaServiceTest {
         doAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"))
                 .when(storageFactory).create(anyString(), anyString(), any());
 
-        GlueService glueService = mock(GlueService.class);
+        glueService = mock(GlueService.class);
         when(glueService.getTables(anyString())).thenReturn(List.of());
         s3Service = mock(S3Service.class);
-        GlueViewDdlBuilder ddlBuilder = mock(GlueViewDdlBuilder.class);
+        ddlBuilder = mock(GlueViewDdlBuilder.class);
+        icebergStatements = mock(AthenaIcebergStatements.class);
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -66,12 +81,32 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class));
+                config, vertx, ddlBuilder, mock(RegionResolver.class), icebergStatements,
+                mock(IamEnforcementFilter.class));
     }
 
     @AfterEach
     void tearDown() {
         vertx.close();
+    }
+
+    @Test
+    void storedTagsReadTheWorkgroupOrTheDataCatalogTheArnNamesInItsAccountAndRegion() {
+        CreateWorkGroupRequest request = new CreateWorkGroupRequest();
+        request.setName("analytics");
+        request.setTags(List.of(new WorkGroupTag("team", "data")));
+        service.createWorkGroup(request, "us-east-1");
+        service.createDataCatalog("us-east-1", "lake", "LAMBDA", null, null, List.of(new WorkGroupTag("team", "lake")));
+        String arn = "arn:aws:athena:us-east-1:000000000000:";
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn + "workgroup/analytics"));
+        assertEquals(Map.of("team", "lake"), service.storedTags(arn + "datacatalog/lake"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/primary"));
+        assertEquals(Map.of(), service.storedTags(arn + "datacatalog/AwsDataCatalog"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/analytics/session/s-1"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-east-1:111111111111:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-west-2:000000000000:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws-cn:athena:us-east-1:000000000000:workgroup/analytics"));
     }
 
     @Test
@@ -193,6 +228,36 @@ class AthenaServiceTest {
                         .map(ResultSet.ColumnInfo::getType).toList());
     }
 
+    /**
+     * Athena (engine v3) renders a timestamp column as {@code 2026-03-14 09:30:00.000}; DuckDB writes
+     * {@code 2026-03-14 09:30:00}. Every timestamp variant is padded to milliseconds, a longer
+     * fraction is kept, and other types, a timestamp with a time zone among them, are left alone.
+     */
+    @Test
+    void getQueryResultsRendersTimestampsWithAtLeastMilliseconds() throws Exception {
+        String query = "SELECT ts, ts_ms, ts_us, ts_tz, s FROM times";
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
+                Map.of("column_name", "ts", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
+                Map.of("column_name", "ts_us", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_tz", "column_type", "TIMESTAMP WITH TIME ZONE"),
+                Map.of("column_name", "s", "column_type", "VARCHAR")));
+
+        ResultSet results = results(query, "ts,ts_ms,ts_us,ts_tz,s\n"
+                + "2026-03-14 09:30:00,2026-11-12 20:22:54.3,2026-11-12 20:22:54.385678,"
+                + "2026-03-14 09:30:00+00,2026-03-14 09:30:00\n"
+                + ",infinity,,,\n");
+
+        assertEquals(List.of(
+                List.of("ts", "ts_ms", "ts_us", "ts_tz", "s"),
+                List.of("2026-03-14 09:30:00.000", "2026-11-12 20:22:54.300", "2026-11-12 20:22:54.385678",
+                        "2026-03-14 09:30:00+00", "2026-03-14 09:30:00"),
+                List.of("", "infinity", "", "", "")),
+                results.getRows().stream()
+                        .map(row -> row.getData().stream().map(ResultSet.Datum::getVarCharValue).toList())
+                        .toList());
+    }
+
     @Test
     void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
         when(duckClient.query(anyString(), any(), any())).thenThrow(new IllegalStateException("not describable"));
@@ -201,7 +266,113 @@ class AthenaServiceTest {
                 .map(ResultSet.ColumnInfo::getType).toList());
     }
 
+    @Test
+    void aQueryHoldingASecondStatementIsRejectedBeforeAnExecutionExists() {
+        String twoInserts = "INSERT INTO t VALUES (3); INSERT INTO t VALUES (4)";
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.startQueryExecution(twoInserts, "primary", null, null));
+
+        assertEquals("InvalidRequestException", rejected.getErrorCode());
+        assertEquals("Only one sql statement is allowed. Got: " + twoInserts, rejected.getMessage());
+        assertEquals(Map.of("AthenaErrorCode", "MALFORMED_QUERY"), rejected.getExtendedData());
+        assertEquals(List.of(), service.listQueryExecutions());
+        verifyNoInteractions(duckClient);
+    }
+
+    @Test
+    void aQueryIsRecordedWithoutTheSemicolonsAroundItAndRunsWithItsLastLineEnded() throws Exception {
+        String id = service.startQueryExecution("\n;SELECT 1 AS a -- done\n;\n", "primary", null,
+                new ResultConfiguration("s3://athena-results/"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        assertEquals("SELECT 1 AS a -- done", service.getQueryExecution(id).getQuery());
+        verify(duckClient).execute(eq("SELECT 1 AS a -- done\n"), any(), any(), any());
+    }
+
+    @Test
+    void aQueryRunsWithItsExecutionParametersBoundAndIsRecordedWithItsPlaceholders() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS region, ? AS n", "primary", null,
+                new ResultConfiguration("s3://athena-results/"), List.of("'eu'", "10"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        assertEquals("SELECT ? AS region, ? AS n", service.getQueryExecution(id).getQuery());
+        verify(duckClient).execute(eq("SELECT 'eu' AS region, 10 AS n\n"), any(), any(), any());
+    }
+
+    @Test
+    void aParameterCountThatDoesNotMatchFailsTheQueryWithAthenasMessage() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS a, ? AS b", "primary", null, null, List.of("1"));
+        awaitState(id, QueryExecutionState.FAILED);
+
+        assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1",
+                service.getQueryExecution(id).getStatus().getStateChangeReason());
+        verifyNoInteractions(duckClient);
+    }
+
+    /**
+     * A value naming a column is bound as written (a TODO at {@code usingListEntry}), so the projection checks read
+     * the bound statement: {@code tenant = ?} would pass as a static equality, while {@code tenant = (tenant || '')}
+     * filters nothing and fails as written in place would. A string holding the column's name is a
+     * literal, and passes.
+     */
+    @Test
+    void anInjectedPartitionColumnIsCheckedAgainstTheBoundValue() throws Exception {
+        Table events = new Table();
+        events.setName("audit_events");
+        StorageDescriptor storage = new StorageDescriptor();
+        storage.setLocation("s3://lake/audit_events/");
+        storage.setColumns(List.of(column("id")));
+        events.setStorageDescriptor(storage);
+        events.setPartitionKeys(List.of(column("tenant")));
+        events.setParameters(Map.of("projection.enabled", "true", "projection.tenant.type", "injected"));
+        when(glueService.getTables("analytics")).thenReturn(List.of(events));
+        String query = "SELECT id FROM audit_events WHERE tenant = ?";
+
+        String unfiltered = service.startQueryExecution(query, "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("tenant || ''"));
+        awaitState(unfiltered, QueryExecutionState.FAILED);
+        assertTrue(service.getQueryExecution(unfiltered).getStatus().getStateChangeReason()
+                .startsWith("CONSTRAINT_VIOLATION: For the injected projected partition column tenant"));
+        verifyNoInteractions(duckClient);
+
+        String filtered = service.startQueryExecution(query, "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("'tenant'"));
+        awaitState(filtered, QueryExecutionState.SUCCEEDED);
+        verify(duckClient).execute(eq("SELECT id FROM audit_events WHERE tenant = 'tenant'\n"), any(), any(), any());
+    }
+
+    /** A value bound as an expression can name a table the query doesn't, and its view is set up all the same. */
+    @Test
+    void theEngineIsSetUpForTheTablesTheBoundStatementNames() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS n", "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("(SELECT count(*) FROM events)"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        String bound = "SELECT ((SELECT count(*) FROM events)) AS n";
+        verify(ddlBuilder).build("analytics", bound);
+        verify(icebergStatements).s3TablesAttachment(eq(bound), any(), eq("analytics"));
+        verify(duckClient).execute(eq(bound + "\n"), any(), any(), any());
+    }
+
+    private static QueryExecutionContext context(String database) {
+        QueryExecutionContext context = new QueryExecutionContext();
+        context.setDatabase(database);
+        return context;
+    }
+
+    private static Column column(String name) {
+        Column column = new Column();
+        column.setName(name);
+        column.setType("string");
+        return column;
+    }
+
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
+        return results(query, csv).getMetadata().getColumnInfo();
+    }
+
+    private ResultSet results(String query, String csv) throws Exception {
         String id = service.startQueryExecution(query, "primary", null,
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
@@ -211,7 +382,7 @@ class AthenaServiceTest {
         when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
         when(s3Service.getObject("athena-results", key)).thenReturn(result);
 
-        return service.getQueryResults(id).getMetadata().getColumnInfo();
+        return service.getQueryResults(id);
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {

@@ -43,6 +43,7 @@ services:
       - { path: services/paymentcryptography/PaymentCryptographyCryptoController.java, mode: rest }
       - { path: services/paymentcryptography/PaymentCryptographyPinController.java, mode: rest }
       - { path: services/paymentcryptography/PaymentCryptographyCardController.java, mode: rest }
+      - { path: services/paymentcryptography/PaymentCryptographyKekValidationController.java, mode: rest }
     exclude_actions:
       - GenerateMacEmvPinChange
   - service: applicationautoscaling
@@ -271,6 +272,19 @@ services:
     doc: docs/services/emr.md
     sources:
       - { path: services/emr/EmrHandler.java, mode: switch }
+  - service: emr-containers
+    doc: docs/services/emr-containers.md
+    sources:
+      - { path: services/emrcontainers/EmrContainersController.java, mode: rest }
+      - { path: core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: eventbridge
     doc: docs/services/eventbridge.md
     sources:

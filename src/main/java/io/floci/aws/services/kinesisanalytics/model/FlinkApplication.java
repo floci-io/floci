@@ -98,7 +98,7 @@ public class FlinkApplication {
     // Resource tags. Real AWS never echoes these in ApplicationDetail (CreateApplication /
     // DescribeApplication) — only ListTagsForResource returns them — so this is bookkeeping only,
     // like containerId/accountId above, not part of the wire response the handler builds.
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     // ApplicationConfiguration.EnvironmentProperties.PropertyGroups, keyed by PropertyGroupId (the
     // key a Flink app looks it up by via KinesisAnalyticsRuntime.getApplicationProperties()). Echoed

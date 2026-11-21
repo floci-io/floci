@@ -1,6 +1,6 @@
 package io.floci.aws.services.iot;
 
-import io.floci.aws.testing.IotSettingsProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
@@ -14,11 +14,11 @@ import static org.hamcrest.Matchers.equalTo;
  * Floci evaluates is rejected with {@code SqlParseException}, while one inside it is still accepted.
  * Off, the default, such a rule is stored and fires on every matching topic with the whole payload.
  *
- * <p>The setting comes from {@link IotSettingsProfile}, which this class shares with the other IoT
+ * <p>The setting comes from {@link SidecarContainersProfile}, which this class shares with the other IoT
  * class that changes a default.
  */
 @QuarkusTest
-@TestProfile(IotSettingsProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class IotTopicRuleSqlStrictIntegrationTest {
 
     @Test

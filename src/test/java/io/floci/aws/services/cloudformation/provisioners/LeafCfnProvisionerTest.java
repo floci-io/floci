@@ -100,8 +100,8 @@ class LeafCfnProvisionerTest {
 
             assertEquals("k-123", r.getPhysicalId(), "Ref is the key id (schema primaryIdentifier)");
             // aws-kms-key.json readOnlyProperties
-            assertEquals(Map.of("Arn", "arn:aws:kms:us-east-1:000000000000:key/k-123", "KeyId", "k-123"),
-                    r.getAttributes());
+            assertEquals(Map.of("Arn", "arn:aws:kms:us-east-1:000000000000:key/k-123", "KeyId", "k-123",
+                    KmsCfnProvisioner.TAG_KEYS_ATTR, "[\"env\"]"), r.getAttributes());
         }
 
         @Test
@@ -138,7 +138,8 @@ class LeafCfnProvisionerTest {
 
             verify(kms, never()).describeKey(anyString(), anyString());
             assertEquals("k-real", r.getPhysicalId());
-            assertEquals(Map.of("Arn", key.getArn(), "KeyId", "k-real"), r.getAttributes());
+            assertEquals(Map.of("Arn", key.getArn(), "KeyId", "k-real", KmsCfnProvisioner.TAG_KEYS_ATTR, "[]"),
+                    r.getAttributes());
         }
 
         @Test

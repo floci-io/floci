@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -49,8 +50,7 @@ class AutoScalingDetachLoadBalancersTest {
         verify(classic).deregisterInstances(REGION, "first", List.of("i-owned"));
         verify(classic).deregisterInstances(REGION, "second", List.of("i-owned"));
         verifyNoMoreInteractions(classic);
-        verify(targets).deregisterTargets(eq(REGION), eq("target-group"),
-                argThat(values -> values.size() == 1 && "i-owned".equals(values.getFirst().getId())));
+        verify(targets).deregisterTargets(eq(REGION), eq("target-group"), onlyTarget("i-owned"));
         assertEquals(List.of(retained), group.getInstances());
         assertEquals(2, group.getDesiredCapacity());
     }
@@ -120,8 +120,7 @@ class AutoScalingDetachLoadBalancersTest {
 
         service.detachInstances(REGION, "group", List.of("i-owned", "i-other-group"), false);
 
-        verify(targets).deregisterTargets(eq(REGION), eq("shared-target-group"),
-                argThat(values -> values.size() == 1 && "i-owned".equals(values.getFirst().getId())));
+        verify(targets).deregisterTargets(eq(REGION), eq("shared-target-group"), onlyTarget("i-owned"));
         assertEquals(List.of(retained), group.getInstances());
     }
 

@@ -1,0 +1,288 @@
+package io.floci.aws.services.cloudformation;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.CfnRequests;
+import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Provisions an {@code AWS::Events::Connection} through a CloudFormation stack and reads it back
+ * through the EventBridge API. {@code Ref} is the connection name; {@code Fn::GetAtt} gives
+ * {@code Arn}, {@code ArnForPolicy} and {@code SecretArn}. An {@code AWS::Events::ApiDestination}
+ * can take the connection's ARN, a description change updates the connection in place, a dropped
+ * description stays and an empty one clears it, dropped Kms and connectivity settings are cleared, dropping a property the service cannot clear is refused, a failed
+ * update rolls the connection back, and the stack delete removes the connection.
+ */
+@QuarkusTest
+class CloudFormationEventsConnectionIntegrationTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String EVENTS_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20261001/us-east-1/events/aws4_request";
+    private final List<String> stacks = new ArrayList<>();
+
+    @BeforeAll
+    static void configureContentTypes() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @AfterEach
+    void cleanUp() {
+        for (String stack : List.copyOf(stacks)) {
+            deleteStack(stack);
+        }
+    }
+
+    @Test
+    void createReadsBackThroughDescribeConnectionAndExposesTheAttributes() throws Exception {
+        String name = "orders-" + suffix();
+        String body = awaitComplete(createStack(template(connection(name, "orders connection"), false)),
+                "CREATE_COMPLETE");
+
+        assertEquals(name, output(body, "ConnectionRef"), "Ref is the connection name");
+        JsonPath connection = describeConnection(name).then().statusCode(200).extract().jsonPath();
+        assertEquals("API_KEY", connection.getString("AuthorizationType"));
+        assertEquals("AUTHORIZED", connection.getString("ConnectionState"));
+        assertEquals("orders connection", connection.getString("Description"));
+        assertEquals("Authorization", connection.getString("AuthParameters.ApiKeyAuthParameters.ApiKeyName"));
+        String arn = connection.getString("ConnectionArn");
+        assertEquals(arn, output(body, "ConnectionArn"), "GetAtt Arn is the connection ARN");
+        assertEquals(arn.substring(0, arn.lastIndexOf('/')), output(body, "ConnectionArnForPolicy"),
+                "GetAtt ArnForPolicy is the ARN without the trailing id");
+        assertEquals(connection.getString("SecretArn"), output(body, "ConnectionSecretArn"));
+    }
+
+    @Test
+    void anApiDestinationTakesTheConnectionArn() throws Exception {
+        String name = "orders-" + suffix();
+        String destination = "orders-dest-" + suffix();
+        String body = awaitComplete(createStack(template(connection(name, null), true, destination)),
+                "CREATE_COMPLETE");
+
+        String arn = describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("ConnectionArn");
+        assertEquals(arn, output(body, "ConnectionArn"));
+        assertEquals(arn, events("DescribeApiDestination", Map.of("Name", destination)).then().statusCode(200)
+                .extract().jsonPath().getString("ConnectionArn"), "the destination points at the real connection");
+    }
+
+    @Test
+    void aDescriptionChangeUpdatesTheConnectionInPlace() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, "first"), false));
+        String arn = output(awaitComplete(stack, "CREATE_COMPLETE"), "ConnectionArn");
+
+        updateStack(stack, template(connection(name, "second"), false));
+        String body = awaitComplete(stack, "UPDATE_COMPLETE");
+
+        assertEquals(arn, output(body, "ConnectionArn"), "an in-place update keeps the connection");
+        assertEquals("second", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("Description"));
+    }
+
+    /** A real AWS account leaves a dropped description as it is and clears an empty one. */
+    @Test
+    void aDroppedDescriptionStaysAndAnEmptyOneClears() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, "first"), false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+
+        updateStack(stack, template(connection(name, null), false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+        assertEquals("first", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("Description"));
+
+        updateStack(stack, template(connection(name, ""), false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+        assertNull(describeConnection(name).then().statusCode(200).extract().jsonPath().getString("Description"));
+    }
+
+    /** A real AWS account clears both when a template drops them. */
+    @Test
+    void aDroppedKmsKeyAndConnectivityParametersAreCleared() throws Exception {
+        String name = "orders-" + suffix();
+        Map<String, Object> full = connection(name, null);
+        full.put("KmsKeyIdentifier", "alias/orders");
+        full.put("InvocationConnectivityParameters", Map.of("ResourceParameters", Map.of(
+                "ResourceConfigurationArn",
+                "arn:aws:vpc-lattice:us-east-1:000000000000:resourceconfiguration/rcfg-0123456789abcdef0")));
+        String stack = createStack(template(full, false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+        JsonPath created = describeConnection(name).then().statusCode(200).extract().jsonPath();
+        assertEquals("alias/orders", created.getString("KmsKeyIdentifier"));
+        assertFalse(created.getMap("InvocationConnectivityParameters").isEmpty());
+
+        updateStack(stack, template(connection(name, null), false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+
+        JsonPath updated = describeConnection(name).then().statusCode(200).extract().jsonPath();
+        assertNull(updated.getString("KmsKeyIdentifier"));
+        assertNull(updated.get("InvocationConnectivityParameters"));
+    }
+
+    @Test
+    void droppingAPropertyTheServiceCannotClearIsRefused() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, "first"), false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+
+        Map<String, Object> dropped = connection(name, "first");
+        dropped.remove("AuthorizationType");
+        updateStack(stack, template(dropped, false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertTrue(CfnStackWaits.failedResourceReason(stack).contains("Removing AuthorizationType"));
+        assertEquals("API_KEY", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("AuthorizationType"));
+    }
+
+    @Test
+    void aFailedUpdateRollsTheConnectionBack() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, "first"), false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+
+        // The connection is updated first; the destination after it points at a connection that
+        // does not exist, so the update fails and the connection has to go back to "first".
+        updateStack(stack, withBrokenDestination(template(connection(name, "second"), false)));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertEquals("first", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("Description"));
+        assertEquals("AUTHORIZED", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("ConnectionState"));
+    }
+
+    @Test
+    void deleteStackRemovesTheConnection() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, null), false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+        describeConnection(name).then().statusCode(200);
+
+        deleteStack(stack);
+
+        assertEquals("ResourceNotFoundException", describeConnection(name).then().statusCode(400)
+                .extract().jsonPath().getString("__type"));
+    }
+
+    /** The template plus an API destination whose connection ARN does not exist, which fails the update. */
+    private static String withBrokenDestination(String template) throws Exception {
+        ObjectNode root = (ObjectNode) MAPPER.readTree(template);
+        ((ObjectNode) root.get("Resources")).set("Broken", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::Events::ApiDestination",
+                "Properties", Map.of(
+                        "Name", "broken-" + suffix(),
+                        "ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/missing/00000000",
+                        "HttpMethod", "POST",
+                        "InvocationEndpoint", "https://example.com/events"))));
+        return root.toString();
+    }
+
+    private static String suffix() {
+        return Long.toString(System.nanoTime(), 36);
+    }
+
+    private String createStack(String template) {
+        String stack = "cfn-connection-" + suffix();
+        CfnRequests.cfn("CreateStack", stack).formParam("TemplateBody", template)
+                .when().post("/").then().statusCode(200);
+        stacks.add(stack);
+        return stack;
+    }
+
+    private static void updateStack(String stack, String template) {
+        CfnRequests.cfn("UpdateStack", stack).formParam("TemplateBody", template)
+                .when().post("/").then().statusCode(200);
+    }
+
+    private void deleteStack(String stack) {
+        CfnStackWaits.deleteStack(stack);
+        stacks.remove(stack);
+    }
+
+    /** Waits for {@code status} and returns the DescribeStacks body, which carries the outputs. */
+    private static String awaitComplete(String stack, String status) {
+        CfnStackWaits.awaitStatus(stack, status);
+        return CfnRequests.cfn("DescribeStacks", stack).when().post("/").then().statusCode(200)
+                .extract().asString();
+    }
+
+    private static String output(String body, String key) {
+        String value = XmlParser.extractPairs(body, "Outputs", "OutputKey", "OutputValue").get(key);
+        assertFalse(value == null || value.isBlank(), body);
+        return value;
+    }
+
+    private static Response events(String action, Map<String, ?> body) throws Exception {
+        return given().contentType("application/x-amz-json-1.1").header("Authorization", EVENTS_AUTH)
+                .header("X-Amz-Target", "AWSEvents." + action).body(MAPPER.writeValueAsString(body)).post("/");
+    }
+
+    private static Response describeConnection(String name) throws Exception {
+        return events("DescribeConnection", Map.of("Name", name));
+    }
+
+    /** An API key connection whose key value is built with {@code Fn::Sub}, as event-streaming templates do. */
+    private static Map<String, Object> connection(String name, String description) {
+        Map<String, Object> apiKey = new LinkedHashMap<>();
+        apiKey.put("ApiKeyName", "Authorization");
+        apiKey.put("ApiKeyValue", Map.of("Fn::Sub", "Bearer ${Token}"));
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("Name", name);
+        properties.put("AuthorizationType", "API_KEY");
+        properties.put("AuthParameters", Map.of("ApiKeyAuthParameters", apiKey));
+        if (description != null) {
+            properties.put("Description", description);
+        }
+        return properties;
+    }
+
+    private static String template(Map<String, Object> connectionProperties, boolean withDestination)
+            throws Exception {
+        return template(connectionProperties, withDestination, null);
+    }
+
+    private static String template(Map<String, Object> connectionProperties, boolean withDestination,
+                                   String destinationName) throws Exception {
+        Map<String, Object> resources = new LinkedHashMap<>();
+        resources.put("Connection", Map.of("Type", "AWS::Events::Connection", "Properties", connectionProperties));
+        if (withDestination) {
+            resources.put("Destination", Map.of("Type", "AWS::Events::ApiDestination", "Properties", Map.of(
+                    "Name", destinationName,
+                    "ConnectionArn", Map.of("Fn::GetAtt", List.of("Connection", "Arn")),
+                    "HttpMethod", "POST",
+                    "InvocationEndpoint", "https://example.com/events")));
+        }
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("ConnectionRef", Map.of("Value", Map.of("Ref", "Connection")));
+        outputs.put("ConnectionArn", Map.of("Value", Map.of("Fn::GetAtt", List.of("Connection", "Arn"))));
+        outputs.put("ConnectionArnForPolicy",
+                Map.of("Value", Map.of("Fn::GetAtt", List.of("Connection", "ArnForPolicy"))));
+        outputs.put("ConnectionSecretArn",
+                Map.of("Value", Map.of("Fn::GetAtt", List.of("Connection", "SecretArn"))));
+        return MAPPER.writeValueAsString(Map.of(
+                "Parameters", Map.of("Token", Map.of("Type", "String", "Default", "tok-123")),
+                "Resources", resources,
+                "Outputs", outputs));
+    }
+}

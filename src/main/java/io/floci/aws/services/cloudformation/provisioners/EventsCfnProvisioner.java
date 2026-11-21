@@ -7,11 +7,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.BatchParameters;
+import io.floci.aws.services.eventbridge.model.Connection;
+import io.floci.aws.services.eventbridge.model.ConnectionState;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
 import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
@@ -24,9 +27,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,10 +47,10 @@ import java.util.stream.Collectors;
  * {@code AWS::Events::EventBus} and {@code AWS::Events::EventBusPolicy}. Extracted from
  * the former CloudFormation monolith.
  *
- * <p>Two of these types need the resource's stored attributes to delete, not just the physical
- * id, so they are served by the {@link #delete(StackResource, String)} override rather than the
- * id-only form: a rule remembers the custom bus it lives on, and an event bus remembers the
- * creation time that proves the stack still owns it.
+ * <p>Two of these types are served by the {@link #delete(StackResource, String)} override rather
+ * than the id-only form: an event bus remembers the creation time that proves the stack still owns
+ * it, and a rule saved before its physical id carried its custom bus finds that bus in the
+ * {@code EventBusName} attribute it stored.
  */
 @ApplicationScoped
 public class EventsCfnProvisioner implements CfnResourceProvisioner {
@@ -53,9 +58,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(EventsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private static final String DEFAULT_EVENT_BUS = "default";
+    private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
+    /** Joins a custom bus to the rule name in a rule's physical id; neither name can contain it. */
+    private static final char RULE_ID_SEPARATOR = '|';
+
     /** The shape AWS::Events::Rule's resource schema declares for its targets. */
     private static final String TARGETS = CfnPropertyTypes.propertyShape("AWS::Events::Rule", "Targets");
 
+    private static final String CONNECTION = "AWS::Events::Connection";
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
@@ -65,6 +76,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
     private static final int STATEMENT_ID_MAX_LENGTH = 64;
+    /** Connection properties an update cannot clear (EventBridge keeps an omitted field) or replace. */
+    private static final Set<String> CONNECTION_REFUSED_DROPS = Set.of(
+            "Name", "AuthorizationType", "AuthParameters");
+    /**
+     * Connection properties a template that drops them clears. A dropped {@code Description} is not
+     * among them: CloudFormation leaves it as it is, and only an explicit empty string clears it.
+     */
+    private static final Set<String> CONNECTION_CLEARED_DROPS = Set.of(
+            "InvocationConnectivityParameters", "KmsKeyIdentifier");
 
     private final EventBridgeService eventBridgeService;
 
@@ -76,7 +96,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of("AWS::Events::Rule", "AWS::Events::EventBus", "AWS::Events::EventBusPolicy",
-                "AWS::Events::ApiDestination");
+                "AWS::Events::ApiDestination", "AWS::Events::Connection");
     }
 
     @Override
@@ -86,20 +106,22 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::EventBus" -> provisionEventBus(r, props, ctx);
             case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(r, props, ctx);
             case "AWS::Events::ApiDestination" -> provisionApiDestination(r, props, ctx);
+            case "AWS::Events::Connection" -> provisionConnection(r, props, ctx);
             default -> throw new IllegalStateException(
                     "EventsCfnProvisioner cannot handle " + r.getResourceType());
         }
     }
 
     /**
-     * A rule and an event bus both need attributes the physical id cannot carry: the rule's custom
-     * bus, and the bus's recorded creation time. Deleting either by id alone would silently target
-     * the default bus or skip the ownership check.
+     * An event bus needs its stored creation time, which the physical id cannot carry; deleting
+     * it by id alone would skip the ownership check. A rule's physical id names its custom bus, but
+     * a rule saved before it did has only the rule name there and its bus in the stored
+     * {@code EventBusName}, which deleting by id alone would silently trade for the default bus.
      */
     @Override
     public void delete(StackResource resource, String region) {
         switch (resource.getResourceType()) {
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(resource.getPhysicalId(),
+            case "AWS::Events::Rule" -> deleteRule(resource.getPhysicalId(),
                     resource.getAttributes() != null ? resource.getAttributes().get("EventBusName") : null,
                     region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(resource, region);
@@ -113,10 +135,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
+            case "AWS::Events::Rule" -> deleteRule(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::Events::ApiDestination" -> deleteApiDestinationSafe(physicalId, region);
+            case "AWS::Events::Connection" -> deleteConnectionSafe(physicalId, region);
             default -> {
                 // no other type reaches this provisioner
             }
@@ -128,11 +151,14 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         // before this run touches a target, so a rollback never puts back a target the rule stopped
         // carrying two updates ago.
         r.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
-        // Name is createOnly and the physical id is the rule name, so ctx.stablePhysicalName
-        // applies directly: without it an unnamed rule was given a fresh random name on every
-        // UpdateStack, creating a second rule and leaving the first behind with its targets.
-        String ruleName = ctx.stablePhysicalName(
-                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        // Name is createOnly, so an unnamed rule keeps its name across an UpdateStack: without that it
+        // was given a fresh random name on every update, creating a second rule and leaving the first
+        // behind with its targets. The prior name comes out of the prior physical id, which for a rule
+        // on a custom bus also carries the bus.
+        String explicitName = ctx.resolveOptional(props, "Name");
+        String ruleName = explicitName != null && !explicitName.isBlank()
+                ? explicitName
+                : ruleNameOf(ctx.stablePhysicalName(null, r.getLogicalId(), 64, false));
 
         String busName = ctx.resolveOptional(props, "EventBusName");
         String description = ctx.resolveOptional(props, "Description");
@@ -154,11 +180,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
         Rule rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
                 state, description, roleArn, Map.of(), ctx.region());
-        r.setPhysicalId(ruleName);
+        r.setPhysicalId(rulePhysicalId(ruleName, busName, ctx.accountId()));
         r.getAttributes().put("Arn", rule.getArn());
         r.getAttributes().put("RuleName", ruleName);
-        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
-        // the right bus (the physical id is only the rule name, which resolves to the default bus).
+        // The bus as the template gave it, name or ARN. The physical id carries it too; this copy is
+        // what a delete reads for a rule saved before the physical id did.
         if (busName != null && !busName.isBlank()) {
             r.getAttributes().put("EventBusName", busName);
         }
@@ -204,6 +230,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             }
             Target target = new Target(targetId, targetArn, input, inputPath);
             target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+            JsonNode kinesisParamsNode = resolved.path("KinesisParameters");
+            if (kinesisParamsNode.isObject()) {
+                target.setKinesisParameters(MAPPER.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+            }
             JsonNode httpParamsNode = resolved.path("HttpParameters");
             if (httpParamsNode.isObject()) {
                 target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
@@ -337,6 +367,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         if ("AWS::Events::EventBus".equals(resource.getResourceType())) {
             return rollbackEventBusUpdate(resource);
+        }
+        if ("AWS::Events::Connection".equals(resource.getResourceType())) {
+            return rollbackConnectionUpdate(resource);
         }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
@@ -670,15 +703,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     private void reconcileEventBusTags(String arn, Collection<String> managedKeys, Map<String, String> desired,
                                        String region) {
-        List<String> dropped = managedKeys.stream()
-                .filter(key -> !desired.containsKey(key))
-                .toList();
-        if (!dropped.isEmpty()) {
-            eventBridgeService.untagResource(arn, dropped, region);
-        }
-        if (!desired.isEmpty()) {
-            eventBridgeService.tagResource(arn, desired, region);
-        }
+        CfnRollback.reconcileTags(managedKeys, desired,
+                dropped -> eventBridgeService.untagResource(arn, dropped, region),
+                tags -> eventBridgeService.tagResource(arn, tags, region));
     }
 
     private Set<String> eventBusManagedTagKeys(StackResource resource) {
@@ -713,6 +740,53 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private String eventBusCreatedTime(EventBus bus) {
         return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
+    }
+
+    /**
+     * The physical id CloudFormation gives a rule, which is also what its {@code Ref} returns: the
+     * rule name for a rule on the default event bus, and {@code <event bus name>|<rule name>} for a
+     * rule on a custom bus. An event bus given by ARN counts by its name when it is in the stack's own
+     * account, so the default bus given by ARN still yields the bare rule name; a bus in another
+     * account keeps its ARN, {@code <event bus ARN>|<rule name>}. This is the format of AWS's resource
+     * provider for the type. EventBridge's own operations take the rule name and the bus separately,
+     * so a caller splits the value at the {@code |}.
+     */
+    private static String rulePhysicalId(String ruleName, String busNameOrArn, String stackAccountId) {
+        if (busNameOrArn == null || busNameOrArn.isBlank() || DEFAULT_EVENT_BUS.equals(busNameOrArn)) {
+            return ruleName;
+        }
+        String busResource = AwsArnUtils.resourceIfArnFor(busNameOrArn, "events").orElse(null);
+        if (busResource != null && busResource.startsWith(EVENT_BUS_RESOURCE_PREFIX)
+                && AwsArnUtils.parse(busNameOrArn).accountId().equals(stackAccountId)) {
+            String busName = busResource.substring(EVENT_BUS_RESOURCE_PREFIX.length());
+            return DEFAULT_EVENT_BUS.equals(busName) ? ruleName : busName + RULE_ID_SEPARATOR + ruleName;
+        }
+        return busNameOrArn + RULE_ID_SEPARATOR + ruleName;
+    }
+
+    /** The rule name a rule's physical id carries: all of it, or what follows its custom bus. */
+    private static String ruleNameOf(String physicalId) {
+        int separator = physicalId.indexOf(RULE_ID_SEPARATOR);
+        return separator < 0 ? physicalId : physicalId.substring(separator + 1);
+    }
+
+    /** The custom bus, by name or ARN, a rule's physical id carries, or null for the default bus. */
+    private static String busNameOf(String physicalId) {
+        int separator = physicalId.indexOf(RULE_ID_SEPARATOR);
+        return separator < 0 ? null : physicalId.substring(0, separator);
+    }
+
+    /**
+     * Deletes the rule a physical id names, on the bus the id carries. A rule saved before the id
+     * carried its custom bus has only the rule name there; {@code storedBus}, the bus it stored at
+     * creation, then says where it lives.
+     */
+    private void deleteRule(String physicalId, String storedBus, String region) {
+        if (physicalId == null || physicalId.isBlank()) {
+            return;
+        }
+        String busName = busNameOf(physicalId);
+        deleteEventBridgeRuleSafe(ruleNameOf(physicalId), busName != null ? busName : storedBus, region);
     }
 
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
@@ -957,6 +1031,132 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private void deleteApiDestinationSafe(String name, String region) {
         CfnDeletes.safeDelete("EventBridge API destination", name,
                 () -> eventBridgeService.deleteApiDestination(name, region),
+                "ResourceNotFoundException");
+    }
+
+    /**
+     * {@code AWS::Events::Connection}: {@code Ref} is the connection name, {@code Fn::GetAtt} gives
+     * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place, and a
+     * template that drops {@code InvocationConnectivityParameters} or {@code KmsKeyIdentifier}
+     * clears it. A dropped {@code Description} stays as it is and an empty one clears it. These
+     * follow what a real AWS account does, checked against a stack. EventBridge's UpdateConnection leaves an omitted
+     * {@code AuthorizationType} or {@code AuthParameters} as it is, so dropping one is refused rather
+     * than left silently stale, and a different name is a replacement, refused too. The properties are
+     * read as the resource handler reads them, so an {@code ApiKeyAuthParameters} without its
+     * {@code ApiKeyValue} fails the resource. A connection an older Floci stubbed names nothing that
+     * exists, so an update creates it.
+     */
+    private void provisionConnection(StackResource r, JsonNode template, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale, and
+        // a check below that refuses this update would otherwise leave it for the rollback to restore
+        r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        boolean updating = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+        Set<String> cleared = new HashSet<>();
+        if (updating) {
+            for (String dropped : ctx.droppedProperties(template)) {
+                if (CONNECTION_REFUSED_DROPS.contains(dropped)) {
+                    throw new AwsException("ValidationError", "Removing " + dropped
+                            + " from a Connection is not supported: EventBridge keeps the value it has.", 400);
+                }
+                if (CONNECTION_CLEARED_DROPS.contains(dropped)) {
+                    cleared.add(dropped);
+                }
+            }
+        }
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(CONNECTION, template);
+        String name = ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        if (updating && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
+            throw new AwsException("ValidationError",
+                    "Updating Connection Name requires resource replacement, which is not supported.", 400);
+        }
+
+        String description = ctx.resolveOptional(props, "Description");
+        String authorizationType = ctx.resolveOptional(props, "AuthorizationType");
+        String authParameters = resolvedObjectAsJson(props, "AuthParameters", ctx);
+        String connectivityParameters = resolvedObjectAsJson(props, "InvocationConnectivityParameters", ctx);
+        String kmsKeyIdentifier = ctx.resolveOptional(props, "KmsKeyIdentifier");
+
+        Connection connection;
+        if (updating && ctx.reusesPriorEntity(name)) {
+            snapshotConnectionBeforeUpdate(r, eventBridgeService.describeConnection(name, ctx.region()),
+                    ctx.region());
+            connection = eventBridgeService.updateConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, cleared, ctx.region());
+        } else {
+            connection = eventBridgeService.createConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
+        }
+
+        r.setPhysicalId(name);
+        String arn = connection.getConnectionArn();
+        r.getAttributes().put("Arn", arn);
+        // The ARN EventBridge allows in a policy is the one without the trailing id: connection/<name>
+        r.getAttributes().put("ArnForPolicy", arn.substring(0, arn.lastIndexOf('/')));
+        r.getAttributes().put("SecretArn", connection.getSecretArn());
+        r.getAttributes().put("Name", name);
+    }
+
+    /**
+     * A nested object property with its intrinsics resolved, as the JSON text EventBridge stores;
+     * null when the property is absent or empty, which the service reads as "not supplied".
+     */
+    private static String resolvedObjectAsJson(JsonNode props, String name, ProvisionContext ctx) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
+        return resolved != null && resolved.isObject() && !resolved.isEmpty() ? resolved.toString() : null;
+    }
+
+    private void snapshotConnectionBeforeUpdate(StackResource r, Connection current, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", current.getName());
+        snapshot.put("description", current.getDescription());
+        snapshot.put("authorizationType", current.getAuthorizationType());
+        snapshot.put("authParameters", current.getAuthParameters());
+        snapshot.put("invocationConnectivityParameters", current.getInvocationConnectivityParameters());
+        snapshot.put("kmsKeyIdentifier", current.getKmsKeyIdentifier());
+        snapshot.put("connectionState",
+                current.getConnectionState() == null ? null : current.getConnectionState().name());
+        snapshot.put("stateReason", current.getStateReason());
+        snapshot.put("lastModifiedTime",
+                current.getLastModifiedTime() == null ? null : current.getLastModifiedTime().toString());
+        snapshot.put("lastAuthorizedTime",
+                current.getLastAuthorizedTime() == null ? null : current.getLastAuthorizedTime().toString());
+        r.getAttributes().put(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    // The snapshot is spent only once the restore succeeded: a restore that throws leaves it for the next attempt
+    private boolean rollbackConnectionUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        Connection previous = new Connection();
+        previous.setName(snapshot.path("name").asText());
+        previous.setDescription(snapshotText(snapshot, "description"));
+        previous.setAuthorizationType(snapshotText(snapshot, "authorizationType"));
+        previous.setAuthParameters(snapshotText(snapshot, "authParameters"));
+        previous.setInvocationConnectivityParameters(snapshotText(snapshot, "invocationConnectivityParameters"));
+        previous.setKmsKeyIdentifier(snapshotText(snapshot, "kmsKeyIdentifier"));
+        String state = snapshotText(snapshot, "connectionState");
+        previous.setConnectionState(state == null ? null : ConnectionState.valueOf(state));
+        previous.setStateReason(snapshotText(snapshot, "stateReason"));
+        String modified = snapshotText(snapshot, "lastModifiedTime");
+        previous.setLastModifiedTime(modified == null ? null : Instant.parse(modified));
+        String authorized = snapshotText(snapshot, "lastAuthorizedTime");
+        previous.setLastAuthorizedTime(authorized == null ? null : Instant.parse(authorized));
+        eventBridgeService.restoreConnection(previous, snapshot.path("region").asText());
+        resource.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private void deleteConnectionSafe(String name, String region) {
+        CfnDeletes.safeDelete("EventBridge connection", name,
+                () -> eventBridgeService.deleteConnection(name, region),
                 "ResourceNotFoundException");
     }
 

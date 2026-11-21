@@ -3,8 +3,6 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
-import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
@@ -36,6 +34,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -60,7 +59,6 @@ import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -76,8 +74,6 @@ class IamConditionContextResolverTest {
     private Instance<DynamoDbFacade> dynamoDbFacadeInstance;
     private Ec2Service ec2Service;
     private S3Service s3Service;
-    private CloudWatchLogsService logsService;
-    private CloudWatchLogsCrossAccountService crossAccountService;
     private IamService iamService;
     private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
@@ -122,14 +118,6 @@ class IamConditionContextResolverTest {
         Instance<S3Service> s3ServiceInstance = mock(Instance.class);
         when(s3ServiceInstance.isResolvable()).thenReturn(true);
         when(s3ServiceInstance.get()).thenReturn(s3Service);
-        logsService = mock(CloudWatchLogsService.class);
-        Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
-        when(logsServiceInstance.isResolvable()).thenReturn(true);
-        when(logsServiceInstance.get()).thenReturn(logsService);
-        crossAccountService = mock(CloudWatchLogsCrossAccountService.class);
-        Instance<CloudWatchLogsCrossAccountService> crossAccountServiceInstance = mock(Instance.class);
-        when(crossAccountServiceInstance.isResolvable()).thenReturn(true);
-        when(crossAccountServiceInstance.get()).thenReturn(crossAccountService);
         iamService = mock(IamService.class);
         Instance<IamService> iamServiceInstance = mock(Instance.class);
         when(iamServiceInstance.isResolvable()).thenReturn(true);
@@ -151,8 +139,7 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
-                crossAccountServiceInstance, iamServiceInstance,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, iamServiceInstance,
                 lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()), mock(Instance.class),
                 requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
@@ -170,29 +157,33 @@ class IamConditionContextResolverTest {
         String resource = "lambda:Resource/WebFunctionAuthType";
 
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
-                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+                webRequest("PUT", "/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
-                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                "lambda:CreateWebFunctionEndpoint", webRequest("PUT", "/2025-03-07/web-functions/app/endpoints",
                         "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
                 resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
-                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+                        webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
-                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev",
                         "{\"description\":\"d\"}")), "an update without authType names none");
-        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
-            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
-                            "")));
-            assertNull(resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        // A function and an endpoint named by their ARNs, which a client sends encoded.
+        String encoded = function.replace("/", "%2F");
+        for (String[] action : new String[][] {{"lambda:GetWebFunctionEndpoint", "GET"},
+                {"lambda:DeleteWebFunctionEndpoint", "DELETE"}}) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/" + encoded + "/endpoints/" + encoded
+                            + "%2Fendpoint%2Fdev", "")));
+            assertNull(resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/app/endpoints/gone", "")),
+                    "a missing endpoint has none");
         }
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
-                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+                webRequest("GET", "/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
-                webRequest("/2025-03-07/web-functions/app", "")));
+                webRequest("GET", "/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
-                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
+                webRequest("POST", "/2025-03-07/web-functions/app/list-endpoints", "{}")));
     }
 
     /**
@@ -232,42 +223,36 @@ class IamConditionContextResolverTest {
     }
 
     @Test
-    void logStreamTagsUseRawParentNameAndRequestRegion() throws Exception {
+    void anAssumeRoleRequestCarriesItsSessionNameAndExternalId() {
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice"), "sts:ExternalId", List.of("partner-42")),
+                resolver.resolve("sts", "sts:AssumeRole", formRequest(
+                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A111111111111%3Arole%2Fr"
+                                + "&RoleSessionName=alice&ExternalId=partner-42")));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), resolver.resolve("sts", "sts:AssumeRole",
+                formRequest("Action=AssumeRole&RoleSessionName=alice")), "no ExternalId, no sts:ExternalId");
+        assertNull(resolver.resolve("sts", "sts:GetCallerIdentity", formRequest("Action=GetCallerIdentity")));
+    }
+
+    /** A Logs create or tag call carries the tags it asks to attach or remove; what it names carries its own. */
+    @Test
+    void aLogsTagCallCarriesTheTagsItAsksToAttachOrRemove() throws Exception {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String group = "\"resourceArn\":\"arn:aws:logs:us-east-1:123456789012:log-group:app\"";
         when(request.getProperty("floci.bufferedJsonBody"))
-                .thenReturn(mapper.readTree("{\"logGroupName\":\" group \",\"logStreamName\":42}"));
-        when(logsService.listTagsLogGroup(" group ", "eu-west-1")).thenReturn(Map.of("team", "blue"));
-        requestContext.setRegion("eu-west-1");
-        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
-            assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("logs", action, request));
-        }
-        requestContext.setRegion(null);
-        when(logsService.listTagsLogGroup(" group ", "us-east-1")).thenReturn(Map.of("team", "red"));
-        assertEquals(Map.of("aws:ResourceTag/team", List.of("red")),
-                resolver.resolve("logs", "logs:CreateLogStream", request));
-    }
-
-    @Test
-    void missingLogGroupTagsDoNotReplaceTheHandlersMissingResourceError() throws Exception {
-        ContainerRequestContext request = mock(ContainerRequestContext.class);
-        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":42}"));
-        when(logsService.listTagsLogGroup("42", "us-east-1"))
-                .thenThrow(new AwsException("ResourceNotFoundException", "missing", 400));
-        assertNull(resolver.resolve("logs", "logs:DeleteLogStream", request));
-    }
-
-    @Test
-    void unexpectedLogGroupLookupFailuresCannotEraseTagDenies() throws Exception {
-        ContainerRequestContext request = mock(ContainerRequestContext.class);
-        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":\"group\"}"));
-        AwsException failure = new AwsException("InternalFailure", "storage unavailable", 500);
-        when(logsService.listTagsLogGroup("group", "us-east-1")).thenThrow(failure);
-        assertSame(failure, assertThrows(AwsException.class,
-                () -> resolver.resolve("logs", "logs:CreateLogStream", request)));
-        IllegalStateException unexpected = new IllegalStateException("unavailable");
-        doThrow(unexpected).when(logsService).listTagsLogGroup("group", "us-east-1");
-        assertSame(unexpected, assertThrows(IllegalStateException.class,
-                () -> resolver.resolve("logs", "logs:DeleteLogStream", request)));
+                .thenReturn(mapper.readTree("{" + group + ",\"tags\":{\"team\":\"blue\"}}"));
+        assertEquals(Map.of("aws:RequestTag/team", List.of("blue"), "aws:TagKeys", List.of("team")),
+                resolver.resolve("logs", "logs:TagResource", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{" + group + ",\"tagKeys\":[\"team\"]}"));
+        assertEquals(Map.of("aws:TagKeys", List.of("team")), resolver.resolve("logs", "logs:UntagResource", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{\"logGroupName\":\"app\",\"tags\":{\"team\":\"red\"}}"));
+        assertEquals(Map.of("aws:RequestTag/team", List.of("red"), "aws:TagKeys", List.of("team")),
+                resolver.resolve("logs", "logs:CreateLogGroup", request));
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{\"logGroupName\":\"app\",\"logStreamName\":\"s\"}"));
+        assertNull(resolver.resolve("logs", "logs:CreateLogGroup", request));
+        assertNull(resolver.resolve("logs", "logs:CreateLogStream", request));
     }
 
     /** A form request whose body can be read again, as a real request's restored stream can. */
@@ -309,11 +294,15 @@ class IamConditionContextResolverTest {
         }
     }
 
-    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+    private ContainerRequestContext webRequest(String method, String path, String body) throws Exception {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
-        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getMethod()).thenReturn(method);
+        when(uriInfo.getPath()).thenReturn(URI.create(path).getPath());
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + path));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getProperty("floci.bufferedJsonBody"))
                 .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;
@@ -846,7 +835,7 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class),
                 spellings(), mock(Instance.class), requestContext, new RegionResolver("us-east-1", "123456789012"),
                 config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
@@ -858,7 +847,7 @@ class IamConditionContextResolverTest {
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class),
                 spellings(), instance, requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog, Clock.systemUTC());
     }
@@ -1528,6 +1517,12 @@ class IamConditionContextResolverTest {
                 "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
                 "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
 
+        // The time of the request is on a service call as on every request; the rest is exact.
+        assertTrue(conditions.containsKey("aws:CurrentTime"));
+        assertTrue(conditions.containsKey("aws:EpochTime"));
+        Map<String, List<String>> rest = new HashMap<>(conditions);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
         assertEquals(Map.of(
                 "aws:PrincipalIsAWSService", List.of("true"),
                 "aws:ViaAWSService", List.of("false"),
@@ -1537,7 +1532,7 @@ class IamConditionContextResolverTest {
                 "aws:SourceAccount", List.of("444455556666"),
                 "aws:SourceOwner", List.of("444455556666"),
                 "aws:ResourceAccount", List.of("111122223333"),
-                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+                "aws:RequestedRegion", List.of("eu-west-2")), rest);
     }
 
     @Test

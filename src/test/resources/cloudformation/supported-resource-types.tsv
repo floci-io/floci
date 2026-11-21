@@ -40,6 +40,7 @@ AWS::Backup::BackupVault	BackupVaultCfnProvisioner
 AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
 AWS::Batch::JobDefinition	BatchCfnProvisioner
 AWS::Batch::JobQueue	BatchCfnProvisioner
+AWS::Bedrock::ApplicationInferenceProfile	BedrockCfnProvisioner
 AWS::BedrockAgentCore::Memory	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::Runtime	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
@@ -60,6 +61,7 @@ AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CloudWatch::CompositeAlarm	CloudWatchCompositeAlarmCfnProvisioner
 AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
+AWS::CodeDeploy::Application	CodeDeployCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
 AWS::CodePipeline::Webhook	CodePipelineCfnProvisioner
@@ -107,7 +109,14 @@ AWS::EFS::FileSystem	EfsCfnProvisioner
 AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
+AWS::EMR::Cluster	EmrCfnProvisioner
+AWS::EMR::SecurityConfiguration	EmrCfnProvisioner
+AWS::EMR::Studio	EmrStudioCfnProvisioner
+AWS::EMR::StudioSessionMapping	EmrStudioCfnProvisioner
+AWS::EMRContainers::VirtualCluster	EmrContainersCfnProvisioner
+AWS::EMRServerless::Application	EmrServerlessCfnProvisioner
 AWS::ElastiCache::CacheCluster	ElastiCacheCfnProvisioner
+AWS::ElastiCache::ReplicationGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::ServerlessCache	ElastiCacheServerlessCfnProvisioner
 AWS::ElastiCache::SubnetGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::User	ElastiCacheCfnProvisioner
@@ -119,6 +128,7 @@ AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
 AWS::Events::ApiDestination	EventsCfnProvisioner
 AWS::Events::Archive	EventsArchiveCfnProvisioner
+AWS::Events::Connection	EventsCfnProvisioner
 AWS::Events::EventBus	EventsCfnProvisioner
 AWS::Events::EventBusPolicy	EventsCfnProvisioner
 AWS::Events::Rule	EventsCfnProvisioner
@@ -185,6 +195,8 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner
 AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
+AWS::SES::ConfigurationSet	SesCfnProvisioner
+AWS::SES::ConfigurationSetEventDestination	SesEventDestinationCfnProvisioner
 AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SES::ReceiptRule	SesReceiptRuleCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner

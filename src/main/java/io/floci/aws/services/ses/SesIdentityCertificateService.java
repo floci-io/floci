@@ -325,8 +325,10 @@ public class SesIdentityCertificateService {
                         + emailIdentity + ">.");
             }
         } else if (!fromAddress.equals(emailIdentity)) {
-            // The model requires an exact match; SES's wording for a mismatch was not probed.
-            throw badRequest("FromAddress <" + fromAddress + "> does not match the email identity <"
+            // The model requires an exact match, so the comparison is case-sensitive (not probed).
+            // The wording was probed 2026-11-18 on AssociateEmailIdentityCertificate, where it is
+            // reported ahead of the 404 for an identity that does not exist.
+            throw badRequest("FromAddress <" + fromAddress + "> must match the email identity <"
                     + emailIdentity + ">.");
         }
         return fromAddress;

@@ -46,6 +46,16 @@ class ContainerStorageHelperTest {
     }
 
     @Test
+    void scopedResourceNamesPreserveNamespaceAndExistingVolumeIdentity() {
+        EmulatorConfig config = config("run-one");
+        assertEquals("floci-aws-run-one-docdb-111111111111-eu-west-1-shared",
+                ContainerStorageHelper.resourceName(config, "docdb", null, "shared", "111111111111", "eu-west-1"));
+        assertEquals("floci-aws-run-one-docdb-existing-volume",
+                ContainerStorageHelper.resourceName(config, "docdb", "existing-volume", "shared",
+                        "111111111111", "eu-west-1"));
+    }
+
+    @Test
     void alreadyPrefixedNamesAreNormalisedNotPrefixedTwice() {
         // A persisted name is fed straight back in when a container is named after the volume it
         // mounts, so prefixing has to be idempotent in both directions.

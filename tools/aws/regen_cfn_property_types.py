@@ -51,10 +51,15 @@ FETCH_TIMEOUT_SECONDS = 60
 
 # The resource types whose provisioners read their properties through CfnPropertyTypes.
 RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::DSQL::Cluster", "AWS::EC2::Instance",
-                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::Events::Rule",
-                  "AWS::Lambda::Function", "AWS::Lambda::LayerVersion"]
+                  "AWS::EC2::LaunchTemplate", "AWS::ECS::TaskDefinition", "AWS::EKS::Cluster",
+                  "AWS::EMR::Cluster", "AWS::EMR::SecurityConfiguration", "AWS::EMR::Studio",
+                  "AWS::EMR::StudioSessionMapping",
+                  "AWS::EMRContainers::VirtualCluster", "AWS::EMRServerless::Application",
+                  "AWS::Events::Connection", "AWS::Events::Rule",
+                  "AWS::Lambda::Function", "AWS::Lambda::LayerVersion",
+                  "AWS::SES::ConfigurationSetEventDestination"]
 
-# The shared shape each scalar body is written as, inline; a definition keeps its own name.
+# The shared shape each unconstrained scalar body is written as, inline; a definition keeps its own name.
 SCALAR_SHAPES = {"string": "String", "integer": "Integer", "boolean": "Boolean", "double": "Double", "json": "Json"}
 SCHEMA_SCALARS = {"string": "string", "integer": "integer", "boolean": "boolean", "number": "double"}
 SHAPE_TYPES = {"structure", "list", "map", *SCALAR_SHAPES}
@@ -75,12 +80,21 @@ ANCHORS = {
     ("AWS::ECS::TaskDefinition/ContainerDefinition", "Memory"): "Integer",
     ("AWS::ECS::TaskDefinition/ContainerDefinition", "Essential"): "Boolean",
     ("AWS::ECS::TaskDefinition/KernelCapabilities", "Add"): ["String"],
+    ("AWS::SES::ConfigurationSetEventDestination/EventDestination", "Enabled"): "Boolean",
+    ("AWS::SES::ConfigurationSetEventDestination/EventDestination", "MatchingEventTypes"): ["String"],
 }
 
 # Required members the provisioners rely on, measured the same way: shape -> its required members.
 REQUIRED_ANCHORS = {
     "AWS::ECS::TaskDefinition/ContainerDefinition": ["Name", "Image"],
     "AWS::ECS::TaskDefinition/Tmpfs": ["Size"],
+    "AWS::SES::ConfigurationSetEventDestination": ["ConfigurationSetName", "EventDestination"],
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination": ["MatchingEventTypes"],
+    "AWS::SES::ConfigurationSetEventDestination/SnsDestination": ["TopicARN"],
+    "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination": ["IAMRoleARN", "DeliveryStreamARN"],
+    "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination": ["EventBusArn"],
+    "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration": [
+        "DimensionValueSource", "DefaultDimensionValue", "DimensionName"],
 }
 
 
@@ -136,7 +150,7 @@ def shape_for(schema: dict, resource_type: str, name: str, node: dict, shapes: d
             shapes[target] = body_of(schema, resource_type, target, schema["definitions"][definition], shapes)
         return target
     body = body_of(schema, resource_type, name, node, shapes)
-    if body["type"] in SCALAR_SHAPES:
+    if body["type"] in SCALAR_SHAPES and len(body) == 1:
         return SCALAR_SHAPES[body["type"]]
     shapes[name] = body
     return name
@@ -168,7 +182,12 @@ def body_of(schema: dict, resource_type: str, name: str, node: dict, shapes: dic
         items = node.get("items")
         member = shape_for(schema, resource_type, f"{name}[]", items, shapes) if isinstance(items, dict) else "Json"
         return {"type": "list", "member": member}
-    return {"type": SCHEMA_SCALARS.get(kind, "json")}
+    body = {"type": SCHEMA_SCALARS.get(kind, "json")}
+    if kind == "string":
+        for constraint in ("minLength", "maxLength", "pattern"):
+            if constraint in node:
+                body[constraint] = node[constraint]
+    return body
 
 
 def render(document: dict) -> str:

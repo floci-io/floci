@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-12",
+    "retrieved": "2026-11-21",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -271,6 +271,10 @@
       "BatchUpdateFirewallRule": "route53resolver:UpdateFirewallRule"
     },
     "s3": {
+      "CompleteMultipartUpload": "s3:PutObject",
+      "CopyObject": "s3:PutObject",
+      "CreateBucketMetadataConfiguration": "s3:CreateBucketMetadataTableConfiguration",
+      "CreateMultipartUpload": "s3:PutObject",
       "DeleteBucketAnalyticsConfiguration": "s3:PutAnalyticsConfiguration",
       "DeleteBucketCors": "s3:PutBucketCORS",
       "DeleteBucketEncryption": "s3:PutEncryptionConfiguration",
@@ -290,13 +294,19 @@
       "GetBucketMetricsConfiguration": "s3:GetMetricsConfiguration",
       "GetBucketNotificationConfiguration": "s3:GetBucketNotification",
       "GetObjectLockConfiguration": "s3:GetBucketObjectLockConfiguration",
+      "GetObjectTorrent": "s3:GetObject",
       "HeadBucket": "s3:ListBucket",
+      "HeadObject": "s3:GetObject",
       "ListBucketAnalyticsConfigurations": "s3:GetAnalyticsConfiguration",
       "ListBucketIntelligentTieringConfigurations": "s3:GetIntelligentTieringConfiguration",
       "ListBucketInventoryConfigurations": "s3:GetInventoryConfiguration",
       "ListBucketMetricsConfigurations": "s3:GetMetricsConfiguration",
       "ListBuckets": "s3:ListAllMyBuckets",
+      "ListMultipartUploads": "s3:ListBucketMultipartUploads",
       "ListObjectVersions": "s3:ListBucketVersions",
+      "ListObjects": "s3:ListBucket",
+      "ListObjectsV2": "s3:ListBucket",
+      "ListParts": "s3:ListMultipartUploadParts",
       "PutBucketAccelerateConfiguration": "s3:PutAccelerateConfiguration",
       "PutBucketAnalyticsConfiguration": "s3:PutAnalyticsConfiguration",
       "PutBucketEncryption": "s3:PutEncryptionConfiguration",
@@ -306,7 +316,9 @@
       "PutBucketMetricsConfiguration": "s3:PutMetricsConfiguration",
       "PutBucketNotificationConfiguration": "s3:PutBucketNotification",
       "PutObjectLockConfiguration": "s3:PutBucketObjectLockConfiguration",
-      "SelectObjectContent": "s3:GetObject"
+      "SelectObjectContent": "s3:GetObject",
+      "UploadPart": "s3:PutObject",
+      "UploadPartCopy": "s3:PutObject"
     },
     "sagemaker": {
       "UpdateRecord": "sagemaker:PutRecord"
@@ -502,6 +514,15 @@
       "ListEksAnywhereSubscriptions",
       "RegisterCluster"
     ],
+    "emr-containers": [
+      "CreateCertificate",
+      "CreateJobTemplate",
+      "CreateSecurityConfiguration",
+      "CreateVirtualCluster",
+      "ListJobTemplates",
+      "ListSecurityConfigurations",
+      "ListVirtualClusters"
+    ],
     "emr-serverless": [
       "CreateApplication",
       "ListApplications"
@@ -561,6 +582,94 @@
       "ListExperiments",
       "ListTargetResourceTypes"
     ],
+    "glue": [
+      "AccessDataQualityRuntimeConfiguration",
+      "BatchGetCustomEntityTypes",
+      "BatchGetStageFiles",
+      "CheckSchemaVersionValidity",
+      "CreateClassifier",
+      "CreateCrawler",
+      "CreateCustomEntityType",
+      "CreateDataQualityRuleset",
+      "CreateDevEndpoint",
+      "CreateGlueIdentityCenterConfiguration",
+      "CreateInboundIntegration",
+      "CreateMLTransform",
+      "CreateScript",
+      "CreateSecurityConfiguration",
+      "DeleteClassifier",
+      "DeleteCustomEntityType",
+      "DeleteGlueIdentityCenterConfiguration",
+      "DeleteSecurityConfiguration",
+      "DeregisterDataPreview",
+      "DescribeInboundIntegrations",
+      "GetClassifier",
+      "GetClassifiers",
+      "GetColumnStatisticsTaskRun",
+      "GetColumnStatisticsTaskRuns",
+      "GetColumnStatisticsTaskSettings",
+      "GetCrawlerMetrics",
+      "GetCrawlers",
+      "GetCustomEntityType",
+      "GetDataPreviewStatement",
+      "GetDataflowGraph",
+      "GetDevEndpoints",
+      "GetEnvironment",
+      "GetExecutors",
+      "GetExecutorsThreads",
+      "GetGeneratedCode",
+      "GetGlueIdentityCenterConfiguration",
+      "GetJobBookmark",
+      "GetJobs",
+      "GetLogParsingStatus",
+      "GetMapping",
+      "GetNotebookInstanceStatus",
+      "GetPlan",
+      "GetQueries",
+      "GetQuery",
+      "GetRecipeAction",
+      "GetSecurityConfiguration",
+      "GetSecurityConfigurations",
+      "GetStage",
+      "GetStageAttempt",
+      "GetStageAttemptTaskList",
+      "GetStageAttemptTaskSummary",
+      "GetStageFiles",
+      "GetStages",
+      "GetStorage",
+      "GetStorageUnit",
+      "GetTriggers",
+      "GlueNotebookAuthorize",
+      "GlueNotebookRefreshCredentials",
+      "ListBlueprints",
+      "ListColumnStatisticsTaskRuns",
+      "ListConnectionTypes",
+      "ListCrawlers",
+      "ListCustomEntityTypes",
+      "ListDevEndpoints",
+      "ListIntegrationTableProperties",
+      "ListJobs",
+      "ListRegistries",
+      "ListSessions",
+      "ListTriggers",
+      "ListUsageProfiles",
+      "ListWorkflows",
+      "ManagedConnector",
+      "RequestLogParsing",
+      "ResetJobBookmark",
+      "RunDataPreviewStatement",
+      "SendFeedback",
+      "SendRecipeAction",
+      "StartCompletion",
+      "StartCrawlerSchedule",
+      "StartNotebook",
+      "StopCrawlerSchedule",
+      "TerminateNotebook",
+      "UpdateClassifier",
+      "UpdateCrawlerSchedule",
+      "UpdateGlueIdentityCenterConfiguration",
+      "UseGlueStudio"
+    ],
     "guardduty": [
       "AcceptAdministratorInvitation",
       "AcceptInvitation",
@@ -611,6 +720,7 @@
       "ListFilters",
       "ListFindings",
       "ListIPSets",
+      "ListInvestigationRecords",
       "ListInvestigations",
       "ListInvitations",
       "ListMalwareProtectionPlans",
@@ -790,6 +900,7 @@
       "ListMicrovmImages",
       "ListMicrovms",
       "ListNetworkConnectors",
+      "ListRuntimes",
       "ListWebFunctions",
       "PassNetworkConnector"
     ],
@@ -911,6 +1022,7 @@
       "GenerateEmbedUrlForRegisteredUserWithIdentity",
       "GetAnonymousUserEmbedUrl",
       "GetCustomPermissionsSummary",
+      "GetEffectiveCustomPermissions",
       "GetGroupMapping",
       "GetSessionEmbedUrl",
       "ListAccessControlApplications",
@@ -947,6 +1059,7 @@
       "ScopeDownPolicy",
       "SearchDirectoryGroups",
       "SearchFlows",
+      "SearchKnowledgeBases",
       "SearchSpaces",
       "SetGroupMapping",
       "StartDashboardSnapshotJobSchedule",
@@ -1015,24 +1128,53 @@
       "CreateCidrCollection",
       "CreateHealthCheck",
       "CreateHostedZone",
+      "CreateIpGuardrailPolicy",
       "CreateReusableDelegationSet",
       "CreateTrafficPolicy",
+      "DeleteIpGuardrailPolicy",
       "GetAccountLimit",
       "GetCheckerIpRanges",
       "GetGeoLocation",
       "GetHealthCheckCount",
       "GetHostedZoneCount",
+      "GetIpGuardrailPolicy",
       "GetTrafficPolicyInstanceCount",
       "ListCidrCollections",
       "ListGeoLocations",
+      "ListHealthCheckSources",
       "ListHealthChecks",
       "ListHostedZones",
       "ListHostedZonesByName",
       "ListHostedZonesByVPC",
+      "ListIpGuardrailPolicies",
       "ListReusableDelegationSets",
       "ListTrafficPolicies",
       "ListTrafficPolicyInstances",
-      "TestDNSAnswer"
+      "TestDNSAnswer",
+      "UpdateIpGuardrailPolicy"
+    ],
+    "s3": [
+      "CreateJob",
+      "CreateStorageLensGroup",
+      "GetAccessPoint",
+      "GetAccountPublicAccessBlock",
+      "ListAccessGrantsInstances",
+      "ListAccessPoints",
+      "ListAccessPointsForObjectLambda",
+      "ListAllMyBuckets",
+      "ListJobs",
+      "ListMultiRegionAccessPoints",
+      "ListStorageLensConfigurations",
+      "ListStorageLensGroups",
+      "PutAccessPointPublicAccessBlock",
+      "PutAccountPublicAccessBlock",
+      "PutStorageLensConfiguration"
+    ],
+    "s3tables": [
+      "ListTableBuckets"
+    ],
+    "s3vectors": [
+      "ListVectorBuckets"
     ],
     "scheduler": [
       "ListScheduleGroups",
@@ -1174,5 +1316,161 @@
       "UpdateStage",
       "UpdateVpcLink"
     ]
+  },
+  "authorizedByModel": {
+    "apigateway": {
+      "apigateway": {
+        "CreateAuthorizer": "apigateway:POST",
+        "CreateDeployment": "apigateway:POST",
+        "CreateModel": "apigateway:POST",
+        "DeleteAuthorizer": "apigateway:DELETE",
+        "DeleteDeployment": "apigateway:DELETE",
+        "DeleteIntegration": "apigateway:DELETE",
+        "DeleteIntegrationResponse": "apigateway:DELETE",
+        "DeleteModel": "apigateway:DELETE",
+        "DeleteStage": "apigateway:DELETE",
+        "DeleteVpcLink": "apigateway:DELETE",
+        "GetAuthorizer": "apigateway:GET",
+        "GetAuthorizers": "apigateway:GET",
+        "GetDeployment": "apigateway:GET",
+        "GetDeployments": "apigateway:GET",
+        "GetDomainName": "apigateway:GET",
+        "GetDomainNames": "apigateway:GET",
+        "GetIntegration": "apigateway:GET",
+        "GetIntegrationResponse": "apigateway:GET",
+        "GetModel": "apigateway:GET",
+        "GetModelTemplate": "apigateway:GET",
+        "GetModels": "apigateway:GET",
+        "GetStage": "apigateway:GET",
+        "GetStages": "apigateway:GET",
+        "GetTags": "apigateway:GET",
+        "GetVpcLink": "apigateway:GET",
+        "GetVpcLinks": "apigateway:GET",
+        "UpdateAuthorizer": "apigateway:PATCH",
+        "UpdateDeployment": "apigateway:PATCH",
+        "UpdateIntegration": "apigateway:PATCH",
+        "UpdateIntegrationResponse": "apigateway:PATCH",
+        "UpdateModel": "apigateway:PATCH",
+        "UpdateStage": "apigateway:PATCH",
+        "UpdateVpcLink": "apigateway:PATCH"
+      }
+    },
+    "s3": {
+      "s3": {
+        "DeleteBucketReplication": "s3:PutReplicationConfiguration",
+        "DeleteBucketTagging": "s3:PutBucketTagging",
+        "DeletePublicAccessBlock": "s3:PutBucketPublicAccessBlock",
+        "GetBucketLifecycleConfiguration": "s3:GetLifecycleConfiguration",
+        "GetBucketReplication": "s3:GetReplicationConfiguration",
+        "GetPublicAccessBlock": "s3:GetBucketPublicAccessBlock",
+        "PutBucketLifecycleConfiguration": "s3:PutLifecycleConfiguration",
+        "PutBucketReplication": "s3:PutReplicationConfiguration",
+        "PutPublicAccessBlock": "s3:PutBucketPublicAccessBlock"
+      },
+      "s3control": {
+        "DeletePublicAccessBlock": "s3:PutAccountPublicAccessBlock",
+        "GetPublicAccessBlock": "s3:GetAccountPublicAccessBlock",
+        "PutPublicAccessBlock": "s3:PutAccountPublicAccessBlock"
+      }
+    }
+  },
+  "versioned": {
+    "s3": {
+      "DeleteObject": {
+        "parameter": "versionId",
+        "without": "s3:DeleteObject",
+        "with": "s3:DeleteObjectVersion"
+      },
+      "DeleteObjectAnnotation": {
+        "parameter": "versionId",
+        "without": "s3:DeleteObjectAnnotation",
+        "with": "s3:DeleteObjectVersionAnnotation"
+      },
+      "DeleteObjectTagging": {
+        "parameter": "versionId",
+        "without": "s3:DeleteObjectTagging",
+        "with": "s3:DeleteObjectVersionTagging"
+      },
+      "GetObject": {
+        "parameter": "versionId",
+        "without": "s3:GetObject",
+        "with": "s3:GetObjectVersion"
+      },
+      "GetObjectAcl": {
+        "parameter": "versionId",
+        "without": "s3:GetObjectAcl",
+        "with": "s3:GetObjectVersionAcl"
+      },
+      "GetObjectAnnotation": {
+        "parameter": "versionId",
+        "without": "s3:GetObjectAnnotation",
+        "with": "s3:GetObjectVersionAnnotation"
+      },
+      "GetObjectAttributes": {
+        "parameter": "versionId",
+        "without": "s3:GetObject",
+        "with": "s3:GetObjectVersion"
+      },
+      "GetObjectTagging": {
+        "parameter": "versionId",
+        "without": "s3:GetObjectTagging",
+        "with": "s3:GetObjectVersionTagging"
+      },
+      "ListObjectAnnotations": {
+        "parameter": "versionId",
+        "without": "s3:ListObjectAnnotations",
+        "with": "s3:ListObjectVersionAnnotations"
+      },
+      "PutObjectAcl": {
+        "parameter": "versionId",
+        "without": "s3:PutObjectAcl",
+        "with": "s3:PutObjectVersionAcl"
+      },
+      "PutObjectAnnotation": {
+        "parameter": "versionId",
+        "without": "s3:PutObjectAnnotation",
+        "with": "s3:PutObjectVersionAnnotation"
+      },
+      "PutObjectTagging": {
+        "parameter": "versionId",
+        "without": "s3:PutObjectTagging",
+        "with": "s3:PutObjectVersionTagging"
+      }
+    }
+  },
+  "spellings": {
+    "amplify": {
+      "CreateWebhook": "amplify:CreateWebHook",
+      "DeleteWebhook": "amplify:DeleteWebHook",
+      "GetWebhook": "amplify:GetWebHook",
+      "ListWebhooks": "amplify:ListWebHooks",
+      "UpdateWebhook": "amplify:UpdateWebHook"
+    },
+    "appflow": {
+      "UnregisterConnector": "appflow:UnRegisterConnector"
+    },
+    "cleanrooms-ml": {
+      "UntagResource": "cleanrooms-ml:UnTagResource"
+    },
+    "cloudsearch": {
+      "Search": "cloudsearch:search",
+      "Suggest": "cloudsearch:suggest"
+    },
+    "codeguru-reviewer": {
+      "UntagResource": "codeguru-reviewer:UnTagResource"
+    },
+    "lookoutequipment": {
+      "DescribeLabel": "lookoutequipment:Describelabel"
+    },
+    "memorydb": {
+      "CreateACL": "memorydb:CreateAcl",
+      "DeleteACL": "memorydb:DeleteAcl",
+      "DescribeACLs": "memorydb:DescribeAcls",
+      "UpdateACL": "memorydb:UpdateAcl"
+    },
+    "s3": {
+      "GetBucketCors": "s3:GetBucketCORS",
+      "PutBucketCors": "s3:PutBucketCORS"
+    }
   }
 }

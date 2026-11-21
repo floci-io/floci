@@ -30,12 +30,8 @@ public class MountTarget {
      * mount target persisted before zone ids took AWS's shape carries the old id.
      */
     public String getAvailabilityZoneId() {
-        if (availabilityZoneName == null || availabilityZoneName.length() < 2
-                || !Character.isLetter(availabilityZoneName.charAt(availabilityZoneName.length() - 1))) {
-            return availabilityZoneId;
-        }
-        String region = availabilityZoneName.substring(0, availabilityZoneName.length() - 1);
-        return AvailabilityZoneIds.forZoneName(region, availabilityZoneName);
+        String region = AvailabilityZoneIds.regionOf(availabilityZoneName);
+        return region == null ? availabilityZoneId : AvailabilityZoneIds.forZoneName(region, availabilityZoneName);
     }
 
     public void setAvailabilityZoneId(String availabilityZoneId) {

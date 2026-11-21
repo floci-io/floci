@@ -4,12 +4,12 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.model.MetricFilter;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -146,36 +146,28 @@ class CloudWatchLogsMetricFilterRetryTest {
     void sampleBoundReportsOverflowAtErrorPreservesQueuedIdsAndReleasesCapacity() {
         f.put("bound", "ERROR", "3", 7.0);
         sink.fail = true;
-        List<LogRecord> records = new CopyOnWriteArrayList<>();
-        Logger logger = Logger.getLogger(CloudWatchLogsMetricFilterService.class.getName());
-        Handler handler = new Handler() {
-            @Override public void publish(LogRecord record) { records.add(record); }
-            @Override public void flush() {}
-            @Override public void close() {}
-        };
-        logger.addHandler(handler);
-        try {
-            f.ingest(null, GROUP, REGION, TIME, Collections.nCopies(10_003, "INFO"));
-            assertEquals(10_000, f.service.pendingSamples(), "bound counts samples, not batches");
-            assertTrue(records.stream().anyMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
-                    && formatted(r).contains(ACCOUNT) && formatted(r).contains(GROUP)
-                    && formatted(r).contains("region=" + REGION) && formatted(r).contains("filter=bound")
-                    && formatted(r).contains("dropped=3")), "overflow must be ERROR with ownership and dropped count");
-            List<String> queuedKeys = List.copyOf(sink.attempts.subList(0, 10_000));
-            sink.fail = false;
-            f.service.retryPending();
-            f.stats("bound", TIME, 70_000, 10_000);
-            assertEquals(0, f.service.pendingSamples());
-            assertEquals(Set.copyOf(queuedKeys), sink.keys());
-            sink.fail = true;
-            f.ingest(TIME, "INFO");
-            assertEquals(1, f.service.pendingSamples());
-            f.service.deleteMetricFilter(GROUP, "bound", REGION);
-            assertEquals(0, f.service.pendingSamples());
-            f.put("bound", "ERROR", "3", 7.0);
-            f.ingest(TIME, "INFO");
-            assertEquals(1, f.service.pendingSamples());
-        } finally { logger.removeHandler(handler); }
+        List<LogRecord> records = LogCapture.capture(CloudWatchLogsMetricFilterService.class,
+                () -> f.ingest(null, GROUP, REGION, TIME, Collections.nCopies(10_003, "INFO")));
+        assertEquals(10_000, f.service.pendingSamples(), "bound counts samples, not batches");
+        assertTrue(records.stream().filter(r -> r.getLevel().intValue() >= Level.SEVERE.intValue())
+                .map(LogCapture::formatted)
+                .anyMatch(text -> text.contains(ACCOUNT) && text.contains(GROUP) && text.contains("region=" + REGION)
+                        && text.contains("filter=bound") && text.contains("dropped=3")),
+                "overflow must be ERROR with ownership and dropped count");
+        List<String> queuedKeys = List.copyOf(sink.attempts.subList(0, 10_000));
+        sink.fail = false;
+        f.service.retryPending();
+        f.stats("bound", TIME, 70_000, 10_000);
+        assertEquals(0, f.service.pendingSamples());
+        assertEquals(Set.copyOf(queuedKeys), sink.keys());
+        sink.fail = true;
+        f.ingest(TIME, "INFO");
+        assertEquals(1, f.service.pendingSamples());
+        f.service.deleteMetricFilter(GROUP, "bound", REGION);
+        assertEquals(0, f.service.pendingSamples());
+        f.put("bound", "ERROR", "3", 7.0);
+        f.ingest(TIME, "INFO");
+        assertEquals(1, f.service.pendingSamples());
     }
 
     @ParameterizedTest
@@ -351,8 +343,8 @@ class CloudWatchLogsMetricFilterRetryTest {
             assertEquals(filters, logs.details(), "one stack per owning filter outage, not per tick or sample");
             assertEquals(1, logs.summaries(), "one aggregate stack-free warning after 60 failed ticks, even for 100 filters");
             LogRecord summary = logs.warnings.stream().filter(record -> record.getThrown() == null).findFirst().orElseThrow();
-            assertTrue(formatted(summary).contains("failedSamples=" + filters));
-            assertTrue(formatted(summary).contains("filters=" + filters));
+            assertTrue(LogCapture.formatted(summary).contains("failedSamples=" + filters));
+            assertTrue(LogCapture.formatted(summary).contains("filters=" + filters));
         }
     }
 
@@ -471,10 +463,6 @@ class CloudWatchLogsMetricFilterRetryTest {
     static void await(CountDownLatch latch) {
         try { assertTrue(latch.await(5, TimeUnit.SECONDS)); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
-    }
-
-    private static String formatted(LogRecord r) {
-        return MessageFormat.format(r.getMessage(), r.getParameters() == null ? new Object[0] : r.getParameters());
     }
 
     static class FaultStore extends InMemoryStorage<String, MetricDatum> {

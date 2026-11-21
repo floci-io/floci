@@ -26,6 +26,22 @@ public final class DynamoDbTableNames {
         return resolveInternal(input).name();
     }
 
+    /** Whether the input is a non-empty name rather than a table ARN. */
+    static boolean isShortName(String input) {
+        return input != null && !input.isEmpty() && !AwsArnUtils.looksLikeArn(input);
+    }
+
+    /** Resolves the table of an item call, which reports only the first problem of a short name. */
+    public static String resolveForItemCall(String input) {
+        if (isShortName(input)) {
+            String violation = nameViolation(input);
+            if (violation != null) {
+                throw SmithyValidationErrors.validationException(violation);
+            }
+        }
+        return resolve(input);
+    }
+
     /**
      * Validates a short table name for use with CreateTable.
      * CreateTable requires min length 3 and missing TableName is a distinct error.
@@ -107,7 +123,11 @@ public final class DynamoDbTableNames {
             throw invalid("Invalid table ARN: " + input);
         }
 
-        validateTableName(tableName);
+        // Every call reports only the first problem of the name in a table ARN, measured in UTF-16 units.
+        List<String> violations = violations(input, "Table name of ARN must ", tableName, tableName.length());
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations.getFirst());
+        }
         return new ResolvedTableRef(tableName, region);
     }
 
@@ -121,30 +141,46 @@ public final class DynamoDbTableNames {
     }
 
     private static void validateTableName(String tableName) {
-        String violation = nameViolation(tableName);
-        if (violation != null) {
-            throw SmithyValidationErrors.validationException(violation);
+        List<String> violations = nameViolations(tableName);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
         }
     }
 
-    /** The violation for a short table name, or {@code null} for a valid one. A bad length hides a bad pattern. */
+    /**
+     * The first violation of a short table name as an item call reports it, or {@code null} for a
+     * valid one. The length counts characters and hides a bad pattern.
+     */
     static String nameViolation(String tableName) {
-        List<String> violations = nameViolations(tableName);
+        List<String> violations = violations(tableName, "Member must ", tableName,
+                tableName.codePointCount(0, tableName.length()));
         return violations.isEmpty() ? null : violations.getFirst();
     }
 
-    /** Every violation of a short table name, the length first. */
+    /**
+     * Every violation of a short table name as the table calls and the older item validator
+     * report them, the length first. The length counts UTF-16 units, so an emoji counts twice.
+     */
     static List<String> nameViolations(String tableName) {
+        return violations(tableName, "Member must ", tableName, tableName.length());
+    }
+
+    /** The length problem, then the pattern problem, of a table name the error quotes as {@code value}. */
+    private static List<String> violations(String value, String rule, String tableName, int length) {
         List<String> violations = new ArrayList<>();
-        String lengthViolation = SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255);
-        if (lengthViolation != null) {
-            violations.add(lengthViolation);
+        if (length < 3) {
+            violations.add(violation(value, rule + "have length greater than or equal to 3"));
+        } else if (255 < length) {
+            violations.add(violation(value, rule + "have length less than or equal to 255"));
         }
         if (!TABLE_NAME_CHARS.matcher(tableName).matches()) {
-            violations.add("Value '" + tableName
-                    + "' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+            violations.add(violation(value, rule + "satisfy regular expression pattern: [a-zA-Z0-9_.-]+"));
         }
         return violations;
+    }
+
+    private static String violation(String value, String constraint) {
+        return SmithyValidationErrors.Violations.QUOTED.constraint("tableName", value, constraint);
     }
 
     private static AwsException invalid(String message) {

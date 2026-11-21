@@ -66,6 +66,7 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.emrcontainers.EmrContainersClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
@@ -85,6 +86,7 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.lambda.LambdaAsyncClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
@@ -553,10 +555,14 @@ public final class TestFixtures {
     }
 
     public static AccountClient accountClient() {
+        return accountClient("test");
+    }
+
+    public static AccountClient accountClient(String accountId) {
         return AccountClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 
@@ -944,6 +950,16 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static LambdaAsyncClient lambdaAsyncClient() {
+        return LambdaAsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .httpClientBuilder(NettyNioAsyncHttpClient.builder()
+                        .protocol(Protocol.HTTP1_1))
+                .build();
+    }
+
     public static LambdaWebClient lambdaWebClient() {
         return LambdaWebClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1266,6 +1282,14 @@ public final class TestFixtures {
 
     public static EmrClient emrClient() {
         return EmrClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EmrContainersClient emrContainersClient() {
+        return EmrContainersClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1707,10 +1731,18 @@ public final class TestFixtures {
     }
 
     public static IotClient iotClient() {
+        return iotClient(CREDENTIALS);
+    }
+
+    public static IotClient iotClient(String accountId) {
+        return iotClient(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")));
+    }
+
+    private static IotClient iotClient(StaticCredentialsProvider credentials) {
         return IotClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(credentials)
                 .build();
     }
 

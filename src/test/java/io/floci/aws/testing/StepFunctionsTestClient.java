@@ -41,9 +41,13 @@ public final class StepFunctionsTestClient {
     }
 
     public static String allow(String resource, String... actions) {
+        return policy(List.of(Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", resource)));
+    }
+
+    /** A policy document holding {@code statements}. */
+    public static String policy(List<Map<String, Object>> statements) {
         try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", List.of(
-                    Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", resource))));
+            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -51,6 +55,24 @@ public final class StepFunctionsTestClient {
 
     public String role(String account, String namePrefix, String trust, String policy) {
         return EnforcementFixtures.createRole(cleanup, port, account, "/", namePrefix + UUID.randomUUID(), trust, policy);
+    }
+
+    /** A bucket {@code account} creates in {@code region}, removed again by {@code cleanup}. */
+    public String bucket(String account, String region, String namePrefix) {
+        String name = namePrefix + UUID.randomUUID();
+        String authorization = auth(account, region, "s3");
+        given().port(port).header("Authorization", authorization)
+                .body("us-east-1".equals(region) ? "" : "<CreateBucketConfiguration><LocationConstraint>" + region
+                        + "</LocationConstraint></CreateBucketConfiguration>")
+                .put("/" + name).then().statusCode(200);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(port, authorization, name));
+        return name;
+    }
+
+    /** Puts {@code policy} on {@code bucket} as {@code account}. */
+    public void setBucketPolicy(String account, String bucket, String policy) {
+        given().port(port).header("Authorization", auth(account, "s3")).body(policy)
+                .queryParam("policy", "").put("/" + bucket).then().statusCode(200);
     }
 
     public SqsTestQueue queue(SqsService service, String account, String region, String namePrefix) {

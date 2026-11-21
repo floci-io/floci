@@ -69,6 +69,8 @@ public class Ec2MetadataServer {
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
     /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
     private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
+    /** The addresses of the relays that name each caller in X-Forwarded-For, which is read from them alone. */
+    private final Set<String> forwarders = ConcurrentHashMap.newKeySet();
 
     private volatile HttpServer httpServer;
     private final InstanceConnectKeys instanceConnect;
@@ -95,6 +97,23 @@ public class Ec2MetadataServer {
     /** EC2 Instance Connect's signing material, for installing its trust anchor in guests; empty in tests. */
     public Optional<InstanceConnectKeys> instanceConnect() {
         return Optional.ofNullable(instanceConnect);
+    }
+
+    /**
+     * Trusts the relay at {@code address}, which holds 169.254.169.254 for containers that cannot hold it themselves and
+     * names each caller's address in {@code X-Forwarded-For}: a request from it is answered for that caller.
+     */
+    public void trustForwarder(String address) {
+        if (address != null && !address.isBlank()) {
+            forwarders.add(address);
+        }
+    }
+
+    /** Stops trusting the relay at {@code address}, which has gone. */
+    public void distrustForwarder(String address) {
+        if (address != null) {
+            forwarders.remove(address);
+        }
     }
 
     /** Called by Ec2ContainerManager after a container starts to register its IP. */
@@ -235,6 +254,7 @@ public class Ec2MetadataServer {
         tokens.clear();
         containerIpToInstance.clear();
         synthesizedProfiles.clear();
+        forwarders.clear();
         if (httpServer != null) {
             httpServer.close();
             httpServer = null;
@@ -261,7 +281,7 @@ public class Ec2MetadataServer {
         }
         else {
             LOG.debugv("IMDS: token requested from {0}, which is not a registered EC2 container; "
-                    + "metadata requests with this token will fail", ctx.request().remoteAddress().host());
+                    + "metadata requests with this token will fail", callerAddress(ctx));
         }
 
         ctx.response()
@@ -563,8 +583,14 @@ public class Ec2MetadataServer {
     // ── Instance resolution ───────────────────────────────────────────────────
 
     private Instance resolveInstanceByIp(RoutingContext ctx) {
-        String remoteIp = ctx.request().remoteAddress().host();
-        return containerIpToInstance.get(remoteIp);
+        return containerIpToInstance.get(callerAddress(ctx));
+    }
+
+    // The caller's address: the request's own, or the one a trusted relay names for its caller.
+    private String callerAddress(RoutingContext ctx) {
+        String remote = ctx.request().remoteAddress().host();
+        String forwarded = forwarders.contains(remote) ? ctx.request().getHeader("X-Forwarded-For") : null;
+        return forwarded != null && !forwarded.isBlank() ? forwarded.trim() : remote;
     }
 
     /**
@@ -586,8 +612,7 @@ public class Ec2MetadataServer {
     }
 
     private Instance resolveInstance(RoutingContext ctx) {
-        String remoteIp = ctx.request().remoteAddress().host();
-        Instance inst = containerIpToInstance.get(remoteIp);
+        Instance inst = containerIpToInstance.get(callerAddress(ctx));
 
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
@@ -614,7 +639,7 @@ public class Ec2MetadataServer {
         }
 
         if (inst == null) {
-            String message = unregisteredContainerMessage(remoteIp);
+            String message = unregisteredContainerMessage(callerAddress(ctx));
             LOG.warnv("IMDS: {0}", message);
             ctx.response().setStatusCode(404)
                     .putHeader("content-type", "text/plain")

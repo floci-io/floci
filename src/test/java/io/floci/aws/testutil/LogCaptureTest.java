@@ -1,6 +1,7 @@
 package io.floci.aws.testutil;
 
 import io.floci.aws.testing.ThreadStates;
+import org.jboss.logmanager.ExtLogRecord;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -102,6 +103,43 @@ class LogCaptureTest {
         assertInstanceOf(TimeoutException.class, failure.getCause());
         assertEquals(originalLevel, logger.getLevel());
         assertEquals(originalHandlerCount, logger.getHandlers().length);
+    }
+
+    @Test
+    void formattedSubstitutesTheParametersARecordStillCarries() {
+        LogRecord pattern = new LogRecord(Level.WARNING, "key {0} in account {1}");
+        pattern.setParameters(new Object[]{"AKIAEXAMPLE", "123456789012"});
+        LogRecord plain = new LogRecord(Level.WARNING, "the user's key {0}");
+
+        assertEquals("key AKIAEXAMPLE in account 123456789012", LogCapture.formatted(pattern));
+        assertEquals("the user's key {0}", LogCapture.formatted(plain));
+    }
+
+    /** A JBoss record is formatted in its own style: printf for {@code infof}, MessageFormat for {@code infov}. */
+    @Test
+    void formattedReadsAJbossRecordInItsOwnFormatStyle() {
+        ExtLogRecord printf = new ExtLogRecord(Level.INFO, "=== Floci %s Starting ===",
+                ExtLogRecord.FormatStyle.PRINTF, LogCaptureTest.class.getName());
+        printf.setParameters(new Object[]{"2.5.0"});
+        ExtLogRecord messageFormat = new ExtLogRecord(Level.INFO, "broker {0} is now RUNNING",
+                ExtLogRecord.FormatStyle.MESSAGE_FORMAT, LogCaptureTest.class.getName());
+        messageFormat.setParameters(new Object[]{"orders"});
+
+        assertEquals("=== Floci 2.5.0 Starting ===", LogCapture.formatted(printf));
+        assertEquals("broker orders is now RUNNING", LogCapture.formatted(messageFormat));
+    }
+
+    /** A pattern MessageFormat cannot read, an empty parameter list and no message at all don't throw. */
+    @Test
+    void formattedLeavesWhatItCannotFormatAsItIs() {
+        LogRecord braces = new LogRecord(Level.WARNING, "bad payload {0 {\"a\":1}");
+        braces.setParameters(new Object[]{"x"});
+        LogRecord empty = new LogRecord(Level.WARNING, "role ''{0}''");
+        empty.setParameters(new Object[0]);
+
+        assertEquals("bad payload {0 {\"a\":1}", LogCapture.formatted(braces));
+        assertEquals("role ''{0}''", LogCapture.formatted(empty));
+        assertEquals("null", LogCapture.formatted(new LogRecord(Level.WARNING, null)));
     }
 
     @Test

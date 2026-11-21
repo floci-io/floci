@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,15 +54,22 @@ final class RequestResourceMembers {
     /** A member a REST request carries outside its body, by its name, and where: a path label or a query parameter. */
     private static final Pattern LOCATED_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
+    // A botocore client, as the vendored routes name its model.
+    private static final Pattern CLIENT = Pattern.compile("[a-z0-9][a-z0-9-]*");
+    // A member of a request's body at any depth: Delete.Objects[].Key.
+    private static final Pattern BODY_PATH = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)*");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
+    /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
+    private static final Pattern NESTED_ID = Pattern.compile("[/:][A-Za-z][A-Za-z0-9-]*[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way. */
     private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
     /** The keys of a resource read from a member holding its ARN. */
     private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
     /** The keys of a resource whose format's variables members fill, or its service finds by them. */
     private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
-            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults");
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -221,13 +229,25 @@ final class RequestResourceMembers {
      * variable that is the one of another type's format names that type's default when the request leaves it out
      * ({@code defaults}, the member mapped to the type), which the service gives: an ECS service of a request with no
      * {@code cluster} is on the default cluster. One member of {@code find} may be a list, each of whose values the
-     * service finds (ECS's {@code taskDefinitions[]}).
+     * service finds (ECS's {@code taskDefinitions[]}). A
+     * {@code partialArn} type's members may give its ARN with the leading parts left out, its account and resource
+     * ({@code 123456789012:function:my-function}) or its Region too, which the reader completes in the request's
+     * partition, and Region where the value leaves that out.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
-                    Map<String, String> defaults) {
+                    Map<String, String> defaults, boolean partialArn) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, false);
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -261,9 +281,11 @@ final class RequestResourceMembers {
     /**
      * A resource a create makes under a parent its action acts on, from a member holding the parent's ARN: the
      * parent's resource with its leading type word {@code parentWord} replaced by {@code childWord} and an open
-     * id appended after {@code separator} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}).
+     * id appended after {@code infix} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}, infix
+     * {@code /}), or the parent's whole resource with a word of the child's own before the open id
+     * ({@code bucket/<name>/table/*} under {@code bucket/<name>}, infix {@code /table/}).
      */
-    record Created(String type, String parent, Member arn, String parentWord, String childWord, String separator) {
+    record Created(String type, String parent, Member arn, String parentWord, String childWord, String infix) {
     }
 
     /** An ordered heterogeneous id list; unsupported ids retain wildcard authorization. */
@@ -289,13 +311,32 @@ final class RequestResourceMembers {
     }
 
     /**
+     * A request an operation's service makes to another service as the caller to run a statement the operation's
+     * request carries: {@code action}, on each of {@code resources}, and only for a partitioned table when
+     * {@code partitioned} (the page vendored for Athena's DDL statements says a table without partitions needs no
+     * partition action).
+     */
+    record StatementRequest(String action, List<StatementResource> resources, boolean partitioned) {
+    }
+
+    /**
+     * A resource of a statement's request: of {@code type}, each variable of its format in {@code fill} taking what
+     * the statement names by that word ({@code database}, {@code table}), the others open.
+     */
+    record StatementResource(String type, Map<String, String> fill) {
+    }
+
+    /**
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
-     * parent and the one a create whose action acts on no type makes ({@code makes}), as
+     * parent and the one a create whose action acts on no type, or on other types alone, makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
-     * query, {@code ?name}, by the member's name. Each operation's {@code forwarded} requests are those its service
-     * makes to another as the caller.
+     * query, {@code ?name}, by the member's name, and one the clients of an operation locate apart is under each
+     * client ({@code locatedApart}), whose vendored route tells a request's client. Each operation's {@code forwarded}
+     * requests are those its service makes to another as the caller, and its {@code statements} those it makes as the
+     * caller to run each statement its request may carry. An {@code unread} operation names what it acts on in a body
+     * the reader does not read.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
@@ -305,7 +346,8 @@ final class RequestResourceMembers {
                  Map<String, Map<String, List<String>>> resourceTagKeys,
                  Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
-                 Map<String, List<Forwarded>> forwarded) {
+                 Map<String, List<Forwarded>> forwarded, Map<String, Map<String, List<StatementRequest>>> statements,
+                 Map<String, Map<String, Map<String, String>>> locatedApart, Set<String> unread) {
     }
 
     private static final class Holder {
@@ -391,7 +433,9 @@ final class RequestResourceMembers {
                 }
                 type.getValue().forEach(key -> {
                     String prefix = key.asText("");
-                    if (!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/") || keys.contains(prefix)) {
+                    if ((!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/")
+                            && !prefix.equals(namespace.getKey() + ":" + type.getKey() + "-tag/"))
+                            || keys.contains(prefix)) {
                         throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
                     }
                     keys.add(prefix);
@@ -408,6 +452,8 @@ final class RequestResourceMembers {
         Map<String, Targets> targets = new LinkedHashMap<>();
         Map<String, Map<Member, String>> ec2Query = new LinkedHashMap<>();
         Map<String, Map<String, String>> located = new LinkedHashMap<>();
+        Map<String, Map<String, Map<String, String>>> locatedApart = new LinkedHashMap<>();
+        Set<String> unread = new LinkedHashSet<>();
         Map<String, List<Forwarded>> forwarded = new LinkedHashMap<>();
         JsonNode forwardedActions = document.path("forwardedActions");
         operations.properties().forEach(operation -> {
@@ -425,10 +471,10 @@ final class RequestResourceMembers {
             actsOn.put(operation.getKey(), types);
             List<Resource> made = new ArrayList<>();
             for (JsonNode resource : operation.getValue().path("makes")) {
-                if (!types.isEmpty() || !resource.isObject() || resource.size() != 2 || !resource.has("type")
-                        || !resource.has("fill")) {
+                if (!resource.isObject() || resource.size() != 2 || !resource.has("type") || !resource.has("fill")
+                        || types.contains(resource.get("type").asText())) {
                     throw new IllegalStateException(RESOURCE_NAME + " makes " + resource + " for " + operation.getKey()
-                            + ", no type's variables of a create acting on none");
+                            + ", no type's variables of a create acting on none or on other types alone");
                 }
                 made.add(resource(operation.getKey(), resource, formats.getOrDefault(namespace, Map.of())));
             }
@@ -495,6 +541,48 @@ final class RequestResourceMembers {
             if (!where.isEmpty()) {
                 located.put(operation.getKey(), Map.copyOf(where));
             }
+            JsonNode locatedApartNode = operation.getValue().path("locatedApart");
+            if (!locatedApartNode.isMissingNode() && (!locatedApartNode.isObject() || locatedApartNode.isEmpty())) {
+                throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey()
+                        + "'s members apart under no client");
+            }
+            Map<String, Map<String, String>> apart = new LinkedHashMap<>();
+            locatedApartNode.properties().forEach(client -> {
+                if (!client.getValue().isObject()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey() + "'s members for "
+                            + client.getKey() + " as " + client.getValue() + ", no members");
+                }
+                Map<String, String> members = new LinkedHashMap<>();
+                client.getValue().properties().forEach(member -> {
+                    if (!CLIENT.matcher(client.getKey()).matches() || !LOCATED_MEMBER.matcher(member.getKey()).matches()
+                            || !LOCATION.matcher(member.getValue().asText("")).matches()) {
+                        throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey() + "'s "
+                                + member.getKey() + " at " + member.getValue() + " for " + client.getKey()
+                                + ", no client's label of a path or query parameter");
+                    }
+                    members.put(member.getKey(), member.getValue().asText());
+                });
+                if (members.isEmpty()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " locates none of " + operation.getKey()
+                            + "'s members for " + client.getKey());
+                }
+                apart.put(client.getKey(), Map.copyOf(members));
+            });
+            if (!apart.isEmpty()) {
+                locatedApart.put(operation.getKey(), Map.copyOf(apart));
+            }
+            JsonNode unreadNode = operation.getValue().path("unread");
+            if (!unreadNode.isMissingNode() && (!unreadNode.isArray() || unreadNode.isEmpty())) {
+                throw new IllegalStateException(RESOURCE_NAME + " leaves " + operation.getKey()
+                        + " unread on no member of its body");
+            }
+            for (JsonNode member : unreadNode) {
+                if (!member.isTextual() || !BODY_PATH.matcher(member.asText()).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " leaves " + operation.getKey() + "'s " + member
+                            + " unread, no member of a request's body");
+                }
+                unread.add(operation.getKey());
+            }
             List<Forwarded> forwards = new ArrayList<>();
             for (JsonNode use : operation.getValue().path("forwarded")) {
                 forwards.add(forwarded(operation.getKey(), use, types, formats.getOrDefault(namespace, Map.of()),
@@ -509,7 +597,58 @@ final class RequestResourceMembers {
                 Map.copyOf(resourceTagKeys), resourceKeys, namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
-                names(document.path("otherNamespaces")), Map.copyOf(forwarded));
+                names(document.path("otherNamespaces")), Map.copyOf(forwarded), statements(document, formats),
+                Map.copyOf(locatedApart), Set.copyOf(unread));
+    }
+
+    /**
+     * Each operation's statements and the requests each makes, refusing an action the file records no types for, a
+     * resource of a type it does not record for the action or with no format, and a variable its format does not have.
+     */
+    private static Map<String, Map<String, List<StatementRequest>>> statements(
+            JsonNode document, Map<String, Map<String, ArnFormat>> formats) {
+        JsonNode actions = document.path("statementActions");
+        Map<String, Map<String, List<StatementRequest>>> found = new LinkedHashMap<>();
+        document.path("statements").properties().forEach(operation -> {
+            Map<String, List<StatementRequest>> byStatement = new LinkedHashMap<>();
+            operation.getValue().properties().forEach(statement -> {
+                List<StatementRequest> requests = new ArrayList<>();
+                for (JsonNode request : statement.getValue()) {
+                    requests.add(statementRequest(operation.getKey() + " " + statement.getKey(), request, actions,
+                            formats));
+                }
+                byStatement.put(statement.getKey(), List.copyOf(requests));
+            });
+            found.put(operation.getKey(), Map.copyOf(byStatement));
+        });
+        return Map.copyOf(found);
+    }
+
+    private static StatementRequest statementRequest(String statement, JsonNode request, JsonNode actions,
+                                                     Map<String, Map<String, ArnFormat>> formats) {
+        String action = request.path("action").asText("");
+        Set<String> types = Set.copyOf(actions.path(action).valueStream().map(JsonNode::asText).toList());
+        Map<String, ArnFormat> namespaceFormats = formats.getOrDefault(
+                action.substring(0, Math.max(0, action.indexOf(':'))), Map.of());
+        List<StatementResource> resources = new ArrayList<>();
+        for (JsonNode resource : request.path("resources")) {
+            String type = resource.path("type").asText("");
+            ArnFormat format = namespaceFormats.get(type);
+            Map<String, String> fill = new LinkedHashMap<>();
+            resource.path("fill").properties()
+                    .forEach(variable -> fill.put(variable.getKey(), variable.getValue().asText("")));
+            if (!types.contains(type) || format == null || fill.entrySet().stream().anyMatch(entry ->
+                    entry.getValue().isEmpty() || !format.format().contains("${" + entry.getKey() + "}"))) {
+                throw new IllegalStateException(RESOURCE_NAME + " gives " + statement + " " + resource + " for "
+                        + action + ", no resource of a type the file records for the action");
+            }
+            resources.add(new StatementResource(type, Map.copyOf(fill)));
+        }
+        if (types.isEmpty() || resources.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " gives " + statement + " " + request
+                    + ", no recorded action on resources");
+        }
+        return new StatementRequest(action, List.copyOf(resources), request.path("partitioned").asBoolean(false));
     }
 
     /** Each resource type's member-named condition keys, by namespace, refusing a type or ARN type with no format. */
@@ -684,9 +823,15 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
+        boolean partialArn = resource.has("partialArn");
+        if (partialArn && (!resource.path("partialArn").isBoolean() || !resource.path("partialArn").booleanValue()
+                || fill.isEmpty())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + type + " for " + operation
+                    + " from a partial ARN " + resource.path("partialArn") + ", not true for a type its members fill");
+        }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
                 Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault,
-                defaults(operation, type, resource.path("defaults"), fill, formats));
+                defaults(operation, type, resource.path("defaults"), fill, formats), partialArn);
     }
 
     /**
@@ -765,15 +910,18 @@ final class RequestResourceMembers {
         String parent = created.path("parent").asText("");
         Matcher child = formats.containsKey(type) ? RESOURCE_PART.matcher(formats.get(type).format()) : null;
         Matcher under = formats.containsKey(parent) ? RESOURCE_PART.matcher(formats.get(parent).format()) : null;
+        boolean nested = child != null && under != null && child.matches() && under.matches()
+                && child.group(1).equals(under.group(1));
         if (child == null || under == null || !child.matches() || !under.matches()
-                || child.group(1).equals(under.group(1)) || !child.group(2).startsWith(under.group(2))
-                || !APPENDED_ID.matcher(child.group(2).substring(under.group(2).length())).matches()) {
+                || !child.group(2).startsWith(under.group(2))
+                || !(nested ? NESTED_ID : APPENDED_ID).matcher(child.group(2).substring(under.group(2).length()))
+                        .matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " creates a " + type + " for " + operation
                     + " under a " + parent + ", no parent of it");
         }
-        String separator = child.group(2).substring(under.group(2).length(), under.group(2).length() + 1);
+        String appended = child.group(2).substring(under.group(2).length());
         return new Created(type, parent, member(operation, created.path("arn").asText("")), under.group(1),
-                child.group(1), separator);
+                child.group(1), appended.substring(0, appended.indexOf("${")));
     }
 
     private static Member member(String operation, String path) {

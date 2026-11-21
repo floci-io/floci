@@ -485,7 +485,8 @@ class KellnrSidecarClientTest {
     }
 
     private KellnrSidecarManager manager() {
-        return new KellnrSidecarManager(containerBuilder, lifecycleManager, config);
+        return new KellnrSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     @SuppressWarnings("unchecked")

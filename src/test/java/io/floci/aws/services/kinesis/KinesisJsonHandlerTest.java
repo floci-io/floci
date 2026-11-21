@@ -11,6 +11,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.kinesis.model.KinesisShard;
 import io.floci.aws.services.kinesis.model.KinesisStream;
+import io.floci.aws.testing.MutableClock;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -491,6 +493,91 @@ class KinesisJsonHandlerTest {
         assertThat(resp.getStatus(), is(200));
         ObjectNode desc = (ObjectNode) responseEntity(resp).get("StreamDescription");
         assertEquals("test-stream", desc.get("StreamName").asText());
+    }
+
+    @Test
+    void statusResponsesUseTheServiceClock() {
+        MutableClock clock = new MutableClock();
+        RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
+        service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                resolver, clock, 60_000, 60_000);
+        handler = new KinesisJsonHandler(service, MAPPER, 300_000);
+        KinesisInspectionController inspection = new KinesisInspectionController(service, MAPPER, resolver);
+        service.createStream("test-stream", 1, REGION);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+
+        assertEquals("CREATING", responseEntity(handler.handle("DescribeStream", request, REGION))
+                .path("StreamDescription").path("StreamStatus").asText());
+        assertEquals("CREATING", responseEntity(handler.handle("DescribeStreamSummary", request, REGION))
+                .path("StreamDescriptionSummary").path("StreamStatus").asText());
+        assertEquals("CREATING", responseEntity(handler.handle("ListStreams", MAPPER.createObjectNode(), REGION))
+                .path("StreamSummaries").get(0).path("StreamStatus").asText());
+        assertEquals("CREATING", responseEntity(inspection.getStreams(null))
+                .path("streams").get(0).path("StreamStatus").asText());
+
+        clock.advance(Duration.ofSeconds(60));
+        service.updateStreamMode("test-stream", "ON_DEMAND", REGION);
+        assertEquals("UPDATING", responseEntity(handler.handle("DescribeStreamSummary", request, REGION))
+                .path("StreamDescriptionSummary").path("StreamStatus").asText());
+        assertEquals("UPDATING", responseEntity(inspection.getStreams(null))
+                .path("streams").get(0).path("StreamStatus").asText());
+    }
+
+    @Test
+    void createStreamAcceptsInitialTagsDuringCreatingWindow() {
+        MutableClock clock = new MutableClock();
+        service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), clock, 60_000, 0);
+        handler = new KinesisJsonHandler(service, MAPPER, 300_000);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream").put("ShardCount", 1);
+        request.putObject("Tags").put("env", "dev");
+
+        assertEquals(200, handler.handle("CreateStream", request, REGION).getStatus());
+        KinesisStream stream = service.describeStream("test-stream", REGION);
+        assertEquals("CREATING", stream.getStreamStatus(clock.instant()));
+        assertEquals(Map.of("env", "dev"), stream.getTags());
+    }
+
+    @Test
+    void createStreamRejectsExcessInitialTagsWithoutLeavingAStream() {
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "too-many-tags").put("ShardCount", 1);
+        ObjectNode tags = request.putObject("Tags");
+        for (int i = 0; i < 51; i++) {
+            tags.put("tag-" + i, "value");
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("CreateStream", request, REGION));
+        assertEquals("LimitExceededException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listStreamDetails(REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PutRecord", "PutRecords"})
+    void recordsRequireCreatedStreamToBecomeActiveButCanWriteWhileUpdating(String action) {
+        MutableClock clock = new MutableClock();
+        service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), clock, 60_000, 60_000);
+        handler = new KinesisJsonHandler(service, MAPPER, 300_000);
+        KinesisStream stream = service.createStream("test-stream", 1, REGION);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        ObjectNode record = "PutRecords".equals(action) ? request.putArray("Records").addObject() : request;
+        record.put("PartitionKey", "pk").put("Data", "AQ==");
+
+        AwsException creating = assertThrows(AwsException.class, () -> handler.handle(action, request, REGION));
+        assertEquals("ResourceNotFoundException", creating.getErrorCode());
+        assertEquals(400, creating.getHttpStatus());
+        assertEquals(0, stream.getShards().getFirst().recordCount());
+
+        clock.advance(Duration.ofSeconds(60));
+        service.updateStreamMode("test-stream", "ON_DEMAND", REGION);
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()));
+        ObjectNode response = responseEntity(handler.handle(action, request, REGION));
+        if ("PutRecords".equals(action)) {
+            assertEquals(0, response.path("FailedRecordCount").asInt());
+        }
+        assertEquals(1, stream.getShards().getFirst().recordCount());
     }
 
     @Test
@@ -2239,6 +2326,27 @@ class KinesisJsonHandlerTest {
         for (JsonNode shard : secondPage.get("Shards")) {
             assertFalse(shard.get("ShardId").asText().equals(firstShardId));
         }
+    }
+
+    @Test
+    void listShardsCapsPageAt1000EvenWhenMaxResultsIsLarger() {
+        createStream("test-stream", 1001);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 10000);
+        ObjectNode firstPage = responseEntity(handler.handle("ListShards", first, REGION));
+
+        assertEquals(1000, firstPage.get("Shards").size());
+        assertTrue(firstPage.hasNonNull("NextToken"), "a token is returned for the remaining shard");
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", firstPage.get("NextToken").asText());
+        second.put("MaxResults", 10000);
+        ObjectNode secondPage = responseEntity(handler.handle("ListShards", second, REGION));
+
+        assertEquals(1, secondPage.get("Shards").size());
+        assertFalse(secondPage.hasNonNull("NextToken"));
     }
 
     @Test

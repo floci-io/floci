@@ -45,7 +45,7 @@ public class UserPool {
     private int estimatedNumberOfUsers = 0;
     private Map<String, Object> emailConfiguration = new HashMap<>();
     private Map<String, Object> smsConfiguration = new HashMap<>();
-    private Map<String, String> userPoolTags = new HashMap<>();
+    private volatile Map<String, String> userPoolTags = new HashMap<>();
     private Map<String, Object> adminCreateUserConfig = new HashMap<>();
     private Map<String, Object> userPoolAddOns = new HashMap<>();
     private Map<String, Object> usernameConfiguration = new HashMap<>();

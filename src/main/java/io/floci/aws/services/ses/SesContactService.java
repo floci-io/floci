@@ -49,7 +49,6 @@ public class SesContactService implements SesTaggable {
     private static final Logger LOG = Logger.getLogger(SesContactService.class);
 
     private static final Set<String> SUBSCRIPTION_STATUSES = Set.of("OPT_IN", "OPT_OUT");
-    private static final Pattern CONTACT_LIST_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
     private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
     private static final int MAX_TOPICS_PER_LIST = 20;
     private static final int MAX_DISPLAY_NAME_LENGTH = 128;
@@ -231,7 +230,7 @@ public class SesContactService implements SesTaggable {
         if (name.isBlank()) {
             throw new AwsException("BadRequestException", "ContactListName can't be blank.", 400);
         }
-        if (!CONTACT_LIST_NAME_CHARS.matcher(name).matches()) {
+        if (!SesNames.isValid(name)) {
             throw new AwsException("BadRequestException",
                     "ContactListName can contain up to 64 characters. Only alphanumeric characters, "
                             + "underscores(_) and hyphens(-) are allowed.", 400);
@@ -277,7 +276,7 @@ public class SesContactService implements SesTaggable {
         if (name.isBlank()) {
             throw new AwsException("BadRequestException", "ContactListName can't be blank.", 400);
         }
-        if (!CONTACT_LIST_NAME_CHARS.matcher(name).matches()) {
+        if (!SesNames.isValid(name)) {
             throw new AwsException("BadRequestException",
                     "ContactListName can contain up to 64 characters. Only alphanumeric characters, "
                             + "underscores(_) and hyphens(-) are allowed.", 400);
@@ -292,7 +291,7 @@ public class SesContactService implements SesTaggable {
                 if (t.getTopicName().isBlank()) {
                     throw new AwsException("BadRequestException", "TopicName can't be blank.", 400);
                 }
-                if (!CONTACT_LIST_NAME_CHARS.matcher(t.getTopicName()).matches()) {
+                if (!SesNames.isValid(t.getTopicName())) {
                     throw new AwsException("BadRequestException",
                             "TopicName can contain up to 64 characters. Only alphanumeric characters, "
                                     + "underscores(_) and hyphens(-) are allowed.", 400);

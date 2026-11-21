@@ -14,7 +14,7 @@ import io.floci.aws.services.acm.model.ValidationMethod;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AlbFixtures;
 import io.floci.aws.testing.InlineMocks;
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
@@ -89,7 +89,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2HttpsDataPlaneIntegrationTest {
 

@@ -44,6 +44,7 @@ import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaId;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -133,7 +134,7 @@ class GlueServiceTest {
                        StorageBackend<String, UserDefinedFunction> functions,
                        StorageBackend<String, Table> tables) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
         kmsService = new KmsService(storageFactory, regionResolver);
         databaseStore = new InMemoryStorage<>();
@@ -1528,18 +1529,6 @@ class GlueServiceTest {
         return statistics;
     }
 
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory("000000000000");
-        }
-    }
 
     private Job createValidJob(String name) {
         Job job = new Job();
@@ -1658,6 +1647,68 @@ class GlueServiceTest {
         String crawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/tagged-crawler";
         Map<String, String> crawlerTags = glueService.getTags(crawlerArn, REGION);
         assertEquals("prod", crawlerTags.get("env"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void storedTagsAreTheStringTagsOfTheJobOrTheRegistryTheArnNames() {
+        glueService.createJob(createValidJob("stored-tags-job"), Map.of("team", "data"), REGION);
+        String jobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/stored-tags-job";
+        String registryArn = schemaRegistryService.createRegistry("stored-tags-registry", null,
+                Map.of("team", "stream"), REGION).getRegistryArn();
+        Map<String, String> mixed = (Map<String, String>) (Map<?, ?>) Map.of("owner", "ingest", "count", 5);
+        glueService.tagResource(jobArn, mixed, REGION);
+
+        assertEquals(Map.of("team", "data", "owner", "ingest"), glueService.storedTags(jobArn));
+        assertEquals(Map.of("team", "stream"), glueService.storedTags(registryArn));
+        assertEquals(Map.of(), glueService.storedTags(jobArn.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), glueService.storedTags(jobArn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), glueService.storedTags(registryArn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), glueService.storedTags(registryArn + "-missing"));
+
+        glueService.deleteJob("stored-tags-job", REGION);
+
+        assertEquals(Map.of(), glueService.storedTags(jobArn));
+    }
+
+    @Test
+    void aTablesAndAFunctionsTagsGoWhenTheyOrTheirDatabaseAreDeleted() {
+        String tableArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":table/db1/tagged";
+        String functionArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":userDefinedFunction/db1/tagged_fn";
+        createTaggedTableAndFunction(tableArn, functionArn);
+        assertEquals(Map.of("team", "data"), glueService.storedTags(tableArn));
+        assertEquals(Map.of("team", "data"), glueService.storedTags(functionArn));
+
+        glueService.deleteTable("db1", "tagged");
+        glueService.deleteUserDefinedFunction("db1", "tagged_fn");
+        Table recreated = new Table();
+        recreated.setName("tagged");
+        glueService.createTable("db1", recreated);
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setFunctionName("tagged_fn");
+        glueService.createUserDefinedFunction("db1", function);
+
+        assertEquals(Map.of(), glueService.storedTags(tableArn));
+        assertEquals(Map.of(), glueService.storedTags(functionArn));
+
+        glueService.deleteTable("db1", "tagged");
+        glueService.deleteUserDefinedFunction("db1", "tagged_fn");
+        createTaggedTableAndFunction(tableArn, functionArn);
+        glueService.deleteDatabase("db1", REGION);
+
+        assertEquals(Map.of(), glueService.storedTags(tableArn));
+        assertEquals(Map.of(), glueService.storedTags(functionArn));
+    }
+
+    private void createTaggedTableAndFunction(String tableArn, String functionArn) {
+        Table table = new Table();
+        table.setName("tagged");
+        glueService.createTable("db1", table);
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setFunctionName("tagged_fn");
+        glueService.createUserDefinedFunction("db1", function);
+        glueService.tagResource(tableArn, Map.of("team", "data"), REGION);
+        glueService.tagResource(functionArn, Map.of("team", "data"), REGION);
     }
 
     @Test

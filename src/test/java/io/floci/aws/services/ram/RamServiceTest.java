@@ -70,6 +70,27 @@ class RamServiceTest {
         service.initializeStorage();
     }
 
+    /**
+     * IAM's tag lookup reads the tags held on the share the whole ARN names, in the owning account the ARN names, as
+     * tagging leaves them, when the caller may see the share: the caller's own share gives its tags, another account's
+     * share not shared with it gives none, as RAM hides it; nothing for another share's ARN or one that is not a
+     * share's.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheShareTheArnNamesWhenTheCallerMaySeeIt() {
+        String caller = "000000000000";
+        ResourceShare own = service.createResourceShare("tagged", List.of(), List.of(), false, "us-east-1", caller);
+        service.tagResource(own.getResourceShareArn(), Map.of("team", "data"), caller, "us-east-1");
+        service.tagResource(own.getResourceShareArn(), Map.of("env", "prod"), caller, "us-east-1");
+        ResourceShare hidden = service.createResourceShare("hidden", List.of(), List.of(), false, "us-east-1", OWNER);
+        service.tagResource(hidden.getResourceShareArn(), Map.of("team", "data"), OWNER, "us-east-1");
+
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(own.getResourceShareArn()));
+        assertEquals(Map.of(), service.storedTags(hidden.getResourceShareArn()));
+        assertEquals(Map.of(), service.storedTags(own.getResourceShareArn() + "0"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+    }
+
     @Test
     void deletedShareStopsExposingItsResourcesAndPrincipals() {
         // Real RAM keeps a deleted share visible (status DELETED) for a retention

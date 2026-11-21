@@ -4,12 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.core.storage.HybridStorage;
-import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.WalStorage;
 import io.floci.aws.services.sqs.GuardedMessageQueue.HandleResult;
 import io.floci.aws.services.sqs.GuardedMessageQueue.MessageCounts;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.StorageTestBackends;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -140,15 +139,8 @@ class SqsMessagePersistenceTest {
 
     private Store open(String mode, Path directory) throws IOException {
         Files.createDirectories(directory);
-        StorageBackend<String, List<Message>> backend;
-        if ("wal".equals(mode)) {
-            backend = new WalStorage<>(directory.resolve("messages.json"), directory.resolve("messages.wal"),
-                    MESSAGES, Long.MAX_VALUE);
-        } else if ("hybrid".equals(mode)) {
-            backend = new HybridStorage<>(directory.resolve("messages.json"), MESSAGES, Long.MAX_VALUE);
-        } else {
-            backend = new PersistentStorage<>(directory.resolve("messages.json"), MESSAGES);
-        }
+        StorageBackend<String, List<Message>> backend = StorageTestBackends.create(
+                mode, directory.resolve("messages.json"), directory.resolve("messages.wal"), MESSAGES, Long.MAX_VALUE);
         backend.load();
         return new Store(directory, backend);
     }
@@ -175,11 +167,7 @@ class SqsMessagePersistenceTest {
 
         @Override
         public void close() {
-            if (backend instanceof WalStorage<String, List<Message>> wal) {
-                wal.shutdown();
-            } else if (backend instanceof HybridStorage<String, List<Message>> hybrid) {
-                hybrid.shutdown();
-            }
+            StorageTestBackends.close(backend);
         }
     }
 }

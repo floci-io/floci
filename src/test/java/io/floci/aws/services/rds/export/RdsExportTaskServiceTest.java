@@ -16,6 +16,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -26,7 +27,9 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -85,6 +88,26 @@ class RdsExportTaskServiceTest {
         List<Runnable> pending = List.copyOf(workers);
         workers.clear();
         pending.forEach(Runnable::run);
+    }
+
+    @Test
+    void iamReadsTheStoredExportSourceWithoutStartingWorkOrChangingState() {
+        InMemoryStorage<String, ExportTask> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<ExportTask> scoped = new AccountAwareStorageBackend<>(raw, null, ACCOUNT);
+        RdsExportTaskService service = new RdsExportTaskService(scoped, rdsService, s3Service,
+                mock(SnapshotExporter.class), regionResolver, true, CLOCK, workers::add);
+        ExportTask task = new ExportTask();
+        task.setAccountId(ACCOUNT);
+        task.setRegion(REGION);
+        task.setSourceArn(SNAPSHOT_ARN);
+        task.setStatus(ExportTask.STATUS_COMPLETE);
+        raw.put("export-task::us-east-1::legacy", task);
+        assertEquals(Optional.of(SNAPSHOT_ARN), service.storedSourceArn("legacy", REGION));
+        assertEquals(Optional.empty(), service.storedSourceArn("legacy", "us-west-2"));
+        assertEquals(Optional.empty(), service.storedSourceArn("missing", REGION));
+        assertEquals(1, raw.keys().size());
+        assertTrue(workers.isEmpty());
+        assertEquals(ExportTask.STATUS_COMPLETE, task.getStatus());
     }
 
     @Test

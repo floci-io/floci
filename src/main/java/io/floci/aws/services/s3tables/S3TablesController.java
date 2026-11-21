@@ -61,11 +61,27 @@ public class S3TablesController {
         return Response.ok(bucketRepresentation(service.getTableBucket(decode(tableBucketArn), region(headers)))).build();
     }
 
+    @GET
+    @Path("/buckets/{tableBucketARN}/encryption")
+    public Response getTableBucketEncryption(@Context HttpHeaders headers,
+                                             @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
+        return Response.ok(Map.of("encryptionConfiguration",
+                service.getTableBucketEncryption(decode(tableBucketArn), region(headers)))).build();
+    }
+
     @DELETE
     @Path("/buckets/{tableBucketARN}")
     public Response deleteTableBucket(@Context HttpHeaders headers, @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
         service.deleteTableBucket(decode(tableBucketArn), region(headers));
         return Response.noContent().build();
+    }
+
+    @GET
+    @Path("/buckets/{tableBucketARN}/storage-class")
+    public Response getTableBucketStorageClass(@Context HttpHeaders headers,
+                                               @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
+        return Response.ok(Map.of("storageClassConfiguration",
+                service.getTableBucketStorageClass(decode(tableBucketArn), region(headers)))).build();
     }
 
     @PUT
@@ -155,8 +171,15 @@ public class S3TablesController {
     @GET
     @Path("/get-table")
     public Response getTable(@Context HttpHeaders headers, @QueryParam("tableBucketARN") String tableBucketArn,
-                             @QueryParam("namespace") String namespace, @QueryParam("name") String name) {
-        return Response.ok(tableRepresentation(service.getTable(decode(tableBucketArn), namespace, name, region(headers)))).build();
+                             @QueryParam("namespace") String namespace, @QueryParam("name") String name,
+                             @QueryParam("tableArn") String tableArn) {
+        // A table ARN names the table whatever else the request gives, as IAM checks the request on it. Query
+        // parameters arrive decoded, as IAM reads them, so they are not decoded again: a double-encoded ARN would
+        // name one table to IAM and another here.
+        S3Table table = tableArn != null
+                ? service.getTableByArn(tableArn, region(headers))
+                : service.getTable(tableBucketArn, namespace, name, region(headers));
+        return Response.ok(tableRepresentation(table)).build();
     }
 
     @GET

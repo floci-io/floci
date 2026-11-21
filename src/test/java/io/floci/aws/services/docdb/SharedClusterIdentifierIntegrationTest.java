@@ -1,7 +1,7 @@
 package io.floci.aws.services.docdb;
 
 import io.floci.aws.services.rds.RdsService;
-import io.floci.aws.testing.RdsAndDocDbMockProfile;
+import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * starting one costs the test about 30 seconds.
  */
 @QuarkusTest
-@TestProfile(RdsAndDocDbMockProfile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class SharedClusterIdentifierIntegrationTest {
 
     @Inject

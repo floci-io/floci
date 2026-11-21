@@ -11,11 +11,14 @@ import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.mwaa.model.CreateEnvironmentRequest;
 import io.floci.aws.services.mwaa.model.Environment;
 import io.floci.aws.services.mwaa.model.EnvironmentStatus;
+import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
 import io.floci.aws.services.mwaa.proxy.MwaaProxyManager;
+import io.floci.aws.services.mwaa.proxy.MwaaWebProxy;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import jakarta.annotation.PostConstruct;
@@ -25,6 +28,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,7 +47,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class MwaaService implements TagHandler {
+public class MwaaService implements TagHandler, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(MwaaService.class);
 
@@ -60,6 +65,9 @@ public class MwaaService implements TagHandler {
     private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchKey", "NoSuchBucket");
     private static final int REQUIREMENTS_INSTALL_THREADS = 2;
 
+    /** Amazon MWAA's web login token "expires after 60 seconds" (Apache Airflow REST API guide). */
+    static final Duration WEB_LOGIN_TOKEN_LIFETIME = Duration.ofSeconds(60);
+
     private final StorageBackend<String, Environment> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -69,12 +77,16 @@ public class MwaaService implements TagHandler {
     private final S3Service s3Service;
     /** Runs DAG-sync reinstalls, which can take minutes, off the poller that syncs every environment. */
     private final Executor requirementsInstaller;
+    private final Clock clock;
 
     private final ScheduledExecutorService readinessPoller = Executors.newSingleThreadScheduledExecutor();
     private final ScheduledExecutorService dagSyncPoller = Executors.newSingleThreadScheduledExecutor();
 
     /** Opaque CLI tokens minted by CreateCliToken, per environment. In-memory only — not persisted. */
     private final Map<String, Set<String>> cliTokensByEnvironment = new ConcurrentHashMap<>();
+
+    /** CreateWebLoginToken tokens and the instant each one expires, per environment. In-memory only. */
+    private final Map<String, Map<String, Instant>> webTokensByEnvironment = new ConcurrentHashMap<>();
 
     /** Last-synced DAG file state (S3 key relative to DagS3Path -> ETag), per environment. */
     private final Map<String, Map<String, String>> dagSyncState = new ConcurrentHashMap<>();
@@ -97,12 +109,14 @@ public class MwaaService implements TagHandler {
                     Thread thread = new Thread(runnable, "mwaa-requirements-install");
                     thread.setDaemon(true);
                     return thread;
-                }));
+                }),
+                Clock.systemUTC());
     }
 
     MwaaService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                 MwaaEnvironmentManager environmentManager, MwaaProxyManager proxyManager,
-                PortAllocator portAllocator, S3Service s3Service, Executor requirementsInstaller) {
+                PortAllocator portAllocator, S3Service s3Service, Executor requirementsInstaller,
+                Clock clock) {
         this.storage = storageFactory.create("mwaa", "mwaa-environments.json",
                 new TypeReference<Map<String, Environment>>() {
                 });
@@ -113,6 +127,7 @@ public class MwaaService implements TagHandler {
         this.portAllocator = portAllocator;
         this.s3Service = s3Service;
         this.requirementsInstaller = requirementsInstaller;
+        this.clock = clock;
     }
 
     @PostConstruct
@@ -120,7 +135,44 @@ public class MwaaService implements TagHandler {
         if (!config.services().mwaa().mock()) {
             startReadinessPoller();
             startDagSyncPoller();
+            for (Environment environment : allEnvironments()) {
+                environmentManager.reclaimVpcAddress(environment);
+            }
         }
+    }
+
+    /**
+     * Amazon MWAA keeps network interfaces in each subnet an environment names, so DeleteSubnet refuses one an
+     * environment still uses, as it does here. A plain read of the caller's environments and of the addresses live
+     * Airflow containers hold, which takes no lock of this service.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        String accountId = regionResolver.getAccountId();
+        return holdsLiveAddresses() && environmentManager.holdsSubnet(accountId, region, subnetId)
+                || environmentsOf(accountId, region).stream()
+                        .filter(environment -> environment.getStatus() != EnvironmentStatus.DELETED)
+                        .map(Environment::getNetworkConfiguration)
+                        .anyMatch(network -> network != null && network.getSubnetIds() != null
+                                && network.getSubnetIds().contains(subnetId));
+    }
+
+    /** A VPC is only deleted once its subnets are, which {@link #hasSubnetDependency} guards; this adds live leases. */
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return holdsLiveAddresses() && environmentManager.holdsVpc(regionResolver.getAccountId(), region, vpcId);
+    }
+
+    /** Mock mode runs no containers, so no Airflow container holds a VPC address there. */
+    private boolean holdsLiveAddresses() {
+        return !config.services().mwaa().mock();
+    }
+
+    private List<Environment> environmentsOf(String accountId, String region) {
+        List<Environment> environments = storage instanceof AccountAwareStorageBackend<Environment> aware
+                ? aware.scanForAccount(accountId, k -> true)
+                : storage.scan(k -> true);
+        return environments.stream().filter(environment -> region.equals(environmentRegion(environment))).toList();
     }
 
     @PreDestroy
@@ -204,15 +256,23 @@ public class MwaaService implements TagHandler {
                 }
                 environmentManager.startEnvironment(environment, version, startupScriptContent,
                         requirements != null ? requirements.getData() : null);
-                proxyPort = portAllocator.allocate(
+                proxyPort = portAllocator.allocateForInProcessListener(
                         config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
                 environment.setProxyPort(proxyPort);
                 environment.setWebserverUrl(buildWebserverUrl(proxyPort));
                 String airflowContainerId = environment.getAirflowContainerId();
+                // The proxy reads this environment's own token map, not whatever the name maps to later: a token
+                // issued while an earlier environment of this name was being deleted lands in that one's map, not
+                // in this.
+                Map<String, Instant> webTokens = new ConcurrentHashMap<>();
+                webTokensByEnvironment.put(environmentIdentity(environment), webTokens);
                 proxyManager.startProxy(environmentIdentity(environment), proxyPort,
                         environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
                         this::isValidCliToken,
-                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand));
+                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand),
+                        (proxyIdentity, token) -> isUnexpired(webTokens, token),
+                        new MwaaWebProxy.AirflowAccount(MwaaEnvironmentManager.AIRFLOW_ADMIN_USER,
+                                environment.getAirflowAdminPassword()));
                 provisioned = true;
             } catch (Exception e) {
                 LOG.errorv(e, "Failed to start MWAA environment {0}", name);
@@ -317,7 +377,13 @@ public class MwaaService implements TagHandler {
             environment.setPluginsS3Path(request.getPluginsS3Path());
         }
         if (request.getNetworkConfiguration() != null) {
-            environment.setNetworkConfiguration(request.getNetworkConfiguration());
+            // UpdateEnvironment's NetworkConfiguration holds only SecurityGroupIds: an environment's subnets, and so
+            // its VPC, are fixed at creation, as Amazon MWAA has them.
+            NetworkConfiguration network = new NetworkConfiguration();
+            network.setSubnetIds(environment.getNetworkConfiguration() != null
+                    ? environment.getNetworkConfiguration().getSubnetIds() : null);
+            network.setSecurityGroupIds(request.getNetworkConfiguration().getSecurityGroupIds());
+            environment.setNetworkConfiguration(network);
         }
         if (request.getLoggingConfiguration() != null) {
             environment.setLoggingConfiguration(request.getLoggingConfiguration());
@@ -356,6 +422,7 @@ public class MwaaService implements TagHandler {
         }
         String environmentIdentity = environmentIdentity(environment);
         cliTokensByEnvironment.remove(environmentIdentity);
+        webTokensByEnvironment.remove(environmentIdentity);
         dagSyncState.remove(environmentIdentity);
         requirementsEtagByEnvironment.remove(environmentIdentity);
         bootstrapInstallsToCheck.remove(environmentIdentity);
@@ -366,11 +433,26 @@ public class MwaaService implements TagHandler {
     public Map<String, Object> createWebLoginToken(String name) {
         Environment environment = getEnvironment(name);
         String token = generateToken();
+        Map<String, Instant> tokens = webTokensByEnvironment.computeIfAbsent(environmentIdentity(environment),
+                k -> new ConcurrentHashMap<>());
+        Instant now = clock.instant();
+        tokens.values().removeIf(expiresAt -> !now.isBefore(expiresAt));
+        tokens.put(token, now.plus(WEB_LOGIN_TOKEN_LIFETIME));
         return Map.of(
                 "WebToken", token,
                 "WebServerHostname", hostnameFromUrl(environment.getWebserverUrl()),
                 "IamIdentity", "assumed-role/floci-local/user",
-                "AirflowIdentity", "admin");
+                "AirflowIdentity", MwaaEnvironmentManager.AIRFLOW_ADMIN_USER);
+    }
+
+    boolean isValidWebToken(String environmentIdentity, String token) {
+        Map<String, Instant> tokens = webTokensByEnvironment.get(environmentIdentity);
+        return tokens != null && isUnexpired(tokens, token);
+    }
+
+    private boolean isUnexpired(Map<String, Instant> tokens, String token) {
+        Instant expiresAt = tokens.get(token);
+        return expiresAt != null && clock.instant().isBefore(expiresAt);
     }
 
     public Map<String, Object> createCliToken(String name) {
@@ -811,7 +893,7 @@ public class MwaaService implements TagHandler {
     }
 
     private String environmentRegion(Environment environment) {
-        return MwaaEnvironmentManager.environmentRegion(environment, regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(environment.getArn());
     }
 
 }

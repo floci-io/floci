@@ -3,6 +3,8 @@ package io.floci.aws.services.cloudformation;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.elbv2.model.AvailabilityZone;
+import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -26,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 
 /**
@@ -307,15 +309,40 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         }
     }
 
+    @Test
+    void failedStackUpdateRestoresLegacyDuplicateZoneSubnetSnapshot() {
+        String stack = "alb-legacy-rollback-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack, branchTemplate(""), "first");
+            LoadBalancer legacy = elbService.describeLoadBalancers("us-east-1", List.of(created.get("Alb")),
+                    null, null, null).getFirst();
+            AvailabilityZone legacyZone = new AvailabilityZone();
+            legacyZone.setSubnetId(created.get("SubnetC"));
+            legacyZone.setZoneName("us-east-1a");
+            // Seed the persisted shape that older versions accepted, without relaxing a new request.
+            legacy.getAvailabilityZones().add(legacyZone);
+            Set<String> prior = Set.copyOf(loadBalancerSubnets(created.get("Alb")));
+
+            request(CFN_AUTH, "UpdateStack", "StackName", stack, "TemplateBody",
+                    branchTemplate(failingSecret(stack, "Alb")),
+                    "Parameters.member.1.ParameterKey", "Placement",
+                    "Parameters.member.1.ParameterValue", "second").statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+            assertEquals(prior, Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
     /**
      * The update's own move onto the new subnets goes through, the first move back fails as if its
      * subnet had been deleted meanwhile, and any later call goes through again.
      */
     private void failTheFirstMoveBack() {
-        doCallRealMethod()
-                .doThrow(new AwsException("SubnetNotFound", "The subnet ID was not found", 400))
+        doThrow(new AwsException("SubnetNotFound", "The subnet ID was not found", 400))
                 .doCallRealMethod()
-                .when(elbService).setSubnets(anyString(), anyString(), anyList());
+                .when(elbService).restoreSubnetSnapshot(anyString(), anyString(), anyList());
     }
 
     /** Moves the load balancer onto SubnetA and an added SubnetC in an update a later resource fails. */

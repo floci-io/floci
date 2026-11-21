@@ -8,7 +8,7 @@ Floci supports optional TLS, enabling `https://` for all REST/JSON/Query endpoin
 docker run -e FLOCI_TLS_ENABLED=true -p 4566:4566 floci/floci:latest
 ```
 
-Then point your SDK at `https://localhost:4566` and trust Floci's local CA in the processes that talk to it. Every certificate Floci issues (its HTTPS endpoint, every ACM certificate and every IoT device certificate) chains to that one CA:
+Then point your SDK at `https://localhost:4566` and trust Floci's local CA in the processes that talk to it. Every certificate Floci issues (its HTTPS endpoint, every ACM certificate and every IoT device certificate) chains to that one CA. With TLS on, `GET /_floci/tls-cert` serves the same PEM as `application/x-pem-file`, at the path every Floci emulator uses (see [Control-Plane Endpoints](endpoints.md)):
 
 ```bash
 curl -s http://localhost:4566/_floci/ca.pem -o floci-root-ca.pem

@@ -219,6 +219,30 @@ public class IdentityStoreService implements Resettable {
         return users.getForAccount(GLOBAL_PARTITION, userKey(storeId, userId));
     }
 
+    /** The user of the identity store {@code storeId} whose {@code UserName} is {@code userName}, if it holds one. */
+    public Optional<User> findUserByName(String storeId, String userName) {
+        if (storeId == null || userName == null) {
+            return Optional.empty();
+        }
+        return listUsersAll(storeId, userName).stream().findFirst();
+    }
+
+    /** The group {@code groupId} of the identity store {@code storeId}, if the store holds one. */
+    public Optional<Group> findGroup(String storeId, String groupId) {
+        if (storeId == null || groupId == null) {
+            return Optional.empty();
+        }
+        return groups.getForAccount(GLOBAL_PARTITION, groupKey(storeId, groupId));
+    }
+
+    /** The group of the identity store {@code storeId} whose {@code DisplayName} is {@code displayName}, if any. */
+    public Optional<Group> findGroupByDisplayName(String storeId, String displayName) {
+        if (storeId == null || displayName == null) {
+            return Optional.empty();
+        }
+        return listGroupsAll(storeId, displayName).stream().findFirst();
+    }
+
     public synchronized void updateUser(JsonNode request) {
         String storeId = requireStore(required(request, "IdentityStoreId"));
         String userId = requireResourceId(required(request, "UserId"), "UserId");

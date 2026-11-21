@@ -33,6 +33,7 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class KinesisJsonHandler {
 
+    private static final int LIST_SHARDS_MAX_PAGE_SIZE = 1000;
     private static final String EXPLICIT_HASH_KEY_FIELD = "ExplicitHashKey";
     private static final String EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE =
             "ExplicitHashKey must be a string.";
@@ -145,10 +146,7 @@ public class KinesisJsonHandler {
         // request instead of leaving an untagged stream behind.
         Map<String, String> tags = parseTags(request);
         service.createStream(streamName, shardCount, streamMode,
-                optionalMaxRecordSize(request), region);
-        if (!tags.isEmpty()) {
-            service.addTagsToStream(streamName, tags, region);
-        }
+                optionalMaxRecordSize(request), tags, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -241,7 +239,7 @@ public class KinesisJsonHandler {
             ObjectNode summary = summaries.addObject();
             summary.put("StreamName", stream.getStreamName());
             summary.put("StreamARN", stream.getStreamArn());
-            summary.put("StreamStatus", stream.getStreamStatus());
+            summary.put("StreamStatus", service.streamStatus(stream));
             addStreamModeDetailsNode(summary, stream);
             summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         }
@@ -276,7 +274,7 @@ public class KinesisJsonHandler {
         ObjectNode desc = response.putObject("StreamDescription");
         desc.put("StreamName", stream.getStreamName());
         desc.put("StreamARN", stream.getStreamArn());
-        desc.put("StreamStatus", stream.getStreamStatus());
+        desc.put("StreamStatus", service.streamStatus(stream));
         desc.put("HasMoreShards", false);
         desc.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
         desc.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
@@ -318,7 +316,7 @@ public class KinesisJsonHandler {
         ObjectNode summary = response.putObject("StreamDescriptionSummary");
         summary.put("StreamName", stream.getStreamName());
         summary.put("StreamARN", stream.getStreamArn());
-        summary.put("StreamStatus", stream.getStreamStatus());
+        summary.put("StreamStatus", service.streamStatus(stream));
         summary.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
         summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
         summary.put("OpenShardCount", (int) stream.getShards().stream().filter(s -> !s.isClosed()).count());
@@ -610,6 +608,7 @@ public class KinesisJsonHandler {
         KinesisStream stream = service.describeStream(streamName, region);
         JsonNode recordsNode = request.path("Records");
         service.validateRecordCount(recordsNode.size());
+        service.requireWritableStream(stream);
 
         // An oversized record fails the whole request before anything is
         // written — per-record ErrorCode is reserved for throughput/internal
@@ -784,7 +783,9 @@ public class KinesisJsonHandler {
             }
         }
 
-        int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
+        int maxResults = request.has("MaxResults")
+                ? Math.min(request.path("MaxResults").asInt(LIST_SHARDS_MAX_PAGE_SIZE), LIST_SHARDS_MAX_PAGE_SIZE)
+                : LIST_SHARDS_MAX_PAGE_SIZE;
 
         List<KinesisShard> snapshot = List.copyOf(shards);
         int start = token == null ? 0 : resumeShardIndex(token, snapshot);

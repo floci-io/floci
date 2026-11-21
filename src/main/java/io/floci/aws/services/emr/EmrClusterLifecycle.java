@@ -32,11 +32,14 @@ final class EmrClusterLifecycle {
 
     static final String STARTING = "STARTING";
     static final String BOOTSTRAPPING = "BOOTSTRAPPING";
+    static final String PROVISIONING = "PROVISIONING";
     static final String RUNNING = "RUNNING";
     static final String WAITING = "WAITING";
     static final String TERMINATING = "TERMINATING";
     static final String TERMINATED = "TERMINATED";
     static final String PENDING = "PENDING";
+    // The ActionOnFailure of a step that names none.
+    static final String DEFAULT_ACTION_ON_FAILURE = "TERMINATE_CLUSTER";
     static final String COMPLETED = "COMPLETED";
     static final String CANCEL_PENDING = "CANCEL_PENDING";
     static final String CANCELLED = "CANCELLED";
@@ -73,8 +76,11 @@ final class EmrClusterLifecycle {
         /** {@code step} of {@code cluster} has just gone RUNNING. */
         void start(EmrCluster cluster, EmrStep step, String region);
 
-        /** {@code step}, which was RUNNING, has just been cancelled. */
-        void stop(EmrStep step);
+        /**
+         * {@code step}, which was RUNNING, has just been cancelled: with {@code terminateProcess} its process is killed
+         * at once, and else sent SIGTERM and left to end.
+         */
+        void stop(EmrStep step, boolean terminateProcess);
     }
 
     /**
@@ -110,6 +116,7 @@ final class EmrClusterLifecycle {
     /** A new cluster, STARTING at {@code now}, with its steps PENDING. */
     void start(EmrCluster cluster, Instant now, String region) {
         cluster.setState(STARTING);
+        instancesFollow(cluster);
         cluster.setCreationDateTime(now);
         events.queue(events.clusterStateChange(cluster, STARTING, now), region);
         submit(cluster, cluster.getSteps(), now, region);
@@ -127,7 +134,7 @@ final class EmrClusterLifecycle {
             step.setState(PENDING);
             step.setCreationDateTime(now);
             if (step.getActionOnFailure() == null) {
-                step.setActionOnFailure("TERMINATE_CLUSTER");
+                step.setActionOnFailure(DEFAULT_ACTION_ON_FAILURE);
             }
             events.queue(events.stepStatusChange(cluster, step, PENDING), region);
         }
@@ -141,10 +148,14 @@ final class EmrClusterLifecycle {
      * "When a job flow is shut down, any step not yet completed is canceled".
      */
     void terminate(EmrCluster cluster, String code, String message, Instant now, String region) {
-        if (BOOTSTRAPPING.equals(cluster.getState()) && !bootstrapTimed(cluster)) {
+        // Its bootstraps stop: the primary node's and its nodes', or, past BOOTSTRAPPING, those of the nodes a resize
+        // added, which run where its own ran in a container.
+        if (BOOTSTRAPPING.equals(cluster.getState()) ? !bootstrapTimed(cluster)
+                : bootstrapping != null && cluster.getBootstrapImage() != null) {
             bootstrapping.stop(cluster);
         }
         cluster.setState(TERMINATING);
+        instancesFollow(cluster);
         cluster.setStateChangeReasonCode(code);
         cluster.setStateChangeMessage(message);
         cluster.setTerminatingDateTime(now);
@@ -163,9 +174,19 @@ final class EmrClusterLifecycle {
      * ({@link #stepEnded}), and keeps its place among the running steps meanwhile: "Canceling a running step does
      * not allow a pending step to start running, assuming no change to stepConcurrencyLevel". One that completes
      * by time, nothing running it, is CANCELLED at once and makes room for the next PENDING one.
+     *
+     * <p>The Management Guide's "Cancel steps": with {@code SEND_INTERRUPT}, the default, "EMR sends a SIGTERM signal
+     * to the step", which may catch it "to terminate descendant step processes or wait for them to complete"; with
+     * {@code TERMINATE_PROCESS} ({@code terminateProcess}) "EMR sends a SIGKILL signal to the step and all its
+     * descendant processes which terminates them immediately". A step whose SEND_INTERRUPT cancel is pending is
+     * killed by a TERMINATE_PROCESS one.
      */
-    String cancel(EmrCluster cluster, EmrStep step, Instant now, String region) {
+    String cancel(EmrCluster cluster, EmrStep step, Instant now, String region, boolean terminateProcess) {
         if (CANCEL_PENDING.equals(step.getState())) {
+            if (terminateProcess && step.isInterrupted()) {
+                step.setInterrupted(false);
+                execution.stop(step, true);
+            }
             return null;
         }
         boolean running = RUNNING.equals(step.getState()) && cancelsRunningSteps(cluster.getReleaseLabel());
@@ -174,8 +195,9 @@ final class EmrClusterLifecycle {
         }
         if (running && !timed(step)) {
             step.setState(CANCEL_PENDING);
+            step.setInterrupted(!terminateProcess);
             events.queue(events.stepCancelPending(cluster, step, now), region);
-            execution.stop(step);
+            execution.stop(step, terminateProcess);
             return null;
         }
         cancelStep(cluster, step, now, region);
@@ -225,6 +247,8 @@ final class EmrClusterLifecycle {
         switch (cluster.getState()) {
             case STARTING -> {
                 cluster.setState(BOOTSTRAPPING);
+                // Its instances are up before its bootstrap actions run on them.
+                instancesFollow(cluster);
                 if (bootstrapping != null && cluster.getBootstrapActions() != null) {
                     cluster.setBootstrapInContainer(true);
                     bootstrapping.start(cluster, region);
@@ -276,6 +300,7 @@ final class EmrClusterLifecycle {
     private void ready(EmrCluster cluster, Instant at, String region) {
         cluster.setReadyDateTime(at);
         cluster.setState(RUNNING);
+        instancesFollow(cluster);
         runSteps(cluster, at, region);
     }
 
@@ -323,6 +348,8 @@ final class EmrClusterLifecycle {
      */
     void stepEnded(EmrCluster cluster, EmrStep step, String failure, Instant at, String region) {
         if (CANCEL_PENDING.equals(step.getState())) {
+            // Its driver has ended, so there is nothing left to kill.
+            step.setInterrupted(false);
             cancelStep(cluster, step, at, region);
             runSteps(cluster, at, region);
             return;
@@ -392,12 +419,14 @@ final class EmrClusterLifecycle {
     }
 
     private void cancelStep(EmrCluster cluster, EmrStep step, Instant at, String region) {
-        boolean running = RUNNING.equals(step.getState());
+        // Running, or left to end after a SIGTERM: a step its cluster's end cancels has its process killed.
+        boolean going = RUNNING.equals(step.getState()) || step.isInterrupted();
         step.setState(CANCELLED);
+        step.setInterrupted(false);
         step.setEndDateTime(at);
         events.queue(events.stepStatusChange(cluster, step, CANCELLED), region);
-        if (running && !timed(step)) {
-            execution.stop(step);
+        if (going && !timed(step)) {
+            execution.stop(step, true);
         }
     }
 
@@ -428,10 +457,68 @@ final class EmrClusterLifecycle {
         return TERMINATED.equals(state) || TERMINATED_WITH_ERRORS.equals(state);
     }
 
+    /**
+     * The state a cluster's instance groups and fleets are in while it is in {@code clusterState}, Floci's reading, as
+     * no source says when theirs apply: PROVISIONING while it starts, as the guide's events have an instance fleet's
+     * "Provisioning ... is complete" end it, then BOOTSTRAPPING, RUNNING while it runs or waits, and TERMINATING as
+     * it ends; TERMINATED once it has (see releaseInstanceCapacity).
+     */
+    static String instancesState(String clusterState) {
+        return switch (clusterState) {
+            case STARTING -> PROVISIONING;
+            case BOOTSTRAPPING -> BOOTSTRAPPING;
+            case TERMINATING -> TERMINATING;
+            default -> RUNNING;
+        };
+    }
+
+    /**
+     * An instance group in {@code state}: none of its instances running while they are provisioned, every one it asks
+     * for from its cluster's bootstrap on, which runs on them; as it ends they run until they are gone.
+     */
+    static void groupIn(EmrInstanceGroup group, String state) {
+        group.setState(state);
+        if (PROVISIONING.equals(state)) {
+            group.setRunningInstanceCount(0);
+        } else if (!TERMINATING.equals(state)) {
+            group.setRunningInstanceCount(group.getRequestedInstanceCount());
+        }
+    }
+
+    /** An instance fleet in {@code state}, its capacity provisioned as {@link #groupIn} has a group's instances run. */
+    static void fleetIn(EmrInstanceFleet fleet, String state) {
+        fleet.setState(state);
+        if (PROVISIONING.equals(state)) {
+            fleet.setProvisionedOnDemandCapacity(0);
+            fleet.setProvisionedSpotCapacity(0);
+        } else if (!TERMINATING.equals(state)) {
+            fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
+            fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
+        }
+    }
+
+    // The cluster's instance groups and fleets, but those that have ended, in the state its own puts them in.
+    private static void instancesFollow(EmrCluster cluster) {
+        String state = instancesState(cluster.getState());
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            if (!TERMINATED.equals(group.getState())) {
+                groupIn(group, state);
+            }
+        }
+        for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+            if (!TERMINATED.equals(fleet.getState())) {
+                fleetIn(fleet, state);
+            }
+        }
+    }
+
     private static void releaseInstanceCapacity(EmrCluster cluster) {
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             group.setState(TERMINATED);
-            group.setTerminatedInstanceCount(group.getRunningInstanceCount());
+            // One that ended while it was provisioned ran none, and the instances it asked for, which ListInstances
+            // listed, have ended, as an ended fleet's targets say what it ran.
+            group.setTerminatedInstanceCount(group.getRunningInstanceCount() > 0 ? group.getRunningInstanceCount()
+                    : group.getRequestedInstanceCount());
             group.setRunningInstanceCount(0);
         }
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {

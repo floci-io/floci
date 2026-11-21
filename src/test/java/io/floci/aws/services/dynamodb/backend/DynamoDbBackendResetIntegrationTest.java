@@ -1,10 +1,10 @@
 package io.floci.aws.services.dynamodb.backend;
 
 import io.floci.aws.services.dynamodb.DynamoDbService;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,24 +14,18 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.util.Set;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
-/** The emulator lifecycle drives only the selected DynamoDB backend, here one that refuses resets. */
+/**
+ * The emulator lifecycle drives only the selected DynamoDB backend, here one that refuses resets.
+ * {@link RdsMockProfile} selects it as {@link RefusingDynamoDbBackendLifecycle}.
+ */
 @QuarkusTest
-@TestProfile(DynamoDbBackendResetIntegrationTest.RefusingBackendProfile.class)
+@TestProfile(RdsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class DynamoDbBackendResetIntegrationTest {
-
-    public static final class RefusingBackendProfile implements QuarkusTestProfile {
-        @Override
-        public Set<Class<?>> getEnabledAlternatives() {
-            return Set.of(RefusingDynamoDbBackendLifecycle.class);
-        }
-    }
 
     private static final String PARAMETER = "/dynamodb-backend-reset/survives-a-refused-reset";
 

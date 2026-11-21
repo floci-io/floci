@@ -28,6 +28,8 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,11 +55,18 @@ public class CloudWatchMetricsJsonHandler {
      * stay refused here until the console's API is known to give them the same shapes.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
+            "PutMetricData", Set.of("Namespace", "MetricData"),
             "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
             "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "MaxRecords", "NextToken"),
             "GetMetricStatistics", Set.of("Namespace", "MetricName", "Dimensions", "StartTime", "EndTime",
                     "Period", "Statistics", "Unit"),
             "DeleteAlarms", Set.of("AlarmNames"));
+
+    private static final Set<String> CONSOLE_METRIC_DATUM_MEMBERS = Set.of(
+            "MetricName", "Dimensions", "Timestamp", "Unit", "Value", "StatisticValues");
+    private static final Set<String> CONSOLE_STATISTIC_MEMBERS = Set.of(
+            "SampleCount", "Sum", "Minimum", "Maximum");
+    private static final Set<String> CONSOLE_DIMENSION_MEMBERS = Set.of("Name", "Value");
 
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
@@ -117,8 +126,10 @@ public class CloudWatchMetricsJsonHandler {
      * {@code Alias} and {@code MetricName}. So only the operations and top-level members in
      * {@code CONSOLE_TARGET_OPERATIONS} are served: any other operation, and any other member set
      * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
-     * were unset, and a top-level {@code null} member is dropped. Members nested inside the served
-     * ones are passed on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
+     * were unset, and a top-level {@code null} member is dropped. {@code PutMetricData} also checks
+     * the complete batch for supported scalar or statistic-set shapes before storing any metrics;
+     * {@code Values} and {@code Counts} remain outside this compatibility subset.
+     * Other operations pass nested members on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
      * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
      * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
      * name matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only
@@ -141,6 +152,17 @@ public class CloudWatchMetricsJsonHandler {
                 return unsupportedWithConsoleTarget("Parameter " + member.getKey() + " of " + action);
             }
         }
+        if ("PutMetricData".equals(action)) {
+            if (!served.path("Namespace").isTextual() || !served.path("MetricData").isArray()
+                    || served.path("MetricData").isEmpty()) {
+                return unsupportedWithConsoleTarget("PutMetricData request shape");
+            }
+            for (JsonNode datum : served.path("MetricData")) {
+                if (!isSupportedConsoleMetricDatum(datum)) {
+                    return unsupportedWithConsoleTarget("PutMetricData datum shape");
+                }
+            }
+        }
         Response response = handle(action, served, region);
         if ("DescribeAlarms".equals(action) && response.getEntity() instanceof JsonNode body) {
             for (JsonNode alarm : body.path("MetricAlarms")) {
@@ -151,6 +173,71 @@ public class CloudWatchMetricsJsonHandler {
             }
         }
         return response;
+    }
+
+    private boolean isSupportedConsoleMetricDatum(JsonNode datum) {
+        if (!hasOnlyConsoleMembers(datum, CONSOLE_METRIC_DATUM_MEMBERS)
+                || !datum.path("MetricName").isTextual()) {
+            return false;
+        }
+        boolean scalar = datum.hasNonNull("Value");
+        boolean statistics = datum.hasNonNull("StatisticValues");
+        if (scalar == statistics || scalar && !isConsoleNumber(datum.path("Value"))) {
+            return false;
+        }
+        if (statistics) {
+            JsonNode values = datum.path("StatisticValues");
+            if (!hasOnlyConsoleMembers(values, CONSOLE_STATISTIC_MEMBERS)
+                    || !CONSOLE_STATISTIC_MEMBERS.stream().allMatch(name -> isConsoleNumber(values.path(name)))
+                    || values.path("SampleCount").doubleValue() <= 0) {
+                return false;
+            }
+        }
+        if (datum.hasNonNull("Timestamp")) {
+            JsonNode timestamp = datum.path("Timestamp");
+            if (!timestamp.isTextual() && !isConsoleNumber(timestamp)) {
+                return false;
+            }
+            try {
+                if (parseInstantNode(timestamp) == null) {
+                    return false;
+                }
+            } catch (DateTimeException invalid) {
+                LOG.debug("Refusing a console metric timestamp outside the supported range", invalid);
+                return false;
+            }
+        }
+        JsonNode dimensions = datum.path("Dimensions");
+        if (!dimensions.isMissingNode() && !dimensions.isNull()) {
+            if (!dimensions.isArray()) {
+                return false;
+            }
+            for (JsonNode dimension : dimensions) {
+                if (!hasOnlyConsoleMembers(dimension, CONSOLE_DIMENSION_MEMBERS)
+                        || !dimension.path("Name").isTextual() || !dimension.path("Value").isTextual()) {
+                    return false;
+                }
+            }
+        }
+        return !datum.hasNonNull("Unit") || datum.path("Unit").isTextual();
+    }
+
+    private static boolean hasOnlyConsoleMembers(JsonNode node, Set<String> supported) {
+        if (!node.isObject()) {
+            return false;
+        }
+        for (Map.Entry<String, JsonNode> member : node.properties()) {
+            JsonNode value = member.getValue();
+            if (!supported.contains(member.getKey()) && !value.isNull()
+                    && (!value.isBoolean() || value.booleanValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isConsoleNumber(JsonNode node) {
+        return MetricNumberValidation.isValid(node);
     }
 
     private static Response unsupportedWithConsoleTarget(String subject) {
@@ -264,8 +351,20 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
         alarm.setDimensions(parseDimensionsJson(request.path("Dimensions")));
 
-        metricsService.putMetricAlarm(alarm, region);
+        metricsService.putMetricAlarm(alarm, region, evaluationInterval(request));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** The EvaluationInterval of a PutMetricAlarm request: null when absent or null, an integer otherwise. */
+    private static BigInteger evaluationInterval(JsonNode request) {
+        JsonNode node = request.get("EvaluationInterval");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("SerializationException", "EvaluationInterval must be an integer", 400);
+        }
+        return node.bigIntegerValue();
     }
 
     private Response handlePutCompositeAlarm(JsonNode request, String region) {
@@ -837,7 +936,10 @@ public class CloudWatchMetricsJsonHandler {
             }
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(metricName.asText());
-            datum.setValue(item.path("Value").asDouble(0));
+            String memberPath = listPath + ".member." + index;
+            if (item.hasNonNull("Value")) {
+                datum.setValue(MetricNumberValidation.parse(item.get("Value"), memberPath + ".Value"));
+            }
             datum.setUnit(item.path("Unit").asText(null));
             JsonNode ts = item.path("Timestamp");
             if (!ts.isMissingNode()) {
@@ -847,14 +949,22 @@ public class CloudWatchMetricsJsonHandler {
             datum.setDimensions(parseDimensionsJson(item.path("Dimensions")));
 
             JsonNode statsValues = item.path("StatisticValues");
-            if (!statsValues.isMissingNode()) {
-                datum.setSampleCount(statsValues.path("SampleCount").asDouble(0));
-                datum.setSum(statsValues.path("Sum").asDouble(0));
-                datum.setMinimum(statsValues.path("Minimum").asDouble(0));
-                datum.setMaximum(statsValues.path("Maximum").asDouble(0));
+            if (!statsValues.isMissingNode() && !statsValues.isNull()) {
+                String statsPath = memberPath + ".StatisticValues";
+                if (!statsValues.isObject()) {
+                    throw CloudWatchMetricsException.invalidParameterValue(statsPath + " must be an object.");
+                }
+                if (item.hasNonNull("Value")) {
+                    throw CloudWatchMetricsException.invalidParameterCombination(
+                            statsPath + " cannot be combined with Value.");
+                }
+                datum.setSampleCount(MetricNumberValidation.parse(statsValues.path("SampleCount"), statsPath + ".SampleCount"));
+                datum.setSum(MetricNumberValidation.parse(statsValues.path("Sum"), statsPath + ".Sum"));
+                datum.setMinimum(MetricNumberValidation.parse(statsValues.path("Minimum"), statsPath + ".Minimum"));
+                datum.setMaximum(MetricNumberValidation.parse(statsValues.path("Maximum"), statsPath + ".Maximum"));
             }
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromJson(item, memberPath, datum));
         }
         return datums;
     }

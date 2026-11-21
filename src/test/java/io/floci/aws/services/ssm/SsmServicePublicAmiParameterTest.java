@@ -2,6 +2,7 @@ package io.floci.aws.services.ssm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -10,9 +11,15 @@ import io.floci.aws.services.ssm.model.Parameter;
 import io.floci.aws.services.ssm.model.ParameterStringFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -175,12 +182,12 @@ class SsmServicePublicAmiParameterTest {
         assertTrue(names.contains(AMZN2_DEFAULT), names.toString());
         assertEquals(9, names.size());
         assertTrue(ssmService.getParametersByPath("/aws/service", false, REGION).isEmpty());
-        assertEquals(54, ssmService.getParametersByPath("/aws/service", true, REGION).size());
+        assertEquals(77, ssmService.getParametersByPath("/aws/service", true, REGION).size());
     }
 
     @Test
     void appliesPathTypeFiltersToPublicParameters() {
-        assertEquals(54, ssmService.getParametersByPath("/aws/service", true,
+        assertEquals(77, ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("String"))), REGION).size());
         assertTrue(ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("StringList"))), REGION).isEmpty());
@@ -227,6 +234,34 @@ class SsmServicePublicAmiParameterTest {
         assertEquals("String", al2023.getType());
         assertEquals(1, al2023.getVersion());
         assertEquals("arn:aws:ssm:eu-west-1::parameter" + al2023Param136, al2023.getArn());
+    }
+
+    @Test
+    void aCustomCatalogReleaseVersionForAKubernetesVersionFlociDoesNotRunIsNotFound(@TempDir Path dir)
+            throws IOException {
+        String unsupported = "/aws/service/eks/optimized-ami/1.27/amazon-linux-2023/x86_64/standard/recommended/release_version";
+        Path catalog = Files.writeString(dir.resolve("catalog.yaml"), """
+                defaultDockerImage: example/base:1
+                images:
+                  - imageId: ami-custom
+                    publicParameterNames:
+                      - %s
+                    dockerImage: example/base:1
+                    name: custom
+                    description: Custom image
+                    architecture: x86_64
+                    creationDate: '2026-01-01T00:00:00.000Z'
+                """.formatted(unsupported));
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        Mockito.when(config.services().ec2().imageCatalogPath()).thenReturn(Optional.of(catalog.toString()));
+        SsmService service = new SsmService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                5, new RegionResolver(REGION, "000000000000"), new Ec2ImageCatalog(config), null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.getParameter(unsupported, REGION));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
+        assertEquals(List.of(), service.getParametersByPath("/aws/service", true, REGION));
     }
 
     @Test

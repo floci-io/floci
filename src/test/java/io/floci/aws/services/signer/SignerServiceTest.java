@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.signer.model.SigningJob;
 import io.floci.aws.services.signer.model.SigningProfile;
 import org.junit.jupiter.api.BeforeEach;
@@ -261,6 +262,34 @@ class SignerServiceTest {
         assertEquals(Map.of("team", "platform"), service.listTags(REGION, PROFILE_ARN));
 
         assertEquals("signer", service.serviceKey());
+    }
+
+    /**
+     * IAM's tag lookup reads the tags of the profile whose ARN it is given, as tag calls leave them, and those of a
+     * profile stored before storage was account-aware, in place, without migrating it; nothing for an ARN of another
+     * account or Region, or of no profile.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheProfileTheArnNames() throws Exception {
+        service.putSigningProfile("MyProfile", profileRequest(), REGION);
+        service.tagResource(REGION, PROFILE_ARN, Map.of("team", "data"));
+        service.untagResource(REGION, PROFILE_ARN, List.of("env"));
+
+        InMemoryStorage<String, SigningProfile> raw = new InMemoryStorage<>();
+        SignerService legacyStore = new SignerService(new AccountAwareStorageBackend<>(raw, null, ACCOUNT), jobs);
+        SigningProfile legacy = new SigningProfile();
+        legacy.setProfileName("Legacy");
+        legacy.setArn("arn:aws:signer:us-east-1:" + ACCOUNT + ":/signing-profiles/Legacy");
+        legacy.setTags(Map.of("tier", "web"));
+        raw.put(REGION + "::Legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(PROFILE_ARN));
+        assertEquals(Map.of("tier", "web"), legacyStore.storedTags(legacy.getArn()));
+        assertTrue(raw.get(REGION + "::Legacy").isPresent());
+        assertEquals(Map.of(), service.storedTags(PROFILE_ARN.replace(ACCOUNT, "111122223333")));
+        assertEquals(Map.of(), service.storedTags(PROFILE_ARN.replace("us-east-1", "eu-west-1")));
+        assertEquals(Map.of(), service.storedTags(PROFILE_ARN + "0"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:acm:us-east-1:" + ACCOUNT + ":certificate/MyProfile"));
     }
 
     @Test

@@ -628,6 +628,8 @@ class RdsControlPlaneTest {
                     .engineVersion("16.4"))
                     .dbSnapshot();
             assertThat(modified.engineVersion()).isEqualTo("16.4");
+            DBSnapshot unchanged = rds.modifyDBSnapshot(b -> b.dbSnapshotIdentifier(snapshotName)).dbSnapshot();
+            assertThat(unchanged.engineVersion()).isEqualTo("16.4");
 
             DBSnapshot deleted = rds.deleteDBSnapshot(b -> b.dbSnapshotIdentifier(snapshotName)).dbSnapshot();
             assertThat(deleted.status()).isEqualTo("deleted");

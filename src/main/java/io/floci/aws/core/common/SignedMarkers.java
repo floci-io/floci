@@ -7,8 +7,6 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -31,13 +29,7 @@ public final class SignedMarkers {
      * an item a page ended on, so a marker resumes after that item even once it is deleted.
      * Bounded with LRU-style eviction, as an expired AWS token would be refused.
      */
-    private final Map<String, String> longCursors = Collections.synchronizedMap(
-            new LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
-                    return size() > MAX_LONG_CURSORS;
-                }
-            });
+    private final Map<String, String> longCursors = BoundedMaps.leastRecentlyUsed(MAX_LONG_CURSORS);
 
     public SignedMarkers() {
         this(Integer.MAX_VALUE);

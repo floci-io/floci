@@ -8,13 +8,13 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestChecks;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
-import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
@@ -44,6 +44,9 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
 
     private static final Logger LOG = Logger.getLogger(TaskPermissions.class);
     private static final String ANY_RESOURCE = "*";
+    static final String RESULT_WRITER_SUCCEEDED = "SUCCEEDED_0.json";
+    static final String RESULT_WRITER_FAILED = "FAILED_0.json";
+    static final String RESULT_WRITER_MANIFEST = "manifest.json";
     private static final String DYNAMODB_OPTIMIZED_PREFIX = "DynamoDB.";
     private static final String DYNAMODB_SDK_PREFIX = "DynamoDb.";
     private static final String REDSHIFT_DATA_PREFIX = "RedshiftData.";
@@ -77,18 +80,6 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     private static final Set<String> SCHEDULER = Set.of("createSchedule", "updateSchedule", "deleteSchedule");
     private static final Set<String> SFN_SDK = Set.of("startExecution", "startSyncExecution", "sendTaskSuccess",
             "sendTaskFailure", "describeMapRun");
-    private static final Set<String> CFN_ANY_RESOURCE = Set.of("ValidateTemplate", "ListStacks", "ListExports",
-            "DescribeOrganizationsAccess", "ActivateOrganizationsAccess", "CreateStackSet", "ListStackSets");
-    private static final Set<String> CFN_OPTIONAL_STACK = Set.of("DescribeStacks", "GetTemplateSummary");
-    private static final Set<String> CFN_CREATES_STACK = Set.of("CreateStack", "CreateChangeSet");
-    private static final Set<String> CFN_NAMES_CHANGE_SET =
-            Set.of("DescribeChangeSet", "ExecuteChangeSet", "DeleteChangeSet");
-    private static final Set<String> CFN_STACK = Set.of("UpdateStack", "DeleteStack", "ContinueUpdateRollback",
-            "UpdateTerminationProtection", "ListChangeSets", "DescribeStackEvents", "DescribeStackResources",
-            "ListStackResources", "DescribeStackResource", "GetTemplate", "SetStackPolicy", "GetStackPolicy");
-    private static final Set<String> CFN_STACK_SET = Set.of("DescribeStackSet", "UpdateStackSet", "DeleteStackSet",
-            "CreateStackInstances", "ListStackInstances", "DescribeStackInstance", "DeleteStackInstances",
-            "ListStackSetOperations", "DescribeStackSetOperation", "ListStackSetAutoDeploymentTargets");
 
     TaskPermissions(String deniedError, List<Permission> permissions) {
         this(deniedError, permissions, true);
@@ -102,13 +93,14 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     /**
      * What finds the resources of a control task's request, reading only.
      *
-     * @param cloudFormation the stack or stack set of a CloudFormation request; without it such a request names nothing
+     * @param cloudFormation the stack or stack set a CloudFormation request names by its name, whose id CloudFormation
+     *                       minted; without it one is the ARN its format gives the name, its id open
      * @param secrets        the secret a Secrets Manager request names, random suffix included; without it a secret is
      *                       the ARN its format gives the name
      * @param states         the state machine or activity whose task a callback's token names; without it a token
      *                       names nothing
      */
-    record ControlServices(CloudFormationQueryHandler cloudFormation, StoredResourceArns secrets,
+    record ControlServices(StoredResourceArns cloudFormation, StoredResourceArns secrets,
                            StoredResourceArns states) {
     }
 
@@ -365,9 +357,69 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         if (bucket.isBlank() || key == null) {
             return accessDenied("S3.", List.of());
         }
-        String partition = AwsArnUtils.parse(machine.getStateMachineArn()).partition();
-        return accessDenied("S3.",
-                List.of(new Permission("s3:PutObject", S3ResourceArns.object(partition, bucket, key))));
+        return accessDenied("S3.", List.of(new Permission("s3:PutObject", s3ObjectArn(machine, bucket, key))));
+    }
+
+    /**
+     * What a Distributed Map's {@code ItemReader} needs to read one object: {@code s3:GetObject} on it. A request
+     * naming no bucket or key needs nothing, and is answered by the reader or by S3.
+     */
+    static List<Permission> itemReaderGetObject(String bucket, String key, StateMachine machine) {
+        if (bucket == null || bucket.isBlank() || key == null) {
+            return List.of();
+        }
+        return List.of(new Permission("s3:GetObject", s3ObjectArn(machine, bucket, key)));
+    }
+
+    /**
+     * What a Distributed Map's {@code ItemReader} needs to list a bucket: {@code s3:ListBucket} on it, offering
+     * {@code s3:prefix} when the request has a prefix, as a direct listing offers it. A request naming no bucket
+     * needs nothing, and is answered by the reader or by S3.
+     */
+    static List<Permission> itemReaderListObjects(String bucket, String prefix, StateMachine machine) {
+        if (bucket == null || bucket.isBlank()) {
+            return List.of();
+        }
+        return List.of(new Permission("s3:ListBucket", s3BucketArn(machine, bucket),
+                prefix == null ? Map.of() : Map.of(S3ConditionKeys.PREFIX, List.of(prefix))));
+    }
+
+    /**
+     * What a Distributed Map's {@code ResultWriter} needs to export: {@code s3:PutObject} on each object it writes,
+     * all known before the first is. The failed file is written only when a child failed. A location naming no
+     * bucket, or a prefix that is not a string, needs nothing, and is answered by the writer.
+     *
+     * @param location the resolved {@code Parameters} or {@code Arguments} of the writer
+     */
+    static List<Permission> resultWriterExport(JsonNode location, String mapRunId, boolean failedChildren,
+                                               StateMachine machine) {
+        String bucket = text(location.path("Bucket"));
+        JsonNode prefix = location.path("Prefix");
+        if (bucket == null || !(prefix.isMissingNode() || prefix.isTextual())) {
+            return List.of();
+        }
+        String base = resultWriterBase(prefix.asText(""), mapRunId);
+        List<String> files = failedChildren
+                ? List.of(RESULT_WRITER_SUCCEEDED, RESULT_WRITER_FAILED, RESULT_WRITER_MANIFEST)
+                : List.of(RESULT_WRITER_SUCCEEDED, RESULT_WRITER_MANIFEST);
+        return files.stream()
+                .map(file -> new Permission("s3:PutObject", s3ObjectArn(machine, bucket, base + file)))
+                .toList();
+    }
+
+    /** The key every object of a Map run's export starts with: the run id keys it under the prefix given. */
+    static String resultWriterBase(String prefix, String mapRunId) {
+        return prefix.isEmpty() ? mapRunId + "/" : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+    }
+
+    /** A bucket's ARN in the state machine's partition: the authorizer moves it to the bucket's own. */
+    private static String s3BucketArn(StateMachine machine, String bucket) {
+        return S3ResourceArns.bucket(AwsArnUtils.parse(machine.getStateMachineArn()).partition(), bucket);
+    }
+
+    /** An object's ARN in the state machine's partition: the authorizer moves it to the bucket's own. */
+    private static String s3ObjectArn(StateMachine machine, String bucket, String key) {
+        return S3ResourceArns.object(AwsArnUtils.parse(machine.getStateMachineArn()).partition(), bucket, key);
     }
 
     /**
@@ -529,69 +581,25 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                 arn(machine, "scheduler", "schedule/" + (group == null ? "default" : group) + "/" + name))));
     }
 
-    /** Every action the CloudFormation handler serves; any other is its own {@code UnknownAction}. */
+    /**
+     * Every CloudFormation operation the vendored request resources read, which a direct request is checked as too;
+     * one the handler does not serve is then its own {@code UnknownAction}.
+     */
     private static boolean servedByCloudFormation(String api) {
-        String operation = AslExecutor.capitalizeFirst(api);
-        return CFN_ANY_RESOURCE.contains(operation) || CFN_OPTIONAL_STACK.contains(operation)
-                || CFN_CREATES_STACK.contains(operation) || CFN_NAMES_CHANGE_SET.contains(operation)
-                || CFN_STACK.contains(operation) || CFN_STACK_SET.contains(operation);
+        return RequestResources.reads("cloudformation:" + AslExecutor.capitalizeFirst(api));
     }
 
     /**
-     * The action of the API's own name, on the stack or stack set the request reaches under the id CloudFormation
-     * holds for it, in the service reference's resource types, so a name and the id it stands for are the same
-     * resource. A stack not there yet has its id open for the APIs that create it; for any other API a stack or
-     * stack set CloudFormation does not have names nothing, so CloudFormation answers it.
+     * The check the vendored request resources give the same call made directly ({@link #requestPermissions}),
+     * {@code stored} finding the stack or the stack set a name names; on any resource when the request names none,
+     * whatever its input is, as a direct request naming none is checked.
      */
     private static TaskPermissions cloudFormation(String operation, JsonNode input, StateMachine machine,
-                                                  CloudFormationQueryHandler stored) {
-        String action = "cloudformation:" + operation;
-        if (CFN_ANY_RESOURCE.contains(operation)) {
-            return accessDenied(CLOUDFORMATION_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
-        }
-        String resource;
-        if (CFN_STACK_SET.contains(operation)) {
-            resource = cloudFormationStackSet(input, machine, stored);
-        } else if (CFN_OPTIONAL_STACK.contains(operation) && text(input.path("StackName")) == null) {
-            resource = ANY_RESOURCE;
-        } else {
-            resource = cloudFormationStack(operation, input, machine, stored);
-        }
-        return accessDenied(CLOUDFORMATION_PREFIX,
-                resource == null ? List.of() : List.of(new Permission(action, resource)));
-    }
-
-    private static String cloudFormationStackSet(JsonNode input, StateMachine machine,
-                                                 CloudFormationQueryHandler stored) {
-        String name = text(input.path("StackSetName"));
-        if (name == null || stored == null) {
-            return null;
-        }
-        return stored.stackSetId(name).map(id -> arn(machine, "cloudformation", "stackset/" + id)).orElse(null);
-    }
-
-    /** The stack as each API finds it: by name or id, or else by the change set or the resource the API can name it by. */
-    private static String cloudFormationStack(String operation, JsonNode input, StateMachine machine,
-                                              CloudFormationQueryHandler stored) {
-        String stack = text(input.path("StackName"));
-        String region = regionOf(machine);
-        if (stored == null) {
-            return null;
-        }
-        if (stack != null) {
-            Optional<String> id = stored.stackId(stack, region);
-            boolean opensId = CFN_CREATES_STACK.contains(operation) && !AwsArnUtils.looksLikeArn(stack);
-            return id.orElseGet(() -> opensId ? arn(machine, "cloudformation", "stack/" + stack + "/*") : null);
-        }
-        String changeSet = text(input.path("ChangeSetName"));
-        if (CFN_NAMES_CHANGE_SET.contains(operation) && AwsArnUtils.looksLikeArn(changeSet)) {
-            return stored.stackIdOfChangeSet(changeSet, region).orElse(null);
-        }
-        String resource = text(input.path("PhysicalResourceId"));
-        if ("DescribeStackResources".equals(operation) && resource != null) {
-            return stored.stackIdOfResource(resource, region).orElse(null);
-        }
-        return null;
+                                                  StoredResourceArns stored) {
+        List<Permission> permissions = requestPermissions("cloudformation", operation, input, machine, stored);
+        return accessDenied(CLOUDFORMATION_PREFIX, permissions.isEmpty()
+                ? List.of(new Permission(IamAuthorizedActions.actionFor("cloudformation", operation), ANY_RESOURCE))
+                : permissions);
     }
 
     /**
@@ -617,18 +625,14 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * {@code ListEventSourceMappings} has no resource type in the service reference, and
-     * {@code UpdateEventSourceMapping} acts on the mapping its {@code Uuid} names; a request naming none is refused
-     * by the integration.
+     * The check the vendored request resources give the same call made directly, on the request the integration
+     * sends ({@link SdkManagementTaskInvoker#lambdaRequest}): {@code ListEventSourceMappings} acts on no resource type,
+     * and {@code UpdateEventSourceMapping} on the mapping its {@code UUID} names; a request naming none is refused by
+     * the integration.
      */
     private static TaskPermissions lambdaSdk(String api, JsonNode input, StateMachine machine) {
-        String action = "lambda:" + AslExecutor.capitalizeFirst(api);
-        if ("listEventSourceMappings".equals(api)) {
-            return accessDenied(LAMBDA_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
-        }
-        String uuid = text(input.path("Uuid"));
-        return accessDenied(LAMBDA_PREFIX, uuid == null ? List.of()
-                : List.of(new Permission(action, arn(machine, "lambda", "event-source-mapping:" + uuid))));
+        return accessDenied(LAMBDA_PREFIX, requestPermissions("lambda", AslExecutor.capitalizeFirst(api),
+                SdkManagementTaskInvoker.lambdaRequest(input), machine, null));
     }
 
     /**
@@ -665,10 +669,6 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     private static String arn(StateMachine machine, String service, String resource) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         return new AwsArnUtils.Arn(owner.partition(), service, owner.region(), owner.accountId(), resource).toString();
-    }
-
-    private static String regionOf(StateMachine machine) {
-        return AwsArnUtils.parse(machine.getStateMachineArn()).region();
     }
 
     /** The value when it is the non-blank string an id has to be, as the integrations require of one. */

@@ -869,6 +869,414 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
     }
 
+    private static final String ON_DEMAND_REASON = "initial throughput for OnDemand. See: https://docs.aws.amazon.com/"
+            + "amazondynamodb/latest/developerguide/on-demand-capacity-mode.html#on-demand-capacity-mode-initial";
+    private static final String CURRENT_REASON = "current WarmThroughput, decreasing WarmThroughput is not supported";
+
+    private JsonNode warmTableRequest(String name, boolean onDemand, String tableWarm, String indexWarm) {
+        String capacity = onDemand ? "\"BillingMode\": \"PAY_PER_REQUEST\","
+                : "\"ProvisionedThroughput\": {\"ReadCapacityUnits\": 5, \"WriteCapacityUnits\": 6},";
+        String indexCapacity = onDemand ? ""
+                : "\"ProvisionedThroughput\": {\"ReadCapacityUnits\": 7, \"WriteCapacityUnits\": 8},";
+        return json("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    %s
+                    %s
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        %s
+                        %s
+                        "Projection": {"ProjectionType": "ALL"}
+                    }]
+                }
+                """.formatted(name, capacity,
+                tableWarm == null ? "" : "\"WarmThroughput\": " + tableWarm + ",",
+                indexCapacity, indexWarm == null ? "" : "\"WarmThroughput\": " + indexWarm + ","));
+    }
+
+    private JsonNode createWarmTable(String name, boolean onDemand, String tableWarm, String indexWarm)
+            throws Exception {
+        Response response = handler.handle("CreateTable", warmTableRequest(name, onDemand, tableWarm, indexWarm),
+                "eu-west-1");
+        assertEquals(200, response.getStatus());
+        return mapper.convertValue(response.getEntity(), JsonNode.class).get("TableDescription");
+    }
+
+    private AwsException warmFailure(String operation, JsonNode request) {
+        return assertThrows(AwsException.class, () -> handler.handle(operation, request, "eu-west-1"));
+    }
+
+    private JsonNode updateWarm(String body) throws Exception {
+        Response response = handler.handle("UpdateTable", json(body), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        return mapper.convertValue(response.getEntity(), JsonNode.class).get("TableDescription");
+    }
+
+    private static void assertWarm(JsonNode warm, long read, long write, String status) {
+        assertEquals(read, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(write, warm.get("WriteUnitsPerSecond").asLong());
+        assertEquals(status, warm.get("Status").asText());
+    }
+
+    @Test
+    void createTableEchoesRequestedWarmThroughputAsUpdating() throws Exception {
+        JsonNode description = createWarmTable("warm-create-echo", true,
+                "{\"ReadUnitsPerSecond\": 15000, \"WriteUnitsPerSecond\": 5000}",
+                "{\"ReadUnitsPerSecond\": 13000}");
+
+        assertWarm(description.get("WarmThroughput"), 15000, 5000, "UPDATING");
+        JsonNode indexWarm = description.get("GlobalSecondaryIndexes").get(0).get("WarmThroughput");
+        assertEquals(2, indexWarm.size());
+        assertEquals(13000, indexWarm.get("ReadUnitsPerSecond").asLong());
+        assertFalse(indexWarm.has("WriteUnitsPerSecond"));
+        assertEquals("UPDATING", indexWarm.get("Status").asText());
+        assertWarm(warmThroughputOf(describedTable("warm-create-echo")), 15000, 5000, "ACTIVE");
+        assertWarm(warmThroughputOf(describedGsi("warm-create-echo", "gsi1")), 13000, 4000, "ACTIVE");
+    }
+
+    @Test
+    void createTableWithOneWarmMemberKeepsTheOtherAtItsBaseline() throws Exception {
+        JsonNode description = createWarmTable("warm-create-one", true, "{\"ReadUnitsPerSecond\": 12000}", null);
+
+        JsonNode warm = description.get("WarmThroughput");
+        assertEquals(2, warm.size());
+        assertEquals("UPDATING", warm.get("Status").asText());
+        assertWarm(warmThroughputOf(describedTable("warm-create-one")), 12000, 4000, "ACTIVE");
+    }
+
+    @Test
+    void createTableWithoutWarmThroughputOmitsTableAndIndexWarmThroughput() throws Exception {
+        JsonNode description = createWarmTable("warm-create-none", false, null, null);
+
+        assertFalse(description.has("WarmThroughput"));
+        assertFalse(description.get("GlobalSecondaryIndexes").get(0).has("WarmThroughput"));
+    }
+
+    @Test
+    void createTableIgnoresEmptyWarmThroughput() throws Exception {
+        JsonNode description = createWarmTable("warm-create-empty", false, "{}", "{}");
+
+        assertFalse(description.has("WarmThroughput"));
+        assertFalse(description.get("GlobalSecondaryIndexes").get(0).has("WarmThroughput"));
+        assertWarm(warmThroughputOf(describedTable("warm-create-empty")), 5, 6, "ACTIVE");
+    }
+
+    @Test
+    void createTableRejectsWarmThroughputBelowOnDemandInitialThroughput() {
+        AwsException readEx = warmFailure("CreateTable", warmTableRequest("warm-low-od", true,
+                "{\"ReadUnitsPerSecond\": 11999, \"WriteUnitsPerSecond\": 1}", null));
+        assertEquals("ValidationException", readEx.getErrorCode());
+        assertEquals(400, readEx.getHttpStatus());
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for table is lower than " + ON_DEMAND_REASON, readEx.getMessage());
+
+        AwsException writeEx = warmFailure("CreateTable", warmTableRequest("warm-low-od", true,
+                "{\"WriteUnitsPerSecond\": 0}", null));
+        assertEquals("One or more parameter values were invalid: Requested WriteUnitsPerSecond for WarmThroughput "
+                + "for table is lower than " + ON_DEMAND_REASON, writeEx.getMessage());
+        assertThrows(AwsException.class, () -> describedTable("warm-low-od"));
+    }
+
+    @Test
+    void createTableRejectsIndexWarmThroughputBelowOnDemandInitialThroughput() {
+        AwsException ex = warmFailure("CreateTable", warmTableRequest("warm-low-od-index", true, null,
+                "{\"WriteUnitsPerSecond\": 3999}"));
+
+        assertEquals("One or more parameter values were invalid: Requested WriteUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than " + ON_DEMAND_REASON, ex.getMessage());
+        assertThrows(AwsException.class, () -> describedTable("warm-low-od-index"));
+    }
+
+    @Test
+    void createTableRejectsWarmThroughputBelowProvisionedCapacity() {
+        AwsException readEx = warmFailure("CreateTable", warmTableRequest("warm-low-prov", false,
+                "{\"ReadUnitsPerSecond\": 4, \"WriteUnitsPerSecond\": 1}", null));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for table is lower than ReadCapacityUnits of ProvisionedThroughput", readEx.getMessage());
+
+        AwsException writeEx = warmFailure("CreateTable", warmTableRequest("warm-low-prov", false,
+                "{\"ReadUnitsPerSecond\": 5, \"WriteUnitsPerSecond\": 5}", null));
+        assertEquals("One or more parameter values were invalid: Requested WriteUnitsPerSecond for WarmThroughput "
+                + "for table is lower than WriteCapacityUnits of ProvisionedThroughput", writeEx.getMessage());
+
+        AwsException indexEx = warmFailure("CreateTable", warmTableRequest("warm-low-prov", false, null,
+                "{\"ReadUnitsPerSecond\": 6}"));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than ReadCapacityUnits of ProvisionedThroughput", indexEx.getMessage());
+        assertThrows(AwsException.class, () -> describedTable("warm-low-prov"));
+    }
+
+    @Test
+    void createTableChecksTheTableBeforeItsIndexes() {
+        AwsException ex = warmFailure("CreateTable", warmTableRequest("warm-order-create", true,
+                "{\"WriteUnitsPerSecond\": 1}", "{\"ReadUnitsPerSecond\": 1}"));
+
+        assertTrue(ex.getMessage().contains("WriteUnitsPerSecond for WarmThroughput for table"));
+    }
+
+    @Test
+    void updateTableRaisesTableWarmThroughputOnOnDemandAndProvisionedTables() throws Exception {
+        createWarmTable("warm-raise-od", true, null, null);
+        createWarmTable("warm-raise-prov", false, null, null);
+
+        JsonNode onDemand = updateWarm("""
+                {"TableName": "warm-raise-od", "WarmThroughput": {"ReadUnitsPerSecond": 20000}}
+                """);
+        JsonNode provisioned = updateWarm("""
+                {"TableName": "warm-raise-prov", "WarmThroughput": {"WriteUnitsPerSecond": 50}}
+                """);
+
+        assertWarm(onDemand.get("WarmThroughput"), 20000, 4000, "UPDATING");
+        assertWarm(provisioned.get("WarmThroughput"), 5, 50, "UPDATING");
+        assertWarm(warmThroughputOf(describedTable("warm-raise-od")), 20000, 4000, "ACTIVE");
+        assertWarm(warmThroughputOf(describedTable("warm-raise-prov")), 5, 50, "ACTIVE");
+    }
+
+    @Test
+    void updateTableMarksOnlyRequestedTargetsAsUpdating() throws Exception {
+        createWarmTable("warm-flags", true, null, null);
+
+        JsonNode indexOnly = updateWarm("""
+                {"TableName": "warm-flags", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 13000}}}]}
+                """);
+
+        assertWarm(indexOnly.get("WarmThroughput"), 12000, 4000, "ACTIVE");
+        assertWarm(indexOnly.get("GlobalSecondaryIndexes").get(0).get("WarmThroughput"), 13000, 4000, "UPDATING");
+        assertWarm(warmThroughputOf(describedGsi("warm-flags", "gsi1")), 13000, 4000, "ACTIVE");
+
+        JsonNode tableOnly = updateWarm("""
+                {"TableName": "warm-flags", "WarmThroughput": {"WriteUnitsPerSecond": 4001}}
+                """);
+
+        assertWarm(tableOnly.get("WarmThroughput"), 12000, 4001, "UPDATING");
+        assertWarm(tableOnly.get("GlobalSecondaryIndexes").get(0).get("WarmThroughput"), 13000, 4000, "ACTIVE");
+    }
+
+    @Test
+    void updateTableAcceptsWarmThroughputEqualToTheCurrentValue() throws Exception {
+        createWarmTable("warm-equal", true, null, null);
+
+        JsonNode description = updateWarm("""
+                {"TableName": "warm-equal", "WarmThroughput": {"ReadUnitsPerSecond": 12000, "WriteUnitsPerSecond": 4000}}
+                """);
+
+        assertWarm(description.get("WarmThroughput"), 12000, 4000, "UPDATING");
+    }
+
+    @Test
+    void updateTableRejectsLoweringTableWarmThroughput() throws Exception {
+        createWarmTable("warm-lower", true, "{\"ReadUnitsPerSecond\": 15000, \"WriteUnitsPerSecond\": 6000}", null);
+
+        AwsException readEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-lower", "WarmThroughput": {"ReadUnitsPerSecond": 14999}}
+                """));
+        assertEquals("ValidationException", readEx.getErrorCode());
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for table is lower than " + CURRENT_REASON, readEx.getMessage());
+
+        AwsException writeEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-lower", "WarmThroughput": {"WriteUnitsPerSecond": 5999}}
+                """));
+        assertEquals("One or more parameter values were invalid: Requested WriteUnitsPerSecond for WarmThroughput "
+                + "for table is lower than " + CURRENT_REASON, writeEx.getMessage());
+        assertWarm(warmThroughputOf(describedTable("warm-lower")), 15000, 6000, "ACTIVE");
+    }
+
+    @Test
+    void updateTableRejectsLoweringIndexWarmThroughputAndChecksTableFirst() throws Exception {
+        createWarmTable("warm-lower-index", true, null, "{\"ReadUnitsPerSecond\": 14000}");
+
+        AwsException indexEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-lower-index", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 13999}}}]}
+                """));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than " + CURRENT_REASON, indexEx.getMessage());
+
+        AwsException orderEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-lower-index", "WarmThroughput": {"ReadUnitsPerSecond": 1},
+                 "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 1}}}]}
+                """));
+        assertTrue(orderEx.getMessage().contains("for table"));
+    }
+
+    @Test
+    void updateTableKeepsIndexWarmThroughputThroughACapacityCut() throws Exception {
+        createWarmTable("warm-index-cut", false, null, null);
+        String capacityUpdate = """
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [{"Update": {"IndexName": "gsi1",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}}]}
+                """;
+        updateWarm(capacityUpdate.formatted(20, 30));
+        updateWarm(capacityUpdate.formatted(7, 8));
+
+        assertWarm(warmThroughputOf(describedGsi("warm-index-cut", "gsi1")), 20, 30, "ACTIVE");
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-index-cut", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"ReadUnitsPerSecond": 19}}}]}
+                """));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi1 is lower than " + CURRENT_REASON, ex.getMessage());
+    }
+
+    @Test
+    void createTableReportsAnExistingTableBeforeAnyWarmThroughputCheck() throws Exception {
+        createWarmTable("warm-create-order", true, null, null);
+
+        AwsException ex = warmFailure("CreateTable",
+                warmTableRequest("warm-create-order", true, "{\"ReadUnitsPerSecond\": 1}", null));
+
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void createTableRejectsWarmThroughputAboveThePerTableQuota() {
+        AwsException tableEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", true, "{\"ReadUnitsPerSecond\": 40001}", null));
+        assertEquals("LimitExceededException", tableEx.getErrorCode());
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("CreateTable",
+                warmTableRequest("warm-quota-create", false, null, "{\"WriteUnitsPerSecond\": 40001}"));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        AwsException lowFirst = warmFailure("CreateTable", warmTableRequest("warm-quota-create", true,
+                "{\"ReadUnitsPerSecond\": 1, \"WriteUnitsPerSecond\": 40001}", null));
+        assertEquals("ValidationException", lowFirst.getErrorCode());
+        assertThrows(AwsException.class, () -> describedTable("warm-quota-create"));
+    }
+
+    @Test
+    void updateTableRejectsWarmThroughputAboveThePerTableQuota() throws Exception {
+        createWarmTable("warm-quota-update", true, null, null);
+
+        AwsException tableEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40001,
+                    "WriteUnitsPerSecond": 1}}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested ReadUnitsPerSecond for WarmThroughput for table exceeds "
+                + "TableMaxReadCapacityUnits of the account in region eu-west-1", tableEx.getMessage());
+
+        AwsException indexEx = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-quota-update", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {"WriteUnitsPerSecond": 40001}}}]}
+                """));
+        assertEquals("Subscriber limit exceeded: Requested WriteUnitsPerSecond for WarmThroughput for index gsi1 "
+                + "exceeds TableMaxWriteCapacityUnits of the account in region eu-west-1", indexEx.getMessage());
+
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 12000, 4000, "ACTIVE");
+        updateWarm("""
+                {"TableName": "warm-quota-update", "WarmThroughput": {"ReadUnitsPerSecond": 40000,
+                    "WriteUnitsPerSecond": 40000}}
+                """);
+        assertWarm(warmThroughputOf(describedTable("warm-quota-update")), 40000, 40000, "ACTIVE");
+    }
+
+    @Test
+    void updateTableRejectsEmptyTableWarmThroughputWithInternalFailure() throws Exception {
+        createWarmTable("warm-empty-table", true, null, null);
+
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-empty-table", "WarmThroughput": {}}
+                """));
+
+        assertEquals("InternalFailure", ex.getErrorCode());
+        assertEquals(500, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableReportsAMissingTableBeforeAnyWarmThroughputCheck() {
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-no-such-table", "WarmThroughput": {}}
+                """));
+
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateTableRejectsEmptyIndexWarmThroughput() throws Exception {
+        createWarmTable("warm-empty-index", true, null, null);
+
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-empty-index", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "gsi1", "WarmThroughput": {}}}]}
+                """));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: WarmThroughput must have at least one of "
+                + "ReadUnitsPerSecond or WriteUnitsPerSecond specified for index: gsi1", ex.getMessage());
+    }
+
+    @Test
+    void updateTableRejectsWarmOnlyUpdateOfAMissingIndexWithInternalFailure() throws Exception {
+        createWarmTable("warm-missing-index", true, null, null);
+
+        AwsException ex = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-missing-index", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "nope", "WarmThroughput": {"ReadUnitsPerSecond": 13000}}}]}
+                """));
+        assertEquals("InternalFailure", ex.getErrorCode());
+        assertEquals(500, ex.getHttpStatus());
+
+        AwsException other = warmFailure("UpdateTable", json("""
+                {"TableName": "warm-missing-index", "GlobalSecondaryIndexUpdates": [
+                    {"Update": {"IndexName": "nope", "OnDemandThroughput": {"MaxReadRequestUnits": 10}}}]}
+                """));
+        assertEquals("ResourceNotFoundException", other.getErrorCode());
+    }
+
+    @Test
+    void updateTableCreatedIndexFollowsTheCreateTableWarmThroughputRules() throws Exception {
+        createWarmTable("warm-index-create", true, null, null);
+        String create = """
+                {"TableName": "warm-index-create",
+                 "AttributeDefinitions": [{"AttributeName": "h", "AttributeType": "S"}],
+                 "GlobalSecondaryIndexUpdates": [{"Create": {
+                    "IndexName": "gsi2",
+                    "KeySchema": [{"AttributeName": "h", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                    "WarmThroughput": %s}}]}
+                """;
+
+        AwsException ex = warmFailure("UpdateTable", json(create.formatted("{\"ReadUnitsPerSecond\": 100}")));
+        assertEquals("One or more parameter values were invalid: Requested ReadUnitsPerSecond for WarmThroughput "
+                + "for index gsi2 is lower than " + ON_DEMAND_REASON, ex.getMessage());
+
+        JsonNode description = updateWarm(create.formatted("{\"ReadUnitsPerSecond\": 12500}"));
+        JsonNode created = description.get("GlobalSecondaryIndexes").get(1).get("WarmThroughput");
+        assertWarm(created, 12500, 4000, "UPDATING");
+        assertWarm(description.get("GlobalSecondaryIndexes").get(0).get("WarmThroughput"), 12000, 4000, "ACTIVE");
+        assertWarm(warmThroughputOf(describedGsi("warm-index-create", "gsi2")), 12500, 4000, "ACTIVE");
+    }
+
+    @Test
+    void updateTableIgnoresEmptyWarmThroughputOnACreatedIndex() throws Exception {
+        createWarmTable("warm-index-create-empty", true, null, null);
+
+        JsonNode description = updateWarm("""
+                {"TableName": "warm-index-create-empty",
+                 "AttributeDefinitions": [{"AttributeName": "h", "AttributeType": "S"}],
+                 "GlobalSecondaryIndexUpdates": [{"Create": {
+                    "IndexName": "gsi2",
+                    "KeySchema": [{"AttributeName": "h", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                    "WarmThroughput": {}}}]}
+                """);
+
+        assertWarm(description.get("GlobalSecondaryIndexes").get(1).get("WarmThroughput"), 12000, 4000, "ACTIVE");
+    }
+
     private JsonNode describedTable(String tableName) throws Exception {
         Response response = handler.handle("DescribeTable",
                 mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
@@ -2752,14 +3160,14 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel33() {
+    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode request = updateUserRequest();
         request.put("UpdateExpression", "SET touched = :t");
         request.put("ConditionExpression", "#d = :deep");
         request.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
         ObjectNode values = singleValue(":t");
-        values.set(":deep", nestedMaps(32));
+        values.set(":deep", nestedMaps(33));
         request.set("ExpressionAttributeValues", values);
 
         AwsException ex = assertThrows(AwsException.class,
@@ -2931,12 +3339,12 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void transactWriteItemsRejectsAnUpdateValueWithALeafAtLevel33() {
+    void transactWriteItemsRejectsAnUpdateValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode update = mapper.createObjectNode();
         update.set("Key", item("userId", "u1"));
         update.put("UpdateExpression", "SET deep = :deep");
-        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
@@ -2946,13 +3354,63 @@ class NativeDynamoDbJsonHandlerTest {
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            UpdateItem | {"TableName":"Users","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET t = :t","ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":t":{"S":"y"},":deep":"DEEP"}}
+            PutItem    | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            DeleteItem | {"TableName":"Users","Key":{"userId":{"S":"u1"}},"ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            PutItem    | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"Expected":{"d":{"Value":"DEEP"}}}
+            """)
+    void aConditionValueWithALeafAtLevel33IsEvaluated(String operation, String request) throws Exception {
+        createUsersTable("eu-west-1");
+        service.putItem("Users", item("userId", "u1"), "eu-west-1");
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(32))));
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals("ConditionalCheckFailedException", ex.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            Scan  | {"TableName":"Users","FilterExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            Scan  | {"TableName":"Users","ScanFilter":{"d":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}}}
+            Query | {"TableName":"Users","KeyConditionExpression":"userId = :u","FilterExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":u":{"S":"u1"},":deep":"DEEP"}}
+            """)
+    void aReadFiltersOnAValueWithALeafAtLevel33AndRefusesOneAtLevel34Bare(String operation, String request)
+            throws Exception {
+        createUsersTable("eu-west-1");
+        JsonNode accepted = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(32))));
+        JsonNode refused = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(33))));
+
+        assertEquals(200, handler.handle(operation, accepted, "eu-west-1").getStatus());
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, refused, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
     @Test
-    void transactWriteItemsRejectsAConditionCheckValueWithALeafAtLevel33BeforeTheTableLookup() {
+    void anUpdateThatWritesAValueWithALeafAtLevel33FailsOnTheFinishedItem() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode request = updateUserRequest();
+        request.put("UpdateExpression", "SET deep = :deep");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        ObjectNode update = request.deepCopy();
+        update.remove("TableName");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+        assertEquals("Nesting Levels have exceeded supported limits",
+                onlyValidationErrorMessage(handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1")));
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsAConditionCheckValueWithALeafAtLevel34BeforeTheTableLookup() {
         ObjectNode check = mapper.createObjectNode();
         check.set("Key", item("userId", "u1"));
         check.put("ConditionExpression", "#d = :deep");
         check.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
-        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("ConditionCheck", check), "eu-west-1"));
@@ -2962,11 +3420,11 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void transactWriteItemsRejectsAnUnusedValueWithALeafAtLevel33() {
+    void transactWriteItemsRejectsAnUnusedValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode delete = mapper.createObjectNode();
         delete.set("Key", item("userId", "u1"));
-        delete.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        delete.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("Delete", delete), "eu-west-1"));
@@ -2981,7 +3439,7 @@ class NativeDynamoDbJsonHandlerTest {
         ObjectNode deepCheck = (ObjectNode) deep.get("ConditionCheck");
         deepCheck.put("ConditionExpression", "#d = :deep");
         deepCheck.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
-        deepCheck.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        deepCheck.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
         ObjectNode broken = transactMember("ConditionCheck", "Users", "Key", item("userId", "u2"));
         ((ObjectNode) broken.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(");
 
@@ -3363,6 +3821,31 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"ExclusiveStartTableName":"ab"}             | 1 validation error detected: Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"😀😀"}           | 2 validation errors detected: Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":""}               | 2 validation errors detected: Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"arn:aws:dynamodb:eu-west-2:123456789012:table/abc"} | 1 validation error detected: Value 'arn:aws:dynamodb:eu-west-2:123456789012:table/abc' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"ab","Limit":0}   | 2 validation errors detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1; Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"a!","Limit":101} | 3 validation errors detected: Value '101' at 'limit' failed to satisfy constraint: Member must have value less than or equal to 100; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            """)
+    void listTablesChecksItsStartNameBesideItsLimit(String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ListTables", mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ExclusiveStartTableName\":\"Aaa\"}", "{\"ExclusiveStartTableName\":null}"})
+    void listTablesAcceptsAStartNameNoTableHasAndANullOne(String request) throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("ListTables", mapper.readTree(request), "eu-west-1");
+        assertTrue(response.getEntity().toString().contains("Users"), response.getEntity().toString());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             PutItem    | {"TableName":"Missing","Item":{},"ReturnValues":"ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
             DeleteItem | {"TableName":"Missing","Key":{},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
@@ -3445,6 +3928,24 @@ class NativeDynamoDbJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            DescribeTable | {}                                                                 | pattern
+            UpdateTable   | {"BillingMode":"PAY_PER_REQUEST"}                                  | pattern
+            PutItem       | {"Item":{"userId":{"S":"u1"}},"Expected":{"d":{"Value":"DEEP"}}} | pattern
+            GetItem       | {"Key":{"userId":{"S":"u1"}}}                                      | short
+            Query         | {"KeyConditionExpression":"userId = :v","ExpressionAttributeValues":{":v":{"S":"u1"}}} | short
+            UpdateItem    | {"Key":{"userId":{"S":"u1"}}}                                      | pattern, short
+            """)
+    void eachCallMeasuresATableNameItsOwnWay(String operation, String request, String problems) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(
+                request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(63))));
+        body.put("TableName", "😀😀");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals(DynamoDbTableNamesTest.nameErrors("😀😀", problems), ex.getMessage());
     }
 
     @ParameterizedTest
@@ -3557,11 +4058,11 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void putItemRejectsAnExpectedValueWithALeafAtLevel33() {
+    void putItemRejectsAnExpectedValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode request = putRequest(attributeValue("S", "x"));
         request.set("Expected", mapper.createObjectNode().set("data",
-                mapper.createObjectNode().set("Value", nestedMaps(32))));
+                mapper.createObjectNode().set("Value", nestedMaps(33))));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutItem", request, "eu-west-1"));
@@ -3569,7 +4070,7 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void queryRejectsAQueryFilterValueWithALeafAtLevel33WithoutTheEnvelope() {
+    void queryRejectsAQueryFilterValueWithALeafAtLevel34WithoutTheEnvelope() {
         createUsersTable("eu-west-1");
         ObjectNode request = mapper.createObjectNode();
         request.put("TableName", "Users");
@@ -3579,7 +4080,7 @@ class NativeDynamoDbJsonHandlerTest {
         request.set("KeyConditions", mapper.createObjectNode().set("userId", keyCondition));
         ObjectNode filter = mapper.createObjectNode();
         filter.put("ComparisonOperator", "EQ");
-        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(32)));
+        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(33)));
         request.set("QueryFilter", mapper.createObjectNode().set("data", filter));
 
         AwsException ex = assertThrows(AwsException.class,

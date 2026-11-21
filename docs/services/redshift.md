@@ -375,6 +375,39 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
 
+## SUPER and VARBYTE
+
+A cluster's database has the `SUPER` and `VARBYTE` types and the functions that make and read them. `VARBYTE(n)`, `VARBINARY(n)`
+and `BINARY VARYING(n)` in `CREATE TABLE` and `ALTER TABLE` are the same type.
+
+| Function | Result |
+|---|---|
+| `JSON_PARSE(varchar or varbyte)` | The `SUPER` value of a JSON document; an error when it is not JSON. NULL for NULL. |
+| `CAN_JSON_PARSE(varchar or varbyte)` | `true` when `JSON_PARSE` takes it, `false` otherwise and for an empty string, NULL for NULL. |
+| `JSON_SERIALIZE(super)` | The JSON text of a `SUPER` value, the string `null` for NULL. |
+| `JSON_TYPEOF(super)` | `object`, `array`, `string`, `number`, `boolean` or `null`. |
+| `FROM_VARBYTE(varbyte, format)` | The string of a binary value in `hex`, `binary`, `utf8` (also `utf-8` and `utf_8`) or `base64`. |
+| `TO_VARBYTE(string, format)` | The binary value of a string in one of those formats; an odd number of hexadecimal digits gets a leading `0`. |
+
+```sql
+CREATE TABLE events (id INT, doc SUPER, raw VARBYTE(64));
+INSERT INTO events VALUES (1, JSON_PARSE('{"a":[1,2]}'), TO_VARBYTE('6162', 'hex'));
+SELECT JSON_SERIALIZE(doc), FROM_VARBYTE(raw, 'utf8') FROM events;
+```
+
+Floci keeps both as PostgreSQL domains, `varbyte` over `bytea` and `super` over `jsonb`, so some things differ from Amazon Redshift:
+
+- The length of `VARBYTE(n)` is not enforced.
+- A `SUPER` object's keys are in `jsonb` order, shorter keys first and then by bytes, not in the order the JSON gave them.
+- A `VARBYTE` column read as it is comes back in PostgreSQL's `bytea` form (`\x6162`), not as `6162`. Read it with `FROM_VARBYTE(value, 'hex')`.
+- A `VARCHAR` or an integer does not cast to `VARBYTE`: use `TO_VARBYTE`.
+- PartiQL navigation into a `SUPER` value (`doc.a[0]`), `JSON_SIZE`, `IS_OBJECT`, `IS_ARRAY` and the other `SUPER` functions are not supported.
+- `JSON_TYPEOF` of an untyped literal is ambiguous with PostgreSQL's own `json_typeof`: give it a `JSON_PARSE` result or a `::super` cast.
+
+See AWS's [SUPER type](https://docs.aws.amazon.com/redshift/latest/dg/r_SUPER_type.html),
+[VARBYTE type](https://docs.aws.amazon.com/redshift/latest/dg/r_VARBYTE_type.html) and
+[JSON_PARSE](https://docs.aws.amazon.com/redshift/latest/dg/JSON_PARSE.html).
+
 ## Cross-region snapshot copy
 
 `EnableSnapshotCopy` makes a background sweep (`FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS`, 60 by default) copy the cluster's snapshots to the destination Region.
@@ -940,9 +973,26 @@ is authorized ahead of the role's policies directly for the minted transfer sess
 verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
 normal policy evaluation.
 
+With `floci.services.redshift.spectrum-lake-formation-enforcement=true`
+(`FLOCI_SERVICES_REDSHIFT_SPECTRUM_LAKE_FORMATION_ENFORCEMENT`, default `false`), a query on an external
+table also needs a Lake Formation `SELECT` grant for the IAM role bound to its external schema. The grant can
+be on the table, on every table of its database (`TableWildcard`), or on the whole table through a column
+wildcard without exclusions; `ALL` also counts. A grant to `IAM_ALLOWED_PRINCIPALS` leaves the table to IAM
+alone, so only the S3 checks above apply to it, as in AWS's IAM-only and hybrid modes. Floci's Glue never
+stores that grant, so a catalog that keeps AWS's initial settings leaves every table to IAM: that is the case
+when no data lake settings are stored, or when `CreateTableDefaultPermissions` names `IAM_ALLOWED_PRINCIPALS`.
+Call `PutDataLakeSettings` with `CreateTableDefaultPermissions` empty to hand tables to Lake Formation.
+Without a grant the query then fails with SQLSTATE `42501`. A schema created without a Glue database reads
+through the legacy catalog, where no grant can name its tables, so the flag refuses those queries as well.
+The check runs on every query, ahead of the cache, so a
+`RevokePermissions` stops the next query even for a table already loaded. Column grants, LF-Tags and data
+cells filters are not evaluated: a table reachable only through them is refused.
+The check runs where Floci reads the external table, which is a query that names it: a local view over an
+external table is not followed, so a query on such a view is not checked until the table is next named.
+
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
-schema-qualified external table names. Full Glue IAM enforcement, Lake Formation, role chaining
+schema-qualified external table names. Full Glue IAM enforcement, Lake Formation column and tag permissions, role chaining
 and `IAM_ROLE SESSION` are outside this implementation. Metadata is exposed through
 `svv_external_schemas`, `svv_external_tables`, `svv_external_columns` and `svv_external_partitions`.
 
@@ -989,6 +1039,98 @@ with a PostgreSQL transaction. The schema transaction restriction is an emulator
 Glue and PostgreSQL updates do not form a distributed transaction: an infrastructure failure after
 one store changes can require retrying the command. The legacy Phase 1 catalog does not gain these
 lifecycle operations.
+
+### External schemas over Kinesis Data Streams
+
+Streaming ingestion from Kinesis Data Streams starts with an external schema that maps to the streaming
+source. A streaming materialized view over a stream of that schema, and `REFRESH`, read it; see
+[Streaming materialized views](#streaming-materialized-views).
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] kds
+FROM KINESIS
+[REGION 'us-west-2']
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role and the optional Region, and
+lists the schema in `svv_external_schemas` with `eskind` 9 and the role in `esoptions`. Without `REGION` the
+schema uses the cluster's own Region. `DROP SCHEMA [IF EXISTS] kds [CASCADE | RESTRICT]` removes the local
+schema, its metadata row and its registration; `RESTRICT` is the default, so a schema that holds objects is
+kept, as in Redshift.
+
+- `IAM_ROLE DEFAULT` is not supported. Name the role ARN in a single-quoted literal.
+- The role is not checked when the schema is created. It is checked when a view over the schema is refreshed.
+- A statement that names a relation of the schema as a source (`SELECT * FROM kds.my_stream`,
+  `INSERT INTO kds.t`, `UPDATE kds.t`) is refused with SQLSTATE `0A000`. Redshift reads a stream through a
+  streaming materialized view, and keeps no user tables in such a schema.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
+  with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
+- `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### External schemas over Amazon MSK
+
+An external schema over an Amazon MSK cluster maps a local schema to the cluster for streaming ingestion.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] msk
+FROM MSK
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole'
+AUTHENTICATION iam
+CLUSTER_ARN 'arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/00000000-0000-0000-0000-000000000000-1';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role, authentication mode and cluster ARN, and lists the schema in `svv_external_schemas` with `eskind` 10 and those options in `esoptions`. `DROP SCHEMA [IF EXISTS] msk [CASCADE | RESTRICT]` removes the local schema, its metadata row and its registration; `RESTRICT` is the default, as in Redshift.
+
+- `AUTHENTICATION` accepts `iam` or `none`. `AUTHENTICATION mtls`, `AUTHENTICATION_ARN`, `SECRET_ARN`, `URI`, `IAM_ROLE DEFAULT` and `FROM KAFKA` schemas are refused with SQLSTATE `0A000`.
+- The role and cluster ARN are not checked when the schema is created.
+- A statement that names a relation of the schema (`SELECT * FROM msk.my_topic`, `INSERT INTO msk.t`, `UPDATE msk.t`, `CREATE TABLE msk.t (...)`) is refused with SQLSTATE `0A000`. Streaming materialized views over MSK topics are not yet wired.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA` with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
+
+### Streaming materialized views
+
+A streaming materialized view reads one stream of a Kinesis external schema, and `REFRESH` loads what the
+stream holds since the last refresh.
+
+```sql
+CREATE MATERIALIZED VIEW my_view [AUTO REFRESH NO] AS
+SELECT approximate_arrival_timestamp, partition_key, shard_id, sequence_number, refresh_time,
+       JSON_PARSE(FROM_VARBYTE(kinesis_data, 'utf-8')) AS doc
+FROM kds.my_stream;
+
+REFRESH MATERIALIZED VIEW my_view;
+DROP MATERIALIZED VIEW [IF EXISTS] my_view [CASCADE | RESTRICT];
+```
+
+The stream's relation has the columns Redshift documents: `approximate_arrival_timestamp`, `partition_key`,
+`shard_id`, `sequence_number`, `refresh_time` and `kinesis_data` (`varbyte`). The view is a PostgreSQL table
+that `SELECT` fills; an unqualified name is created in `public`. Records are read through Floci's own Kinesis
+service, never through Firehose or S3.
+
+- **Refresh:** the first refresh reads each shard from its trim horizon. Every later one starts after the
+  last record of the shard that a refresh loaded. A batch is loaded, run through the view's `SELECT` and
+  committed as one statement, and the shard's position is saved only after that commit, so it never runs ahead
+  of the data. A crash between the commit and the save re-reads that last batch. `TRUNCATE` or `DELETE` on the
+  view does not move the position, as on Redshift.
+- **Errors:** a failure in the view's own expressions (a cast, a calculation) fails the refresh and leaves the
+  position where it was, as on Redshift.
+- **IAM:** each refresh checks the schema's role against `kinesis:DescribeStreamSummary`,
+  `GetShardIterator`, `GetRecords`, `ListShards` and `DescribeStream` on the stream and `kinesis:ListStreams`,
+  with trust for `redshift.amazonaws.com`, when IAM enforcement is on. `CREATE MATERIALIZED VIEW` fails with
+  `42P01` when the stream does not exist.
+- **Not supported:** `AUTO REFRESH YES` is refused with `0A000`; refresh the view yourself. Shard splits and
+  merges, `ALTER MATERIALIZED VIEW`, and PartiQL navigation into `SUPER` values are not implemented.
+  A `JOIN` in the view is refused with `0A000`, as on Redshift; a comma join (`FROM a, b`) is not detected.
+  Grouping and aggregation (`GROUP BY`, `HAVING`, `DISTINCT`, and aggregate functions such as `COUNT` or `MAX`)
+  are refused with `0A000` too, because each refresh batch is inserted on its own and would leave a partial row
+  per batch. Aggregate over the view with a query instead.
+- `CREATE MATERIALIZED VIEW` over a stream fails with `0A000` inside a transaction block, and `DROP MATERIALIZED VIEW`
+  and `REFRESH MATERIALIZED VIEW` of a streaming view with `25001`.
+- Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with
+  the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
+- Refreshes of the views over one stream run one at a time.
 
 ### COPY from S3
 

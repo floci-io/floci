@@ -53,7 +53,7 @@ public class Pipe {
     private JsonNode enrichmentParameters;
 
     @JsonProperty("Tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     @JsonProperty("CreationTime")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)

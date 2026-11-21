@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -221,7 +222,19 @@ public class CodeArtifactCargoExternalConnectionImporter {
         return Optional.of(String.join("\n", merged.values()).getBytes(StandardCharsets.UTF_8));
     }
 
-    private Optional<String> indexLineVersion(String line) {
+    /**
+     * Whether {@code repository} has a cargo external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return cargoExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
+    Optional<String> indexLineVersion(String line) {
         try {
             return Optional.ofNullable(mapper.readTree(line).path("vers").asText(null));
         } catch (IOException e) {
@@ -229,7 +242,7 @@ public class CodeArtifactCargoExternalConnectionImporter {
         }
     }
 
-    private static List<String> splitLines(byte[] indexBytes) {
+    static List<String> splitLines(byte[] indexBytes) {
         List<String> lines = new ArrayList<>();
         for (String line : new String(indexBytes, StandardCharsets.UTF_8).split("\n")) {
             if (!line.isBlank()) {
@@ -239,7 +252,7 @@ public class CodeArtifactCargoExternalConnectionImporter {
         return lines;
     }
 
-    private Optional<JsonNode> findIndexLine(byte[] indexBytes, String version) {
+    Optional<JsonNode> findIndexLine(byte[] indexBytes, String version) {
         for (String line : splitLines(indexBytes)) {
             JsonNode node;
             try {
@@ -278,7 +291,7 @@ public class CodeArtifactCargoExternalConnectionImporter {
      * though crates.io itself re-derives it from the {@code .crate}'s own {@code Cargo.toml}
      * rather than trusting the index's copy.
      */
-    private byte[] metadataFromIndexLine(JsonNode indexLine) {
+    byte[] metadataFromIndexLine(JsonNode indexLine) {
         ObjectNode metadata = mapper.createObjectNode();
         metadata.put("name", indexLine.path("name").asText());
         metadata.put("vers", indexLine.path("vers").asText());
@@ -334,7 +347,7 @@ public class CodeArtifactCargoExternalConnectionImporter {
      * asset can, so the header is written first and {@code crateFile}'s own real bytes are then
      * streamed straight through rather than ever held alongside it in memory.
      */
-    private static Path buildStagedWireBody(byte[] metadataJson, Path crateFile) {
+    static Path buildStagedWireBody(byte[] metadataJson, Path crateFile) {
         Path staged;
         try {
             staged = Files.createTempFile("codeartifact-cargo-import-wire-", ".bin");
@@ -366,7 +379,7 @@ public class CodeArtifactCargoExternalConnectionImporter {
         }
     }
 
-    private static long fileSize(Path path) {
+    static long fileSize(Path path) {
         try {
             return Files.size(path);
         } catch (IOException e) {

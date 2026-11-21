@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -47,6 +48,8 @@ public final class RequestResources {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+    /** An ARN without its leading {@code arn:<partition>:<service>:}, its Region optional: {@code 123456789012:function:f}. */
+    private static final Pattern PARTIAL_ARN = Pattern.compile("(?:([a-z]{2}(?:-[a-z0-9]+)+-\\d+):)?(\\d{12}):(.+)");
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
@@ -62,9 +65,18 @@ public final class RequestResources {
     private RequestResources() {
     }
 
-    /** Whether the generated table owns this operation, including those of hand-built namespaces it reads. */
+    /**
+     * Whether the generated table owns this operation, including those of hand-built namespaces it reads. An operation
+     * naming what it acts on in a body the reader does not read ({@code unread}: S3's DeleteObjects, its keys in an XML
+     * body) is not read, as checked on the rest of its request it would be checked on none of what it names.
+     */
     public static boolean reads(String operation) {
-        return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
+        return readable(RequestResourceMembers.table(), operation);
+    }
+
+    /** Whether {@code table} reads the operation's requests: it has an entry for it, and not an unread one. */
+    static boolean readable(RequestResourceMembers.Table table, String operation) {
+        return operation != null && table.operations().containsKey(operation) && !table.unread().contains(operation);
     }
 
     /** Whether {@code ResourceArnBuilder} builds the resources of this namespace's requests itself. */
@@ -79,6 +91,61 @@ public final class RequestResources {
     public static boolean readsNamespace(String namespace) {
         return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace)
                 && !builtByHand(namespace);
+    }
+
+    /**
+     * The ARN formats AWS publishes for the resource types an operation acts on, as
+     * {@code <namespace>:<Operation>}, with the variables the published formats carry
+     * ({@code arn:${Partition}:ssm:${Region}:${Account}:parameter/${FullName}}), each once and in the order the
+     * table lists the types: empty for an operation the table does not read, and for one AWS publishes no resource
+     * type for. A type the table reads without a format of its own is left out, there being no format to name.
+     *
+     * <p>The name is read whatever case it is written in, an action naming an operation being case-insensitive
+     * where a dispatched request names its own operation exactly, which is what {@link #reads} answers for.
+     */
+    public static List<String> arnFormatsOf(String operation) {
+        String named = operationNamed(operation);
+        if (named == null) {
+            return List.of();
+        }
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, named);
+        List<String> published = new ArrayList<>();
+        for (String type : table.types().getOrDefault(named, List.of())) {
+            RequestResourceMembers.ArnFormat format = formats.get(type);
+            if (format != null && !published.contains(format.format())) {
+                published.add(format.format());
+            }
+        }
+        return List.copyOf(published);
+    }
+
+    /** The table's own spelling of an operation named in any case, or null for one it does not read. */
+    private static String operationNamed(String operation) {
+        if (operation == null) {
+            return null;
+        }
+        if (reads(operation)) {
+            return operation;
+        }
+        return OperationNames.INDEX.get(operation.toLowerCase(Locale.ROOT));
+    }
+
+    /** Every operation the table reads, under its own name lowercased, built once on first use. */
+    private static final class OperationNames {
+
+        private static final Map<String, String> INDEX = index();
+
+        private static Map<String, String> index() {
+            Map<String, String> index = new HashMap<>();
+            for (String operation : RequestResourceMembers.table().operations().keySet()) {
+                index.putIfAbsent(operation.toLowerCase(Locale.ROOT), operation);
+            }
+            return Map.copyOf(index);
+        }
+
+        private OperationNames() {
+        }
     }
 
     /**
@@ -117,7 +184,8 @@ public final class RequestResources {
             return targetArns(targets, formats(table, operation), form,
                     form.isEmpty() ? PassedRoles.jsonBody(ctx) : null, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null
+        // An operation the table does not read, an unread one among them, names nothing from it.
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
                 : served(table.operations().get(operation), ctx);
         if (resources == null) {
             return List.of();
@@ -141,7 +209,8 @@ public final class RequestResources {
         if (targets != null) {
             return targetArns(targets, formats(table, operation), Map.of(), body, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
+                : table.operations().get(operation);
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
@@ -206,6 +275,43 @@ public final class RequestResources {
         return List.copyOf(found);
     }
 
+    /** A request a statement's run makes to another service as the caller: {@code action} on {@code resource}. */
+    public record StatementRequest(String action, String resource) {
+    }
+
+    /**
+     * The requests the operation's service makes to another service as the caller to run {@code statement}, as the
+     * table's {@code statements} give them, from the page of AWS's documentation vendored for them: each action on
+     * each of its resources, in the request's partition, Region and account, a variable taking what {@code names}
+     * gives the word the table fills it with ({@code database}, {@code table}) and open where it fills it with none. A
+     * table without partitions makes no partition request. None for a statement the table gives no requests.
+     */
+    public static List<StatementRequest> statementRequests(String operation, String statement,
+                                                           Map<String, String> names, boolean partitioned,
+                                                           String partition, String region, String accountId) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        List<StatementRequest> requests = new ArrayList<>();
+        for (RequestResourceMembers.StatementRequest request : table.statements()
+                .getOrDefault(operation, Map.of()).getOrDefault(statement, List.of())) {
+            if (request.partitioned() && !partitioned) {
+                continue;
+            }
+            Map<String, RequestResourceMembers.ArnFormat> formats = table.formats()
+                    .getOrDefault(request.action().substring(0, request.action().indexOf(':')), Map.of());
+            for (RequestResourceMembers.StatementResource resource : request.resources()) {
+                Map<String, String> filling = new HashMap<>();
+                resource.fill().forEach((variable, word) -> {
+                    if (names.get(word) != null) {
+                        filling.put(variable, names.get(word));
+                    }
+                });
+                requests.add(new StatementRequest(request.action(),
+                        render(formats.get(resource.type()).format(), filling, partition, region, accountId)));
+            }
+        }
+        return List.copyOf(requests);
+    }
+
     /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
     public static boolean actsOnNoResource(String operation) {
         return reads(operation) && !hasIndividualTargets(operation)
@@ -233,7 +339,8 @@ public final class RequestResources {
         for (String id : ids) {
             String arn = "*";
             for (Map.Entry<String, String> prefix : targets.prefixes().entrySet()) {
-                if (id.startsWith(prefix.getValue())) {
+                // A longer, uncovered resource prefix must not borrow a shorter covered type's ARN.
+                if (id.startsWith(prefix.getValue()) && id.indexOf('-', prefix.getValue().length()) < 0) {
                     arn = idArn(formats.get(prefix.getKey()).format(), id, partition, region, accountId);
                     break;
                 }
@@ -304,8 +411,9 @@ public final class RequestResources {
 
     /**
      * As {@link #created(String, ContainerRequestContext, String, String, String, Map)}, for a request whose tags need
-     * the {@code tagging} action: a create whose action acts on no resource type tags the resource it makes
-     * ({@code makes}) where that action acts on the resource's type, as AWS checks a tagging action on the resource
+     * the {@code tagging} action: a create whose action acts on no resource type, or on other types alone (Glue's
+     * {@code CreateConnection}), tags the resource it makes ({@code makes}) where that action acts on the resource's
+     * type, as AWS checks a tagging action on the resource
      * being tagged, and its tags go where the operation is checked otherwise (a Cloud Map namespace, whose
      * {@code TagResource} acts on no type, on {@code *}); a null {@code tagging}, or one the table does not hold, acts
      * on it.
@@ -365,7 +473,7 @@ public final class RequestResources {
                 AwsArnUtils.Arn parent = AwsArnUtils.parse(parentFormat.checked(named));
                 String under = parent.resource().substring(created.parentWord().length());
                 addNamed(arns, new AwsArnUtils.Arn(parent.partition(), parent.service(), parent.region(),
-                        parent.accountId(), created.childWord() + under + created.separator() + "*").toString(),
+                        parent.accountId(), created.childWord() + under + created.infix() + "*").toString(),
                         false, partition, region, accountId, null);
             }
         }
@@ -412,12 +520,26 @@ public final class RequestResources {
 
     private static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation,
                                                        ContainerRequestContext ctx) {
+        IamActionRegistry.RouteMembers route = IamActionRegistry.routeMembers(operation, ctx);
+        return locatedMembers(table, operation, route.model(), route.located());
+    }
+
+    /**
+     * The members the table locates for a request of the operation whose route is the {@code model}'s: those every
+     * client locates alike, those it locates apart for that model ({@code locatedApart}: S3 Control's CreateBucket
+     * carries its {@code Bucket} as {@code {name}}, S3's as {@code {Bucket}}), and those a generated alternative route
+     * locates ({@code alternatives}), {@code body} for one its body carries there.
+     */
+    static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation, String model,
+                                              Map<String, String> alternatives) {
         Map<String, String> located = table.located().getOrDefault(operation, Map.of());
-        Map<String, String> alternatives = IamActionRegistry.routeMemberLocations(operation, ctx);
-        if (alternatives.isEmpty()) {
+        Map<String, String> apart = model == null ? Map.of()
+                : table.locatedApart().getOrDefault(operation, Map.of()).getOrDefault(model, Map.of());
+        if (alternatives.isEmpty() && apart.isEmpty()) {
             return located;
         }
         Map<String, String> merged = new HashMap<>(located);
+        merged.putAll(apart);
         alternatives.forEach((member, source) -> {
             if ("body".equals(source)) {
                 merged.remove(member);
@@ -639,6 +761,8 @@ public final class RequestResources {
                     .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
                             ? asVariable(variable.getKey(), value)
                             : withoutTypePath(value, resource.types().getFirst()))
+                    .map(value -> resource.partialArn() ? completed(value, variable.getValue(), resource, formats,
+                            format, partition, region, accountId) : value)
                     .toList();
             // An element of a list naming no resource names its service's default (a PutEvents entry with no bus).
             if (variable.getValue().eachElement() && stored != null && resource.fill().size() == 1) {
@@ -712,6 +836,39 @@ public final class RequestResources {
                         region, accountId, stored);
             }
         }
+    }
+
+    /**
+     * The value of a member of a {@code partialArn} type as an ARN: one giving its account and resource
+     * ({@code 123456789012:function:my-function}), or its Region too, completed in the request's partition and, where
+     * it leaves the Region out, the request's; one giving the resource alone ({@code function:my-function}) in the
+     * caller's account too; as given otherwise, a name or a whole ARN. A member that may give the ARN of another type
+     * ({@code arnOf}) is completed as that type's.
+     */
+    static String completed(String value, RequestResourceMembers.Member member,
+                            RequestResourceMembers.Resource resource,
+                            Map<String, RequestResourceMembers.ArnFormat> formats,
+                            RequestResourceMembers.ArnFormat format, String partition, String region,
+                            String accountId) {
+        RequestResourceMembers.ArnFormat named = arnOf(resource, member.path(), formats);
+        RequestResourceMembers.ArnFormat type = named == null ? format : named;
+        String[] parts = type.format().split(":", 6);
+        int variable = parts.length < 6 ? -1 : parts[5].indexOf("${");
+        if (variable <= 0) {
+            return value;
+        }
+        String word = parts[5].substring(0, variable);
+        Matcher partial = PARTIAL_ARN.matcher(value);
+        String arn;
+        if (partial.matches() && partial.group(3).startsWith(word)) {
+            arn = new AwsArnUtils.Arn(partition, parts[2], partial.group(1) == null ? region : partial.group(1),
+                    partial.group(2), partial.group(3)).toString();
+        } else if (value.startsWith(word) && value.length() > word.length()) {
+            arn = new AwsArnUtils.Arn(partition, parts[2], region, accountId, value).toString();
+        } else {
+            return value;
+        }
+        return type.pattern().matcher(arn).matches() ? arn : value;
     }
 
     /**

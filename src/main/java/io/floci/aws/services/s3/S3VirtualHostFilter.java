@@ -9,6 +9,7 @@ import io.floci.aws.core.common.RequestUriRewrite;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.lifecycle.ControlPlaneNotFoundFilter;
 import io.floci.aws.services.apigateway.ApiGatewayCustomDomainFilter;
 import io.floci.aws.services.cloudfront.CloudFrontDistributionFilter;
 import io.floci.aws.services.cognito.CognitoCustomDomainFilter;
@@ -166,6 +167,13 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Do not rewrite S3 Control API paths — the account ID appears as a host label
         // in the S3ControlClient but the path belongs to the S3 Control service, not S3.
         if (path.startsWith("/v20180820/")) {
+            return;
+        }
+
+        // The Floci control plane is matched before any service routing, so a health probe sent with a
+        // bucket-style Host still reaches it. The cost is that a virtual-hosted request cannot address
+        // an object key under _floci/ or _localstack/; a path-style request still can.
+        if (ControlPlaneNotFoundFilter.isControlPlanePath(path)) {
             return;
         }
 

@@ -5,6 +5,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.UUID;
+
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -59,6 +61,39 @@ class EmrClusterRegionIntegrationTest {
 
         emr(HOME, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
             .then().statusCode(200);
+    }
+
+    @Test
+    void aSecurityConfigurationIsListedDescribedAndNamedOnlyInItsRegion() {
+        String name = "sec-" + UUID.randomUUID().toString().substring(0, 8);
+        String create = "{\"Name\":\"" + name + "\",\"SecurityConfiguration\":\"{\\\"EncryptionConfiguration\\\":{}}\"}";
+        String byName = "{\"Name\":\"" + name + "\"}";
+        emr(HOME, "CreateSecurityConfiguration", create).then().statusCode(200);
+        try {
+            emr(OTHER, "ListSecurityConfigurations", "{}").then().statusCode(200)
+                .body("SecurityConfigurations.Name", not(hasItem(name)));
+            emr(OTHER, "DescribeSecurityConfiguration", byName).then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Security configuration does not exist: " + name));
+            emr(OTHER, "DeleteSecurityConfiguration", byName).then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+            emr(OTHER, "RunJobFlow", "{\"Name\":\"secured\",\"ReleaseLabel\":\"emr-7.5.0\",\"SecurityConfiguration\":\""
+                    + name + "\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                    + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
+                    + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+            emr(OTHER, "CreateSecurityConfiguration", create).then().statusCode(200);
+            emr(OTHER, "DeleteSecurityConfiguration", byName).then().statusCode(200);
+
+            emr(HOME, "ListSecurityConfigurations", "{}").then().statusCode(200)
+                .body("SecurityConfigurations.Name", hasItem(name));
+            emr(HOME, "DescribeSecurityConfiguration", byName).then().statusCode(200)
+                .body("Name", equalTo(name));
+        } finally {
+            emr(HOME, "DeleteSecurityConfiguration", byName);
+        }
     }
 
     // Catches: an instance's or the master's private DNS name in the wrong region's domain.

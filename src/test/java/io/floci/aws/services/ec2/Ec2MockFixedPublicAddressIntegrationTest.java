@@ -1,12 +1,11 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.floci.aws.services.ec2.Ec2MockPublicAddressSettingIntegrationTest.INSTANCE;
@@ -19,10 +18,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Mock instances under {@code mock-public-addresses: fixed} all show the configured address. */
 @QuarkusTest
-@TestProfile(Ec2MockFixedPublicAddressIntegrationTest.FixedAddress.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class Ec2MockFixedPublicAddressIntegrationTest {
     private static final AtomicLong ACCOUNTS = new AtomicLong(724000000000L);
-    private static final String CONFIGURED = "192.168.65.2";
+    private static final String CONFIGURED = ScopedServiceSettingsProfile.MOCK_PUBLIC_ADDRESS;
 
     @Test
     void everyMockInstanceDueAnAddressShowsTheConfiguredOne() {
@@ -63,13 +62,5 @@ class Ec2MockFixedPublicAddressIntegrationTest {
     private static String address(String owner, String allocation) {
         return request("DescribeAddresses", owner).formParam("AllocationId.1", allocation).post("/").then()
                 .statusCode(200).extract().path("DescribeAddressesResponse.addressesSet.item.publicIp");
-    }
-
-    public static class FixedAddress implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ec2.mock-public-addresses", "fixed",
-                    "floci.services.ec2.mock-public-address", CONFIGURED);
-        }
     }
 }

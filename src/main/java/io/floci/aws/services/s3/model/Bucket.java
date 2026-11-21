@@ -36,6 +36,7 @@ public class Bucket {
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
     private String region;
+    private boolean serviceOwned;
     private WebsiteConfiguration websiteConfiguration;
     /** CloudWatch request metrics configurations, keyed by the id they were stored under. */
     private Map<String, String> metricsConfigurations;
@@ -55,6 +56,9 @@ public class Bucket {
         this.creationDate = Instant.now();
         this.tags = new HashMap<>();
     }
+
+    public boolean isServiceOwned() { return serviceOwned; }
+    public void setServiceOwned(boolean serviceOwned) { this.serviceOwned = serviceOwned; }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
