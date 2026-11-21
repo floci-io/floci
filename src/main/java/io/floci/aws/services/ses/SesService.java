@@ -890,11 +890,40 @@ public class SesService {
         cvetService.createCustomVerificationEmailTemplate(template, region);
     }
 
-    public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+    /**
+     * The v2 update, which takes every member and replaces the stored template with them. The v1
+     * update is {@link #patchCustomVerificationEmailTemplate}.
+     */
+    public void replaceCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         // Validate (including the From-verified identity check and the required-field checks) before
         // delegating the storage update, matching createCustomVerificationEmailTemplate.
         validateCustomVerificationTemplate(template, region);
-        cvetService.updateCustomVerificationEmailTemplate(template, region);
+        cvetService.replaceCustomVerificationEmailTemplate(template, region);
+    }
+
+    /**
+     * The v1 update, which unlike the v2 one takes any subset of the members (probed). Only the
+     * members given are checked, redirection URLs before the sender, and all of it before the
+     * template's existence. An empty member is checked as if it were absent.
+     */
+    public void patchCustomVerificationEmailTemplate(CustomVerificationEmailTemplate changes, String region) {
+        requireCvetField(changes.getTemplateName(), "TemplateName");
+        if (isGiven(changes.getSuccessRedirectionURL()) && !isValidRedirectUrl(changes.getSuccessRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid.", 400);
+        }
+        if (isGiven(changes.getFailureRedirectionURL()) && !isValidRedirectUrl(changes.getFailureRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", "The failure redirection URL is invalid.", 400);
+        }
+        if (isGiven(changes.getFromEmailAddress())
+                && !identityService.isVerifiedSender(changes.getFromEmailAddress(), region)) {
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "The from email address " + changes.getFromEmailAddress() + " is not verified.", 400);
+        }
+        cvetService.patchCustomVerificationEmailTemplate(changes, region);
+    }
+
+    private static boolean isGiven(String member) {
+        return member != null && !member.isEmpty();
     }
 
     // AWS appends this exact disclaimer to the end of every custom verification email and it cannot

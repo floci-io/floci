@@ -10,6 +10,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Integration tests for the SES V1 Query-protocol custom-verification-email-template APIs.
@@ -114,6 +116,83 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
         SesV1Requests.query("ListCustomVerificationEmailTemplates")
         .when().post("/").then().statusCode(200)
                 .body(containsString("<TemplateName>" + NAME + "</TemplateName>"));
+    }
+
+    @Test
+    @Order(14)
+    void update_checksOnlyTheMembersGivenBeforeTheTemplateExists() {
+        // Probed: the name alone reaches the existence check, and a member that is given is
+        // checked first, redirection URLs before the sender.
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"));
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+                .formParam("TemplateSubject", "").formParam("TemplateContent", "")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>CustomVerificationEmailTemplateDoesNotExist</Code>"));
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+                .formParam("FromEmailAddress", "nobody@unverified.test")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>FromEmailAddressNotVerified</Code>"))
+                .body(containsString(
+                        "<Message>The from email address nobody@unverified.test is not verified.</Message>"));
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+                .formParam("FailureRedirectionURL", "not-a-url")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>The failure redirection URL is invalid.</Message>"));
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", "cvet-v1-ghost")
+                .formParam("FromEmailAddress", "nobody@unverified.test")
+                .formParam("SuccessRedirectionURL", "not-a-url")
+                .formParam("FailureRedirectionURL", "not-a-url")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>The success redirection URL is invalid.</Message>"));
+    }
+
+    @Test
+    @Order(15)
+    void update_changesOnlyTheMembersGiven_andAnEmptySubjectClearsIt() {
+        String name = "cvet-v1-partial";
+        create(name, "Verify your email").when().post("/").then().statusCode(200);
+
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", name)
+                .formParam("TemplateSubject", "Verify again")
+        .when().post("/").then().statusCode(200);
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", name)
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<TemplateSubject>Verify again</TemplateSubject>"))
+                .body(containsString("<FromEmailAddress>" + FROM + "</FromEmailAddress>"))
+                .body(containsString("<TemplateContent>&lt;html&gt;&lt;body&gt;verify&lt;/body&gt;&lt;/html&gt;"
+                        + "</TemplateContent>"))
+                .body(containsString("<SuccessRedirectionURL>https://example.com/ok</SuccessRedirectionURL>"))
+                .body(containsString("<FailureRedirectionURL>https://example.com/fail</FailureRedirectionURL>"));
+
+        // A refused update leaves the stored template as it was.
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", name)
+                .formParam("TemplateSubject", "Never stored")
+                .formParam("FromEmailAddress", "nobody@unverified.test")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>FromEmailAddressNotVerified</Code>"));
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", name)
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<TemplateSubject>Verify again</TemplateSubject>"));
+
+        SesV1Requests.query("UpdateCustomVerificationEmailTemplate").formParam("TemplateName", name)
+                .formParam("TemplateSubject", "")
+        .when().post("/").then().statusCode(200);
+        SesV1Requests.query("GetCustomVerificationEmailTemplate").formParam("TemplateName", name)
+        .when().post("/").then().statusCode(200)
+                .body(not(containsString("<TemplateSubject>")))
+                .body(containsString("<FromEmailAddress>" + FROM + "</FromEmailAddress>"));
+        // The v2 view of the same template leaves the cleared member out instead of answering null.
+        given().header("Authorization", SesV2Requests.AUTH)
+        .when().get("/v2/email/custom-verification-email-templates/" + name).then().statusCode(200)
+                .body("$", not(hasKey("TemplateSubject")))
+                .body("FromEmailAddress", equalTo(FROM));
+
+        SesV1Requests.query("DeleteCustomVerificationEmailTemplate").formParam("TemplateName", name)
+        .when().post("/").then().statusCode(200);
     }
 
     @Test
