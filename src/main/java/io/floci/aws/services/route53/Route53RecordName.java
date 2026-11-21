@@ -18,21 +18,22 @@ public final class Route53RecordName {
      * "Normalizing the Route 53 condition key values"): without the final dot, and with {@code *} as {@code \052}.
      */
     public static String conditionName(String name) {
-        return spell(name, false);
+        return spell(name);
     }
 
     /**
-     * The name a record is stored and matched under: with the final dot, and with {@code *} kept as given, the
-     * spelling Floci's DNS server matches wildcard records by.
+     * The name a record is stored, matched and listed under: with the final dot and every byte outside
+     * {@code a-z}, {@code 0-9}, {@code -}, {@code _} and unescaped {@code .} written as a three-digit octal escape
+     * (including {@code *} as {@code \052}), as Route 53's API returns it.
      */
     public static String recordName(String name) {
         if (name == null || name.isEmpty()) {
             return name;
         }
-        return spell(name, true) + ".";
+        return spell(name) + ".";
     }
 
-    private static String spell(String name, boolean literalAsterisk) {
+    private static String spell(String name) {
         String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
         byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
         StringBuilder spelled = new StringBuilder(bytes.length);
@@ -47,7 +48,7 @@ public final class Route53RecordName {
                 value += 'a' - 'A';
             }
             if (value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || value == '-' || value == '_'
-                    || value == '*' && literalAsterisk || value == '.' && !escaped) {
+                    || value == '.' && !escaped) {
                 spelled.append((char) value);
             } else {
                 spelled.append(String.format(Locale.ROOT, "\\%03o", value));
