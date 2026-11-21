@@ -27,6 +27,7 @@ order:
   - AWS::ECS
   - AWS::EFS
   - AWS::EKS
+  - AWS::EMRContainers
   - AWS::EMRServerless
   - AWS::RDS
   - AWS::DSQL
@@ -157,6 +158,7 @@ service_labels:
   AWS::ECS: ECS
   AWS::EFS: EFS
   AWS::EKS: EKS
+  AWS::EMRContainers: EMR on EKS
   AWS::EMRServerless: EMR Serverless
   AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
   AWS::Events: EventBridge
@@ -230,6 +232,7 @@ notes:
   AWS::Transfer::User: 'management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user'
   AWS::EKS::Cluster: 'created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack, for `Logging`, for `AccessConfig.AuthenticationMode` (a mode cannot be moved back, so a stack update that does so fails, and a stack rollback restores it) and for `ResourcesVpcConfig` endpoint access and `PublicAccessCidrs`; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion`; a change to the subnets or security groups of `ResourcesVpcConfig` fails the resource, as the emulator''s `UpdateClusterConfig` does not change them'
   AWS::EKS::Nodegroup: 'created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place'
+  AWS::EMRContainers::VirtualCluster: 'created with `Name`, `ContainerProvider`, `SecurityConfigurationId`, `SessionEnabled` and `Tags`; a template that sets the read-only `Arn` or `Id` is refused; updated in place for `Tags` alone, which end as the template lists them, any other but an `aws:` one removed; a change to any other property replaces the virtual cluster, as the registry marks them create-only, and terminates the old one once the update commits; an update of a virtual cluster that is terminated or gone fails'
   AWS::EMRServerless::Application: 'created with every property, `Name` and `Type` included; updated in place through `UpdateApplication` for the settings a template changes, a dropped setting kept as it is but for `InitialCapacity`, which is cleared, and for `Tags`, which end as the template lists them, any other removed; a change to `Name` or `Type` replaces the application and deletes the old one once the update commits; neither an update nor a delete stops a `STARTED` application, so one it refuses fails the resource, as on AWS'
   AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
   AWS::ApiGateway::Authorizer: 'created with `Name`, `Type`, `AuthorizerUri`, `IdentitySource`, `AuthorizerResultTtlInSeconds` and `ProviderARNs`; updated in place for those, keeping the id; a template that drops `AuthorizerResultTtlInSeconds`, `IdentitySource` or `ProviderARNs` restores the TTL of 300 and clears the identity source and the pools, a dropped `AuthorizerUri` keeps the current one, and dropping `IdentitySource` from a `TOKEN` or `COGNITO_USER_POOLS` authorizer fails the resource, as AWS requires it there; a change to `RestApiId` replaces the authorizer, as the registry marks it create-only, and deletes the old one once the update commits; `AuthorizerCredentials`, `AuthType` and `IdentityValidationExpression` are not stored'
