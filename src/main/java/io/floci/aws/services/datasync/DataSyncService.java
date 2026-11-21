@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.datasync.model.DataSyncAgent;
@@ -27,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -42,7 +45,7 @@ import java.util.function.Function;
  * back.
  */
 @ApplicationScoped
-public class DataSyncService {
+public class DataSyncService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(DataSyncService.class);
 
@@ -319,16 +322,59 @@ public class DataSyncService {
         return new LinkedHashMap<>(findTaggable(resourceArn).getTags());
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    /**
+     * Gives the resource a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         DataSyncTaggable resource = findTaggable(resourceArn);
-        resource.getTags().putAll(tags);
+        Map<String, String> merged = new LinkedHashMap<>(resource.getTags());
+        merged.putAll(tags);
+        resource.setTags(merged);
         persist(resourceArn, resource);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    /** Gives the resource a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         DataSyncTaggable resource = findTaggable(resourceArn);
-        tagKeys.forEach(resource.getTags()::remove);
+        Map<String, String> remaining = new LinkedHashMap<>(resource.getTags());
+        tagKeys.forEach(remaining::remove);
+        resource.setTags(remaining);
         persist(resourceArn, resource);
+    }
+
+    @Override
+    public String namespace() {
+        return "datasync";
+    }
+
+    /** A request names an agent, a location or a task by its ARN: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the agent, the location or the task whose ARN is {@code arn}, in the request's account, where the tag
+     * handlers read: an ARN of another account names none. Read in place under the ARN itself, which each is stored
+     * under, an agent, a location or a task stored before storage was account-aware included. A task execution's ARN
+     * reads nothing, Floci holding no tags of its own for it. Tag calls give the resource a new map, so the read is of
+     * one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "datasync")) {
+            return Map.of();
+        }
+        String account = regionResolver.getAccountId();
+        if (!AwsArnUtils.parse(arn).accountId().equals(account)) {
+            return Map.of();
+        }
+        Optional<DataSyncTaggable> resource = AccountAwareStorageBackend.readInAccount(agents, account, arn)
+                .<DataSyncTaggable>map(agent -> agent)
+                .or(() -> AccountAwareStorageBackend.readInAccount(locations, account, arn).map(location -> location))
+                .or(() -> AccountAwareStorageBackend.readInAccount(tasks, account, arn).map(task -> task));
+        return new LinkedHashMap<>(resource.map(DataSyncTaggable::getTags).orElse(Map.of()));
     }
 
     private DataSyncTaggable findTaggable(String resourceArn) {

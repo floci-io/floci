@@ -4,12 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.InMemoryStorage;
-import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.WalStorage;
 import io.floci.aws.services.kms.model.KmsKey;
+import io.floci.aws.testing.StorageTestBackends;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -159,7 +157,7 @@ class KmsRotationPublicationServiceTest {
             newCiphertext = service.encrypt(keyId, plaintext, primaryRegion);
             keys.flush();
         } finally {
-            close(keys);
+            StorageTestBackends.close(keys);
         }
 
         StorageBackend<String, KmsKey> reopened = persistentKeys(mode);
@@ -175,31 +173,18 @@ class KmsRotationPublicationServiceTest {
             assertEquals(service.describeKey(keyId, primaryRegion).getBackingKeys(),
                     service.describeKey(keyId, replicaRegion).getBackingKeys());
         } finally {
-            close(reopened);
+            StorageTestBackends.close(reopened);
         }
     }
 
     private StorageBackend<String, KmsKey> persistentKeys(String mode) {
         TypeReference<Map<String, KmsKey>> type = new TypeReference<>() {};
-        Path snapshot = directory.resolve("keys.json");
-        return switch (mode) {
-            case "persistent" -> new PersistentStorage<>(snapshot, type);
-            case "hybrid" -> new HybridStorage<>(snapshot, type, Long.MAX_VALUE);
-            case "wal" -> new WalStorage<>(snapshot, directory.resolve("keys.wal"), type, Long.MAX_VALUE);
-            default -> throw new IllegalArgumentException("Unsupported test storage mode: " + mode);
-        };
+        return StorageTestBackends.create(mode, directory.resolve("keys.json"), directory.resolve("keys.wal"),
+                type, Long.MAX_VALUE);
     }
 
     private static KmsService service(StorageBackend<String, KmsKey> keys, String region) {
         return new KmsService(keys, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(region, "000000000000"));
-    }
-
-    private static void close(StorageBackend<String, KmsKey> keys) {
-        if (keys instanceof HybridStorage<String, KmsKey> hybrid) {
-            hybrid.shutdown();
-        } else if (keys instanceof WalStorage<String, KmsKey> wal) {
-            wal.shutdown();
-        }
     }
 }

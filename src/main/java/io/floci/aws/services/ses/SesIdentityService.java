@@ -30,6 +30,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -401,13 +402,51 @@ public class SesIdentityService implements SesTaggable {
 
     static final List<String> NOTIFICATION_TYPES = List.of("Bounce", "Complaint", "Delivery");
 
+    /**
+     * Probed: SES answers in this order. The members the model requires come first, reported
+     * together; then the shape of the identity, where an empty value and one with whitespace around
+     * it are refused; then the topic; and only then whether the identity exists, so a bad topic on
+     * an unknown identity reports the topic. Every topic SES cannot use (malformed, missing, in
+     * another region, or one whose policy refuses SES) gets the same message, an empty value is
+     * refused instead of clearing, and only an absent {@code SnsTopic} clears the setting. A
+     * refused call leaves the stored topic as it was.
+     *
+     * @param publishableTopic whether SES may publish to the topic for this identity
+     */
     public void setIdentityNotificationTopic(String identityValue, String notificationType,
-                                             String snsTopic, String region) {
+                                             String snsTopic, String region,
+                                             Predicate<String> publishableTopic) {
+        List<String> violations = new ArrayList<>();
+        if (identityValue == null) {
+            violations.add(SmithyValidationErrors.notNullWithoutValue("identity"));
+        }
+        if (notificationType == null) {
+            violations.add(SmithyValidationErrors.notNullWithoutValue("notificationType"));
+        } else if (!NOTIFICATION_TYPES.contains(notificationType)) {
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.notInEnum(
+                    notificationType, "notificationType", NOTIFICATION_TYPES));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+        if (identityValue.isBlank() || !identityValue.equals(identityValue.strip())) {
+            throw new AwsException("InvalidParameterValue", "Identity " + identityValue
+                    + " is invalid. Must be a valid email address or domain or identity ARN.", 400);
+        }
+        if (snsTopic != null) {
+            if (snsTopic.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "SNS topic cannot be empty.", 400);
+            }
+            if (!publishableTopic.test(snsTopic)) {
+                throw new AwsException("InvalidParameterValue", "SNS topic " + snsTopic + " is invalid.", 400);
+            }
+        }
         synchronized (identityCreationLock) {
             Identity identity = identityStore.get(identityKey(region, identityValue))
                     .orElseThrow(() -> new AwsException("InvalidParameterValue",
-                            "Identity does not exist: " + identityValue, 400));
-            if (snsTopic != null && !snsTopic.isBlank()) {
+                            "Identity " + identityValue
+                                    + " is invalid. Must be a verified email address or domain.", 400));
+            if (snsTopic != null) {
                 identity.getNotificationAttributes().put(notificationType + "Topic", snsTopic);
             } else {
                 identity.getNotificationAttributes().remove(notificationType + "Topic");
@@ -472,9 +511,8 @@ public class SesIdentityService implements SesTaggable {
         }
         if (!NOTIFICATION_TYPES.contains(notificationType)) {
             throw SmithyValidationErrors.validationError(
-                    "Value at 'notificationType' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set: "
-                            + NOTIFICATION_TYPES);
+                    SmithyValidationErrors.Violations.WITHOUT_VALUES.notInEnum(
+                            notificationType, "notificationType", NOTIFICATION_TYPES));
         }
         synchronized (identityCreationLock) {
             Identity identity = identityStore.get(identityKey(region, identityValue))

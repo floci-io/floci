@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_iam_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
     "AcceptDelegationRequest": "AcceptDelegationRequestRequest",
@@ -1233,11 +1233,13 @@
     "ListPoliciesGrantingServiceAccessRequest": {
       "type": "structure",
       "required": [
-        "Arn"
+        "Arn",
+        "ServiceNamespaces"
       ],
       "members": {
         "Marker": "markerType",
-        "Arn": "arnType"
+        "Arn": "arnType",
+        "ServiceNamespaces": "serviceNamespaceListType"
       }
     },
     "ListPoliciesRequest": {
@@ -2417,6 +2419,12 @@
     },
     "serviceName": {
       "type": "string"
+    },
+    "serviceNamespaceListType": {
+      "type": "list",
+      "min": 1,
+      "max": 200,
+      "member": "serviceNamespaceType"
     },
     "serviceNamespaceType": {
       "type": "string",

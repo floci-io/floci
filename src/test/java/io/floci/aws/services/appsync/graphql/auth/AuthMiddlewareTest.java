@@ -9,6 +9,8 @@ import io.floci.aws.services.appsync.model.GraphqlApi;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -103,13 +105,10 @@ class AuthMiddlewareTest {
         verify(apiKeyAuthValidator, never()).validate(any(), any());
     }
 
-    @Test
-    void bearerJwtIsNotSentToLambda() {
-        GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
-        api.setUserPoolConfig(Map.of("userPoolId", "pool", "awsRegion", "us-east-1"));
-        AdditionalAuthenticationProvider lambda = new AdditionalAuthenticationProvider();
-        lambda.setAuthenticationType(AuthenticationType.AWS_LAMBDA);
-        api.setAdditionalAuthenticationProviders(List.of(lambda));
+    @ParameterizedTest
+    @ValueSource(strings = {"Bearer ", ""})
+    void jwtIsNotSentToLambda(String scheme) {
+        GraphqlApi api = cognitoAndLambdaApi();
 
         Map<String, Object> claims = Map.of(
                 "sub", "s",
@@ -119,10 +118,63 @@ class AuthMiddlewareTest {
         when(cognitoAuthValidator.matchesProvider(any(), any())).thenReturn(true);
         when(cognitoAuthValidator.validate(any(), any(), any())).thenReturn(Map.of("sub", "s"));
 
-        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", "Bearer " + jwt), api, info);
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", scheme + jwt), api, info);
 
         assertEquals(AuthenticationType.AMAZON_COGNITO_USER_POOLS, ctx.authenticationType());
         verify(lambdaAuthorizerValidator, never()).authorize(any(), any(), any(), any());
+    }
+
+    @Test
+    void bareJwtWithoutBearerPrefixAuthenticatesAgainstCognito() {
+        GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        api.setUserPoolConfig(Map.of("userPoolId", "pool", "awsRegion", "us-east-1"));
+        String jwt = JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s", "exp", 9999999999L)), new ObjectMapper());
+        when(cognitoAuthValidator.matchesProvider(any(), any())).thenReturn(true);
+        when(cognitoAuthValidator.validate(any(), any(), any())).thenReturn(Map.of("sub", "s"));
+
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", jwt), api, info);
+
+        assertEquals(AuthenticationType.AMAZON_COGNITO_USER_POOLS, ctx.authenticationType());
+        verify(lambdaAuthorizerValidator, never()).authorize(any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Bearer ", ""})
+    void rejectedJwtIs401AndNotSentToLambda(String scheme) {
+        GraphqlApi api = cognitoAndLambdaApi();
+        String jwt = JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s")), new ObjectMapper());
+
+        AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
+                () -> middleware.authenticate(Map.of("Authorization", scheme + jwt), api, info));
+
+        assertEquals(401, ex.getHttpStatus());
+        verify(lambdaAuthorizerValidator, never()).authorize(any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"prefix:%s", "%s:suffix"})
+    void wrappedJwtStillReachesLambdaWhenCognitoIsConfigured(String wrapper) {
+        GraphqlApi api = cognitoAndLambdaApi();
+        String token = wrapper.formatted(JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s")), new ObjectMapper()));
+        when(lambdaAuthorizerValidator.authorize(eq("api-1"), eq(token), any(), any()))
+                .thenReturn(new LambdaAuthorizerResult(true, List.of(), Map.of(), null, 10));
+
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", token), api, info);
+
+        assertEquals(AppSyncAuth.AUTH_TYPE_LAMBDA, ctx.authType());
+    }
+
+    @Test
+    void jwtWithRandomAlphanumericPrefixStillReachesLambda() {
+        GraphqlApi api = cognitoAndLambdaApi();
+        String token = "x7f" + JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s")), new ObjectMapper());
+        when(lambdaAuthorizerValidator.authorize(eq("api-1"), eq(token), any(), any()))
+                .thenReturn(new LambdaAuthorizerResult(true, List.of(), Map.of(), null, 10));
+
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", token), api, info);
+
+        assertEquals(AppSyncAuth.AUTH_TYPE_LAMBDA, ctx.authType());
+        verify(cognitoAuthValidator, never()).validate(any(), any(), any());
     }
 
     @Test
@@ -136,6 +188,15 @@ class AuthMiddlewareTest {
 
         assertEquals(AppSyncAuth.AUTH_TYPE_LAMBDA, ctx.authType());
         assertEquals("green", ((Map<?, ?>) ctx.identity().get("resolverContext")).get("apple"));
+    }
+
+    private static GraphqlApi cognitoAndLambdaApi() {
+        GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        api.setUserPoolConfig(Map.of("userPoolId", "pool", "awsRegion", "us-east-1"));
+        AdditionalAuthenticationProvider lambda = new AdditionalAuthenticationProvider();
+        lambda.setAuthenticationType(AuthenticationType.AWS_LAMBDA);
+        api.setAdditionalAuthenticationProviders(List.of(lambda));
+        return api;
     }
 
     private static GraphqlApi api(AuthenticationType type) {

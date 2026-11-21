@@ -57,7 +57,6 @@ public class CurJsonHandler {
     }
 
     private Response handlePutReportDefinition(JsonNode request, String region) {
-        CurRequestShapes.checkTags(request.get("Tags"));
         ReportDefinition def = parseReportDefinition(request.path("ReportDefinition"));
         def.setTags(parseTags(request.path("Tags")));
         ReportDefinition created = service.putReportDefinition(def, region);
@@ -136,10 +135,6 @@ public class CurJsonHandler {
     }
 
     private ReportDefinition parseReportDefinition(JsonNode node) {
-        if (node == null || !node.isObject() || node.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "ReportDefinition is required.", 400);
-        }
         ReportDefinition d = new ReportDefinition();
         d.setReportName(stringOrNull(node, "ReportName"));
         d.setTimeUnit(stringOrNull(node, "TimeUnit"));

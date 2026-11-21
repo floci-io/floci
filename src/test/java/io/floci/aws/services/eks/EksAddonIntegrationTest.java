@@ -1,18 +1,63 @@
 package io.floci.aws.services.eks;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EksRequests.eks;
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
 class EksAddonIntegrationTest {
+
+    private static final String REGION = "us-east-1";
+
+    @InjectSpy
+    EksClusterManager clusterManager;
+
+    /**
+     * The Pod Identity address answers while the agent add-on is installed: CreateAddon starts it and
+     * DeleteAddon stops it, except with preserve, which leaves the agent running on EKS. Other add-ons
+     * leave it alone.
+     */
+    @Test
+    void thePodIdentityAgentsAddressFollowsItsAddon() {
+        String account = "123456789012";
+        String name = "addon-agent-" + UUID.randomUUID().toString().substring(0, 8);
+        String basePath = "/clusters/" + name + "/addons";
+        createCluster(account, name, "1.30");
+        try {
+            for (String addon : List.of("eks-pod-identity-agent", "coredns")) {
+                given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                        .body(Map.of("addonName", addon)).post(basePath).then().statusCode(200);
+            }
+            Mockito.verify(clusterManager, Mockito.times(1))
+                    .podIdentityAgentChanged(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+
+            given().header("Authorization", auth(account, "eks")).queryParam("preserve", true)
+                    .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
+            given().header("Authorization", auth(account, "eks"))
+                    .delete(basePath + "/coredns").then().statusCode(200);
+            Mockito.verify(clusterManager, Mockito.times(1)).podIdentityAgentChanged(Mockito.any());
+
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .body(Map.of("addonName", "eks-pod-identity-agent")).post(basePath).then().statusCode(200);
+            given().header("Authorization", auth(account, "eks"))
+                    .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
+            Mockito.verify(clusterManager, Mockito.times(3))
+                    .podIdentityAgentChanged(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+        } finally {
+            deleteCluster(account, name);
+        }
+    }
 
     @Test
     void addonLifecycleRoundTrip() {
@@ -36,8 +81,7 @@ class EksAddonIntegrationTest {
                     "tags", Map.of("environment", "test")
             );
 
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -59,8 +103,7 @@ class EksAddonIntegrationTest {
                     .body("addon.modifiedAt", instanceOf(Number.class));
 
             // 2. Idempotent retry with same parameters and token
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -74,8 +117,7 @@ class EksAddonIntegrationTest {
                     "clientRequestToken", "token-addon-1",
                     "tags", Map.of("environment", "production")
             );
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(conflictReq)
                     .post(basePath)
                     .then()
@@ -88,8 +130,7 @@ class EksAddonIntegrationTest {
                     "addonName", "vpc-cni",
                     "clientRequestToken", "token-addon-2"
             );
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(duplicateReq)
                     .post(basePath)
                     .then()
@@ -98,7 +139,7 @@ class EksAddonIntegrationTest {
                     .body("__type", equalTo("ResourceInUseException"));
 
             // 5. Describe addon
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/vpc-cni")
                     .then()
                     .statusCode(200)
@@ -117,8 +158,7 @@ class EksAddonIntegrationTest {
                     "serviceAccountRoleArn", updatedRoleArn,
                     "configurationValues", "{\"env\":{\"ENABLE_PREFIX_DELEGATION\":\"false\"}}"
             );
-            String updateId = given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            String updateId = eks(account, REGION)
                     .body(updateReq)
                     .post(basePath + "/vpc-cni/update")
                     .then()
@@ -130,7 +170,7 @@ class EksAddonIntegrationTest {
                     .extract().path("update.id");
 
             // Verify DescribeUpdate (called by Terraform aws_eks_addon waiter)
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("addonName", "vpc-cni")
                     .get("/clusters/" + name + "/updates/" + updateId)
                     .then()
@@ -141,7 +181,7 @@ class EksAddonIntegrationTest {
                     .body("update.type", equalTo("AddonUpdate"));
 
             // Verify describe shows updated values
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/vpc-cni")
                     .then()
                     .statusCode(200)
@@ -150,7 +190,7 @@ class EksAddonIntegrationTest {
                     .body("addon.configurationValues", equalTo("{\"env\":{\"ENABLE_PREFIX_DELEGATION\":\"false\"}}"));
 
             // 7. List addons
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath)
                     .then()
                     .statusCode(200)
@@ -159,7 +199,7 @@ class EksAddonIntegrationTest {
                     .body("addons[0]", equalTo("vpc-cni"));
 
             // 8. Delete addon
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .delete(basePath + "/vpc-cni")
                     .then()
                     .statusCode(200)
@@ -168,7 +208,7 @@ class EksAddonIntegrationTest {
                     .body("addon.status", equalTo("DELETING"));
 
             // 9. Describe after delete returns 404
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/vpc-cni")
                     .then()
                     .statusCode(404)
@@ -183,7 +223,7 @@ class EksAddonIntegrationTest {
         String account = "123456789012";
 
         // Query all supported versions
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .get("/addons/supported-versions")
                 .then()
                 .statusCode(200)
@@ -192,7 +232,7 @@ class EksAddonIntegrationTest {
                 .body("addons.addonName", hasItems("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent", "aws-ebs-csi-driver"));
 
         // Query with addonName filter
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .queryParam("addonName", "vpc-cni")
                 .get("/addons/supported-versions")
                 .then()
@@ -202,7 +242,7 @@ class EksAddonIntegrationTest {
                 .body("addons[0].addonVersions", not(empty()));
 
         // Query with kubernetesVersion filter
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .queryParam("addonName", "vpc-cni")
                 .queryParam("kubernetesVersion", "1.29")
                 .get("/addons/supported-versions")
@@ -213,7 +253,7 @@ class EksAddonIntegrationTest {
                 .body("addons[0].addonVersions.addonVersion", hasItem("v1.18.1-eksbuild.1"));
 
         // Unknown addon name returns empty list 200
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .queryParam("addonName", "non-existent-addon")
                 .get("/addons/supported-versions")
                 .then()
@@ -241,8 +281,7 @@ class EksAddonIntegrationTest {
                     )
             );
 
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -250,7 +289,7 @@ class EksAddonIntegrationTest {
                     .body("addon.podIdentityAssociations", hasSize(1));
 
             // Verify the association was created under kube-system namespace
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get("/clusters/" + name + "/pod-identity-associations")
                     .then()
                     .statusCode(200)
@@ -259,20 +298,19 @@ class EksAddonIntegrationTest {
                     .body("associations[0].serviceAccount", equalTo("aws-node"));
 
             // Delete addon with preserve=false (default) -> deletes association
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .delete(basePath + "/vpc-cni")
                     .then()
                     .statusCode(200);
 
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get("/clusters/" + name + "/pod-identity-associations")
                     .then()
                     .statusCode(200)
                     .body("associations", empty());
 
             // Re-creating addon with same association succeeds (no ResourceInUseException)
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -293,8 +331,7 @@ class EksAddonIntegrationTest {
         createCluster(account, name, "1.40");
         try {
             // Create with no version resolves default version on cluster outside catalog range
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("addonName", "vpc-cni"))
                     .post(basePath)
                     .then()
@@ -304,8 +341,7 @@ class EksAddonIntegrationTest {
                     .body("addon.addonVersion", notNullValue());
 
             // In-place update with catalog version succeeds
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("addonVersion", "v1.18.1-eksbuild.1"))
                     .post(basePath + "/vpc-cni/update")
                     .then()
@@ -313,8 +349,7 @@ class EksAddonIntegrationTest {
                     .body("update.status", equalTo("Successful"));
 
             // In-place update with unknown version fails
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("addonVersion", "v99.0.0"))
                     .post(basePath + "/vpc-cni/update")
                     .then()
@@ -333,8 +368,7 @@ class EksAddonIntegrationTest {
 
         createCluster(account, name, "1.29");
 
-        given().header("Authorization", auth(account, "eks"))
-                .contentType("application/json")
+        eks(account, REGION)
                 .body(Map.of("addonName", "vpc-cni"))
                 .post(basePath)
                 .then()
@@ -347,7 +381,7 @@ class EksAddonIntegrationTest {
         createCluster(account, name, "1.29");
         try {
             // Addons must be empty on recreated cluster
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath)
                     .then()
                     .statusCode(200)
@@ -362,7 +396,7 @@ class EksAddonIntegrationTest {
         String account = "123456789012";
 
         // Missing cluster returns 404 JSON, not S3 NoSuchBucket XML
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .get("/clusters/nonexistent-cluster/addons")
                 .then()
                 .statusCode(404)
@@ -373,8 +407,7 @@ class EksAddonIntegrationTest {
         String name = "addon-err-" + UUID.randomUUID().toString().substring(0, 8);
         createCluster(account, name, "1.29");
         try {
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(Map.of("addonName", "unknown-addon"))
                     .post("/clusters/" + name + "/addons")
                     .then()
@@ -404,8 +437,7 @@ class EksAddonIntegrationTest {
                     "serviceAccountRoleArn", roleArn
             );
 
-            given().header("Authorization", auth(account, "eks"))
-                    .contentType("application/json")
+            eks(account, REGION)
                     .body(createReq)
                     .post(basePath)
                     .then()
@@ -420,7 +452,7 @@ class EksAddonIntegrationTest {
                     .body("addon.serviceAccountRoleArn", equalTo(roleArn));
 
             // 2. Describe addon returns it
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .get(basePath + "/aws-ebs-csi-driver")
                     .then()
                     .statusCode(200)
@@ -430,7 +462,7 @@ class EksAddonIntegrationTest {
                     .body("addon.status", equalTo("ACTIVE"));
 
             // 3. Filter describe-addon-versions by addonName
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("addonName", "aws-ebs-csi-driver")
                     .get("/addons/supported-versions")
                     .then()
@@ -442,7 +474,7 @@ class EksAddonIntegrationTest {
                     .body("addons[0].publisher", equalTo("eks"));
 
             // 4. Filter describe-addon-versions by addonName and kubernetesVersion
-            given().header("Authorization", auth(account, "eks"))
+            eks(account, REGION)
                     .queryParam("addonName", "aws-ebs-csi-driver")
                     .queryParam("kubernetesVersion", "1.32")
                     .get("/addons/supported-versions")
@@ -455,11 +487,6 @@ class EksAddonIntegrationTest {
             deleteCluster(account, name);
             deleteRole(account, roleName);
         }
-    }
-
-    private static String auth(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20260920/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=fake";
     }
 
     private static void createRole(String account, String roleName) {
@@ -494,8 +521,7 @@ class EksAddonIntegrationTest {
                         "bootstrapClusterCreatorAdminPermissions", false
                 )
         );
-        given().header("Authorization", auth(account, "eks"))
-                .contentType("application/json")
+        eks(account, REGION)
                 .body(req)
                 .post("/clusters")
                 .then()
@@ -503,7 +529,7 @@ class EksAddonIntegrationTest {
     }
 
     private static void deleteCluster(String account, String name) {
-        given().header("Authorization", auth(account, "eks"))
+        eks(account, REGION)
                 .delete("/clusters/" + name);
     }
 }

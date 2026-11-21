@@ -4,19 +4,14 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
 public record ExternalSchemaBinding(String accountId, String clusterKey, String databaseName,
-                                   String schemaName, String glueDatabase, String iamRoleArn) {
+                                   String schemaName, String glueDatabase, String iamRoleArn)
+        implements SchemaBinding {
     public ExternalSchemaBinding {
-        require(accountId, "accountId");
-        require(clusterKey, "clusterKey");
-        require(databaseName, "databaseName");
-        require(schemaName, "schemaName");
-        require(glueDatabase, "glueDatabase");
-        require(iamRoleArn, "iamRoleArn");
-    }
-
-    private static void require(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(field + " is required");
-        }
+        SchemaBinding.require(accountId, "accountId");
+        SchemaBinding.require(clusterKey, "clusterKey");
+        SchemaBinding.require(databaseName, "databaseName");
+        SchemaBinding.require(schemaName, "schemaName");
+        SchemaBinding.require(glueDatabase, "glueDatabase");
+        SchemaBinding.require(iamRoleArn, "iamRoleArn");
     }
 }

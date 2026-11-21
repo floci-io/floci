@@ -248,13 +248,18 @@ public final class Pagination {
      * should produce.
      */
     public static Integer parseMaxResults(String value, String errorCode) {
+        return parseMaxResults(value, "maxResults", errorCode);
+    }
+
+    /** As above, naming {@code field} in the message for a page size that is not called {@code maxResults}. */
+    public static Integer parseMaxResults(String value, String field, String errorCode) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
-            throw new AwsException(errorCode, "maxResults must be an integer.", 400);
+            throw new AwsException(errorCode, field + " must be an integer.", 400);
         }
     }
 

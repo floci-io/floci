@@ -14,10 +14,10 @@ import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.floci.aws.testing.TestImages;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -50,7 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * names now, as the ECS agent's default pull behaviour does, and report that image's digest.
  */
 @QuarkusTest
-@TestProfile(EcsImagePullDockerIntegrationTest.DockerEcsProfile.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class EcsImagePullDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -59,19 +59,6 @@ class EcsImagePullDockerIntegrationTest {
             "application/vnd.oci.image.manifest.v1+json",
             "application/vnd.docker.distribution.manifest.list.v2+json",
             "application/vnd.docker.distribution.manifest.v2+json");
-
-    /**
-     * Real containers, security-group enforcement back to its shipped default of off, and the
-     * shipped pull behaviour, which the shared test config swaps for prefer-cached.
-     */
-    public static final class DockerEcsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.mock", "false",
-                    "floci.network.security-group-enforcement.enabled", "false",
-                    "floci.services.ecs.image-pull-behavior", "default");
-        }
-    }
 
     @Inject
     EcsService ecsService;
@@ -160,6 +147,8 @@ class EcsImagePullDockerIntegrationTest {
         app.setName("app");
         app.setImage(image);
         app.setCommand(List.of("sleep", "120"));
+        // Forward SIGTERM to the sleeping fixture so task cleanup can finish promptly.
+        app.setUnparsed(Map.of("linuxParameters", Map.of("initProcessEnabled", true)));
         return ecsService.registerTaskDefinition("pull-" + UUID.randomUUID().toString().substring(0, 8),
                 List.of(app), NetworkMode.bridge, null, null, null, null, null, REGION);
     }

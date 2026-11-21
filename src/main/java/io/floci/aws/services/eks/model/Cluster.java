@@ -62,7 +62,7 @@ public class Cluster {
     private String platformVersion;
 
     @JsonProperty("tags")
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     @JsonIgnore
     private String containerId;
@@ -111,6 +111,11 @@ public class Cluster {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String nodeInstanceType;
 
+    /** Private IPv4 address leased for the cluster node from its VPC subnet. Internal persisted metadata. */
+    @JsonProperty("nodePrivateIp")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String nodePrivateIp;
+
     /**
      * Caller-supplied k3s arguments passed at creation via reserved floci tags.
      * Internal persisted metadata omitted from AWS API responses.
@@ -147,8 +152,20 @@ public class Cluster {
 
     private AccessConfig accessConfig;
 
+    @JsonProperty("computeConfig")
+    private ComputeConfig computeConfig;
+
+    @JsonProperty("storageConfig")
+    private StorageConfig storageConfig;
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
+    public ComputeConfig getComputeConfig() { return computeConfig; }
+    public void setComputeConfig(ComputeConfig computeConfig) { this.computeConfig = computeConfig; }
+
+    public StorageConfig getStorageConfig() { return storageConfig; }
+    public void setStorageConfig(StorageConfig storageConfig) { this.storageConfig = storageConfig; }
 
     public Map<String, String> getJoinedInstanceIds() {
         if (joinedInstanceIds != null && !(joinedInstanceIds instanceof ConcurrentHashMap)) {
@@ -215,6 +232,9 @@ public class Cluster {
     public String getNodeInstanceType() { return nodeInstanceType; }
     public void setNodeInstanceType(String nodeInstanceType) { this.nodeInstanceType = nodeInstanceType; }
 
+    public String getNodePrivateIp() { return nodePrivateIp; }
+    public void setNodePrivateIp(String nodePrivateIp) { this.nodePrivateIp = nodePrivateIp; }
+
     public List<String> getClusterArgs() { return clusterArgs; }
     public void setClusterArgs(List<String> clusterArgs) { this.clusterArgs = clusterArgs; }
 
@@ -278,10 +298,13 @@ public class Cluster {
         c.dockerName = this.dockerName;
         c.dockerNameRegion = this.dockerNameRegion;
         c.nodeInstanceType = this.nodeInstanceType;
+        c.nodePrivateIp = this.nodePrivateIp;
         c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
         c.defaultStorageClass = this.defaultStorageClass;
         c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
+        c.computeConfig = this.computeConfig;
+        c.storageConfig = this.storageConfig;
         return c;
     }
 }

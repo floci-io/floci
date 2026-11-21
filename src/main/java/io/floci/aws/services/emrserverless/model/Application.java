@@ -29,7 +29,7 @@ public class Application {
     private Instant createdAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant updatedAt;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private String architecture;
     private Map<String, InitialCapacityConfig> initialCapacity;
     private MaximumCapacity maximumCapacity;
@@ -38,9 +38,15 @@ public class Application {
     private NetworkConfiguration networkConfiguration;
     private ImageConfiguration imageConfiguration;
     private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
+    // Each custom image resolved at the application's start, which its runs take until it starts again, by worker type,
+    // the application's own under ""; Floci's own, as the API has none.
+    private Map<String, ImageConfiguration> pinnedImages;
     private MonitoringConfiguration monitoringConfiguration;
     private List<RuntimeConfiguration> runtimeConfiguration;
     private SchedulerConfiguration schedulerConfiguration;
+    // Whether an empty schedulerConfiguration turned queuing off, which leaves the application with none, so that a
+    // release that queues by default does not; Floci's own, as the API has none.
+    private Boolean schedulerOff;
     private DiskEncryptionConfiguration diskEncryptionConfiguration;
     private InteractiveConfiguration interactiveConfiguration;
     private IdentityCenterConfiguration identityCenterConfiguration;
@@ -88,6 +94,8 @@ public class Application {
     public void setMonitoringConfiguration(MonitoringConfiguration monitoringConfiguration) { this.monitoringConfiguration = monitoringConfiguration; }
     public List<RuntimeConfiguration> getRuntimeConfiguration() { return runtimeConfiguration; }
     public void setRuntimeConfiguration(List<RuntimeConfiguration> runtimeConfiguration) { this.runtimeConfiguration = runtimeConfiguration; }
+    public Boolean getSchedulerOff() { return schedulerOff; }
+    public void setSchedulerOff(Boolean schedulerOff) { this.schedulerOff = schedulerOff; }
     public SchedulerConfiguration getSchedulerConfiguration() { return schedulerConfiguration; }
     public void setSchedulerConfiguration(SchedulerConfiguration schedulerConfiguration) { this.schedulerConfiguration = schedulerConfiguration; }
     public DiskEncryptionConfiguration getDiskEncryptionConfiguration() { return diskEncryptionConfiguration; }
@@ -103,4 +111,7 @@ public class Application {
         return value != null && value.getEpochSecond() >= LEGACY_MILLIS_FLOOR
                 ? Instant.ofEpochMilli(value.getEpochSecond()) : value;
     }
+
+    public Map<String, ImageConfiguration> getPinnedImages() { return pinnedImages; }
+    public void setPinnedImages(Map<String, ImageConfiguration> pinnedImages) { this.pinnedImages = pinnedImages; }
 }

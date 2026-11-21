@@ -20,21 +20,25 @@ real Parquet artifacts in Floci's S3 service via the `floci-duck` sidecar.
 
 ## Validation rules
 
-- `ReportName`: alphanumerics + `-_`, max 256 chars
-- `Tags`: up to 200 in one request, each a `Key` of 1 to 128 characters and a `Value` of up to 256. A report holds at most 50 tags, so a `PutReportDefinition` or `TagResource` that would leave it with more fails with `ValidationException`
+Every request is checked by `RequestConstraintCheck` against the types, required members, bounds,
+patterns and enums generated from botocore's CUR service model, so an invalid request fails with
+`ValidationException` before it reaches the report store. `tools/aws/regen_cur_shapes.py` vendors
+them; `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. Among them:
 
-The tag operations, and the `Tags` of `PutReportDefinition`, are checked by `RequestConstraintCheck`
-against the types, required members and bounds generated from botocore's CUR service model.
-`tools/aws/regen_cur_shapes.py` vendors them; `make aws-data-sync` regenerates them and
-`make aws-data-check` checks for drift. The 50-tag limit is documented in the model's prose only,
-so Floci enforces it separately.
-- `TimeUnit`: `HOURLY` / `DAILY` / `MONTHLY`
+- `ReportName`: letters, digits and `!-_.*'()`, max 256 chars
+- `Tags`: up to 200 in one request, each a `Key` of 1 to 128 characters and a `Value` of up to 256
+- `TimeUnit`, `ReportVersioning`, `AdditionalArtifacts`, `AdditionalSchemaElements` and `S3Region`: the model's enums
+- Required: `ReportName`, `TimeUnit`, `Format`, `Compression`, `AdditionalSchemaElements`, `S3Bucket`, `S3Prefix`, `S3Region`
+
+Floci also enforces:
+
+- A report holds at most 50 tags, so a `PutReportDefinition` or `TagResource` that would leave it with
+  more fails with `ValidationException`. The limit is documented in the model's prose only.
 - `Format`: `Parquet` (CSV emission not yet implemented; `textORcsv` returns `ValidationException`)
 - `Compression`: `Parquet` (`ZIP` / `GZIP` not yet implemented)
-- `ReportVersioning`: `CREATE_NEW_REPORT` / `OVERWRITE_REPORT`
-- `AdditionalArtifacts`: subset of `REDSHIFT` / `QUICKSIGHT` / `ATHENA`
-- `AdditionalSchemaElements`: subset of `RESOURCES` / `SPLIT_COST_ALLOCATION_DATA` / `MANUAL_DISCOUNT_COMPATIBILITY`
-- Required: `ReportName`, `TimeUnit`, `Format`, `Compression`, `S3Bucket`, `S3Region`
+- `ReportName` and `S3Prefix`: letters, digits, `-`, `_` and `.` (and `/` in a prefix), the characters of the
+  S3 key the report is written to. A name or prefix with `!`, `*`, `'`, `(` or `)`, which the model allows,
+  returns `ValidationException`
 
 ## Storage keys
 

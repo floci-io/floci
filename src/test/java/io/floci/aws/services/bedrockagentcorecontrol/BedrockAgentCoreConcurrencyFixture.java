@@ -5,14 +5,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntime;
 import io.floci.aws.testing.ParkingStore;
-import io.floci.aws.testing.ThreadStates;
-
-import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 final class BedrockAgentCoreConcurrencyFixture {
 
@@ -37,13 +29,5 @@ final class BedrockAgentCoreConcurrencyFixture {
 
     AgentRuntime delete() {
         return service.deleteAgentRuntime(runtimeId, null, REGION);
-    }
-
-    static void assertBlocked(AtomicReference<Thread> worker, Future<?> task) throws InterruptedException {
-        ThreadStates.awaitBlockedOrDone(worker, task);
-        assertNotNull(worker.get(), "the competing worker must start");
-        assertEquals(Thread.State.BLOCKED, worker.get().getState(),
-                "the competing worker must overlap the parked storage operation");
-        assertFalse(task.isDone());
     }
 }

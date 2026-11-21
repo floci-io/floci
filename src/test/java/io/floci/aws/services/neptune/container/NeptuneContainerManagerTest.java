@@ -1,6 +1,5 @@
 package io.floci.aws.services.neptune.container;
 
-import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -57,8 +56,7 @@ class NeptuneContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
 
         NeptuneContainerManager manager = newManager(lifecycleManager);
 
@@ -77,8 +75,7 @@ class NeptuneContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("no such image: tinkerpop/gremlin-server:3.7.3"));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         NeptuneContainerManager manager = newManager(lifecycleManager);
 

@@ -13,8 +13,8 @@ import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.Credentials;
 import software.amazon.awssdk.services.sts.model.StsException;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -24,18 +24,19 @@ class StsSessionTokenCallerTest {
     @ParameterizedTest
     @ValueSource(strings = {"session", "federation", "role"})
     void rejectsTemporaryCallersWhileTheirIdentityRemainsUsable(String kind) {
-        List<Runnable> cleanup = new ArrayList<>();
+        Deque<Runnable> cleanup = new ArrayDeque<>();
+        Throwable failure = null;
         try (IamClient iam = TestFixtures.iamClient()) {
             try {
                 String name = TestFixtures.uniqueName("token-caller");
                 iam.createUser(r -> r.userName(name));
-                cleanup.add(() -> iam.deleteUser(r -> r.userName(name)));
+                cleanup.push(() -> iam.deleteUser(r -> r.userName(name)));
                 AccessKey key = iam.createAccessKey(r -> r.userName(name)).accessKey();
-                cleanup.add(() -> iam.deleteAccessKey(r -> r.userName(name).accessKeyId(key.accessKeyId())));
+                cleanup.push(() -> iam.deleteAccessKey(r -> r.userName(name).accessKeyId(key.accessKeyId())));
                 String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
                         + "{\"Effect\":\"Allow\",\"Action\":\"sts:*\",\"Resource\":\"*\"}]}";
                 iam.putUserPolicy(r -> r.userName(name).policyName("sts").policyDocument(policy));
-                cleanup.add(() -> iam.deleteUserPolicy(r -> r.userName(name).policyName("sts")));
+                cleanup.push(() -> iam.deleteUserPolicy(r -> r.userName(name).policyName("sts")));
                 try (StsClient caller = client(AwsBasicCredentials.create(key.accessKeyId(), key.secretAccessKey()))) {
                     Credentials issued;
                     if ("role".equals(kind)) {
@@ -43,9 +44,9 @@ class StsSessionTokenCallerTest {
                                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                                 + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}"))
                                 .role().arn();
-                        cleanup.add(() -> iam.deleteRole(r -> r.roleName(name)));
+                        cleanup.push(() -> iam.deleteRole(r -> r.roleName(name)));
                         iam.putRolePolicy(r -> r.roleName(name).policyName("sts").policyDocument(policy));
-                        cleanup.add(() -> iam.deleteRolePolicy(r -> r.roleName(name).policyName("sts")));
+                        cleanup.push(() -> iam.deleteRolePolicy(r -> r.roleName(name).policyName("sts")));
                         issued = caller.assumeRole(r -> r.roleArn(arn).roleSessionName("caller")).credentials();
                     } else if ("federation".equals(kind)) {
                         issued = caller.getFederationToken(r -> r.name(name).policy(policy)).credentials();
@@ -72,21 +73,11 @@ class StsSessionTokenCallerTest {
                         assertThat(temporary.getCallerIdentity().arn()).isEqualTo(identity);
                     }
                 }
+            } catch (Throwable t) {
+                failure = t;
+                throw t;
             } finally {
-                RuntimeException failure = null;
-                for (int i = cleanup.size() - 1; i >= 0; i--) {
-                    try {
-                        cleanup.get(i).run();
-                    } catch (RuntimeException problem) {
-                        if (failure == null) {
-                            failure = new IllegalStateException("STS fixture cleanup failed");
-                        }
-                        failure.addSuppressed(problem);
-                    }
-                }
-                if (failure != null) {
-                    throw failure;
-                }
+                FixtureCleanup.run(cleanup, failure);
             }
         }
     }

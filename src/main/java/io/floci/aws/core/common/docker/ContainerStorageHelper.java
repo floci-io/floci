@@ -110,6 +110,13 @@ public final class ContainerStorageHelper {
         return dockerName(config, service + "-" + (volumeId != null ? volumeId : fallbackId));
     }
 
+    /** Scopes name-based resources without changing the identity of an existing data volume. */
+    public static String resourceName(EmulatorConfig config, String service, String volumeId, String fallbackId,
+                                      String accountId, String region) {
+        return resourceName(config, service, volumeId,
+                sanitizeNamePart(accountId) + "-" + sanitizeNamePart(region) + "-" + fallbackId);
+    }
+
     /**
      * Prefixes {@code baseName} with {@code floci-aws-} and the configured resource namespace,
      * which lands after the cloud token: {@code floci-aws-<namespace>-<base>}.
@@ -407,8 +414,23 @@ public final class ContainerStorageHelper {
     }
 
     /**
-     * Ensures the host data directory exists for host-path mode (absolute paths only).
-     * Called by managers in their legacy host-path code paths.
+     * Ensures each host data directory exists for host-path mode, when Floci runs on the Docker
+     * host. The paths name directories on the Docker host: inside a container Floci cannot reach
+     * them, so it leaves a missing bind source for the daemon to create. Managers call this in their
+     * legacy host-path code paths.
+     */
+    public static void ensureHostDir(ContainerDetector containerDetector, String... hostDataPaths) {
+        if (containerDetector.isRunningInContainer()) {
+            return;
+        }
+        for (String hostDataPath : hostDataPaths) {
+            ensureHostDir(hostDataPath);
+        }
+    }
+
+    /**
+     * Ensures the host data directory exists for host-path mode (absolute paths only), wherever
+     * Floci runs; managers go through {@link #ensureHostDir(ContainerDetector, String...)}.
      */
     public static void ensureHostDir(String hostDataPath) {
         try {

@@ -72,7 +72,7 @@ public class PaymentCryptographyCardValidationOperations {
                 : validationDataLength;
         CardAttrs attrs = resolveCardAttrs(request.get("GenerationAttributes"));
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Generate");
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -95,7 +95,7 @@ public class PaymentCryptographyCardValidationOperations {
         int length = validationData.length();
         CardAttrs attrs = resolveCardAttrs(request.get("VerificationAttributes"));
 
-        PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
+        PaymentCryptographyKey key = PaymentCryptographyKeyRules.requiredKey(service, keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Verify");
 
         String computed = computeValue(pan, attrs, key, length);
@@ -222,15 +222,6 @@ public class PaymentCryptographyCardValidationOperations {
                         + "(only CardVerificationValue1/CardVerificationValue2"
                         + "/DynamicCardVerificationValue/DynamicCardVerificationCode)");
         }
-    }
-
-    private PaymentCryptographyKey requiredKey(String identifier, String region) {
-        PaymentCryptographyKey key = service.findKey(region, identifier);
-        if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
-        }
-        PaymentCryptographyKeyRules.requireEnabled(key);
-        return key;
     }
 
     /**

@@ -24,11 +24,13 @@ public final class EventRuleQueue implements AutoCloseable {
     private static final String TARGET_ID = "1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private final String account;
     private final String region;
     private final String name;
     private final String url;
 
-    private EventRuleQueue(String region, String name, String url) {
+    private EventRuleQueue(String account, String region, String name, String url) {
+        this.account = account;
         this.region = region;
         this.name = name;
         this.url = url;
@@ -36,18 +38,33 @@ public final class EventRuleQueue implements AutoCloseable {
 
     /** A queue named {@code name}, and a rule of the same name sending it the events {@code pattern} matches. */
     public static EventRuleQueue route(String region, String name, String pattern) {
-        String url = call(region, "sqs", "AmazonSQS.CreateQueue", SQS_CONTENT_TYPE,
+        return route("AKID", region, name, pattern);
+    }
+
+    /** The same route in the selected {@code account}, including reads and cleanup. */
+    public static EventRuleQueue route(String account, String region, String name, String pattern) {
+        String url = call(account, region, "sqs", "AmazonSQS.CreateQueue", SQS_CONTENT_TYPE,
                 MAPPER.createObjectNode().put("QueueName", name)).jsonPath().getString("QueueUrl");
-        ObjectNode attributes = MAPPER.createObjectNode().put("QueueUrl", url);
-        attributes.putArray("AttributeNames").add("QueueArn");
-        String arn = call(region, "sqs", "AmazonSQS.GetQueueAttributes", SQS_CONTENT_TYPE, attributes)
-                .jsonPath().getString("Attributes.QueueArn");
-        call(region, "events", "AWSEvents.PutRule", EVENTS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("Name", name).put("EventPattern", pattern));
-        ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
-        targets.putArray("Targets").addObject().put("Id", TARGET_ID).put("Arn", arn);
-        call(region, "events", "AWSEvents.PutTargets", EVENTS_CONTENT_TYPE, targets);
-        return new EventRuleQueue(region, name, url);
+        EventRuleQueue queue = new EventRuleQueue(account, region, name, url);
+        try {
+            ObjectNode attributes = MAPPER.createObjectNode().put("QueueUrl", url);
+            attributes.putArray("AttributeNames").add("QueueArn");
+            String arn = call(account, region, "sqs", "AmazonSQS.GetQueueAttributes", SQS_CONTENT_TYPE, attributes)
+                    .jsonPath().getString("Attributes.QueueArn");
+            call(account, region, "events", "AWSEvents.PutRule", EVENTS_CONTENT_TYPE,
+                    MAPPER.createObjectNode().put("Name", name).put("EventPattern", pattern));
+            ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
+            targets.putArray("Targets").addObject().put("Id", TARGET_ID).put("Arn", arn);
+            call(account, region, "events", "AWSEvents.PutTargets", EVENTS_CONTENT_TYPE, targets);
+            return queue;
+        } catch (RuntimeException | AssertionError failure) {
+            try {
+                queue.close();
+            } catch (RuntimeException | AssertionError cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
     }
 
     /**
@@ -60,14 +77,14 @@ public final class EventRuleQueue implements AutoCloseable {
         ObjectNode receive = MAPPER.createObjectNode().put("QueueUrl", url).put("MaxNumberOfMessages", 10)
                 .put("WaitTimeSeconds", 0);
         while (true) {
-            Response response = call(region, "sqs", "AmazonSQS.ReceiveMessage", SQS_CONTENT_TYPE, receive);
+            Response response = call(account, region, "sqs", "AmazonSQS.ReceiveMessage", SQS_CONTENT_TYPE, receive);
             JsonNode messages = MAPPER.readTree(response.asString()).path("Messages");
             if (messages.isEmpty()) {
                 return events;
             }
             for (JsonNode message : messages) {
                 events.add(MAPPER.readTree(message.path("Body").asText()));
-                call(region, "sqs", "AmazonSQS.DeleteMessage", SQS_CONTENT_TYPE, MAPPER.createObjectNode()
+                call(account, region, "sqs", "AmazonSQS.DeleteMessage", SQS_CONTENT_TYPE, MAPPER.createObjectNode()
                         .put("QueueUrl", url).put("ReceiptHandle", message.path("ReceiptHandle").asText()));
             }
         }
@@ -78,16 +95,23 @@ public final class EventRuleQueue implements AutoCloseable {
     public void close() {
         ObjectNode targets = MAPPER.createObjectNode().put("Rule", name);
         targets.putArray("Ids").add(TARGET_ID);
-        call(region, "events", "AWSEvents.RemoveTargets", EVENTS_CONTENT_TYPE, targets);
-        call(region, "events", "AWSEvents.DeleteRule", EVENTS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("Name", name));
-        call(region, "sqs", "AmazonSQS.DeleteQueue", SQS_CONTENT_TYPE,
-                MAPPER.createObjectNode().put("QueueUrl", url));
+        try {
+            call(account, region, "events", "AWSEvents.RemoveTargets", EVENTS_CONTENT_TYPE, targets);
+        } finally {
+            try {
+                call(account, region, "events", "AWSEvents.DeleteRule", EVENTS_CONTENT_TYPE,
+                        MAPPER.createObjectNode().put("Name", name));
+            } finally {
+                call(account, region, "sqs", "AmazonSQS.DeleteQueue", SQS_CONTENT_TYPE,
+                        MAPPER.createObjectNode().put("QueueUrl", url));
+            }
+        }
     }
 
-    private static Response call(String region, String service, String target, String contentType, JsonNode body) {
+    private static Response call(String account, String region, String service, String target,
+                                  String contentType, JsonNode body) {
         Response response = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region + "/" + service
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/" + region + "/" + service
                         + "/aws4_request, SignedHeaders=host, Signature=abc")
                 .header("X-Amz-Target", target)
                 .contentType(contentType)

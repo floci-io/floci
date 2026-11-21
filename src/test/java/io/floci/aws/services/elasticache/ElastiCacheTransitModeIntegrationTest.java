@@ -3,6 +3,7 @@ package io.floci.aws.services.elasticache;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerHandle;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerManager;
 import io.floci.aws.services.elasticache.container.ValkeyClusterFormation;
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,8 +11,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.CacheCluster;
@@ -132,8 +131,6 @@ class ElastiCacheTransitModeIntegrationTest {
     }
 
     private ElastiCacheClient client() {
-        return ElastiCacheClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        return AwsTestClients.create(ElastiCacheClient.builder(), "000000000000", Region.US_EAST_1, endpoint);
     }
 }

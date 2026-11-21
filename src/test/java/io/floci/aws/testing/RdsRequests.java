@@ -2,34 +2,108 @@ package io.floci.aws.testing;
 
 import io.restassured.RestAssured;
 import io.restassured.specification.RequestSpecification;
+import org.jboss.logging.Logger;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.retries.StandardRetryStrategy;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.RdsClientBuilder;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
+import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
 
 import java.net.URI;
+import java.time.Duration;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public final class RdsRequests {
+    private static final Logger LOG = Logger.getLogger(RdsRequests.class);
+
     private RdsRequests() {}
 
     public static RequestSpecification rds(String action) {
+        return rds(action, "test");
+    }
+
+    public static RequestSpecification rds(String action, String accessKey) {
         return given().header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20261011/us-east-1/rds/aws4_request")
+                        "AWS4-HMAC-SHA256 Credential=" + accessKey + "/20261011/us-east-1/rds/aws4_request")
                 .contentType(URLENC).formParam("Action", action).formParam("Version", "2014-10-31");
     }
 
     public static RdsClient rdsClient(String region, String account) {
+        return rdsClientBuilder(region, account).build();
+    }
+
+    /** Keeps synchronous Docker startup within one bounded request, without replaying a create. */
+    public static RdsClient rdsDockerClient(String region, String account) {
+        Duration requestBudget = Duration.ofSeconds(90);
+        return rdsClientBuilder(region, account)
+                .httpClientBuilder(UrlConnectionHttpClient.builder().socketTimeout(requestBudget))
+                .overrideConfiguration(c -> c.apiCallTimeout(requestBudget)
+                        .retryStrategy(StandardRetryStrategy.builder().maxAttempts(1).build()))
+                .build();
+    }
+
+    /** A client failure does not establish that server-side creation finished. */
+    public static void cleanupDockerInstance(RdsClient client, String id,
+                                             RuntimeException createFailure, Duration budget) {
+        try {
+            if (createFailure instanceof RdsException) {
+                try {
+                    client.deleteDBInstance(b -> b.dbInstanceIdentifier(id).skipFinalSnapshot(true));
+                } catch (DbInstanceNotFoundException expected) {
+                    // The server rejected creation and completed its rollback.
+                    LOG.debugv("Rejected RDS test instance {0} is absent", id);
+                }
+            } else {
+                long deadline = System.nanoTime() + budget.toNanos();
+                await().pollDelay(Duration.ZERO).atMost(budget)
+                        .ignoreExceptionsMatching(DbInstanceNotFoundException.class::isInstance)
+                        .untilAsserted(() -> client.deleteDBInstance(b -> b.dbInstanceIdentifier(id)
+                                .skipFinalSnapshot(true).overrideConfiguration(c -> c.apiCallTimeout(
+                                        Duration.ofNanos(Math.max(1, deadline - System.nanoTime()))))));
+            }
+        } catch (RuntimeException cleanupFailure) {
+            if (createFailure == null) {
+                throw cleanupFailure;
+            }
+            createFailure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    /** The ids of the VPC security groups {@code DescribeDBInstances} reports for DB instance {@code id}. */
+    public static List<String> vpcSecurityGroupIds(RdsClient client, String id) {
+        return client.describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst()
+                .vpcSecurityGroups().stream().map(VpcSecurityGroupMembership::vpcSecurityGroupId).toList();
+    }
+
+    /**
+     * Two CloudFormation resources, to put inside a template's {@code Resources}: an Aurora PostgreSQL
+     * cluster {@code Cluster}, and its {@code Member} instance, which also has
+     * {@code memberProperties}, written as members of a JSON object.
+     */
+    public static String auroraClusterWithMember(String memberProperties) {
+        return """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {"Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"}},
+                "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {"DBClusterIdentifier": {"Ref": "Cluster"},
+                  "Engine": "aurora-postgresql", "DBInstanceClass": "db.r6g.large", %s}}""".formatted(memberProperties);
+    }
+
+    private static RdsClientBuilder rdsClientBuilder(String region, String account) {
         return RdsClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test-secret-key")))
-                .build();
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test-secret-key")));
     }
 
     /** Skips the test when no Docker daemon answers, which a real PostgreSQL instance needs. */
@@ -40,7 +114,16 @@ public final class RdsRequests {
     /** Creates a PostgreSQL instance with database {@code appdb} and returns its endpoint port. */
     public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
                                              boolean iamDatabaseAuthentication) {
-        return rds("CreateDBInstance")
+        return createPostgresInstance(id, masterUsername, masterPassword, iamDatabaseAuthentication, null);
+    }
+
+    /**
+     * Creates a PostgreSQL instance with database {@code appdb}, in DB parameter group
+     * {@code parameterGroupName} unless it is null, and returns its endpoint port.
+     */
+    public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
+                                             boolean iamDatabaseAuthentication, String parameterGroupName) {
+        RequestSpecification request = rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", id)
                 .formParam("Engine", "postgres")
                 .formParam("MasterUsername", masterUsername)
@@ -48,10 +131,23 @@ public final class RdsRequests {
                 .formParam("DBName", "appdb")
                 .formParam("AllocatedStorage", "20")
                 .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication)
+                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication);
+        if (parameterGroupName != null) {
+            request.formParam("DBParameterGroupName", parameterGroupName);
+        }
+        return request
         .when().post("/").then().statusCode(200)
                 .extract().xmlPath()
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+    }
+
+    public static RequestSpecification createAuroraPostgresCluster(String id) {
+        return rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password");
     }
 
     public static void deleteInstance(String id) {

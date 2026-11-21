@@ -12,7 +12,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -34,8 +33,7 @@ class SesTenantPagingIntegrationTest {
     private static final String REGION = "af-south-1";
     // Only a token is sent there and it is refused, so no state lands in this region.
     private static final String OTHER_REGION = "eu-west-1";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor(REGION);
     private static final String ARN_PREFIX = "arn:aws:ses:" + REGION + ":000000000000:";
     private static final String PAGE_SIZE_BELOW_ONE = "Value '0' at 'pageSize' failed to satisfy constraint: "
             + "Member must have value greater than or equal to 1";
@@ -45,7 +43,7 @@ class SesTenantPagingIntegrationTest {
             + "Member must have length greater than or equal to 1";
 
     private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
+        return SesV2Requests.v2(AUTH);
     }
 
     @Test
@@ -146,8 +144,7 @@ class SesTenantPagingIntegrationTest {
         String token = v2().body("{\"PageSize\":1}")
         .when().post("/v2/email/tenants/list").then().statusCode(200).extract().path("NextToken");
 
-        given().contentType("application/json")
-                .header("Authorization", AUTH.replace(REGION, OTHER_REGION))
+        SesV2Requests.v2(SesV2Requests.authFor(OTHER_REGION))
                 .body("{\"NextToken\":\"" + token + "\"}")
         .when().post("/v2/email/tenants/list").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))

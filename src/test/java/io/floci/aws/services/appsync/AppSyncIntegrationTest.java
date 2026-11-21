@@ -388,7 +388,8 @@ class AppSyncIntegrationTest {
             .body("""
                 {
                   "name": "Query",
-                  "definition": "type Query { hello: String, getItem(id: ID!): Item }"
+                  "definition": "type Query { hello: String, getItem(id: ID!): Item }",
+                  "format": "SDL"
                 }
                 """)
         .when()
@@ -448,7 +449,8 @@ class AppSyncIntegrationTest {
             .body("""
                 {
                   "name": "TempType",
-                  "definition": "type TempType { id: ID }"
+                  "definition": "type TempType { id: ID }",
+                  "format": "SDL"
                 }
                 """)
         .when()
@@ -943,12 +945,15 @@ class AppSyncIntegrationTest {
 
     @Test
     @Order(108)
-    void createTypeMissingNameReturns400() {
+    void createTypeInfersNameAndRejectsMissingDefinition() {
         given()
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
-                {"definition": "type Foo { id: ID }"}
+                {
+                  "definition": "type Foo { id: ID }",
+                  "format": "SDL"
+                }
                 """)
         .when()
             .post("/v1/apis/" + apiId + "/types")
@@ -959,14 +964,16 @@ class AppSyncIntegrationTest {
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
-                {}
+                {
+                  "format": "SDL"
+                }
                 """)
         .when()
             .post("/v1/apis/" + apiId + "/types")
         .then()
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("A type name is required"));
+            .body("message", containsString("A type definition is required"));
     }
 
     @Test
@@ -1139,7 +1146,8 @@ class AppSyncIntegrationTest {
             .body("""
                 {
                   "name": "StandaloneDeleteType",
-                  "definition": "type StandaloneDeleteType { id: ID }"
+                  "definition": "type StandaloneDeleteType { id: ID }",
+                  "format": "SDL"
                 }
                 """)
         .when()
@@ -1627,7 +1635,11 @@ class AppSyncIntegrationTest {
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
-                {"name": "%s", "definition": "type %s { id: ID }"}
+                {
+                  "name": "%s",
+                  "definition": "type %s { id: ID }",
+                  "format": "SDL"
+                }
                 """.formatted(typeName, typeName))
         .when()
             .post("/v1/apis/" + apiId + "/types")
@@ -1638,7 +1650,11 @@ class AppSyncIntegrationTest {
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
-                {"name": "%s", "definition": "type %s { id: ID }"}
+                {
+                  "name": "%s",
+                  "definition": "type %s { id: ID }",
+                  "format": "SDL"
+                }
                 """.formatted(typeName, typeName))
         .when()
             .post("/v1/apis/" + apiId + "/types")

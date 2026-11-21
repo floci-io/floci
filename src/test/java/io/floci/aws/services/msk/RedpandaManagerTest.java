@@ -1,7 +1,6 @@
 package io.floci.aws.services.msk;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
@@ -42,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -110,6 +108,8 @@ class RedpandaManagerTest {
 
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
         lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        // A cluster's Region is read from its ARN, as RegionResolver reads it, falling back to the default above.
+        lenient().when(regionResolver.regionOf(any())).thenCallRealMethod();
         lenient().when(regionResolver.getAccountId()).thenReturn("000000000000");
         lenient().when(regionResolver.getDefaultAccountId()).thenReturn("000000000000");
     }
@@ -466,8 +466,9 @@ class RedpandaManagerTest {
         assertFalse(Files.exists(tempDir.resolve("msk").resolve("test-cluster")),
                 "container mode must not create host directories from inside the emulator container");
 
-        assertEquals("172.18.0.5:9092", cluster.getBootstrapBrokers(),
-                "without a bootstrap hostname, GetBootstrapBrokers keeps the Docker-network address");
+        assertEquals("floci-aws-msk-abc123:9092", cluster.getBootstrapBrokers(),
+                "without a bootstrap hostname, GetBootstrapBrokers names the internal listener the way the "
+                        + "broker advertises it, not by the container IP");
     }
 
     @Test
@@ -513,7 +514,7 @@ class RedpandaManagerTest {
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9305",
                 spec.cmd().get(flagIndex + 1));
-        assertEquals("172.18.0.8:9092", cluster.getBootstrapBrokers());
+        assertEquals("floci-aws-msk-abc123:9092", cluster.getBootstrapBrokers());
     }
 
     @Test
@@ -545,8 +546,7 @@ class RedpandaManagerTest {
     void tryStartContainerReportsUnavailableWhenNoDaemonAnswers() {
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
-        when(lifecycleManager.getDockerClient())
-                .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
 
         assertFalse(manager.tryStartContainer(newCluster()));
     }
@@ -555,7 +555,7 @@ class RedpandaManagerTest {
     void tryStartContainerPropagatesFailuresWhileTheDaemonIsReachable() {
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("no such image: redpandadata/redpanda:latest"));
-        when(lifecycleManager.getDockerClient()).thenReturn(mock(DockerClient.class, RETURNS_DEEP_STUBS));
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         RuntimeException failure = assertThrows(RuntimeException.class,
                 () -> manager.tryStartContainer(newCluster()));

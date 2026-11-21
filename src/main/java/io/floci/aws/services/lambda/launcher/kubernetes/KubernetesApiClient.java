@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.floci.aws.services.lambda.launcher.InvocationLogTail;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import javax.net.ssl.KeyManager;
@@ -36,6 +37,8 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -199,9 +202,35 @@ public class KubernetesApiClient {
      * underlying connection and the kubelet stops the follow.
      */
     public InputStream openPodLogStream(String namespace, String podName, String containerName) {
+        return openPodLogs(namespace, podName, containerName, "&follow=true");
+    }
+
+    public String readPodLogTail(String namespace, String podName, Instant since) {
+        return podLogSnapshot(namespace, podName, since, 4096).encoded();
+    }
+
+    public Supplier<String> capturePodLogTail(String namespace, String podName, boolean initialization) {
+        Instant since = initialization ? Instant.EPOCH
+                : podLogSnapshot(namespace, podName, Instant.EPOCH, 1).lastTimestamp().plusNanos(1);
+        return () -> readPodLogTail(namespace, podName, since);
+    }
+
+    private InvocationLogTail podLogSnapshot(String namespace, String podName, Instant since, int lines) {
+        String options = "&follow=false&timestamps=true&tailLines=" + lines + "&sinceTime="
+                + URLEncoder.encode(since.truncatedTo(ChronoUnit.SECONDS).toString(), StandardCharsets.UTF_8);
+        try (InputStream logs = openPodLogs(namespace, podName, "runtime", options)) {
+            return InvocationLogTail.readTimestamped(logs, since);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read invocation logs for pod " + podName, e);
+        } catch (KubernetesApiException e) {
+            throw new IllegalStateException("Could not read invocation logs for pod " + podName, e);
+        }
+    }
+
+    private InputStream openPodLogs(String namespace, String podName, String containerName, String options) {
         ensureInitialized();
         String path = podPath(namespace, podName) + "/log?container="
-                + URLEncoder.encode(containerName, StandardCharsets.UTF_8) + "&follow=true";
+                + URLEncoder.encode(containerName, StandardCharsets.UTF_8) + options;
         try {
             HttpResponse<InputStream> response = http.send(requestBuilder(path).GET().build(), HttpResponse.BodyHandlers.ofInputStream());
             if (response.statusCode() != 200) {

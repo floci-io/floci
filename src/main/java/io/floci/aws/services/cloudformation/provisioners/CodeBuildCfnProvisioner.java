@@ -2,7 +2,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -14,6 +13,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -27,6 +27,8 @@ import java.util.Set;
 public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildCfnProvisioner.class);
+    private static final CfnApiShapeConverter.Rules API_SHAPE =
+            new CfnApiShapeConverter.Rules(Map.of("BuildSpec", "buildspec"), Set.of(), Set.of(), false);
 
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final RegionResolver regionResolver;
@@ -47,7 +49,7 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        ObjectNode request = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
+        ObjectNode request = (ObjectNode) CfnApiShapeConverter.convert(ctx.engine().resolveNode(props), API_SHAPE);
         boolean update = r.getPhysicalId() != null && !r.getPhysicalId().isBlank();
         String name = request.path("name").asText(null);
         if (name == null || name.isBlank()) {
@@ -92,25 +94,5 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("InternalFailure",
                     "CodeBuild " + action + " failed: " + e.getMessage(), 500);
         }
-    }
-
-    private JsonNode lowerKeys(JsonNode node) {
-        if (node instanceof ObjectNode objectNode) {
-            ObjectNode result = mapper.createObjectNode();
-            objectNode.fields().forEachRemaining(entry -> {
-                String key = entry.getKey();
-                String lowered = "BuildSpec".equals(key)
-                        ? "buildspec"
-                        : key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
-                result.set(lowered, lowerKeys(entry.getValue()));
-            });
-            return result;
-        }
-        if (node instanceof ArrayNode arrayNode) {
-            ArrayNode result = mapper.createArrayNode();
-            arrayNode.forEach(entry -> result.add(lowerKeys(entry)));
-            return result;
-        }
-        return node;
     }
 }

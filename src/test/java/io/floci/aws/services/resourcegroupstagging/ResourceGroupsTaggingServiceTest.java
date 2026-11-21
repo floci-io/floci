@@ -6,6 +6,8 @@ import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.resourcegroupstagging.model.ResourceTagMapping;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +27,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ResourceGroupsTaggingServiceTest {
 
@@ -45,6 +51,26 @@ class ResourceGroupsTaggingServiceTest {
         assertEquals("apikeys", ResourceGroupsTaggingService.parsedType("/apikeys/k"));
         assertEquals("restapis", ResourceGroupsTaggingService.parsedType("/restapis/a/stages/s"));
         assertEquals("my-bucket", ResourceGroupsTaggingService.parsedType("my-bucket"));
+    }
+
+    @Test
+    void storedTagsReadTheMappingOfTheAccountAndRegionAskedForAndTaggingReplacesIt() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory(ACCOUNT));
+        ResourceGroupsTaggingService service = new ResourceGroupsTaggingService(storageFactory, List.of(), List.of(),
+                new RegionResolver(REGION, ACCOUNT));
+        service.initializeStorage();
+        service.tagResources(List.of(QUEUE_ARN), Map.of("team", "a"), REGION);
+        Map<String, String> held = service.getTagsForResource(REGION, QUEUE_ARN);
+
+        service.tagResources(List.of(QUEUE_ARN), Map.of("stage", "prod"), REGION);
+        service.untagResources(List.of(QUEUE_ARN), List.of("team"), REGION);
+
+        assertEquals(Map.of("stage", "prod"), service.storedTags(ACCOUNT, REGION, QUEUE_ARN));
+        assertEquals(Map.of("team", "a"), held);
+        assertEquals(Map.of(), service.storedTags("111111111111", REGION, QUEUE_ARN));
+        assertEquals(Map.of(), service.storedTags(ACCOUNT, "us-west-2", QUEUE_ARN));
     }
 
     @Test

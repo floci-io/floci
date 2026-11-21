@@ -22,7 +22,7 @@ public class DataSyncAgent implements DataSyncTaggable {
     private String platformVersion;
     private Instant creationTime;
     private Instant lastConnectionTime;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public String getAgentArn() {
         return agentArn;

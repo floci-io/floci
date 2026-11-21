@@ -11,6 +11,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -20,9 +21,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -41,6 +46,122 @@ class PerKeyContainerPoolTest {
     @AfterEach
     void stopFakeContainers() {
         fakeContainers.forEach(server -> server.stop(0));
+    }
+
+    @Test
+    void lastUseAttemptsEveryRetirementAndRetriesOnlyFailedRemoval() throws IOException {
+        prepareTwoRetiredContainers();
+        IllegalStateException failedRemoval = new IllegalStateException("first removal failed");
+        doThrow(failedRemoval).doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict("retired-first", null);
+
+        assertSame(failedRemoval, assertThrows(IllegalStateException.class, () -> pool.endUse("key-1")));
+        verify(lifecycleManager).stopAndRemoveStrict("retired-second", null);
+        pool.stopContainerStrict("key-1");
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("retired-first", null);
+        verify(lifecycleManager).stopAndRemoveStrict("current", null);
+        verifyNoMoreInteractions(lifecycleManager);
+        assertFalse(pool.isTracked("key-1"));
+    }
+
+    @Test
+    void strictTeardownAttemptsRetiredAndCurrentContainersBeforeReportingFailures() throws IOException {
+        prepareTwoRetiredContainers();
+        IllegalStateException first = new IllegalStateException("first removal failed");
+        IllegalStateException second = new IllegalStateException("second removal failed");
+        IllegalStateException current = new IllegalStateException("current removal failed");
+        doThrow(first).doNothing().when(lifecycleManager).stopAndRemoveStrict("retired-first", null);
+        doThrow(second).doNothing().when(lifecycleManager).stopAndRemoveStrict("retired-second", null);
+        doThrow(current).doNothing().when(lifecycleManager).stopAndRemoveStrict("current", null);
+
+        assertSame(first, assertThrows(IllegalStateException.class, () -> pool.stopContainerStrict("key-1")));
+        assertEquals(List.of(second, current), List.of(first.getSuppressed()));
+        assertTrue(pool.isTracked("key-1"));
+        pool.stopAllStrictExcept(Set.of());
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("retired-first", null);
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("retired-second", null);
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("current", null);
+        verifyNoMoreInteractions(lifecycleManager);
+        assertFalse(pool.isTracked("key-1"));
+    }
+
+    @Test
+    void bestEffortTeardownRetainsFailedRetirementsForStrictRetry() throws IOException {
+        prepareTwoRetiredContainers();
+        doThrow(new IllegalStateException("remove failed")).doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict("retired-first", null);
+
+        pool.stopAll();
+        verify(lifecycleManager).stopAndRemoveStrict("retired-second", null);
+        verify(lifecycleManager).stopAndRemove("current", null);
+        assertTrue(pool.isTracked("key-1"));
+        pool.stopAllStrictExcept(Set.of());
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("retired-first", null);
+        verifyNoMoreInteractions(lifecycleManager);
+        assertFalse(pool.isTracked("key-1"));
+    }
+
+    private void prepareTwoRetiredContainers() throws IOException {
+        pool.beginUse("key-1");
+        String firstUrl = startFakePing(200);
+        pool.ensureReady("key-1", () -> new StartedContainer("retired-first", firstUrl));
+        fakeContainers.forEach(server -> server.stop(0));
+        String secondUrl = startFakePing(200);
+        pool.ensureReady("key-1", () -> new StartedContainer("retired-second", secondUrl));
+        fakeContainers.forEach(server -> server.stop(0));
+        String currentUrl = startFakePing(200);
+        pool.ensureReady("key-1", () -> new StartedContainer("current", currentUrl));
+    }
+
+    @Test
+    void unhealthyRetirementWaitsForEveryAdmittedUse() throws IOException {
+        String staleUrl = startFakePing(200);
+        pool.beginUse("key-1");
+        pool.ensureReady("key-1", () -> new StartedContainer("stale-container", staleUrl));
+        fakeContainers.forEach(server -> server.stop(0));
+        pool.beginUse("key-1");
+        String freshUrl = startFakePing(200);
+        assertEquals(freshUrl, pool.ensureReady("key-1", () -> new StartedContainer("fresh-container", freshUrl)));
+        verifyNoInteractions(lifecycleManager);
+        pool.endUse("key-1");
+        verifyNoInteractions(lifecycleManager);
+        pool.endUse("key-1");
+        verify(lifecycleManager).stopAndRemoveStrict("stale-container", null);
+        verifyNoMoreInteractions(lifecycleManager);
+    }
+
+    @Test
+    void failedReplacementKeepsRetiredContainerOwnedUntilUseEnds() throws IOException {
+        String staleUrl = startFakePing(200);
+        pool.beginUse("key-1");
+        pool.ensureReady("key-1", () -> new StartedContainer("stale-container", staleUrl));
+        fakeContainers.forEach(server -> server.stop(0));
+        assertThrows(IllegalStateException.class, () -> pool.ensureReady("key-1", () -> {
+            throw new IllegalStateException("start failed");
+        }));
+        assertTrue(pool.isTracked("key-1"));
+        verifyNoInteractions(lifecycleManager);
+        pool.endUse("key-1");
+        verify(lifecycleManager).stopAndRemoveStrict("stale-container", null);
+        assertTrue(!pool.isTracked("key-1"));
+    }
+
+    @Test
+    void failedRetirementIsRetriedByStrictTeardown() throws IOException {
+        String staleUrl = startFakePing(200);
+        pool.beginUse("key-1");
+        pool.ensureReady("key-1", () -> new StartedContainer("stale-container", staleUrl));
+        fakeContainers.forEach(server -> server.stop(0));
+        assertThrows(IllegalStateException.class, () -> pool.ensureReady("key-1", () -> {
+            throw new IllegalStateException("start failed");
+        }));
+        doThrow(new IllegalStateException("remove failed")).doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict("stale-container", null);
+        assertThrows(IllegalStateException.class, () -> pool.endUse("key-1"));
+        assertTrue(pool.isTracked("key-1"));
+        pool.stopAllStrictExcept(Set.of());
+        verify(lifecycleManager, times(2)).stopAndRemoveStrict("stale-container", null);
+        assertTrue(!pool.isTracked("key-1"));
     }
 
     @Test

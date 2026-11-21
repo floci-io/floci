@@ -4,18 +4,23 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
+import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
+import io.floci.aws.services.ecs.model.EcsLoadBalancer;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -61,6 +66,8 @@ class EcsGracefulStopConcurrencyServiceTest {
 
     private final EcsContainerManager containerManager = mock(EcsContainerManager.class);
     private final EcsEventPublisher eventPublisher = mock(EcsEventPublisher.class);
+    private final EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
+    private final MutableClock clock = new MutableClock();
     private final List<EcsService> services = new ArrayList<>();
     /** The task whose stop blocks until {@link #releaseSlowStop}; every other task stops at once. */
     private final AtomicReference<String> slowTaskArn = new AtomicReference<>();
@@ -335,6 +342,205 @@ class EcsGracefulStopConcurrencyServiceTest {
         assertEquals(2, stops.get());
     }
 
+    @Test
+    void aTaskBehindALoadBalancerStaysDeactivatingUntilItsTargetsHaveDrained() throws Exception {
+        Duration deregistrationDelay = Duration.ofSeconds(300);
+        when(lbRegistrar.deregisterTask(any(), any(), anyString())).thenReturn(deregistrationDelay);
+        when(lbRegistrar.targetsHealthy(any())).thenReturn(true);
+        EcsService service = newService();
+        createService(service, "drained", 1, List.of(loadBalancer("drained")));
+        tick(service);
+        EcsTask old = onlyRunningTask(service, "drained");
+
+        service.updateService(CLUSTER, "drained", null, null, null, null, true, REGION);
+        tick(service);
+        tick(service);
+        verify(lbRegistrar).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())), any(),
+                eq(REGION));
+        assertEquals("DEACTIVATING", lastStatus(service, old));
+
+        clock.advance(deregistrationDelay.minusSeconds(1));
+        tick(service);
+        assertEquals("DEACTIVATING", lastStatus(service, old));
+        verify(containerManager, never()).stopTaskAndCollectExitCodes(handleOf(old));
+
+        clock.advance(Duration.ofSeconds(1));
+        tick(service);
+        await().atMost(TICK_BUDGET).until(() -> "STOPPED".equals(lastStatus(service, old)));
+        verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handleOf(old));
+    }
+
+    @Test
+    void aRollingDeploymentStopsTheOldTaskOnlyOnceItsReplacementsTargetsAreHealthy() throws Exception {
+        AtomicReference<String> healthyTaskArn = new AtomicReference<>();
+        when(lbRegistrar.targetsHealthy(any())).thenAnswer(invocation ->
+                invocation.<EcsTask>getArgument(0).getTaskArn().equals(healthyTaskArn.get()));
+        EcsService service = newService();
+        createService(service, "checked", 1, List.of(loadBalancer("checked")));
+        tick(service);
+        EcsTask old = onlyRunningTask(service, "checked");
+
+        service.updateService(CLUSTER, "checked", null, null, null, null, true, REGION);
+        tick(service);
+        EcsTask replacement = runningTasks(service, "checked").stream()
+                .filter(task -> !task.getTaskArn().equals(old.getTaskArn()))
+                .findFirst().orElseThrow();
+        tick(service);
+        tick(service);
+        assertEquals("RUNNING", lastStatus(service, old), "the replacement's targets are still in initial health");
+        verify(lbRegistrar, never()).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())),
+                any(), anyString());
+
+        healthyTaskArn.set(replacement.getTaskArn());
+        tick(service);
+        verify(lbRegistrar).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())), any(),
+                eq(REGION));
+        await().atMost(TICK_BUDGET).until(() -> "STOPPED".equals(lastStatus(service, old)));
+        assertEquals("RUNNING", lastStatus(service, replacement));
+    }
+
+    @Test
+    void teardownPreparationPausesReconciliationUntilReset() throws Exception {
+        EcsService service = newService();
+        createService(service, "draining", 1);
+        tick(service);
+        EcsTask original = onlyRunningTask(service, "draining");
+
+        service.beginTeardown();
+        assertTrue(service.isReconcilerShutdown(), "preparation stops the scheduler before other owners drain");
+        service.updateService(CLUSTER, "draining", null, 2, null, REGION);
+        tick(service);
+        service.reconcileServices();
+        verify(containerManager, times(1)).startTask(any(), any(), any(), anyString());
+
+        service.stopManagedContainers();
+        verify(containerManager).stopTask(handleOf(original));
+        service.clear();
+        service.afterReset();
+        tick(service);
+        assertEquals(2, runningTasks(service, "draining").size(), "reset resumes the desired service count");
+    }
+
+    @Test
+    void preparationInterruptsTheScheduledPullBeforeWaitingForItsPass() throws Exception {
+        EcsService service = newService(true);
+        CountDownLatch pullEntered = new CountDownLatch(1);
+        CountDownLatch releasePull = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            pullEntered.countDown();
+            try {
+                releasePull.await();
+            } catch (InterruptedException e) {
+                interrupted.countDown();
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("image pull interrupted", e);
+            }
+            throw new IllegalStateException("test released the pull without interruption");
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        createService(service, "scheduled-pull", 1);
+        FutureTask<Void> preparation = new FutureTask<>(service::beginTeardown, null);
+        Thread thread = new Thread(preparation, "test-ecs-scheduled-pull-teardown");
+        thread.setDaemon(true);
+        try {
+            assertTrue(pullEntered.await(10, TimeUnit.SECONDS), "the real scheduler must enter its pull");
+            thread.start();
+            preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            assertEquals(0, interrupted.getCount(), "preparation interrupts the scheduler's inline pull");
+            List<EcsTask> tasks = allTasks(service, "scheduled-pull");
+            assertEquals(1, tasks.size());
+            assertEquals("STOPPED", tasks.getFirst().getLastStatus());
+            assertEquals("TaskFailedToStart", tasks.getFirst().getStopCode());
+            verify(containerManager, never()).stopTask(any());
+        } finally {
+            releasePull.countDown();
+            if (thread.getState() != Thread.State.NEW) {
+                preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    @Test
+    void preparationReturnsWhileTheScheduledPullIgnoresInterruption() throws Exception {
+        EcsService service = newService(true);
+        CountDownLatch pullEntered = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch releasePull = new CountDownLatch(1);
+        CountDownLatch pullFinished = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            pullEntered.countDown();
+            try {
+                boolean released = false;
+                while (!released) {
+                    try {
+                        released = releasePull.await(10, TimeUnit.SECONDS);
+                        assertTrue(released, "test must release the uncooperative pull");
+                    } catch (InterruptedException e) {
+                        interrupted.countDown();
+                    }
+                }
+                throw new IllegalStateException("test released the uncooperative pull");
+            } finally {
+                pullFinished.countDown();
+            }
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        createService(service, "uncooperative-pull", 1);
+        FutureTask<Void> preparation = new FutureTask<>(service::beginTeardown, null);
+        Thread thread = new Thread(preparation, "test-ecs-uncooperative-pull-teardown");
+        thread.setDaemon(true);
+        try {
+            assertTrue(pullEntered.await(10, TimeUnit.SECONDS), "the real scheduler must enter its pull");
+            thread.start();
+            assertTrue(interrupted.await(5, TimeUnit.SECONDS), "preparation must interrupt the pull");
+            preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            assertEquals(1, pullFinished.getCount(), "preparation returns while the pull is still blocked");
+            assertTrue(service.isReconcilerShutdown());
+        } finally {
+            releasePull.countDown();
+            assertTrue(pullFinished.await(5, TimeUnit.SECONDS), "the test pull must finish");
+            if (thread.getState() != Thread.State.NEW) {
+                preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    @Test
+    void teardownPreparationWaitsForTaskLaunchBeforeStoppingContainers() throws Exception {
+        EcsService service = newService();
+        createService(service, "launching", 1);
+        CountDownLatch launchEntered = new CountDownLatch(1);
+        CountDownLatch releaseLaunch = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            launchEntered.countDown();
+            assertTrue(releaseLaunch.await(30, TimeUnit.SECONDS), "test must release the in-flight launch");
+            Container container = new Container();
+            container.setName("app");
+            container.setRuntimeId("launching-container");
+            task.setContainers(List.of(container));
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("app", container.getRuntimeId()), Map.of());
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        FutureTask<Void> launch = startTick(service);
+        FutureTask<Void> preparation = new FutureTask<>(service::beginTeardown, null);
+        Thread preparationThread = new Thread(preparation, "test-ecs-teardown-preparation");
+        preparationThread.setDaemon(true);
+        try {
+            assertTrue(launchEntered.await(5, TimeUnit.SECONDS), "the task launch must be in flight");
+            preparationThread.start();
+            Thread.State state = ThreadStates.awaitState(preparationThread,
+                    EnumSet.of(Thread.State.TIMED_WAITING, Thread.State.TERMINATED), TICK_BUDGET,
+                    "teardown preparation");
+            assertEquals(Thread.State.TIMED_WAITING, state, "preparation must wait for the admitted task launch");
+        } finally {
+            releaseLaunch.countDown();
+        }
+        launch.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+        preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+        EcsTask launched = onlyRunningTask(service, "launching");
+        service.stopManagedContainers();
+        verify(containerManager).stopTask(handleOf(launched));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     /** One full reconcile tick, on a thread of its own, so a tick stuck behind a stop fails rather than hangs. */
@@ -356,24 +562,47 @@ class EcsGracefulStopConcurrencyServiceTest {
     }
 
     private EcsService newService() {
+        return newService(false);
+    }
+
+    private EcsService newService(boolean scheduleReconciliation) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), eventPublisher);
-        service.initializeStorage();
+                config, lbRegistrar, new InMemoryStorageFactory("000000000000"), eventPublisher,
+                new EcsExecSessionRegistry(), null, null, clock);
+        if (scheduleReconciliation) {
+            service.init();
+        } else {
+            service.initializeStorage();
+        }
         service.createCluster(CLUSTER, REGION);
         services.add(service);
         return service;
     }
 
     private static void createService(EcsService service, String name, int desiredCount) {
+        createService(service, name, desiredCount, List.of());
+    }
+
+    private static void createService(EcsService service, String name, int desiredCount,
+                                      List<EcsLoadBalancer> loadBalancers) {
         ContainerDefinition container = new ContainerDefinition();
         container.setName("app");
         container.setImage(name + ":1");
         service.registerTaskDefinition(name, List.of(container), null, null, null,
                 null, null, List.of(), REGION);
-        service.createService(CLUSTER, name, name, desiredCount, LaunchType.FARGATE, List.of(), null, REGION);
+        service.createService(CLUSTER, name, name, desiredCount, LaunchType.FARGATE, loadBalancers, null, REGION);
+    }
+
+    private static EcsLoadBalancer loadBalancer(String targetGroupName) {
+        EcsLoadBalancer loadBalancer = new EcsLoadBalancer();
+        loadBalancer.setTargetGroupArn("arn:aws:elasticloadbalancing:" + REGION
+                + ":000000000000:targetgroup/" + targetGroupName + "/0123456789abcdef");
+        loadBalancer.setContainerName("app");
+        loadBalancer.setContainerPort(8080);
+        return loadBalancer;
     }
 
     private static EcsTaskHandle handleOf(EcsTask task) {

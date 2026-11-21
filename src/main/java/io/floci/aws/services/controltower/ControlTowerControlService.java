@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.controltower.model.EnabledControl;
@@ -97,6 +98,20 @@ public class ControlTowerControlService {
                 .orElseThrow(() -> notFound("The request references an enabled control that does not exist."));
     }
 
+    /**
+     * The tags of the enabled control whose ARN is {@code arn} in {@code region}, found as the tag handlers find it, by
+     * the ARN it records among the Region's controls in the request's account. {@link ControlTowerStoredResourceArns}
+     * asks it.
+     */
+    public Map<String, String> storedTags(String region, String arn) {
+        return controls.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(control -> arn.equals(control.getArn()))
+                .findFirst()
+                .map(EnabledControl::getTags)
+                .<Map<String, String>>map(LinkedHashMap::new)
+                .orElse(Map.of());
+    }
+
     public synchronized Map<String, String> listTags(String region, String arn) {
         Map<String, String> tags = get(region, arn).getTags();
         return tags == null ? Map.of() : tags;
@@ -152,7 +167,7 @@ public class ControlTowerControlService {
     }
 
     public synchronized ControlOperation operation(String accountId, String region, String operationIdentifier) {
-        if (operationIdentifier == null || !operationIdentifier.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(operationIdentifier)) {
             throw validation("operationIdentifier must be a UUID.");
         }
         ControlOperation operation = operations.get(operationKey(accountId, region, operationIdentifier));

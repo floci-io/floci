@@ -94,7 +94,8 @@ public class AthenaJsonHandler {
                     resultConfiguration = mapper.treeToValue(request.get("ResultConfiguration"), ResultConfiguration.class);
                 }
 
-                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration);
+                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration,
+                        strings(request, "ExecutionParameters"));
                 yield Response.ok(Map.of("QueryExecutionId", id)).build();
             }
             case "GetQueryExecution" -> {
@@ -194,20 +195,23 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "UntagResource" -> {
-                athenaService.untagResource(text(request, "ResourceARN"), tagKeys(request));
+                athenaService.untagResource(text(request, "ResourceARN"), strings(request, "TagKeys"));
                 yield Response.ok(Map.of()).build();
             }
             case "ListDatabases" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
             }
             case "ListTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
             }
             case "GetTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
@@ -257,15 +261,16 @@ public class AthenaJsonHandler {
         return tags;
     }
 
-    private static List<String> tagKeys(JsonNode request) {
-        JsonNode node = request.get("TagKeys");
+    /** The strings of the list member {@code field}, such as {@code TagKeys}; none when it is absent. */
+    private static List<String> strings(JsonNode request, String field) {
+        JsonNode node = request.get(field);
         if (node == null || !node.isArray()) {
             return List.of();
         }
-        List<String> keys = new ArrayList<>();
-        for (JsonNode key : node) {
-            keys.add(key.asText());
+        List<String> strings = new ArrayList<>();
+        for (JsonNode string : node) {
+            strings.add(string.asText());
         }
-        return keys;
+        return strings;
     }
 }

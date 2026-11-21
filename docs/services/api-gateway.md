@@ -24,6 +24,33 @@ bundle Floci gives the containers it launches (see [TLS](../configuration/tls.md
 authorizer on a Floci user pool verifies its tokens, as one on a Cognito user pool does on AWS. Its
 address is still a private one, so it also needs `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
 
+## Integration target addresses
+
+REST API `HTTP` and `HTTP_PROXY` integrations, HTTP API `HTTP_PROXY` integrations and WebSocket API
+HTTP integrations send the request from Floci itself, so Floci screens where it may go. When an
+integration is invoked, Floci resolves the integration URI's host and refuses link-local and cloud
+instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+
+How a refusal reaches the caller depends on the integration:
+
+- `HTTP_PROXY`, on a REST or an HTTP API, answers `502`.
+- A REST `HTTP` integration treats the refusal like a backend `502` and runs it through the
+  integration responses, so with only a default `200` response the client gets `200`. A
+  `5\d{2}` selection pattern surfaces it.
+- A WebSocket integration fails with `500`: `$connect` rejects the upgrade, and a message route
+  sends no reply.
+
+For an `http://` URI, Floci connects to the address it checked, so a name that resolves differently
+on a second lookup cannot reach a refused address. For an `https://` URI, it checks the address and
+then hands the URL to the JDK HTTP client, which resolves the name again when it connects, so a name
+that changes between the two lookups is not screened. Treat the check as the boundary for `http://`
+targets only.
+
+Loopback and private addresses stay reachable, since an integration in front of a service on the
+same host or in a neighbouring container is the normal case in local development. Unlike the JWT
+policy above, no setting refuses them, so keep Floci off networks where untrusted callers can
+create integrations.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
@@ -840,12 +867,60 @@ query names are case-sensitive. No configured sources produces an empty array
 or string. A missing or empty configured value returns `401` without invoking
 Lambda in either format. Repeated request values use each event's delivered
 representation: last value in format `1.0`, comma-joined values in format `2.0`.
+The authorizer event's source IP (`requestContext.http.sourceIp` in format `2.0`,
+`requestContext.identity.sourceIp` in format `1.0`) and the Lambda proxy event's
+`requestContext.http.sourceIp` are the address of the TCP connection to Floci, as in
+`$context.identity.sourceIp`; a client's `X-Forwarded-For` header does not change them.
 
 HTTP API `HTTP_PROXY` integrations can map values from a successful Lambda
 authorizer's context into request headers, query strings, and paths. For a returned
 `context` containing `tenantId`, use `$context.authorizer.tenantId` in
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
+
+HTTP API `HTTP_PROXY` header, query string and path mappings also read `$request.body`,
+`$request.body.<JSONPath>`, `$stageVariables.<name>` and the `$context` variables `accountId`,
+`apiId`, `domainName`, `domainPrefix`, `extendedRequestId`, `httpMethod`, `path`, `protocol`,
+`requestTime`, `requestTimeEpoch`, `routeKey` and `stage`, alongside `requestId`,
+`identity.sourceIp` and the authorizer values above. A JSONPath that selects a scalar maps its text,
+and one that selects an object or array maps its JSON. A missing field, an empty body or a body
+that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
+expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
+an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+An expression embedded in a path is read whole before it is resolved: a body JSONPath takes dotted
+names, `[n]` indexes and `['key']` selectors, so `/orders/$request.body.items[0].id` selects the
+first item's `id`, a stage variable name ends at the first character that is not a letter, digit or
+underscore, and a `$request.path`, `$request.header` or `$request.querystring` name ends at the next
+`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any
+source, including the whole `$request.body`, is rejected when it contains CR, LF, NUL or any other
+control character besides tab, as is a mapped `Host`: the request never reaches the backend and the
+caller receives `502` with
+`{"message":"Bad Gateway: invalid request header value for <name>"}`.
+
+HTTP API integrations store and return `responseParameters`, and an `HTTP_PROXY` integration
+applies the mappings keyed by the backend's status code to its response. `overwrite:statuscode`
+replaces the status, and `append:header.<name>`, `overwrite:header.<name>` and
+`remove:header.<name>` edit the response headers, matching the name case-insensitively. A value is a
+static string, `$response.header.<name>` (repeated values joined with commas), `$response.body`,
+`$response.body.<JSONPath>`, `$stageVariables.<name>` or one of the `$context` variables above, and
+every value reads the backend response as it arrived. A value that resolves to nothing skips its
+mapping. So does an `overwrite:statuscode` source that resolves to anything but a status from 100 to
+599, and a header value holding CR, LF, NUL or any other control character besides tab, such as a
+pretty-printed `$response.body`, while the other mappings still apply. Floci
+evaluates the whole body, where AWS reads only its first 100 KB, and does not resolve the braced
+`${response.header.<name>}` form. The `502` Floci answers for an unreachable backend goes through
+the same mappings as a backend's own `502`. Lambda (`AWS_PROXY`) integrations store
+`responseParameters` without applying them.
+
+Create, update and OpenAPI import reject `responseParameters` that is not an object, a status code
+key outside 200 to 599, a mapping key other than `overwrite:statuscode` or an `append`, `overwrite`
+or `remove` of `header.<name>`, a header name that is not an HTTP token, and a static
+`overwrite:statuscode` value that is not a status from 100 to 599, with `400 BadRequestException`.
+The headers AWS reserves from mapping, such as `Content-Length`, are not checked. `UpdateIntegration` merges by status code: a status code with mappings replaces that status
+code's mappings, an empty map such as `{"500": {}}` removes it, and a status code the update leaves
+out is kept. CloudFormation carries `ResponseParameters` from an `AWS::ApiGatewayV2::Integration`,
+each status code's `Destination` and `Source` pairs becoming its mappings, and from the
+`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`.
 
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
@@ -884,8 +959,10 @@ expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<n
 `$context` variables: `accountId`, `apiId`, `domainName`, `domainPrefix`, `extendedRequestId`,
 `httpMethod`, `path`, `protocol`, `requestTime`, `requestTimeEpoch`, `routeKey`, `stage`,
 `requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
-and `domainName` are the values the rest of the gateway reports for the request, and `path`
-starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
+and `domainName` are the values the rest of the gateway reports for the request,
+`extendedRequestId` is the same value as `requestId`, as AWS documents for HTTP APIs and as
+`HTTP_PROXY` mappings also resolve it (an `HTTP_PROXY` response returns that id as `x-amzn-RequestId`,
+in place of any the backend sent, and a valid UUID sent in `x-amzn-RequestId` replaces it), and `path` starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
 with any other source is rejected with `400 BadRequestException` on create, update and import,
 including one embedded as `${...}` or inside a JSON parameter's string values. A `$` inside static
 text without braces, as in `price $5`, stays literal. A `$context` variable outside the list

@@ -156,9 +156,9 @@ wrapping key spec: `GetParametersForImport` rejects that combination with
 The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
 rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
-An import token is scoped to one key and spent by the import that uses it, and a second
-`GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
-hours after they are issued.
+An import token is scoped to one key. It stays valid until it expires and can be used again; a
+reimport must carry the key's original material. Unlike AWS, a later `GetParametersForImport` call
+still replaces the earlier token. Tokens expire 24 hours after they are issued.
 
 `ExpirationModel=KEY_MATERIAL_EXPIRES` (the default) requires `ValidTo`, which must be in the
 future and no more than 365 days out. Once `ValidTo` passes, the material is dropped and the key
@@ -253,6 +253,10 @@ Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, 
 With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, an operation that names a key is evaluated against that key's ARN, as on AWS. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`.
 
 `CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias ARN and the key it points at, `UpdateAlias` also against the key it will point at, the two resource types the Service Authorization Reference lists for them. `ReEncrypt` is evaluated against both keys it acts on, under the single `kms:ReEncrypt` action: the source its `SourceKeyId` names, or when it names none the key that encrypted its `CiphertextBlob` (never a `KeyId`, which the operation does not read), and the destination its `DestinationKeyId` names. AWS authorizes the two halves separately as `kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. The grant operations name the key the grant they act on belongs to: a `RetireGrant` carrying a `GrantToken` the key that grant belongs to, since the handler finds the grant by the token alone, and a `RetireGrant` or `RevokeGrant` identifying its grant by `KeyId` and `GrantId` the key it names together with the key that grant belongs to. A request nothing resolves keeps the permissive `key/*` pattern, and the operation then fails with its own error. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the resource a policy must name for them on AWS too.
+
+A key's policy is evaluated as its resource policy. An explicit `Deny` in it refuses the request, and an `Allow` naming the caller grants it. A key in another account needs both its key policy and the caller's own policies to allow the request. An `Allow` naming only the account, as the default key policy's does, leaves the decision to the account's IAM policies. Floci deviates from AWS here: a same-account identity policy grants access even when the key policy does not name the account, while AWS requires the key policy to allow it.
+
+The same check applies when another service asks KMS, as the caller, to use a key its resource is encrypted with. Restoring a Redshift or Redshift Serverless snapshot encrypted with a customer managed key needs `kms:Decrypt` on that key, read from the key policy in the snapshot owner's account and from the caller's own policies. The request carries `aws:ViaAWSService` as `true` and `kms:ViaService` naming the service's endpoint in the request's Region (`redshift-serverless.us-east-1.amazonaws.com`), as AWS's forward access sessions do. A key KMS would not use, disabled or pending deletion, refuses the restore whatever the policies say, as KMS refuses the request the service makes with it; Floci answers it as an access denial naming `kms:Decrypt`. A key AWS manages (`alias/aws/redshift`, which a snapshot copy grant made without a key records) needs no permission: AWS writes its key policy to let every principal of the account use it through the service. KMS itself still serves only the caller's own keys: a direct request naming another account's key is refused.
 
 ## Configuration
 

@@ -13,6 +13,7 @@ import org.jboss.logging.Logger;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -663,7 +664,7 @@ public class CloudFrontController {
     }
 
     @PUT
-    @Path("/origin-access-control/{Id}")
+    @Path("/origin-access-control/{Id}/config")
     public Response updateOriginAccessControl(@PathParam("Id") String id,
                                               @HeaderParam("If-Match") String ifMatch,
                                               String body) {
@@ -985,7 +986,7 @@ public class CloudFrontController {
                 appendKeyValueStoreAssociations(xml, fn);
                 xml.end("FunctionConfig")
                         .start("FunctionMetadata")
-                        .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                        .elem("FunctionARN", service.functionArn(fn.getName()))
                         .elem("Stage", fn.getStage())
                         .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                         .elem("LastModifiedTime",
@@ -1900,7 +1901,7 @@ public class CloudFrontController {
                 .elem("HttpVersion", cfg.getHttpVersion() != null ? cfg.getHttpVersion() : "http2")
                 .elem("PriceClass", cfg.getPriceClass() != null ? cfg.getPriceClass() : "PriceClass_All")
                 .elem("IsIPV6Enabled", cfg.isIPV6Enabled())
-                .elem("WebAclId", cfg.getWebAclId() != null ? cfg.getWebAclId() : "");
+                .elem("WebACLId", cfg.getWebAclId() != null ? cfg.getWebAclId() : "");
 
         List<Origin> origins = cfg.getOrigins();
         xml.raw(xmlQuantityItems("Origins", "Origin", origins != null ? origins.size() : 0,
@@ -1963,6 +1964,9 @@ public class CloudFrontController {
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
         xml.raw(xmlLogging(cfg.getLogging()));
+        if (cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         return xml.build();
     }
@@ -2367,6 +2371,7 @@ public class CloudFrontController {
     }
 
     private String xmlDistributionSummary(Distribution d) {
+        DistributionConfig cfg = d.getConfig();
         XmlBuilder xml = new XmlBuilder()
                 .start("DistributionSummary")
                 .elem("Id", d.getId())
@@ -2383,9 +2388,9 @@ public class CloudFrontController {
                 .elem("PriceClass", d.getConfig() != null && d.getConfig().getPriceClass() != null
                         ? d.getConfig().getPriceClass() : "PriceClass_All")
                 .elem("IsIPV6Enabled", d.getConfig() != null && d.getConfig().isIPV6Enabled())
-                .elem("WebAclId", "");
+                .elem("WebACLId", cfg != null && cfg.getWebAclId() != null
+                        ? cfg.getWebAclId() : "");
 
-        DistributionConfig cfg = d.getConfig();
         List<Origin> origins = cfg != null ? cfg.getOrigins() : null;
         xml.raw(xmlQuantityItems("Origins", "Origin",
                 origins != null ? origins.size() : 0,
@@ -2407,6 +2412,9 @@ public class CloudFrontController {
 
         xml.raw(xmlViewerCertificate(cfg != null ? cfg.getViewerCertificate() : null));
         xml.raw(xmlRestrictions(cfg != null ? cfg.getGeoRestriction() : null));
+        if (cfg != null && cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         xml.end("DistributionSummary");
         return xml.build();
@@ -2533,7 +2541,7 @@ public class CloudFrontController {
         appendKeyValueStoreAssociations(xml, fn);
         return xml.end("FunctionConfig")
                 .start("FunctionMetadata")
-                .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                .elem("FunctionARN", service.functionArn(fn.getName()))
                 .elem("Stage", fn.getStage())
                 .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                 .elem("LastModifiedTime",
@@ -2665,11 +2673,13 @@ public class CloudFrontController {
                 values.getOrDefault("PriceClass", "PriceClass_All"));
         cfg.setIPV6Enabled("true".equalsIgnoreCase(
                 values.getOrDefault("IsIPV6Enabled", "true")));
-        cfg.setWebAclId(values.get("WebAclId"));
+        cfg.setWebAclId(values.containsKey("WebACLId")
+                ? values.get("WebACLId") : values.get("WebAclId"));
         cfg.setContinuousDeploymentPolicyId(
                 values.get("ContinuousDeploymentPolicyId"));
         cfg.setStaging("true".equalsIgnoreCase(
                 values.getOrDefault("Staging", "false")));
+        cfg.setConnectionMode(values.get("ConnectionMode"));
 
         cfg.setOrigins(parseOrigins(body));
         cfg.setDefaultCacheBehavior(parseDefaultCacheBehavior(body));
@@ -2744,9 +2754,11 @@ public class CloudFrontController {
                     "HttpVersion",
                     "PriceClass",
                     "IsIPV6Enabled",
+                    "WebACLId",
                     "WebAclId",
                     "ContinuousDeploymentPolicyId",
-                    "Staging" -> true;
+                    "Staging",
+                    "ConnectionMode" -> true;
             default -> false;
         };
     }

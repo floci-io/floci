@@ -56,7 +56,7 @@ final class CustomResourceProbe {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final List<JsonNode> events = new CopyOnWriteArrayList<>();
-    private final String physicalId;
+    private volatile Function<JsonNode, String> physicalId;
     private volatile Function<JsonNode, Map<String, String>> data;
     private volatile Predicate<JsonNode> failing = event -> false;
     private volatile String failureReason;
@@ -64,7 +64,7 @@ final class CustomResourceProbe {
     private volatile Hold hold;
 
     private CustomResourceProbe(String physicalId) {
-        this.physicalId = physicalId;
+        this.physicalId = event -> physicalId;
     }
 
     static CustomResourceProbe stub(LambdaService lambdaService, String serviceToken, String physicalId) {
@@ -77,6 +77,12 @@ final class CustomResourceProbe {
                     return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
                 });
         return probe;
+    }
+
+    /** Answers each request with the PhysicalResourceId {@code physicalId} builds from it. */
+    CustomResourceProbe physicalId(Function<JsonNode, String> physicalId) {
+        this.physicalId = physicalId;
+        return this;
     }
 
     /** Answers each request with the Data {@code data} builds from it. */
@@ -125,7 +131,7 @@ final class CustomResourceProbe {
         response.put("RequestId", event.get("RequestId").asText())
                 .put("StackId", event.get("StackId").asText())
                 .put("LogicalResourceId", event.get("LogicalResourceId").asText())
-                .put("PhysicalResourceId", physicalId);
+                .put("PhysicalResourceId", physicalId.apply(event));
         if (data != null) {
             response.set("Data", MAPPER.valueToTree(data.apply(event)));
         }

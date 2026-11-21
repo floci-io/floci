@@ -20,7 +20,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * AWS CUR (Cost and Usage Report) management plane.
@@ -43,11 +42,6 @@ public class CurService {
     /** AWS hard limit per account: 5 report definitions. */
     private static final int MAX_REPORTS_PER_ACCOUNT = 5;
     private static final int MAX_TAGS_PER_REPORT = 50;
-    /** AWS allows the report name to contain alphanumerics, hyphens, and underscores. */
-    private static final Pattern REPORT_NAME_PATTERN =
-            Pattern.compile("[A-Za-z0-9_-]+");
-
-    private static final Set<String> ALLOWED_TIME_UNITS = Set.of("HOURLY", "DAILY", "MONTHLY");
     /**
      * Floci only emits Parquet at the moment. Real CUR also accepts
      * {@code textORcsv} but Floci's emission engine writes Parquet
@@ -57,9 +51,6 @@ public class CurService {
      */
     private static final Set<String> ALLOWED_FORMATS = Set.of("Parquet");
     private static final Set<String> ALLOWED_COMPRESSIONS = Set.of("Parquet");
-    private static final Set<String> ALLOWED_VERSIONING = Set.of("CREATE_NEW_REPORT", "OVERWRITE_REPORT");
-    private static final Set<String> ALLOWED_ARTIFACTS = Set.of("REDSHIFT", "QUICKSIGHT", "ATHENA");
-    private static final Set<String> ALLOWED_SCHEMA_ELEMENTS = Set.of("RESOURCES", "SPLIT_COST_ALLOCATION_DATA", "MANUAL_DISCOUNT_COMPATIBILITY");
 
     private final StorageBackend<String, ReportDefinition> store;
     private final RegionResolver regionResolver;
@@ -273,51 +264,17 @@ public class CurService {
         return store.keys().size();
     }
 
+    /**
+     * The checks the model leaves to Floci: its types, required members, patterns, lengths and enums are checked in
+     * {@link CurJsonHandler#handle} from {@code cur-request-shapes.json}.
+     */
     private void validateReportDefinition(ReportDefinition d) {
-        if (d == null) {
-            throw new AwsException("ValidationException", "ReportDefinition is required.", 400);
-        }
-        requireNonEmpty(d.getReportName(), "ReportName");
-        if (!REPORT_NAME_PATTERN.matcher(d.getReportName()).matches()) {
-            throw new AwsException("ValidationException",
-                    "ReportName may only contain alphanumeric characters, hyphens, and underscores.", 400);
-        }
-        if (d.getReportName().length() > 256) {
-            throw new AwsException("ValidationException",
-                    "ReportName must be at most 256 characters long.", 400);
-        }
-        requireOneOf(d.getTimeUnit(), ALLOWED_TIME_UNITS, "TimeUnit");
         requireOneOf(d.getFormat(), ALLOWED_FORMATS, "Format");
         requireOneOf(d.getCompression(), ALLOWED_COMPRESSIONS, "Compression");
-        requireNonEmpty(d.getS3Bucket(), "S3Bucket");
+        // The report name is a segment of the key ParquetEmitter writes, which takes fewer characters than the model.
+        S3DestinationValidation.requireSafeKeySegment(d.getReportName(), "ReportName");
         S3DestinationValidation.requireValidBucketName(d.getS3Bucket(), "S3Bucket");
-        if (d.getS3Prefix() != null) {
-            S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
-        }
-        if (d.getS3Prefix() == null) {
-            d.setS3Prefix("");
-        }
-        requireNonEmpty(d.getS3Region(), "S3Region");
-        if (d.getReportVersioning() != null && !ALLOWED_VERSIONING.contains(d.getReportVersioning())) {
-            throw new AwsException("ValidationException",
-                    "ReportVersioning must be one of " + ALLOWED_VERSIONING, 400);
-        }
-        if (d.getAdditionalArtifacts() != null) {
-            for (String artifact : d.getAdditionalArtifacts()) {
-                if (!ALLOWED_ARTIFACTS.contains(artifact)) {
-                    throw new AwsException("ValidationException",
-                            "AdditionalArtifacts must be one of " + ALLOWED_ARTIFACTS, 400);
-                }
-            }
-        }
-        if (d.getAdditionalSchemaElements() != null) {
-            for (String element : d.getAdditionalSchemaElements()) {
-                if (!ALLOWED_SCHEMA_ELEMENTS.contains(element)) {
-                    throw new AwsException("ValidationException",
-                            "AdditionalSchemaElements must be one of " + ALLOWED_SCHEMA_ELEMENTS, 400);
-                }
-            }
-        }
+        S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
     }
 
     private static String compositeKey(String region, String reportName) {
@@ -332,7 +289,6 @@ public class CurService {
     }
 
     private static void requireOneOf(String value, Set<String> allowed, String field) {
-        requireNonEmpty(value, field);
         if (!allowed.contains(value)) {
             throw new AwsException("ValidationException",
                     field + " must be one of " + allowed, 400);

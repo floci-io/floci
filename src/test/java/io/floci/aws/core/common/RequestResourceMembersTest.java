@@ -18,7 +18,6 @@ import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +28,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -41,6 +41,35 @@ import static org.mockito.Mockito.when;
 class RequestResourceMembersTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void modeledIntegerArnVariablesNormalizeOnlyTheirOwnValues() throws Exception {
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {
+                    "version": "arn:${Partition}:example:${Region}:${Account}:item:${Name}:${Version}"
+                  }},
+                  "integerVariables": {"example": {"version": ["Version"]}},
+                  "operations": {"example:Read": {"resources": []}}
+                }
+                """);
+        ArnFormat format = parse(document.toString()).formats().get("example").get("version");
+        String prefix = "arn:aws-cn:example:cn-north-1:000000000001:item:001:";
+        assertEquals(prefix + "1", format.checked(prefix + "01"));
+        assertEquals(prefix + "1", format.checked(prefix + "+1"));
+        for (String invalid : List.of("latest", "*", "9223372036854775808")) {
+            assertEquals(prefix + invalid, format.checked(prefix + invalid));
+        }
+        for (String invalid : List.of("[]", "{\"unknown\":{\"version\":[\"Version\"]}}",
+                "{\"example\":{\"unknown\":[\"Version\"]}}", "{\"example\":{\"version\":[\"Account\"]}}",
+                "{\"example\":{\"version\":\"Version\"}}", "{\"example\":{\"version\":[1]}}")) {
+            ObjectNode changed = document.deepCopy();
+            changed.set("integerVariables", MAPPER.readTree(invalid));
+            IllegalStateException failure = assertThrows(IllegalStateException.class, () -> parse(changed.toString()));
+            assertTrue(failure.getMessage().contains("integerVariables"), failure.getMessage());
+        }
+    }
 
     @Test
     void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
@@ -66,27 +95,85 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void generatedResourceTagKeysValidateTheirPrefixesAndResourceTypes() throws Exception {
+        assertEquals(List.of("aws:ResourceTag/", "ec2:ResourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("ec2").get("instance"));
+        // Secrets Manager writes its key `secretsmanager:ResourceTag/tag-key`, SSM spells the word `resourceTag`.
+        assertEquals(List.of("aws:ResourceTag/", "secretsmanager:ResourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("secretsmanager").get("Secret"));
+        assertEquals(List.of("aws:ResourceTag/", "ssm:resourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("ssm").get("parameter"));
+        assertEquals(List.of("aws:ResourceTag/", "rds:pg-tag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("rds").get("pg"));
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {"namespaces":{"example":["example"]},"arnFormats":{"example":{
+                "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
+                "resourceTagKeys":{"example":{"thing":["vendor:ResourceTag/"]}},
+                "operations":{"example:Read":{"resources":[]}}}
+                """);
+        assertEquals(List.of("vendor:ResourceTag/"),
+                parse(document.toString()).resourceTagKeys().get("example").get("thing"));
+        for (String invalid : List.of("{\"missing\":[\"vendor:ResourceTag/\"]}",
+                "{\"thing\":\"vendor:ResourceTag/\"}", "{\"thing\":[\"vendor:ResourceTag\"]}",
+                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}",
+                "{\"thing\":[\"vendor:thing-tag/\"]}", "{\"thing\":[\"example:other-tag/\"]}",
+                "{\"thing\":[\"example:req-tag/\"]}")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("resourceTagKeys")).set("example", MAPPER.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+    }
+
+    @Test
+    void forwardedRequestsJoinTheirActionsRecordedTypeAndViaServiceKeyAndRefuseAnythingElse() throws Exception {
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("kms:Decrypt", "key", "snapshot", "kmsKeyId",
+                        "redshift-serverless", "kms:ViaService")),
+                RequestResourceMembers.table().forwarded().get("redshift-serverless:RestoreFromSnapshot"));
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("kms:Decrypt", "key", "snapshot", "KmsKeyId",
+                        "redshift", "kms:ViaService")),
+                RequestResourceMembers.table().forwarded().get("redshift:RestoreFromClusterSnapshot"));
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {"namespaces":{"example":["example"]},"arnFormats":{"example":{
+                "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
+                "forwardedActions":{"keys:Decrypt":{"type":"key",
+                "format":"arn:${Partition}:keys:${Region}:${Account}:key/${KeyId}"}},
+                "operations":{"example:Restore":{"types":["thing"],"resources":[],
+                "forwarded":[{"action":"keys:Decrypt","of":"thing","member":"keysKeyId","endpoint":"example"}]}}}
+                """);
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("keys:Decrypt", "key", "thing", "keysKeyId",
+                "example", null)), parse(document.toString()).forwarded().get("example:Restore"));
+        for (String invalid : List.of(
+                "[{\"action\":\"keys:Encrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"gadget\",\"member\":\"keysKeyId\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"Keys[]\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\",\"endpoint\":\"\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\"}]")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("operations").path("example:Restore")).set("forwarded", MAPPER.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+        ObjectNode otherKey = document.deepCopy();
+        ((ObjectNode) otherKey.path("forwardedActions").path("keys:Decrypt")).put("viaService", "other:ViaService");
+        assertThrows(IllegalStateException.class, () -> parse(otherKey.toString()));
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
-        assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs", "ssm"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertTrue(table.namespaces().contains("lambda"));
+        assertFalse(table.handBuilt().contains("lambda"));
+        assertFalse(table.handBuilt().contains("logs"));
+        assertEquals(Set.of("dynamodb"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
-        Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
-                "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
-                "DeleteDeliveryDestination", "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery",
-                "UpdateDeliveryConfiguration", "DeleteDelivery", "DescribeDeliveries")
-                .map(operation -> "logs:" + operation).collect(Collectors.toSet());
-        Set<String> expected = new HashSet<>(logsDelivery);
-        expected.add("dynamodb:ListTables");
-        expected.add("logs:PutDestination");
-        Stream.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource", "CreateDocument",
-                "CreateAssociation").forEach(operation -> expected.add("ssm:" + operation));
-        assertEquals(expected, table.operations().keySet().stream()
+        // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
+        assertEquals(Set.of("dynamodb:ListTables"), table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),
-                "only explicit corrections and the operations listed to read override hand-built operations");
+                "only what MEASURED gives is read in a hand-built namespace");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
+        assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
+        assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {
             Map<String, ArnFormat> formats = table.formats().get(operation.substring(0, operation.indexOf(':')));
@@ -122,6 +209,10 @@ class RequestResourceMembersTest {
         assertTrue(events.get("connection").minted());
         assertTrue(events.get("api-destination").minted());
         assertFalse(events.get("event-bus").minted());
+        // A secret is followed by the six characters botocore documents Secrets Manager adding after its name.
+        assertEquals("-??????",
+                RequestResourceMembers.table().formats().get("secretsmanager").get("Secret").mintedSuffix());
+        assertNull(events.get("event-bus").mintedSuffix());
     }
 
     @Test
@@ -139,8 +230,9 @@ class RequestResourceMembersTest {
         assertEquals(List.of(new Member("Namespace", false), new Member("Dimension", false)), parseUnchecked(document(
                 formats, "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\",\"Dimension\"]}"))
                 .operations().get("a:Op").getFirst().find());
-        // No members, a list, members beside one filling it, no list of them, or beside members reading it otherwise.
-        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
+        // No members, a list beside another, members beside one filling it, no list of them, or beside members
+        // reading it otherwise.
+        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\",\"Namespace\"]",
                 "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
                 "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
                 "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
@@ -159,7 +251,7 @@ class RequestResourceMembersTest {
     @Test
     void aDataApiSessionNamesTheClusterOrWorkgroupItRunsOnThroughItsSessionId() {
         Resource session = new Resource(List.of("cluster", "workgroup"), null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), null, null, Map.of(), false, List.of(), null, new Member("SessionId", false));
+                null, Map.of(), false, List.of(), null, new Member("SessionId", false));
         for (String operation : List.of("ExecuteStatement", "BatchExecuteStatement")) {
             assertEquals(session, RequestResourceMembers.table().operations().get("redshift-data:" + operation)
                     .getLast(), operation);
@@ -215,31 +307,31 @@ class RequestResourceMembersTest {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
         }
-        // A field of each of a list's structures fills a variable, read as given when absent or as an ARN, which
-        // only a member filling a variable is.
+        // A field of each of a list's structures fills a variable, read as given or as an ARN, which only a member
+        // filling a variable is.
         Member each = new Member("A", true, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(),
-                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null, Map.of(), false, null)),
+                Map.of("A[].Name", "thing"), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"},"
-                        + "\"absent\":{\"A[].Name\":\"default\"},\"arnOf\":{\"A[].Name\":\"thing\"}}"))
+                        + "\"arnOf\":{\"A[].Name\":\"thing\"}}"))
                         .operations().get("a:Op"));
         assertEquals("A[].Name", each.path());
-        for (String bad : List.of("\"absent\":{\"A[].Name\":\"default\"}", "\"arnOf\":{\"A[].Name\":\"thing\"}")) {
+        for (String bad : List.of("\"arnOf\":{\"A[].Name\":\"thing\"}")) {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
         }
         // A field of a structure fills a variable, as one value.
         Member field = new Member("A", false, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", field), Map.of(), Map.of(),
-                Map.of("A.Name", "default"), Map.of(), null, null, Map.of(), false, null)),
-                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"},"
-                        + "\"absent\":{\"A.Name\":\"default\"}}")).operations().get("a:Op"));
+                Map.of(), null, Map.of(), false, null)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"}}"))
+                        .operations().get("a:Op"));
         assertEquals("A.Name", field.path());
         // A variable fixed to the one value its handler uses, and one fixed that is no variable, that a member fills,
         // or to no value.
         String owned = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${Owner}/${ThingName}\"}}";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
-                Map.of(), Map.of(), Map.of(), null, null, Map.of("Owner", "Custom"), false, null)),
+                Map.of(), Map.of(), null, Map.of("Owner", "Custom"), false, null)),
                 parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"fixed\":{\"Owner\":\"Custom\"}}")).operations().get("a:Op"));
         for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":\"\"}",
@@ -257,16 +349,15 @@ class RequestResourceMembersTest {
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"made\":" + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
+                Map.of(), Map.of(), Map.of(), null, Map.of(), false, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));
-        // A member read before more than one character, holding an ARN or filling a variable.
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"##\"}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\"##\"}")));
-        // A member filling a variable read up to a character, as a CodeBuild build id names its project.
-        assertEquals(":", parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},"
-                + "\"before\":\":\"}")).operations().get("a:Op").getFirst().before());
+        // A key no resource of its kind has, as one the table no longer writes, fails rather than being ignored.
+        for (String bad : List.of("{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"#\"}",
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\":\"}",
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"absent\":{\"Name\":\"default\"}}",
+                "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"when\":{\"Type\":[\"a\"]}}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, bad)), bad);
+        }
         // An account from a list, or for a type whose format has no account.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"account\":\"Ids[]\"}")));
@@ -287,22 +378,21 @@ class RequestResourceMembersTest {
         }
         assertTrue(parseUnchecked("{\"namespaces\":{\"a\":[]}," + parts + ",\"mintedIds\":{\"a\":[\"thing\"]},"
                 + "\"operations\":{\"a:Op\":{\"resources\":[]}}}").formats().get("a").get("thing").minted());
-        // A member read when absent as no value, or as an ARN of a type with no format or of more than one variable.
-        for (String bad : List.of("\"absent\":{\"Bus\":\"\"}", "\"absent\":{\"Bus[]\":\"default\"}",
-                "\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}", "\"unless\":{\"Bus\":[]}")) {
+        // A member read as an ARN of a type with no format or of more than one variable.
+        for (String bad : List.of("\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}",
+                "\"unless\":{\"Bus\":[]}")) {
             assertThrows(IllegalStateException.class, () -> parse(document("\"arnFormats\":{\"a\":{"
                     + "\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
                     + "\"part\":\"arn:${Partition}:a:${Region}:${Account}:part/${ThingName}/${PartId}\"}}",
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)),
-                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null,
-                Map.of(), false, null)),
+                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "thing"), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
-                        + "\"unless\":{\"Bus\":[\"default\"]},\"absent\":{\"Bus\":\"default\"},"
-                        + "\"arnOf\":{\"Bus\":\"thing\"}}")).operations().get("a:Op"));
+                        + "\"unless\":{\"Bus\":[\"default\"]},\"arnOf\":{\"Bus\":\"thing\"}}"))
+                        .operations().get("a:Op"));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Names", true)), Map.of(),
-                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false, null)),
+                        Map.of(), Map.of(), new Member("registryId", false), Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
     }
@@ -323,9 +413,15 @@ class RequestResourceMembersTest {
         // The resource a create acting on no type makes, of its variables alone; and none for a create acting on one.
         String makes = "\"makes\":[{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}}]";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
-                Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, null)),
+                Map.of(), Map.of(), null, Map.of(), false, null)),
                 parseUnchecked("{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"types\":[],"
                         + "\"resources\":[]," + makes + "}}}").makes().get("a:Op"));
+        // So does a create acting on other types alone (Glue's CreateConnection, on its connection type).
+        String kinds = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                + "\"kind\":\"arn:${Partition}:a:${Region}:${Account}:kind/${KindName}\"}}";
+        assertEquals(List.of("thing"), parseUnchecked("{\"namespaces\":{\"a\":[]}," + kinds
+                + ",\"operations\":{\"a:Op\":{\"types\":[\"kind\"],\"resources\":[]," + makes + "}}}")
+                .makes().get("a:Op").getFirst().types());
         for (String bad : List.of("\"types\":[\"thing\"],\"resources\":[]," + makes, "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"type\":\"thing\",\"fill\":{},\"made\":true}]", "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"types\":[\"thing\"],\"arn\":\"ThingArn\"}]")) {
@@ -335,12 +431,39 @@ class RequestResourceMembersTest {
         // A field of each of a map's structure values fills a variable, one value for each.
         Member each = new Member("A", false, new Member("Name", false), true);
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(), Map.of(),
-                Map.of(), null, null, Map.of(), false, null)),
+                null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A{}.Name\"}}"))
                         .operations().get("a:Op"));
         assertEquals("A{}.Name", each.path());
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A{}.B{}.Name\"}}")));
+    }
+
+    /**
+     * A member filling the one variable of another type's format names that type's default for a request leaving it
+     * out ({@code defaults}: an ECS service on the default cluster), and a type its service finds may be found by each
+     * value of one list member; a default for a member filling no such variable, or none, and a list beside another
+     * member to find by, fail to load.
+     */
+    @Test
+    void aDefaultAMemberNamesWhenLeftOutAndAFindByOneListAreReadAsWritten() {
+        String formats = "\"arnFormats\":{\"a\":{"
+                + "\"cluster\":\"arn:${Partition}:a:${Region}:${Account}:cluster/${ClusterName}\","
+                + "\"service\":\"arn:${Partition}:a:${Region}:${Account}:service/${ClusterName}/${ServiceName}\"}}";
+        String fill = "\"fill\":{\"ClusterName\":\"cluster\",\"ServiceName\":\"services[]\"}";
+        assertEquals(Map.of("cluster", "cluster"), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill
+                + ",\"defaults\":{\"cluster\":\"cluster\"}}")).operations().get("a:Op").getFirst().defaults());
+        assertEquals(Map.of(), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill + "}"))
+                .operations().get("a:Op").getFirst().defaults());
+        for (String bad : List.of("{\"services[]\":\"cluster\"}", "{\"other\":\"cluster\"}", "{\"cluster\":\"service\"}",
+                "{\"cluster\":\"none\"}", "{}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"service\"," + fill
+                    + ",\"defaults\":" + bad + "}")), bad);
+        }
+        assertEquals(List.of(new Member("names", true)), parseUnchecked(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\"]}")).operations().get("a:Op").getFirst().find());
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\",\"cluster\"]}")));
     }
 
     /**
@@ -361,11 +484,14 @@ class RequestResourceMembersTest {
                 .map(resource -> DynamicTest.dynamicTest(operation.getKey() + " " + resource, () -> {
                     String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
                     String name = operation.getKey().substring(namespace.length() + 1);
-                    ArnFormat format = table.formats().get(namespace).get(resource.types().getFirst());
+                    String type = exampleType(resource, operation.getValue());
+                    ArnFormat format = table.formats().get(namespace).get(type);
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
                     String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
-                            : expected(format.format(), resource, account) + (format.minted() ? "/*" : "");
+                            : expected(format.format(), resource, account) + (format.minted() ? "/*"
+                                    : format.mintedSuffix() != null && resource.fill().size() == 1
+                                    ? format.mintedSuffix() : "");
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
@@ -396,11 +522,14 @@ class RequestResourceMembersTest {
                         }
                         String sent = where == null ? value : "other";
                         put(body, member, sent);
-                        form.append('&').append(parameter(member)).append('=').append(encoded(sent));
+                        String ec2Wire = table.ec2Query().getOrDefault(operation.getKey(), Map.of()).get(member);
+                        String parameter = ec2Wire == null ? parameter(member)
+                                : ec2Wire + (member.list() ? ".1" : "");
+                        form.append('&').append(parameter).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
                             .filter(other -> (other == resource || named(other) || sharesAMember(other, given)
-                                    || fillsFromTheArn(other, resource)
+                                    || fillsFromTheArn(other, resource, type)
                                     || !other.find().isEmpty() && other.find().equals(resource.find())
                                     && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
                                     && (other.endpoint() == null || resource.endpoint() == null
@@ -422,11 +551,12 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * Each resource a create whose action acts on no type makes, from a request naming it, is where its tags go, and
-     * the create itself names none.
+     * Each resource a create whose action acts on no type, or on other types alone, makes, from a request naming it,
+     * is where its tags go, and a create acting on no type names nothing itself, unless {@code MEASURED} gives it the
+     * resource AWS checks (EKS's {@code CreateCluster}).
      */
     @TestFactory
-    Stream<DynamicTest> everyResourceACreateActingOnNoTypeMakesIsWhereItsTagsGo() {
+    Stream<DynamicTest> everyResourceACreateMakesIsWhereItsTagsGo() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         return table.makes().entrySet().stream().map(operation -> DynamicTest.dynamicTest(operation.getKey(), () -> {
             String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
@@ -446,8 +576,11 @@ class RequestResourceMembersTest {
                     "000000000000");
             assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
                     "aws", "us-east-1", "000000000000", labels), body + " " + labels);
-            assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
-                    "us-east-1", "000000000000", null, labels));
+            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()
+                    && table.operations().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
+                assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
+                        "us-east-1", "000000000000", null, labels));
+            }
         }));
     }
 
@@ -462,6 +595,15 @@ class RequestResourceMembersTest {
                     String parent = example(table.formats().get(namespace).get(created.parent()).format());
                     String child = example(table.formats().get(namespace).get(created.type()).format());
                     String expected = child.substring(0, child.length() - 1) + "*";
+                    // A REST request carrying the parent's ARN in its path names it there alone (S3 Tables'
+                    // CreateTable, under /tables/{tableBucketARN}/...), as its handler reads it.
+                    String where = table.located().getOrDefault(operation.getKey(), Map.of()).get(created.arn().name());
+                    if (where != null && where.startsWith("{")) {
+                        assertTrue(RequestResources.created(operation.getKey(), null, json("{}"), "aws", "us-east-1",
+                                "000000000000", Map.of(where.substring(1, where.length() - 1), parent))
+                                .contains(expected), where + " " + parent);
+                        return;
+                    }
                     ObjectNode body = MAPPER.createObjectNode();
                     if (created.arn().list()) {
                         body.putArray(created.arn().name()).add(parent);
@@ -480,12 +622,25 @@ class RequestResourceMembersTest {
     /**
      * Whether a resource fills its variables from the ARN the other's member holds, as that ARN's type's variable alone
      * (a permission set made in the instance an {@code InstanceArn} names), so a request naming the other by an ARN of
-     * its first type, which the test gives, names it too.
+     * the type the test gives names it too.
      */
-    private static boolean fillsFromTheArn(Resource resource, Resource other) {
+    private static boolean fillsFromTheArn(Resource resource, Resource other, String type) {
         return other.arn() != null && !resource.fill().isEmpty()
                 && resource.fill().values().stream().allMatch(other.arn()::equals)
-                && other.types().getFirst().equals(resource.arnOf().get(other.arn().path()));
+                && type.equals(resource.arnOf().get(other.arn().path()));
+    }
+
+    /**
+     * The type of the ARN the test gives a resource's member: for an ARN member that also fills a resource of one of
+     * the types it is read as, that resource's type, as the member holds one of those (OAM's {@code CreateLink} reads
+     * its {@code SinkIdentifier} as a link or a sink and fills the sink from it); else its first type.
+     */
+    private static String exampleType(Resource resource, List<Resource> resources) {
+        return resource.arn() == null ? resource.types().getFirst() : resources.stream()
+                .filter(other -> other.arn() == null && other.fill().containsValue(resource.arn())
+                        && !other.arnOf().containsKey(resource.arn().path())
+                        && resource.types().contains(other.types().getFirst()))
+                .map(other -> other.types().getFirst()).findFirst().orElse(resource.types().getFirst());
     }
 
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
@@ -529,13 +684,23 @@ class RequestResourceMembersTest {
      * {@code ""}).
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
-        if (resource.arn() != null || resource.fill().values().stream()
+        // A resource its service finds by several members is found only from a request giving every one of them.
+        if (!resource.find().isEmpty() && !given.keySet().containsAll(resource.find())) {
+            return false;
+        }
+        if (resource.arn() != null || Stream.concat(resource.fill().values().stream(), resource.find().stream())
                 .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
                         || !AwsArnUtils.isArn(given.get(member))))) {
             return false;
         }
         Map<String, String> values = given.entrySet().stream()
                 .collect(Collectors.toMap(entry -> entry.getKey().name(), Map.Entry::getValue, (a, b) -> a));
+        // Of a pair whose formats differ by one variable, the one without it applies when its member is absent (the
+        // test's services give no default), the other when the request gives it.
+        if (resource.whenDefault().keySet().stream().anyMatch(values::containsKey)
+                || resource.unlessDefault().keySet().stream().anyMatch(member -> !values.containsKey(member))) {
+            return false;
+        }
         return resource.when().entrySet().stream()
                 .allMatch(when -> when.getValue().contains(values.getOrDefault(when.getKey(), "")))
                 && resource.unless().entrySet().stream()

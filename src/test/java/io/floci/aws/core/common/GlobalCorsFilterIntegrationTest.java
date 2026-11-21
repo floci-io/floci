@@ -1,15 +1,14 @@
 package io.floci.aws.core.common;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -17,7 +16,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
-@TestProfile(GlobalCorsFilterIntegrationTest.CorsProfile.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class GlobalCorsFilterIntegrationTest {
 
     @BeforeAll
@@ -186,16 +185,5 @@ class GlobalCorsFilterIntegrationTest {
         .then()
             .statusCode(403)
             .header("Access-Control-Allow-Origin", nullValue());
-    }
-
-    public static final class CorsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.security.extra-cors-allowed-origins", "http://localhost:3000,https://ui.example.test",
-                    "floci.security.extra-cors-allowed-headers", "x-added-header",
-                    "floci.security.extra-cors-expose-headers", "x-visible-header",
-                    "floci.security.cors-allow-private-network", "true");
-        }
     }
 }

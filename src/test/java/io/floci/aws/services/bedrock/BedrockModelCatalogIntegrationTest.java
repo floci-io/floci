@@ -60,6 +60,19 @@ class BedrockModelCatalogIntegrationTest {
     }
 
     @Test
+    void novaLiteAdvertisesVideoInputOnGetAndList() {
+        List<String> expected = List.of("TEXT", "IMAGE", "VIDEO");
+        try (BedrockClient client = client("us-east-1")) {
+            assertEquals(expected, client.getFoundationModel(request -> request.modelIdentifier(NOVA_LITE))
+                    .modelDetails().inputModalitiesAsStrings());
+            FoundationModelSummary summary = client.listFoundationModels(request -> request.byProvider("Amazon"))
+                    .modelSummaries().stream().filter(model -> NOVA_LITE.equals(model.modelId())).findFirst()
+                    .orElseThrow();
+            assertEquals(expected, summary.inputModalitiesAsStrings());
+        }
+    }
+
+    @Test
     void listFoundationModelsOnlyListsModelsServedInTheRegion() {
         try (BedrockClient us = client("us-east-1"); BedrockClient eu = client("eu-west-1")) {
             assertTrue(modelIds(us).contains(LLAMA));
@@ -133,7 +146,7 @@ class BedrockModelCatalogIntegrationTest {
         try (BedrockClient client = client("eu-central-1")) {
             FoundationModelSummary novaMicro = client.listFoundationModels(request -> { }).modelSummaries().stream()
                     .filter(model -> model.modelId().equals(NOVA_MICRO)).findFirst().orElseThrow();
-            assertTrue(novaMicro.inferenceTypesSupported().isEmpty(),
+            assertEquals(List.of("INFERENCE_PROFILE"), novaMicro.inferenceTypesSupportedAsStrings(),
                     "Nova Micro is reachable from eu-central-1 only through eu." + NOVA_MICRO);
 
             List<String> onDemand = client.listFoundationModels(request -> request

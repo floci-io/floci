@@ -4,6 +4,8 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -31,11 +33,22 @@ class RdsDataConnectionFactory {
         return DriverManager.getConnection(url, props);
     }
 
+    /** The longest database name the RDS Data API accepts ({@code DbName}, at most 64 characters). */
+    static final int MAX_DATABASE_NAME_LENGTH = 64;
+
+    /**
+     * The JDBC URL for {@code database}, the name percent-encoded so that both drivers read back exactly
+     * the name given and nothing in it can start, add or override a connection property, as AWS passes
+     * the name to the engine as an identifier. A name the engine does not know is then the engine's
+     * error. {@link URLEncoder} writes a literal {@code +} as {@code %2B} and a space as {@code +}, which
+     * is replaced by {@code %20}: both drivers decode a bare {@code +} in the path as a space.
+     */
     static String buildUrl(DatabaseEngine engine, String host, int port, String database) {
+        String path = URLEncoder.encode(database, StandardCharsets.UTF_8).replace("+", "%20");
         return switch (engine) {
-            case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + database
+            case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + path
                     + "?useSSL=false&allowPublicKeyRetrieval=true";
-            case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + database
+            case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + path
                     + "?sslmode=disable";
             case SQLSERVER -> throw new IllegalArgumentException(
                     "RDS Data API is not supported for SQL Server");

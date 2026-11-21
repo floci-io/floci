@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -301,25 +302,41 @@ public class PipesService implements TagHandler, ResourceProvider {
         return "pipes";
     }
 
+    /**
+     * Gives the pipe a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
     @Override
-    public void tagResource(String region, String arn, Map<String, String> tags) {
+    public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
         Pipe pipe = findByArn(arn, region);
-        if (pipe.getTags() == null) {
-            pipe.setTags(new HashMap<>());
-        }
-        pipe.getTags().putAll(tags);
+        Map<String, String> merged = new HashMap<>(pipe.getTags() != null ? pipe.getTags() : Map.of());
+        merged.putAll(tags);
+        pipe.setTags(merged);
         String key = region + "::" + pipe.getName();
         storage.put(key, pipe);
     }
 
+    /** Gives the pipe a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
     @Override
-    public void untagResource(String region, String arn, List<String> tagKeys) {
+    public synchronized void untagResource(String region, String arn, List<String> tagKeys) {
         Pipe pipe = findByArn(arn, region);
         if (pipe.getTags() != null && tagKeys != null) {
-            tagKeys.forEach(pipe.getTags()::remove);
+            Map<String, String> remaining = new HashMap<>(pipe.getTags());
+            tagKeys.forEach(remaining::remove);
+            pipe.setTags(remaining);
         }
         String key = region + "::" + pipe.getName();
         storage.put(key, pipe);
+    }
+
+    /**
+     * The tags of the pipe whose ARN is {@code arn} in {@code account}, read in place under the key the handlers read,
+     * its name in the ARN's Region, and matched on the whole ARN it records; none when there is no such pipe.
+     */
+    Map<String, String> pipeTagsInAccount(String account, String arn, String name) {
+        return AccountAwareStorageBackend.readInAccount(storage, account, AwsArnUtils.parse(arn).region() + "::" + name)
+                .filter(pipe -> arn.equals(pipe.getArn()))
+                .map(Pipe::getTags).filter(Objects::nonNull).orElse(Map.of());
     }
 
     @Override

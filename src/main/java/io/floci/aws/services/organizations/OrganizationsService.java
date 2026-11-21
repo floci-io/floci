@@ -10,6 +10,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.iam.PrincipalOrganization;
 import io.floci.aws.services.iam.RootAccessOrganization;
 import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.organizations.model.CreateAccountStatus;
@@ -60,7 +61,8 @@ import java.util.regex.Pattern;
  * @see <a href="https://docs.aws.amazon.com/organizations/latest/APIReference/Welcome.html">AWS Organizations API Reference</a>
  */
 @ApplicationScoped
-public class OrganizationsService implements ScpProvider, RootAccessOrganization {
+public class OrganizationsService implements ScpProvider, RootAccessOrganization,
+        PrincipalOrganization {
 
     private static final Logger LOG = Logger.getLogger(OrganizationsService.class);
 
@@ -694,7 +696,21 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         return requireAccount(requireOrganizationForCaller(callerAccountId), accountId);
     }
 
-    public Optional<OrganizationAccount> findAccountForPortal(String accountId) {
+    /**
+     * Renames an account in the organization that holds it, as Account Management's {@code PutAccountName} does,
+     * so {@code DescribeAccount} and {@code ListAccounts} answer the new name. Does nothing for an account in no
+     * organization.
+     */
+    public void renameAccount(String accountId, String name) {
+        findOrganizationForAccount(accountId).ifPresent(organization -> accountIn(organization, accountId)
+                .ifPresent(account -> {
+                    account.setName(name);
+                    accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+                }));
+    }
+
+    /** The record of an account in the organization that holds it, empty for an account in no organization. */
+    public Optional<OrganizationAccount> findAccount(String accountId) {
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             return Optional.empty();
         }
@@ -1120,6 +1136,65 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             }
         }
         return levels.isEmpty() ? null : levels;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Answered for any account the organization holds, the management account included: it is
+     * a member of its own organization, so its principals carry the keys too. The lookup is not
+     * scoped to a caller, the account asked about being the one a policy is evaluated for rather
+     * than the one that called.</p>
+     *
+     * <p>It is read on the authorization path, so it reads as little as it can: an emulator
+     * holding no organization at all answers from the store's own emptiness, and an account that
+     * is in one is found once and carries its own parent into the path rather than being looked
+     * up again.</p>
+     */
+    @Override
+    public Optional<OrganizationContext> organizationContextOf(String accountId) {
+        if (accountId == null || accountId.isBlank() || organizations.isEmptyInAllAccounts()) {
+            return Optional.empty();
+        }
+        OrganizationAccount member = accounts.scanAllAccounts().stream()
+                .filter(account -> accountId.equals(account.getId()))
+                .findFirst()
+                .orElse(null);
+        Optional<Organization> organization = member == null
+                ? organizationManagedBy(accountId)
+                : organizationById(member.getOrganizationId());
+        return organization.map(found -> new OrganizationContext(
+                found.getId(), found.getMasterAccountId(), parentPath(found, member)));
+    }
+
+    /** The organization this account manages, which is the one holding no member row for it. */
+    private Optional<Organization> organizationManagedBy(String accountId) {
+        return organizations.scanAllAccounts().stream()
+                .filter(organization -> accountId.equals(organization.getMasterAccountId()))
+                .findFirst();
+    }
+
+    /**
+     * The path an account's principals carry, which stops at the account's parent rather than at
+     * the account: the published condition for the key compares a path ending in an OU. An
+     * account the organization holds no row for is at its root, which is where the management
+     * account sits.
+     *
+     * <p>A chain that cannot be walked, an account naming a parent the organization no longer
+     * holds, is no path rather than a failed call: the caller asked for an authorization decision,
+     * and a key with no value is answered by every condition written on it. {@link
+     * #effectiveScpLevels} answers an organization it cannot resolve the same way.
+     */
+    private String parentPath(Organization organization, OrganizationAccount member) {
+        String rootId = organization.getRoot().getId();
+        String parentId = member == null || member.getParentId() == null || member.getParentId().isBlank()
+                ? rootId : member.getParentId();
+        try {
+            return organizationPath(organization.getId(), rootId, parentId,
+                    id -> parentOf(organization, id));
+        } catch (AwsException e) {
+            return null;
+        }
     }
 
     // ──────────────────────────── Tags ────────────────────────────
@@ -1593,6 +1668,12 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                 .toList();
     }
 
+    private Optional<OrganizationAccount> accountIn(Organization organization, String accountId) {
+        return accountsIn(organization).stream()
+                .filter(account -> accountId.equals(account.getId()))
+                .findFirst();
+    }
+
     private List<OrganizationalUnit> organizationalUnitsIn(Organization organization) {
         return organizationalUnits.scanAllAccounts().stream()
                 .filter(ou -> organization.getId().equals(ou.getOrganizationId()))
@@ -1623,9 +1704,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             throw invalidInput("Account id must be 12 digits.");
         }
-        return accountsIn(organization).stream()
-                .filter(account -> accountId.equals(account.getId()))
-                .findFirst()
+        return accountIn(organization, accountId)
                 .orElseThrow(() -> new AwsException("AccountNotFoundException",
                         "We can't find an AWS account with the AccountId " + accountId + ".", 400));
     }

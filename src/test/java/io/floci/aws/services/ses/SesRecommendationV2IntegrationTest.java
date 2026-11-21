@@ -27,8 +27,7 @@ import static org.hamcrest.Matchers.nullValue;
 class SesRecommendationV2IntegrationTest {
 
     private static final String REGION = "eu-south-2";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor(REGION);
     private static final String DOMAIN = "recommend-it.floci.test";
     private static final String ARN = "arn:aws:ses:" + REGION + ":000000000000:identity/" + DOMAIN;
     private static final String PATH = "/v2/email/vdm/recommendations";
@@ -36,7 +35,7 @@ class SesRecommendationV2IntegrationTest {
     private static String zoneId;
 
     private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
+        return SesV2Requests.v2(AUTH);
     }
 
     private static void addTxtRecord(String name, String value) {

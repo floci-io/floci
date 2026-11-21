@@ -172,6 +172,22 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     }
 
     @Override
+    public TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                       List<AttributeDefinition> attributeDefinitions, boolean onDemand,
+                                       ThroughputSpec throughput, List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                       List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return RequestScopes.callAs(scope.accountId(), () -> tableService.createTable(tableName, keySchema,
+                attributeDefinitions, onDemand, throughput, globalSecondaryIndexes, localSecondaryIndexes,
+                scope.region()));
+    }
+
+    @Override
+    public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
+        return RequestScopes.callAs(scope.accountId(),
+                () -> tableService.updateThroughput(tableName, change, scope.region()));
+    }
+
+    @Override
     public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                                List<AttributeDefinition> attributeDefinitions,
                                                List<GlobalSecondaryIndex> globalSecondaryIndexes,
@@ -262,6 +278,11 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public void untagResource(Scope scope, String resourceArn, List<String> tagKeys) {
         RequestScopes.runAs(scope.accountId(),
                 () -> dynamoDbService.untagResource(resourceArn, tagKeys, scope.region()));
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        return dynamoDbService.storedTags(arn);
     }
 
     @Override

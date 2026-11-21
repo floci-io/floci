@@ -7,6 +7,7 @@ import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
 import io.floci.aws.services.redshift.container.RedshiftContainerManager;
 import io.floci.aws.services.redshift.model.ClusterParameterGroup;
 import io.floci.aws.services.redshift.model.Parameter;
+import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -1144,15 +1145,14 @@ public class RedshiftOperationsTest {
     }
 
 
+    /** {@link #redshift} signed for {@code region}. */
+    private static Response redshiftIn(String region, String action, String... keyValues) {
+        return QueryRequests.request("test", region, "redshift", action, keyValues)
+                .contentType("application/x-www-form-urlencoded").when().post("/");
+    }
+
     private static Response redshift(String action, String... keyValues) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_HEADER)
-            .formParam("Action", action);
-        for (int i = 0; i < keyValues.length; i += 2) {
-            request.formParam(keyValues[i], keyValues[i + 1]);
-        }
-        return request.when().post("/");
+        return redshiftIn("us-east-1", action, keyValues);
     }
 
     private static void assertFault(Response response, int status, String code) {
@@ -1233,8 +1233,10 @@ public class RedshiftOperationsTest {
         assertFalse(redshift("DescribeClusters", "ClusterIdentifier", "cluster-copy").asString()
                 .contains("ClusterSnapshotCopyStatus"));
 
-        // A grant named on enable is reported back.
-        assertEquals(200, redshift("CreateSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
+        // A grant named on enable is reported back. It is made in the destination Region, as on AWS: the source
+        // Region has no grant of that name.
+        assertEquals(200, redshiftIn("us-west-2", "CreateSnapshotCopyGrant",
+                "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
         assertEquals(200, redshift("EnableSnapshotCopy", "ClusterIdentifier", "cluster-copy",
                 "DestinationRegion", "us-west-2", "RetentionPeriod", "3",
                 "ManualSnapshotRetentionPeriod", "5", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
@@ -1244,13 +1246,16 @@ public class RedshiftOperationsTest {
         assertEquals(5, copy.getInt("ClusterSnapshotCopyStatus.ManualSnapshotRetentionPeriod"));
 
         // A grant a cluster's enabled copy still names cannot be deleted (InvalidSnapshotCopyGrantStateFault).
-        assertFault(redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
+        assertFault(redshiftIn("us-west-2", "DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
                 400, "InvalidSnapshotCopyGrantStateFault");
+        assertFault(redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
+                400, "SnapshotCopyGrantNotFoundFault");
         assertEquals(200, redshift("DisableSnapshotCopy", "ClusterIdentifier", "cluster-copy").statusCode());
 
         assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-copy",
                 "SkipFinalClusterSnapshot", "true").statusCode());
-        assertEquals(200, redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
+        assertEquals(200, redshiftIn("us-west-2", "DeleteSnapshotCopyGrant",
+                "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
     }
 
     /**
@@ -1404,10 +1409,12 @@ public class RedshiftOperationsTest {
 
         AccountAwareStorageBackend<ClusterParameterGroup> backend = storageFactory.create(
                 "redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
-        assertTrue(backend.get(name).isEmpty());
+        // Parameter groups are Regional: stored under their Region, us-east-1 here.
+        String key = RedshiftService.regionalKey("us-east-1", name);
+        assertTrue(backend.get(key).isEmpty());
         ClusterParameterGroup legacy = new ClusterParameterGroup(name, "redshift-1.0", "legacy custom group");
         legacy.setParameters(List.of(new Parameter("max_cursor_result_set_size", "1000")));
-        backend.put(name, legacy);
+        backend.put(key, legacy);
         backend.flush();
         try {
             redshift("DescribeClusterParameterGroups", "ParameterGroupName", name).then().statusCode(200)
@@ -1426,7 +1433,7 @@ public class RedshiftOperationsTest {
                     .body(containsString("<Source>engine-default</Source>"));
             redshift("DeleteClusterParameterGroup", "ParameterGroupName", name).then().statusCode(200);
         } finally {
-            backend.delete(name);
+            backend.delete(key);
             backend.flush();
         }
         redshift("DescribeClusterParameterGroups", "ParameterGroupName", name).then().statusCode(200)

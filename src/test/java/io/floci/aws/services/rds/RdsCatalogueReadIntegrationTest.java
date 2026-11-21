@@ -63,6 +63,11 @@ class RdsCatalogueReadIntegrationTest {
                 .formParam("DefaultOnly", "true")
         .when().post("/").then().statusCode(200)
                 .body(VERSIONS + ".EngineVersion", equalTo("18.4"));
+        query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("EngineVersion", "18.6")
+        .when().post("/").then().statusCode(200)
+                .body(VERSIONS + ".size()", equalTo(1))
+                .body(VERSIONS + ".DBParameterGroupFamily", equalTo("aurora-postgresql18"))
+                .body(VERSIONS + ".MajorEngineVersion", equalTo("18"));
         // Without a version, DefaultOnly gives the version Floci creates when none is named.
         query("DescribeDBEngineVersions").formParam("Engine", "aurora-mysql").formParam("DefaultOnly", "true")
         .when().post("/").then().statusCode(200)
@@ -79,7 +84,7 @@ class RdsCatalogueReadIntegrationTest {
                 .body(not(containsString("<DBEngineVersion>")));
         query("DescribeDBEngineVersions").formParam("MaxRecords", "20")
         .when().post("/").then().statusCode(200)
-                .body(VERSIONS + ".size()", equalTo(19))
+                .body(VERSIONS + ".size()", equalTo(20))
                 .body(not(containsString("<Marker>")));
     }
 
@@ -102,6 +107,16 @@ class RdsCatalogueReadIntegrationTest {
                 .body(VERSIONS + ".SupportsReadReplica", equalTo("false"))
                 .body(containsString("<SupportedFeatureNames></SupportedFeatureNames>"))
                 .body(VERSIONS + ".SupportsGlobalDatabases", equalTo("true"));
+        for (String engine : new String[]{"mysql", "mariadb"}) {
+            query("DescribeDBEngineVersions").formParam("Engine", engine).formParam("DefaultOnly", "true")
+            .when().post("/").then()
+                    .statusCode(200)
+                    .body(VERSIONS + ".SupportsReadReplica", equalTo("true"));
+        }
+        query("DescribeDBEngineVersions").formParam("Engine", "sqlserver-se").formParam("DefaultOnly", "true")
+        .when().post("/").then()
+                .statusCode(200)
+                .body(VERSIONS + ".SupportsReadReplica", equalTo("false"));
         query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("DefaultOnly", "true")
         .when().post("/").then()
                 .statusCode(200)
@@ -113,7 +128,7 @@ class RdsCatalogueReadIntegrationTest {
     void engineVersionsPageByOffset() {
         query("DescribeDBEngineVersions").formParam("Marker", "15")
         .when().post("/").then().statusCode(200)
-                .body(VERSIONS + ".size()", equalTo(4))
+                .body(VERSIONS + ".size()", equalTo(5))
                 .body(not(containsString("<Marker>")));
         query("DescribeDBEngineVersions").formParam("Marker", "next")
         .when().post("/").then().statusCode(400)

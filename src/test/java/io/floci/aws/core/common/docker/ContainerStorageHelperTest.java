@@ -2,7 +2,9 @@ package io.floci.aws.core.common.docker;
 
 import io.floci.aws.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +19,23 @@ import static org.mockito.Mockito.when;
 
 class ContainerStorageHelperTest {
 
+    /** Inside a container the host paths are left to the Docker daemon; on the host each is created. */
+    @Test
+    void hostDirsAreCreatedOnlyWhenFlociRunsOnTheDockerHost(@TempDir Path directory) {
+        Path data = directory.resolve("influxdb").resolve("data");
+        Path config = directory.resolve("influxdb").resolve("config");
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        ContainerStorageHelper.ensureHostDir(containerDetector, data.toString(), config.toString());
+        assertFalse(Files.exists(directory.resolve("influxdb")));
+
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        ContainerStorageHelper.ensureHostDir(containerDetector, data.toString(), config.toString());
+        assertTrue(Files.isDirectory(data));
+        assertTrue(Files.isDirectory(config));
+    }
+
     @Test
     void resourceNamesCarryThisEmulatorsPrefix() {
         assertEquals("floci-aws-rds-db1", ContainerStorageHelper.resourceName("rds", null, "db1"));
@@ -24,6 +43,16 @@ class ContainerStorageHelperTest {
         assertEquals("floci-aws-opensearch-domain1",
                 ContainerStorageHelper.resourceName(config(""), "opensearch", null, "domain1"));
         assertEquals("floci-aws-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "ec2-i-123"));
+    }
+
+    @Test
+    void scopedResourceNamesPreserveNamespaceAndExistingVolumeIdentity() {
+        EmulatorConfig config = config("run-one");
+        assertEquals("floci-aws-run-one-docdb-111111111111-eu-west-1-shared",
+                ContainerStorageHelper.resourceName(config, "docdb", null, "shared", "111111111111", "eu-west-1"));
+        assertEquals("floci-aws-run-one-docdb-existing-volume",
+                ContainerStorageHelper.resourceName(config, "docdb", "existing-volume", "shared",
+                        "111111111111", "eu-west-1"));
     }
 
     @Test

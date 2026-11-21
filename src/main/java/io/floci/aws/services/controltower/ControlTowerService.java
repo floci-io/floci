@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.UuidShapes;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.controltower.model.EnabledBaseline;
@@ -200,6 +202,20 @@ public class ControlTowerService {
         String operationIdentifier = UUID.randomUUID().toString();
         recordOperation(accountId, region, operationIdentifier, OP_TYPE_CREATE);
         return new CreateLandingZoneResult(arn, operationIdentifier);
+    }
+
+    /**
+     * The tags of the landing zone whose ARN is {@code arn}, held for {@code accountId} in {@code region}: read in
+     * place, a landing zone stored before storage was account-aware included, and matched on the whole ARN. Nothing is
+     * seeded here, so a Region whose landing zone was never read holds no tags. {@link ControlTowerStoredResourceArns}
+     * asks it.
+     */
+    public Map<String, String> storedLandingZoneTags(String accountId, String region, String arn) {
+        return AccountAwareStorageBackend.readInAccount(landingZoneStore, accountId, region)
+                .filter(landingZone -> arn.equals(landingZone.getArn()))
+                .map(LandingZone::getTags)
+                .<Map<String, String>>map(LinkedHashMap::new)
+                .orElse(Map.of());
     }
 
     public synchronized Map<String, String> listLandingZoneTags(String accountId, String region, String arn) {
@@ -731,8 +747,7 @@ public class ControlTowerService {
     }
 
     private static void validateOperationIdentifier(String operationIdentifier) {
-        if (operationIdentifier == null
-                || !operationIdentifier.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(operationIdentifier)) {
             throw validation("operationIdentifier must be a UUID.");
         }
     }

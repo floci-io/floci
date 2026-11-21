@@ -1,11 +1,18 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.iam.IamClient;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -327,6 +334,98 @@ class CloudFormationIamInlinePolicyIntegrationTest {
     }
 
     @Test
+    void managedPolicyAttachesUsersAndGroups() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String userName = "managed-policy-user-" + suffix;
+        String groupName = "managed-policy-group-" + suffix;
+        String policyName = "managed-principal-policy-" + suffix;
+        String policyArn = "arn:aws:iam::000000000000:policy/" + policyName;
+        String stackName = "cfn-managed-principals-" + suffix;
+
+        String template = """
+                {
+                  "Resources": {
+                    "ManagedPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Users": ["%s"],
+                        "Groups": ["%s"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(policyName, userName, groupName);
+        try (IamClient iam = AwsTestClients.create(IamClient.builder(), "test", Region.US_EAST_1)) {
+            iam.createUser(request -> request.userName(userName));
+            iam.createGroup(request -> request.groupName(groupName));
+
+            createStack(stackName, template);
+            assertStackComplete(stackName);
+
+            assertAll(
+                    () -> assertEquals(List.of(policyArn), iam.listAttachedUserPolicies(request ->
+                                    request.userName(userName)).attachedPolicies().stream()
+                            .map(policy -> policy.policyArn()).toList()),
+                    () -> assertEquals(List.of(policyArn), iam.listAttachedGroupPolicies(request ->
+                                    request.groupName(groupName)).attachedPolicies().stream()
+                            .map(policy -> policy.policyArn()).toList()));
+
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+
+            assertAll(
+                    () -> assertTrue(iam.listAttachedUserPolicies(request ->
+                            request.userName(userName)).attachedPolicies().isEmpty()),
+                    () -> assertTrue(iam.listAttachedGroupPolicies(request ->
+                            request.groupName(groupName)).attachedPolicies().isEmpty()));
+        }
+    }
+
+    @Test
+    void managedPolicyAttachesSameStackUserRefAndDeletesBeforeUser() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String userName = "managed-ref-user-" + suffix;
+        String policyName = "managed-ref-policy-" + suffix;
+        String policyArn = "arn:aws:iam::000000000000:policy/" + policyName;
+        String stackName = "cfn-managed-user-ref-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "User": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {"UserName": "%s"}
+                    },
+                    "ManagedPolicy": {
+                      "Type": "AWS::IAM::ManagedPolicy",
+                      "Properties": {
+                        "ManagedPolicyName": "%s",
+                        "PolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]
+                        },
+                        "Users": [{"Ref": "User"}]
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName, policyName);
+
+        try (IamClient iam = AwsTestClients.create(IamClient.builder(), "test", Region.US_EAST_1)) {
+            createStack(stackName, template);
+            assertStackComplete(stackName);
+            assertEquals(List.of(policyArn), iam.listAttachedUserPolicies(request ->
+                            request.userName(userName)).attachedPolicies().stream()
+                    .map(policy -> policy.policyArn()).toList());
+
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+        }
+    }
+
+    @Test
     void deletingManagedPolicyDetachesItFromSurvivingRole() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String roleName = "managed-policy-role-" + suffix;
@@ -364,14 +463,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         createStack(stackName, template);
         assertStackComplete(stackName);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DeleteStack")
-            .formParam("StackName", stackName)
-        .when().post("/").then().statusCode(200);
-
-        awaitManagedPolicyGone(policyArn);
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -751,22 +843,6 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         }
         throw new AssertionError("Timed out waiting for inline policy " + policyName
                 + " to be detached from role " + roleName);
-    }
-
-    private static void awaitManagedPolicyGone(String policyArn) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            int status = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", IAM_AUTH)
-                .formParam("Action", "GetPolicy")
-                .formParam("PolicyArn", policyArn)
-            .when().post("/").then().extract().statusCode();
-            if (status == 404) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        throw new AssertionError("Timed out waiting for managed policy " + policyArn + " to be deleted");
     }
 
     private static void assertFailedResource(String stackName, String logicalId,

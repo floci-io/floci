@@ -1,45 +1,59 @@
 package io.floci.aws.services.emrserverless;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
+import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunRecord;
+import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.MonitoringConfiguration;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
+import io.floci.aws.services.emrserverless.model.SchedulerConfiguration;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
+import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -49,6 +63,8 @@ class EmrServerlessJobRunServiceTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/emr-serverless-job";
+    private static final String DIGEST = "sha256:" + "a".repeat(64);
+    private static final String OTHER_DIGEST = "sha256:" + "b".repeat(64);
 
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private EmrServerlessService applications;
@@ -90,6 +106,66 @@ class EmrServerlessJobRunServiceTest {
         request.setMode(mode);
         request.setExecutionTimeoutMinutes(executionTimeoutMinutes);
         return request;
+    }
+
+    @Test
+    void runsStartedWithinTheSameMillisecondListNewestFirst() {
+        EmrServerlessJobRunService service = new EmrServerlessJobRunService(store, applications, iamService,
+                new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, 0,
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        List<String> started = new ArrayList<>();
+        for (int run = 0; run < 12; run++) {
+            started.add(service.startJobRun(applicationId, request(null, null)).getJobRunId());
+        }
+
+        List<String> listed = service.listJobRuns(applicationId, null, null, null, null, null, null).items().stream()
+                .map(JobRunSummary::getId).toList();
+
+        assertEquals(started.reversed(), listed);
+    }
+
+    @Test
+    void aRetryIsTheOriginalRunWhereTheRunWouldHoldTheSameAndConflictsWhereItWouldNot() {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest first = request(null, 720L);
+        first.setTags(Map.of());
+        JobRun original = service.startJobRun(applicationId, first);
+        // The run holds the default timeout and no tags either way.
+        StartJobRunRequest retry = request(null, null);
+        retry.setClientToken(first.getClientToken());
+        // A mode, an empty-valued tag and a name the original's run does not hold.
+        StartJobRunRequest batch = request("BATCH", null);
+        batch.setClientToken(first.getClientToken());
+        StartJobRunRequest emptyTag = request(null, null);
+        emptyTag.setClientToken(first.getClientToken());
+        emptyTag.setTags(Map.of("team", ""));
+        StartJobRunRequest renamed = request(null, null);
+        renamed.setClientToken(first.getClientToken());
+        renamed.setName("another");
+
+        assertEquals(original.getJobRunId(), service.startJobRun(applicationId, retry).getJobRunId());
+        for (StartJobRunRequest conflicting : List.of(batch, emptyTag, renamed)) {
+            assertEquals("ConflictException", assertThrows(AwsException.class,
+                    () -> service.startJobRun(applicationId, conflicting)).getErrorCode());
+        }
+    }
+
+    @Test
+    void aNextTokenGivenBeforeRunsKeptASequenceIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        List<String> ids = new ArrayList<>();
+        for (int run = 0; run < 3; run++) {
+            ids.add(service.startJobRun(applicationId, request(null, null)).getJobRunId());
+        }
+        // A token of the listing's earlier cursors, the creation time and the id, under its earlier namespace.
+        String earlier = Pagination.paginate(ids, id -> id, 1, null,
+                String.join("|", "ListJobRuns", applicationId, "[]", "null", "null", "null"),
+                token -> new AwsException("ValidationException", "Invalid nextToken.", 400)).nextToken();
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.listJobRuns(applicationId, null, null, null, null, 1, earlier));
+
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test
@@ -218,6 +294,26 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void anAttemptStoredBeforeItsManagedStorageWasKeptTakesItFromItsRun() throws Exception {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest unmanaged = request("BATCH", null);
+        unmanaged.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("managedPersistenceMonitoringConfiguration", Map.of("enabled", false))));
+        String unmanagedRun = service.startJobRun(applicationId, unmanaged).getJobRunId();
+        String managedRun = service.startJobRun(applicationId, request("BATCH", null)).getJobRunId();
+
+        // As an earlier Floci stored them: each attempt's destinations without whether its logs were managed.
+        for (String jobRunId : List.of(unmanagedRun, managedRun)) {
+            ObjectNode stored = objectMapper.valueToTree(store.get(jobRunId).orElseThrow());
+            stored.get("driverLogs").forEach(logs -> ((ObjectNode) logs).remove("managedStorage"));
+            store.put(jobRunId, objectMapper.treeToValue(stored, JobRunRecord.class));
+        }
+
+        assertFalse(service.dashboard(applicationId, unmanagedRun, 1).logs().inManagedStorage());
+        assertTrue(service.dashboard(applicationId, managedRun, 1).logs().inManagedStorage());
+    }
+
+    @Test
     void negativeRunDurationIsRefused() {
         assertThrows(IllegalArgumentException.class, () -> service(-1));
     }
@@ -316,6 +412,244 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void aRunOfAnApplicationThatResolvedItsImageAsItStartedPullsThatImageByItsDigest() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String digest = "sha256:" + "c".repeat(64);
+        applications.ecrService = EmrServerlessServiceTest.ecrHolding("spark/custom", "7.5.0", digest);
+        CreateApplicationRequest custom = applicationRequest("resolved", "emr-7.5.0", "SPARK");
+        custom.setImageConfiguration(EmrServerlessServiceTest.image(
+                "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0"));
+        String customId = applications.createApplication(custom).getApplicationId();
+
+        // The run starts the application, which resolves its image as it starts.
+        String jobRunId = service.startJobRun(customId, request(null, null)).getJobRunId();
+        runNext();
+
+        assertEquals("000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom@" + digest,
+                runner.jobs.get(0).customImage());
+        assertEquals(digest, service.getJobRun(customId, jobRunId, null).getImageConfiguration()
+                .getResolvedImageDigest());
+    }
+
+    @Test
+    void aRunReportsTheImageConfigurationsItAppliesEachWithTheDigestOfTheImageItsRunnerResolvedForIt() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 2);
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String driverImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/driver:7.5.0";
+        String executorImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/executor:7.5.0";
+        CreateApplicationRequest custom = applicationRequest("custom", "emr-7.5.0", "SPARK");
+        custom.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        custom.getImageConfiguration().setApplicationLevelDigestResolution(false);
+        custom.setWorkerTypeSpecifications(Map.of("Driver", EmrServerlessServiceTest.workerType(driverImage),
+                "Executor", EmrServerlessServiceTest.workerType(executorImage)));
+        String customId = applications.createApplication(custom).getApplicationId();
+        String jobRunId = service.startJobRun(customId, request(null, null)).getJobRunId();
+        String plain = service.startJobRun(applicationId, request(null, null)).getJobRunId();
+        runner.digests.put(driverImage, DIGEST);
+        runner.digests.put(executorImage, OTHER_DIGEST);
+
+        JobRun submitted = service.getJobRun(customId, jobRunId, null);
+        runNext();
+        runNext();
+
+        assertEquals(List.of("application " + applicationImage + " null", "Driver " + driverImage + " null",
+                "Executor " + executorImage + " null"), images(submitted));
+        // The driver and the executors each run their worker type's image, so the application's runs on none.
+        JobRun ran = service.getJobRun(customId, jobRunId, null);
+        assertEquals(List.of("application " + applicationImage + " null", "Driver " + driverImage + " " + DIGEST,
+                "Executor " + executorImage + " " + OTHER_DIGEST), images(ran));
+        assertNull(ran.getImageConfiguration().getApplicationLevelDigestResolution());
+        // The application's own stay as it gave them.
+        Application app = applications.getApplication(customId);
+        assertNull(app.getImageConfiguration().getResolvedImageDigest());
+        assertNull(app.getWorkerTypeSpecifications().get("Driver").getImageConfiguration().getResolvedImageDigest());
+        JobRun withoutImages = service.getJobRun(applicationId, plain, null);
+        assertNull(withoutImages.getImageConfiguration());
+        assertNull(withoutImages.getWorkerTypeSpecifications());
+    }
+
+    @Test
+    void aDigestGoesOnlyToTheConfigurationItsWorkerTypeTookItsImageFromNotToAnotherNamingThatImage() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String hiveDriverImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/hive/driver:7.5.0";
+        CreateApplicationRequest spark = applicationRequest("local-executors", "emr-7.5.0", "SPARK");
+        spark.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        spark.setWorkerTypeSpecifications(Map.of("Executor", EmrServerlessServiceTest.workerType(applicationImage)));
+        CreateApplicationRequest hive = applicationRequest("tez-tasks", "emr-7.5.0", "HIVE");
+        hive.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        hive.setWorkerTypeSpecifications(Map.of("HiveDriver", EmrServerlessServiceTest.workerType(hiveDriverImage),
+                "TezTask", EmrServerlessServiceTest.workerType(hiveDriverImage)));
+        String sparkId = applications.createApplication(spark).getApplicationId();
+        String hiveId = applications.createApplication(hive).getApplicationId();
+        String sparkRun = service.startJobRun(sparkId, request(null, null)).getJobRunId();
+        String hiveRun = service.startJobRun(hiveId, hiveRequest("s3://bucket/queries/report.sql", null, null))
+                .getJobRunId();
+        runner.digests.put(applicationImage, DIGEST);
+        runner.digests.put(hiveDriverImage, OTHER_DIGEST);
+
+        runNext();
+        runNext();
+
+        // Local mode runs the executors in the driver's container, and Tez a Hive run's tasks, so neither image runs.
+        assertEquals(List.of("application " + applicationImage + " " + DIGEST,
+                "Executor " + applicationImage + " null"), images(service.getJobRun(sparkId, sparkRun, null)));
+        assertEquals(List.of("application " + applicationImage + " null",
+                "HiveDriver " + hiveDriverImage + " " + OTHER_DIGEST, "TezTask " + hiveDriverImage + " null"),
+                images(service.getJobRun(hiveId, hiveRun, null)));
+    }
+
+    @Test
+    void eachWorkerTypeKeepsTheDigestOfItsOwnPullAndAConfigurationTheyShareHoldsTheDrivers() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 2);
+        String sameTag = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String shared = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/shared:7.5.0";
+        CreateApplicationRequest apart = applicationRequest("apart", "emr-7.5.0", "SPARK");
+        apart.setWorkerTypeSpecifications(Map.of("Driver", EmrServerlessServiceTest.workerType(sameTag),
+                "Executor", EmrServerlessServiceTest.workerType(sameTag)));
+        CreateApplicationRequest together = applicationRequest("together", "emr-7.5.0", "SPARK");
+        together.setImageConfiguration(EmrServerlessServiceTest.image(shared));
+        String apartId = applications.createApplication(apart).getApplicationId();
+        String togetherId = applications.createApplication(together).getApplicationId();
+        String apartRun = service.startJobRun(apartId, request(null, null)).getJobRunId();
+        String togetherRun = service.startJobRun(togetherId, request(null, null)).getJobRunId();
+        // The tag pushed again between the driver's pull and the executors'.
+        runner.digests.put(sameTag, DIGEST);
+        runner.executorDigests.put(sameTag, OTHER_DIGEST);
+        runner.digests.put(shared, DIGEST);
+        runner.executorDigests.put(shared, OTHER_DIGEST);
+
+        runNext();
+        runNext();
+
+        assertEquals(List.of("Driver " + sameTag + " " + DIGEST, "Executor " + sameTag + " " + OTHER_DIGEST),
+                images(service.getJobRun(apartId, apartRun, null)));
+        assertEquals(List.of("application " + shared + " " + DIGEST),
+                images(service.getJobRun(togetherId, togetherRun, null)));
+    }
+
+    @Test
+    void eachAttemptAppliesItsApplicationsImageAgainAndKeepsTheDigestItsOwnPullResolved() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        EmrServerlessJobRunService service = dockerService(runner);
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        CreateApplicationRequest custom = applicationRequest("retagged", "emr-7.5.0", "SPARK");
+        custom.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        String customId = applications.createApplication(custom).getApplicationId();
+        StartJobRunRequest resilient = request(null, null);
+        resilient.setRetryPolicy(Map.of("maxAttempts", 2));
+        String jobRunId = service.startJobRun(customId, resilient).getJobRunId();
+
+        runner.digests.put(applicationImage, DIGEST);
+        runNext();
+        JobRun secondScheduled = service.getJobRun(customId, jobRunId, null);
+        // The tag pushed again: "either by retagging an image in Amazon ECR or by updating the imageConfiguration".
+        runner.digests.put(applicationImage, OTHER_DIGEST);
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(0);
+        runNext();
+
+        assertEquals(List.of("application " + applicationImage + " null"), images(secondScheduled));
+        assertEquals(List.of("application " + applicationImage + " " + OTHER_DIGEST),
+                images(service.getJobRun(customId, jobRunId, null)));
+        assertEquals(List.of("application " + applicationImage + " " + DIGEST),
+                images(service.getJobRun(customId, jobRunId, 1)));
+    }
+
+    @Test
+    void aDigestResolvedOnceAResetHasBegunIsNotWritten() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        CreateApplicationRequest custom = applicationRequest("reset", "emr-7.5.0", "SPARK");
+        custom.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        String customId = applications.createApplication(custom).getApplicationId();
+        String jobRunId = service.startJobRun(customId, request(null, null)).getJobRunId();
+        runner.digests.put(applicationImage, DIGEST);
+        runner.whileResolving = service::beforeReset;
+
+        runNext();
+
+        assertEquals(List.of("application " + applicationImage + " null"),
+                images(store.get(jobRunId).orElseThrow().getJobRun()));
+    }
+
+    // A run's image configurations, each "<whose> <imageUri> <resolvedImageDigest>": its own, then its worker types'
+    // by name.
+    private static List<String> images(JobRun run) {
+        List<String> images = new ArrayList<>();
+        if (run.getImageConfiguration() != null) {
+            images.add(described("application", run.getImageConfiguration()));
+        }
+        if (run.getWorkerTypeSpecifications() != null) {
+            new TreeMap<>(run.getWorkerTypeSpecifications()).forEach((workerType, specification) ->
+                    images.add(described(workerType, specification.getImageConfiguration())));
+        }
+        return images;
+    }
+
+    private static String described(String whose, ImageConfiguration image) {
+        return whose + " " + image.getImageUri() + " " + image.getResolvedImageDigest();
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureElseTheDockerHostsOwn() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = honouringService(runner);
+        CreateApplicationRequest graviton = applicationRequest("graviton", "emr-7.5.0", "SPARK");
+        graviton.setArchitecture("ARM64");
+        CreateApplicationRequest x86 = applicationRequest("x86", "emr-7.5.0", "SPARK");
+        x86.setArchitecture("X86_64");
+        CreateApplicationRequest hive = applicationRequest("hive-graviton", "emr-7.5.0", "HIVE");
+        hive.setArchitecture("ARM64");
+
+        service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+        service.startJobRun(applications.createApplication(x86).getApplicationId(), request(null, null));
+        service.startJobRun(applicationId, request(null, null));
+        service.startJobRun(applications.createApplication(hive).getApplicationId(),
+                hiveRequest("s3://bucket/queries/report.sql", null, null));
+        for (int i = 0; i < 4; i++) {
+            runNext();
+        }
+
+        assertEquals("linux/arm64", runner.jobs.get(0).platform());
+        assertEquals("linux/amd64", runner.jobs.get(1).platform());
+        // An application that names none runs on the Docker host's own platform.
+        assertNull(runner.jobs.get(2).platform());
+        assertEquals("linux/arm64", runner.jobs.get(3).platform());
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureOnlyWithHonourArchitecturesOn() {
+        for (boolean honour : List.of(true, false)) {
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().emrserverless().runnerMode()).thenReturn("docker");
+            when(config.services().emrserverless().honourArchitectures()).thenReturn(honour);
+            EmrServerlessSparkRunner sparkRunner = mock(EmrServerlessSparkRunner.class);
+            when(sparkRunner.run(any(), any())).thenReturn(SparkJobRunner.Outcome.exitedWith(0));
+            EmrServerlessJobRunService service = new EmrServerlessJobRunService(new InMemoryStorageFactory(ACCOUNT_ID),
+                    applications, iamService, new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, config, clock,
+                    sparkRunner);
+            CreateApplicationRequest graviton = applicationRequest("graviton-" + honour, "emr-7.5.0", "SPARK");
+            graviton.setArchitecture("ARM64");
+            try {
+                service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+
+                // Off, the default, an ARM64 application's run stays on the Docker host's own platform.
+                String platform = honour ? "linux/arm64" : null;
+                verify(sparkRunner, timeout(10_000))
+                        .run(argThat(job -> Objects.equals(platform, job.platform())), any());
+            } finally {
+                service.shutdown();
+            }
+        }
+    }
+
+    @Test
     void aSparkRunsExecutorsRunApartInTheirWorkerTypesImageWithinTheApplicationsMaximumCapacity() {
         FakeRunner runner = new FakeRunner();
         EmrServerlessJobRunService service = dockerService(runner, 2);
@@ -354,6 +688,65 @@ class EmrServerlessJobRunServiceTest {
                 applications.getApplication(applicationId).getArn()), runner.jobs.get(2).executors());
         // Tez runs a Hive run's tasks in its driver's container.
         assertNull(runner.jobs.get(3).executors());
+    }
+
+    @Test
+    void aRunGoingKeepsWhatItWasLaunchedWithAndTheNextTakesItsStartedApplicationsNewImageAndMaximumCapacity() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 2);
+        String firstImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String nextImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1";
+        CreateApplicationRequest create = applicationRequest("updated-while-started", "emr-7.5.0", "SPARK");
+        create.setImageConfiguration(EmrServerlessServiceTest.image(firstImage));
+        create.setMaximumCapacity(EmrServerlessServiceTest.capacity("400 vCPU"));
+        Application app = applications.createApplication(create);
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(EmrServerlessServiceTest.image(nextImage));
+        update.setMaximumCapacity(EmrServerlessServiceTest.capacity("100 vCPU"));
+        List<String> statesUpdated = new ArrayList<>();
+        runner.whileRunning = () -> statesUpdated.add(
+                applications.updateApplication(app.getApplicationId(), update).getState());
+
+        service.startJobRun(app.getApplicationId(), request(null, null));
+        runNext();
+        runner.whileRunning = () -> { };
+        service.startJobRun(app.getApplicationId(), request(null, null));
+        runNext();
+
+        // The first run started the application, which took the update while that run went on.
+        assertEquals(List.of("STARTED"), statesUpdated);
+        assertEquals(firstImage, runner.jobs.get(0).customImage());
+        assertEquals(new SparkJobRunner.Executors(2, firstImage, 400, 0, 0, app.getArn()),
+                runner.jobs.get(0).executors());
+        assertEquals(nextImage, runner.jobs.get(1).customImage());
+        assertEquals(new SparkJobRunner.Executors(2, nextImage, 100, 0, 0, app.getArn()),
+                runner.jobs.get(1).executors());
+    }
+
+    @Test
+    void aRunsNextAttemptTakesTheImageItsStartedApplicationWasUpdatedTo() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        EmrServerlessJobRunService service = dockerService(runner);
+        String firstImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String nextImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1";
+        CreateApplicationRequest create = applicationRequest("retried-after-update", "emr-7.5.0", "SPARK");
+        create.setImageConfiguration(EmrServerlessServiceTest.image(firstImage));
+        String id = applications.createApplication(create).getApplicationId();
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(EmrServerlessServiceTest.image(nextImage));
+        runner.whileRunning = () -> applications.updateApplication(id, update);
+        StartJobRunRequest resilient = request(null, null);
+        resilient.setRetryPolicy(Map.of("maxAttempts", 2));
+
+        service.startJobRun(id, resilient);
+        runNext();
+        runner.whileRunning = () -> { };
+        runNext();
+
+        // "New job attempts will pick new images".
+        assertEquals(firstImage, runner.jobs.get(0).customImage());
+        assertEquals(nextImage, runner.jobs.get(1).customImage());
     }
 
     @Test
@@ -713,6 +1106,216 @@ class EmrServerlessJobRunServiceTest {
     }
 
     // A SPARK application on releaseLabel, with monitoring as its monitoring configuration (null for none).
+    // An application on releaseLabel with these scheduler members, none for no scheduler configuration.
+    private String queuingApplication(String releaseLabel, Map<String, Object> scheduler) {
+        CreateApplicationRequest create = applicationRequest("queuing", releaseLabel, "SPARK");
+        if (!scheduler.isEmpty()) {
+            create.setSchedulerConfiguration(EmrServerlessServiceTest.scheduler(scheduler));
+        }
+        return applications.createApplication(create).getApplicationId();
+    }
+
+    private String start(EmrServerlessJobRunService service, String app, String mode) {
+        return service.startJobRun(app, request(mode, null)).getJobRunId();
+    }
+
+    @Test
+    void aRunBeyondMaxConcurrentRunsIsQueuedAndStartsTheMomentARunEnds() {
+        EmrServerlessJobRunService service = service(600);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        clock.advance(Duration.ofSeconds(1));
+        String second = start(service, app, null);
+
+        assertEquals("RUNNING", service.getJobRun(app, first, null).getState());
+        JobRun queued = service.getJobRun(app, second, null);
+        assertEquals("QUEUED", queued.getState());
+        assertNull(queued.getStartedAt());
+        assertNull(queued.getQueuedDurationMilliseconds());
+        assertEquals(List.of(second), service.listJobRuns(app, List.of("QUEUED"), null, null, null, null, null)
+                .items().stream().map(JobRunSummary::getId).toList());
+
+        // Read only once both have ended: the second started the moment the first ended.
+        clock.advance(Duration.ofHours(1));
+        JobRun ended = service.getJobRun(app, first, null);
+        JobRun started = service.getJobRun(app, second, null);
+        assertEquals("SUCCESS", started.getState());
+        assertEquals(ended.getEndedAt(), started.getStartedAt());
+        assertEquals(Duration.between(started.getCreatedAt(), ended.getEndedAt()).toMillis(),
+                started.getQueuedDurationMilliseconds());
+        assertEquals(600, started.getTotalExecutionDurationSeconds());
+    }
+
+    @Test
+    void aRunStillQueuedAtTheQueueTimeoutIsCancelled() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1, "queueTimeoutMinutes", 15));
+        start(service, app, "STREAMING");
+        String queued = start(service, app, null);
+
+        clock.advance(Duration.ofMinutes(15));
+        JobRun run = service.getJobRun(app, queued, null);
+        assertEquals("CANCELLED", run.getState());
+        assertEquals(run.getCreatedAt().plus(Duration.ofMinutes(15)), run.getEndedAt());
+        assertEquals(900_000L, run.getQueuedDurationMilliseconds());
+        assertNull(run.getStartedAt());
+        assertEquals(0, run.getTotalExecutionDurationSeconds());
+        assertTrue(run.getStateDetails().contains("15 minutes"), run.getStateDetails());
+    }
+
+    @Test
+    void aCancelOrAHigherLimitOnTheStartedApplicationStartsTheQueuedRunsInOrderAtOnce() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, "STREAMING");
+        String second = start(service, app, "STREAMING");
+        String third = start(service, app, "STREAMING");
+        String fourth = start(service, app, "STREAMING");
+
+        clock.advance(Duration.ofMinutes(1));
+        service.cancelJobRun(app, third);
+        JobRun cancelled = service.getJobRun(app, third, null);
+        assertEquals("CANCELLED", cancelled.getState());
+        assertEquals(Duration.between(cancelled.getCreatedAt(), cancelled.getEndedAt()).toMillis(),
+                cancelled.getQueuedDurationMilliseconds());
+        assertTrue(cancelled.getQueuedDurationMilliseconds() >= 60_000L);
+
+        service.cancelJobRun(app, first);
+        Instant firstEnded = service.getJobRun(app, first, null).getEndedAt();
+        JobRun next = service.getJobRun(app, second, null);
+        assertEquals("RUNNING", next.getState());
+        assertFalse(next.getStartedAt().isBefore(firstEnded));
+        assertTrue(Duration.between(firstEnded, next.getStartedAt()).toSeconds() < 1, next.getStartedAt()::toString);
+        assertEquals("QUEUED", service.getJobRun(app, fourth, null).getState());
+        AwsException stop = assertThrows(AwsException.class, () -> service.stopApplication(app));
+        assertEquals("ValidationException", stop.getErrorCode());
+
+        UpdateApplicationRequest raise = new UpdateApplicationRequest();
+        raise.setSchedulerConfiguration(EmrServerlessServiceTest.scheduler(Map.of("maxConcurrentRuns", 2)));
+        service.updateApplication(app, raise);
+        assertEquals("RUNNING", service.getJobRun(app, fourth, null).getState());
+    }
+
+    @Test
+    void runsQueueByDefaultFromRelease730AndNeverBeforeRelease700() {
+        EmrServerlessJobRunService service = service(0);
+        String byDefault = queuingApplication("emr-7.3.0", Map.of());
+        String sparkRuntime = queuingApplication("emr-spark-8.0.0", Map.of());
+        String notByDefault = queuingApplication("emr-7.2.0", Map.of());
+        String tooEarly = queuingApplication("emr-6.15.0", Map.of("maxConcurrentRuns", 1));
+        for (int run = 0; run < 15; run++) {
+            for (String app : List.of(byDefault, sparkRuntime, notByDefault, tooEarly)) {
+                start(service, app, "STREAMING");
+            }
+        }
+
+        assertEquals("QUEUED", service.getJobRun(byDefault, start(service, byDefault, "STREAMING"), null).getState());
+        assertEquals("QUEUED",
+                service.getJobRun(sparkRuntime, start(service, sparkRuntime, "STREAMING"), null).getState());
+        assertEquals("RUNNING",
+                service.getJobRun(notByDefault, start(service, notByDefault, "STREAMING"), null).getState());
+        assertEquals("RUNNING", service.getJobRun(tooEarly, start(service, tooEarly, "STREAMING"), null).getState());
+    }
+
+    @Test
+    void aQueuedBatchRunThatStartsWithoutADurationEndsAsItStarts() {
+        EmrServerlessJobRunService service = service(0);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String streaming = start(service, app, "STREAMING");
+        String batch = start(service, app, null);
+        assertEquals("QUEUED", service.getJobRun(app, batch, null).getState());
+
+        service.cancelJobRun(app, streaming);
+
+        JobRun run = service.getJobRun(app, batch, null);
+        assertEquals("SUCCESS", run.getState());
+        assertEquals(run.getStartedAt(), run.getEndedAt());
+    }
+
+    @Test
+    void manyRunsEndingTogetherHandTheirSlotsOnInOrder() {
+        EmrServerlessJobRunService service = service(600);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 5));
+        List<String> runs = new ArrayList<>();
+        for (int run = 0; run < 20; run++) {
+            runs.add(start(service, app, null));
+        }
+
+        clock.advance(Duration.ofHours(1));
+        List<JobRun> ended = runs.stream().map(id -> service.getJobRun(app, id, null)).toList();
+        for (int run = 0; run < ended.size(); run++) {
+            assertEquals("SUCCESS", ended.get(run).getState(), "run " + run);
+            if (run >= 5) {
+                assertEquals(ended.get(run - 5).getEndedAt(), ended.get(run).getStartedAt(), "run " + run);
+            }
+        }
+    }
+
+    @Test
+    void anEmptySchedulerConfigurationTurnsQueuingOffOnAReleaseThatQueuesByDefault() {
+        EmrServerlessJobRunService service = service(0);
+        CreateApplicationRequest create = applicationRequest("off", "emr-7.5.0", "SPARK");
+        create.setSchedulerConfiguration(new SchedulerConfiguration());
+        String app = applications.createApplication(create).getApplicationId();
+        assertNull(applications.getApplication(app).getSchedulerConfiguration());
+        for (int run = 0; run < 15; run++) {
+            start(service, app, "STREAMING");
+        }
+
+        assertEquals("RUNNING", service.getJobRun(app, start(service, app, "STREAMING"), null).getState());
+    }
+
+    @Test
+    void aQueuedRunWhoseDriverIsNotItsApplicationsFailsAsItLeavesTheQueueAndTakesNoSlot() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        StartJobRunRequest hive = request(null, null);
+        JobDriver.Hive query = new JobDriver.Hive();
+        query.setQuery("s3://bucket/query.sql");
+        JobDriver hiveDriver = new JobDriver();
+        hiveDriver.setHive(query);
+        hive.setJobDriver(hiveDriver);
+        String mismatched = service.startJobRun(app, hive).getJobRunId();
+        String next = start(service, app, null);
+        clock.advance(Duration.ofSeconds(5));
+
+        runNext();
+
+        JobRun failed = service.getJobRun(app, mismatched, null);
+        assertEquals("FAILED", failed.getState());
+        assertEquals(EmrServerlessJobRunService.DRIVER_NOT_THE_APPLICATIONS, failed.getStateDetails());
+        assertTrue(failed.getEndedAt().isAfter(failed.getCreatedAt()), "it fails as it leaves the queue");
+        assertEquals(failed.getCreatedAt().plusMillis(failed.getQueuedDurationMilliseconds()), failed.getEndedAt());
+        assertEquals("SCHEDULED", service.getJobRun(app, next, null).getState());
+        assertEquals("SUCCESS", service.getJobRun(app, first, null).getState());
+    }
+
+    @Test
+    void aQueuedContainerRunStartsItsDriverOnlyOnceTheRunningOneHasEnded() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String app = queuingApplication("emr-7.5.0", Map.of("maxConcurrentRuns", 1));
+        String first = start(service, app, null);
+        String second = start(service, app, null);
+        String third = start(service, app, null);
+
+        assertEquals(1, tasks.size(), "only the first run's driver is launched");
+        assertEquals("QUEUED", service.getJobRun(app, second, null).getState());
+        service.cancelJobRun(app, third);
+        assertEquals("CANCELLED", service.getJobRun(app, third, null).getState());
+        assertFalse(runner.stopped.contains(third), "a queued run has no driver to stop");
+
+        runNext();
+        assertEquals("SUCCESS", service.getJobRun(app, first, null).getState());
+        assertEquals("SCHEDULED", service.getJobRun(app, second, null).getState());
+        runNext();
+        assertEquals("SUCCESS", service.getJobRun(app, second, null).getState());
+        assertEquals(List.of(first, second), runner.driversStarted);
+        assertTrue(tasks.isEmpty());
+    }
+
     private String application(String name, String releaseLabel, MonitoringConfiguration monitoring) {
         CreateApplicationRequest create = applicationRequest(name, releaseLabel, "SPARK");
         create.setMonitoringConfiguration(monitoring);
@@ -1085,6 +1688,12 @@ class EmrServerlessJobRunServiceTest {
                 null, objectMapper, 0, clock, runner, tasks::add, null, null, null, executorContainers);
     }
 
+    // A service whose container runs run for their application's architecture, as with honour-architectures on.
+    private EmrServerlessJobRunService honouringService(SparkJobRunner runner) {
+        return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
+                null, objectMapper, 0, clock, runner, tasks::add, null, null, null, 0, true);
+    }
+
     private void runNext() {
         tasks.remove(0).run();
     }
@@ -1136,6 +1745,11 @@ class EmrServerlessJobRunServiceTest {
         Outcome outcome = Outcome.exitedWith(0);
         Runnable whileRunning = () -> { };
         Runnable whileTimingOut = () -> { };
+        // The manifest digest each custom image resolves to, told before the driver starts as the Docker runner does,
+        // and the executors' where their pull resolves another, as a push between the two pulls gives.
+        final Map<String, String> digests = new HashMap<>();
+        final Map<String, String> executorDigests = new HashMap<>();
+        Runnable whileResolving = () -> { };
 
         @Override
         public Outcome run(Job job, Progress progress) {
@@ -1143,6 +1757,13 @@ class EmrServerlessJobRunServiceTest {
             // As the Docker runner, a stop counts only for a run in progress, so a cancel before then is read here.
             if (progress.cancelled()) {
                 return Outcome.halted();
+            }
+            // The driver's first, so an executors' digest written over it shows.
+            resolved(progress, WorkerType.DRIVER, job.customImage(), digests);
+            if (job.executors() != null) {
+                Map<String, String> executorsResolve = new HashMap<>(digests);
+                executorsResolve.putAll(executorDigests);
+                resolved(progress, WorkerType.EXECUTOR, job.executors().image(), executorsResolve);
             }
             driversStarted.add(job.runId());
             progress.started();
@@ -1154,6 +1775,13 @@ class EmrServerlessJobRunServiceTest {
                 whileTimingOut.run();
             }
             return stopped.contains(job.runId()) ? Outcome.halted() : outcome;
+        }
+
+        private void resolved(Progress progress, WorkerType workerType, String image, Map<String, String> resolve) {
+            if (image != null && resolve.containsKey(image)) {
+                whileResolving.run();
+                progress.imageResolved(workerType, resolve.get(image));
+            }
         }
 
         @Override

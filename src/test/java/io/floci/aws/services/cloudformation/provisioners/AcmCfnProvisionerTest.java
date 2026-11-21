@@ -19,6 +19,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -325,10 +326,10 @@ class AcmCfnProvisionerTest {
 
         verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
                 eq(new CertificateOptions("ENABLED", "ENABLED")), any(), eq(REGION));
-        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(any(), any());
         verify(acm, never()).updateCertificateOptions(any(), any(), any());
         assertEquals(NEW_ARN, r.getPhysicalId());
-        assertEquals(Map.of("CertificateArn", NEW_ARN), r.getAttributes());
+        assertEquals(NEW_ARN, r.getAttributes().get("CertificateArn"));
     }
 
     @Test
@@ -341,7 +342,7 @@ class AcmCfnProvisionerTest {
 
         verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
                 eq(new CertificateOptions("ENABLED", "DISABLED")), any(), eq(REGION));
-        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(any(), any());
         assertEquals(NEW_ARN, r.getPhysicalId());
     }
 
@@ -358,7 +359,7 @@ class AcmCfnProvisionerTest {
 
         verify(acm).requestCertificate(eq("api.example.com"), any(), any(), isNull(), any(), isNull(),
                 eq(new CertificateOptions("DISABLED", "ENABLED")), any(), eq(REGION));
-        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(any(), any());
         verify(acm, never()).updateCertificateOptions(any(), any(), any());
     }
 
@@ -378,7 +379,7 @@ class AcmCfnProvisionerTest {
 
         verify(acm).requestCertificate(eq("new.example.com"), any(), any(), isNull(), any(), isNull(),
                 eq(new CertificateOptions("DISABLED", "DISABLED")), any(), eq(REGION));
-        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(any(), any());
         verify(acm, never()).updateCertificateOptions(any(), any(), any());
     }
 
@@ -408,31 +409,79 @@ class AcmCfnProvisionerTest {
 
         provisioner.provision(r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN));
 
-        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(any(), any());
         assertEquals(NEW_ARN, r.getPhysicalId());
-        assertEquals(Map.of("CertificateArn", NEW_ARN), r.getAttributes());
+        assertEquals(NEW_ARN, r.getAttributes().get("CertificateArn"));
     }
 
-    @Test
-    void replacementThatCannotDeleteThePriorCertificateRemovesTheNewOneAndFails() {
-        // CloudFormationService restores the previous StackResource when an update fails and never
-        // learns the new ARN, so the certificate this attempt created must not be left behind.
+    private StackResource replacedCertificate() {
         Certificate stored = certificate(ARN, "old.example.com");
         stored.setSubjectAlternativeNames(List.of("old.example.com"));
         stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
         when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
         stubRequestCertificate("new.example.com", certificate(NEW_ARN, "new.example.com"));
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("CertificateArn", ARN);
+        provisioner.provision(r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN));
+        return r;
+    }
+
+    @Test
+    void replacementLeavesThePriorCertificateToTheCleanupAfterTheUpdateCommits() {
+        StackResource r = replacedCertificate();
+
+        verify(acm, never()).deleteCertificate(any(), any());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(ARN, provisioner.updateCleanupPhysicalId(r));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+
+        verify(acm).deleteCertificate(ARN, REGION);
+        verify(acm, never()).deleteCertificate(eq(NEW_ARN), any());
+        assertTrue(result.applicable());
+        assertTrue(result.complete());
+        assertEquals(ARN, result.previousPhysicalId());
+        provisioner.clearUpdate(r);
+        assertEquals(NEW_ARN, r.getPhysicalId());
+        assertEquals(Map.of("CertificateArn", NEW_ARN), r.getAttributes());
+    }
+
+    @Test
+    void cleanupThatFindsThePriorCertificateStillInUseKeepsItOwedAndCountsTheAttempt() {
+        StackResource r = replacedCertificate();
         doThrow(new AwsException("ResourceInUseException", "in use", 400))
                 .when(acm).deleteCertificate(ARN, REGION);
-        StackResource r = resource();
 
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
-                r, mapper.createObjectNode().put("DomainName", "new.example.com"), ctx(ARN)));
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
 
-        assertEquals("ResourceInUseException", failure.getErrorCode());
+        assertTrue(result.applicable());
+        assertFalse(result.complete());
+        assertEquals(ARN, result.previousPhysicalId());
+        assertEquals(1, result.attempts());
+    }
+
+    @Test
+    void rollbackRestoresThePriorCertificateAndDeletesTheNewOne() {
+        StackResource r = replacedCertificate();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
         verify(acm).deleteCertificate(NEW_ARN, REGION);
-        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
-        assertNull(r.getPhysicalId());
+        verify(acm, never()).deleteCertificate(eq(ARN), any());
+        assertEquals(ARN, r.getPhysicalId());
+        assertEquals(Map.of("CertificateArn", ARN), r.getAttributes());
+    }
+
+    @Test
+    void rollbackOfAnInPlaceUpdateHasNothingToUndo() {
+        when(acm.describeCertificate(ARN, REGION)).thenReturn(storedCertificate("ENABLED", "DISABLED"));
+        StackResource r = resource();
+        provisioner.provision(r, mapper.createObjectNode().put("DomainName", "api.example.com"), ctx(ARN));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(acm, never()).deleteCertificate(any(), any());
     }
 
     @Test

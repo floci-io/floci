@@ -4,11 +4,108 @@
     "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
+    "DeleteReportDefinition": "DeleteReportDefinitionRequest",
+    "DescribeReportDefinitions": "DescribeReportDefinitionsRequest",
     "ListTagsForResource": "ListTagsForResourceRequest",
+    "ModifyReportDefinition": "ModifyReportDefinitionRequest",
+    "PutReportDefinition": "PutReportDefinitionRequest",
     "TagResource": "TagResourceRequest",
     "UntagResource": "UntagResourceRequest"
   },
   "shapes": {
+    "AWSRegion": {
+      "type": "string",
+      "enum": [
+        "af-south-1",
+        "ap-east-1",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ca-central-1",
+        "eu-central-1",
+        "eu-central-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "me-central-1",
+        "me-south-1",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+        "cn-north-1",
+        "cn-northwest-1"
+      ]
+    },
+    "AdditionalArtifact": {
+      "type": "string",
+      "enum": [
+        "REDSHIFT",
+        "QUICKSIGHT",
+        "ATHENA"
+      ]
+    },
+    "AdditionalArtifactList": {
+      "type": "list",
+      "member": "AdditionalArtifact"
+    },
+    "BillingViewArn": {
+      "type": "string",
+      "max": 128,
+      "pattern": "(arn:aws(-cn)?:billing::[0-9]{12}:billingview/)?[a-zA-Z0-9_\\+=\\.\\-@].{1,30}"
+    },
+    "CompressionFormat": {
+      "type": "string",
+      "enum": [
+        "ZIP",
+        "GZIP",
+        "Parquet"
+      ]
+    },
+    "DeleteReportDefinitionRequest": {
+      "type": "structure",
+      "required": [
+        "ReportName"
+      ],
+      "members": {
+        "ReportName": "ReportName"
+      }
+    },
+    "DescribeReportDefinitionsRequest": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "MaxResults",
+        "NextToken": "GenericString"
+      }
+    },
+    "GenericString": {
+      "type": "string",
+      "max": 256,
+      "pattern": "[A-Za-z0-9_\\.\\-=]*"
+    },
+    "LastDelivery": {
+      "type": "string",
+      "min": 16,
+      "max": 20,
+      "pattern": "[0-9]{8}[T][0-9]{6}([Z]|[+-][0-9]{4})"
+    },
+    "LastStatus": {
+      "type": "string",
+      "enum": [
+        "SUCCESS",
+        "ERROR_PERMISSIONS",
+        "ERROR_NO_BUCKET"
+      ]
+    },
     "ListTagsForResourceRequest": {
       "type": "structure",
       "required": [
@@ -18,10 +115,110 @@
         "ReportName": "ReportName"
       }
     },
+    "MaxResults": {
+      "type": "integer",
+      "min": 5,
+      "max": 5
+    },
+    "ModifyReportDefinitionRequest": {
+      "type": "structure",
+      "required": [
+        "ReportName",
+        "ReportDefinition"
+      ],
+      "members": {
+        "ReportName": "ReportName",
+        "ReportDefinition": "ReportDefinition"
+      }
+    },
+    "PutReportDefinitionRequest": {
+      "type": "structure",
+      "required": [
+        "ReportDefinition"
+      ],
+      "members": {
+        "ReportDefinition": "ReportDefinition",
+        "Tags": "TagList"
+      }
+    },
+    "RefreshClosedReports": {
+      "type": "boolean"
+    },
+    "ReportDefinition": {
+      "type": "structure",
+      "required": [
+        "ReportName",
+        "TimeUnit",
+        "Format",
+        "Compression",
+        "AdditionalSchemaElements",
+        "S3Bucket",
+        "S3Prefix",
+        "S3Region"
+      ],
+      "members": {
+        "ReportName": "ReportName",
+        "TimeUnit": "TimeUnit",
+        "Format": "ReportFormat",
+        "Compression": "CompressionFormat",
+        "AdditionalSchemaElements": "SchemaElementList",
+        "S3Bucket": "S3Bucket",
+        "S3Prefix": "S3Prefix",
+        "S3Region": "AWSRegion",
+        "AdditionalArtifacts": "AdditionalArtifactList",
+        "RefreshClosedReports": "RefreshClosedReports",
+        "ReportVersioning": "ReportVersioning",
+        "BillingViewArn": "BillingViewArn",
+        "ReportStatus": "ReportStatus"
+      }
+    },
+    "ReportFormat": {
+      "type": "string",
+      "enum": [
+        "textORcsv",
+        "Parquet"
+      ]
+    },
     "ReportName": {
       "type": "string",
       "max": 256,
       "pattern": "[0-9A-Za-z!\\-_.*\\'()]+"
+    },
+    "ReportStatus": {
+      "type": "structure",
+      "members": {
+        "lastDelivery": "LastDelivery",
+        "lastStatus": "LastStatus"
+      }
+    },
+    "ReportVersioning": {
+      "type": "string",
+      "enum": [
+        "CREATE_NEW_REPORT",
+        "OVERWRITE_REPORT"
+      ]
+    },
+    "S3Bucket": {
+      "type": "string",
+      "max": 256,
+      "pattern": "[A-Za-z0-9_\\.\\-]+"
+    },
+    "S3Prefix": {
+      "type": "string",
+      "max": 256,
+      "pattern": "[0-9A-Za-z!\\-_.*\\'()/]*"
+    },
+    "SchemaElement": {
+      "type": "string",
+      "enum": [
+        "RESOURCES",
+        "SPLIT_COST_ALLOCATION_DATA",
+        "MANUAL_DISCOUNT_COMPATIBILITY"
+      ]
+    },
+    "SchemaElementList": {
+      "type": "list",
+      "member": "SchemaElement"
     },
     "Tag": {
       "type": "structure",
@@ -68,6 +265,14 @@
       "min": 0,
       "max": 256,
       "pattern": ".*"
+    },
+    "TimeUnit": {
+      "type": "string",
+      "enum": [
+        "HOURLY",
+        "DAILY",
+        "MONTHLY"
+      ]
     },
     "UntagResourceRequest": {
       "type": "structure",

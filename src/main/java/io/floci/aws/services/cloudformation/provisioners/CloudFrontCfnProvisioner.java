@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -523,11 +524,16 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
             config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
             config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
+            String connectionMode = cfnText(dc, "ConnectionMode", engine);
+            if (!connectionMode.isEmpty()) {
+                config.setConnectionMode(connectionMode);
+            }
             config.setAliases(cfnStringList(dc.path("Aliases"), engine));
             config.setOrigins(cfnOrigins(dc, engine));
             config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
             config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
             config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
+            config.setViewerCertificate(cfnViewerCertificate(dc.path("ViewerCertificate"), engine));
         }
 
         Distribution dist = new Distribution();
@@ -545,6 +551,27 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("DomainName", dist.getDomainName());
         r.getAttributes().put("Arn", dist.getArn());
     }
+
+    /**
+     * The template's {@code ViewerCertificate} under the API member names the REST controller stores,
+     * so the service's certificate rules read it the same way. Only members the template sets are
+     * carried; a template with none leaves the config unset, which the service reads as the default
+     * certificate.
+     */
+    private Map<String, String> cfnViewerCertificate(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        Map<String, String> certificate = new LinkedHashMap<>();
+        putIfPresent(certificate, "ACMCertificateArn", cfnText(node, "AcmCertificateArn", engine));
+        putIfPresent(certificate, "IAMCertificateId", cfnText(node, "IamCertificateId", engine));
+        putIfPresent(certificate, "CloudFrontDefaultCertificate",
+                cfnText(node, "CloudFrontDefaultCertificate", engine).toLowerCase(Locale.ROOT));
+        putIfPresent(certificate, "MinimumProtocolVersion", cfnText(node, "MinimumProtocolVersion", engine));
+        putIfPresent(certificate, "SSLSupportMethod", cfnText(node, "SslSupportMethod", engine));
+        return certificate.isEmpty() ? null : certificate;
+    }
+
     private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
         List<Origin> origins = new ArrayList<>();
         JsonNode items = dc.path("Origins");
@@ -661,7 +688,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         }
         return result;
     }
-    private static void putIfPresent(Map<String, Object> map, String key, String value) {
+    private static void putIfPresent(Map<String, ? super String> map, String key, String value) {
         if (value != null && !value.isEmpty()) {
             map.put(key, value);
         }

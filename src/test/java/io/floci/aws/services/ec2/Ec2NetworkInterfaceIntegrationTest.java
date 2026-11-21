@@ -586,6 +586,114 @@ class Ec2NetworkInterfaceIntegrationTest {
         Assertions.assertTrue(replacement.startsWith("i-"));
     }
 
+    /**
+     * DeleteOnTermination=true on a supplied interface is refused: AWS allows true only when
+     * RunInstances is creating the network interface itself, so a request naming an existing
+     * interface with it fails before anything launches, and the interface stays unattached.
+     */
+    @Test
+    @Order(29)
+    void aSuppliedInterfaceSentTrueIsRefused() {
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("SecurityGroupId.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("NetworkInterface.1.NetworkInterfaceId", eni)
+            .formParam("NetworkInterface.1.DeviceIndex", "0")
+            .formParam("NetworkInterface.1.DeleteOnTermination", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+
+        // The refused launch left nothing behind: the interface has no attachment and would be
+        // accepted by a launch without the flag.
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.status",
+                    equalTo("available"))
+            .body(not(containsString("<attachment")));
+    }
+
+    /**
+     * An interface RunInstances creates itself honors an explicit DeleteOnTermination=false: the
+     * instance's interface is then kept past termination, so it comes back to "available" for
+     * reuse instead of being destroyed with the instance, which is what DeleteOnTermination
+     * means on AWS.
+     */
+    @Test
+    @Order(30)
+    void aLaunchCreatedInterfaceSentFalseSurvivesTermination() {
+        String instanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("NetworkInterface.1.DeleteOnTermination", "false")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        String eni = given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .path("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.networkInterfaceId");
+
+        given()
+            .formParam("Action", "TerminateInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The interface the launch created outlives its instance and is back to "available",
+        // rather than gone with it.
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.status",
+                    equalTo("available"));
+    }
+
     @Test
     @Order(19)
     void anExplicitAddressAnotherInterfaceHoldsIsRefused() {
@@ -688,6 +796,13 @@ class Ec2NetworkInterfaceIntegrationTest {
             out.put(ips.get(i), Boolean.parseBoolean(primaries.get(i)));
         }
         return out;
+    }
+
+    @Test
+    @Order(40)
+    void nonIntegerSecondaryCountIsRejected() {
+        createWithList("SecondaryPrivateIpAddressCount", "not-an-integer").statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     private static void deleteEni(String id) {

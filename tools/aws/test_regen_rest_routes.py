@@ -19,6 +19,21 @@ def model(protocol: str, api_version: str, **operations: tuple[str, str]) -> dic
     }
 
 
+def shaped(model_doc: dict, operation: str, required: dict[str, tuple[str, str]], deprecated: bool = False) -> dict:
+    """The model with the operation's input requiring each member, at its location under its name on the wire."""
+    shape = f"{operation}Request"
+    model_doc.setdefault("shapes", {})[shape] = {
+        "type": "structure", "required": sorted(required),
+        "members": {member: {"shape": "String", "location": location, "locationName": wire}
+                    for member, (location, wire) in required.items()},
+    }
+    model_doc["shapes"]["String"] = {"type": "string"}
+    model_doc["operations"][operation]["input"] = {"shape": shape}
+    if deprecated:
+        model_doc["operations"][operation]["deprecated"] = True
+    return model_doc
+
+
 def test_each_operation_keeps_its_method_and_request_uri_under_its_scope():
     doc = r.build({
         "s3": model("rest-xml", "2006-03-01", GetObject=("GET", "/{Bucket}/{Key+}?x-id=GetObject"),
@@ -54,7 +69,8 @@ def test_a_model_that_is_not_rest_is_refused():
         r.build({"s3": model("json", "2006-03-01", GetObject=("POST", "/"))}, "botocore test")
 
 
-def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path):
+def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "DOCUMENTED", {})
     for name in r.MODELS:
         directory = tmp_path / "data" / name / "2020-01-01"
         directory.mkdir(parents=True)
@@ -69,21 +85,109 @@ def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path):
     assert r.main(data + ["--check"]) == 1
 
 
-def test_a_route_naming_two_operations_of_a_scope_the_rules_do_not_route_alone_is_refused():
+def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused():
     with pytest.raises(SystemExit):
         r.build({"lambda": model("rest-json", "2015-03-31", GetByName=("GET", "/things/{Name}"),
                                  GetById=("GET", "/things/{Id}/"))}, "botocore test")
-    # One operation in two models of a scope, two routes a query tells apart, and two operations on one route of a
-    # scope the rules route alone, all pass.
+    # A scope the rules route alone is checked too: its routes are what the coverage test builds requests on.
+    with pytest.raises(SystemExit):
+        r.build({"s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
+                             UploadPart=("PUT", "/{Bucket}/{Key+}"))}, "botocore test")
+    # One operation in two models of a scope, two routes a query tells apart, and two operations on one route that
+    # what botocore requires tells apart, all pass.
     doc = r.build({
         "lambda": model("rest-json", "2015-03-31", ListTags=("GET", "/tags/{ARN}"), GetThing=("GET", "/things/{Name}"),
                         ListThingTags=("GET", "/things/{Name}?tagging")),
         "lambda-microvms": model("rest-json", "2025-01-01", ListTags=("GET", "/tags/{Resource}")),
-        "s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
-                    UploadPart=("PUT", "/{Bucket}/{Key+}")),
+        "s3": shaped(model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
+                           UploadPart=("PUT", "/{Bucket}/{Key+}")), "UploadPart",
+                     {"PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")}),
     }, "botocore test")
     assert doc["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
     assert set(doc["handRouted"]) == {"s3"}
+    # Only a route several operations share carries conditions; one operation in two models is one operation.
+    assert "requires" not in doc["models"]["lambda"]["operations"]["ListTags"]
+    assert "requires" not in doc["models"]["lambda"]["operations"]["GetThing"]
+
+
+def test_operations_sharing_a_route_carry_the_query_parameters_and_headers_botocore_requires():
+    s3 = model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"), CopyObject=("PUT", "/{Bucket}/{Key+}"),
+               UploadPart=("PUT", "/{Bucket}/{Key+}"), UploadPartCopy=("PUT", "/{Bucket}/{Key+}"))
+    shaped(s3, "CopyObject", {"CopySource": ("header", "x-amz-copy-source")})
+    shaped(s3, "UploadPart", {"PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")})
+    shaped(s3, "UploadPartCopy", {"CopySource": ("header", "x-amz-copy-source"),
+                                  "PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")})
+    operations = r.build({"s3": s3}, "botocore test")["models"]["s3"]["operations"]
+    assert "requires" not in operations["PutObject"]
+    assert operations["CopyObject"]["requires"] == {"headers": ["x-amz-copy-source"]}
+    assert operations["UploadPart"]["requires"] == {"query": ["partNumber", "uploadId"]}
+    assert operations["UploadPartCopy"]["requires"] == {"query": ["partNumber", "uploadId"],
+                                                        "headers": ["x-amz-copy-source"]}
+
+
+def test_what_any_two_operations_of_a_route_require_together_must_be_what_one_of_them_requires():
+    # A request carrying both `a` and `b` would satisfy both operations, and none requires all it carries.
+    route = model("rest-xml", "2006-03-01", WithA=("PUT", "/{Bucket}/{Key+}"), WithB=("PUT", "/{Bucket}/{Key+}"))
+    shaped(route, "WithA", {"A": ("querystring", "a")})
+    shaped(route, "WithB", {"B": ("header", "x-b")})
+    with pytest.raises(SystemExit):
+        r.build({"s3": route}, "botocore test")
+    # An operation requiring both settles it, as UploadPartCopy settles CopyObject's header and UploadPart's query.
+    route["operations"]["WithBoth"] = {"http": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"}}
+    shaped(route, "WithBoth", {"A": ("querystring", "a"), "B": ("header", "x-b")})
+    assert set(r.build({"s3": route}, "botocore test")["models"]["s3"]["operations"]) == {"WithA", "WithB", "WithBoth"}
+
+
+def test_a_deprecated_operation_yields_to_the_current_one_of_its_route_and_conditions():
+    s3 = model("rest-xml", "2006-03-01", GetBucketLifecycle=("GET", "/{Bucket}?lifecycle"),
+               GetBucketLifecycleConfiguration=("GET", "/{Bucket}?lifecycle"))
+    operations = r.build({"s3": shaped(s3, "GetBucketLifecycle", {}, deprecated=True)},
+                         "botocore test")["models"]["s3"]["operations"]
+    assert operations["GetBucketLifecycle"]["deprecated"] is True
+    assert "deprecated" not in operations["GetBucketLifecycleConfiguration"]
+    # Two deprecated ones, or two current ones, a request still cannot tell apart.
+    both = model("rest-xml", "2006-03-01", GetBucketLifecycle=("GET", "/{Bucket}?lifecycle"),
+                 GetBucketLifecycleConfiguration=("GET", "/{Bucket}?lifecycle"))
+    shaped(both, "GetBucketLifecycle", {}, deprecated=True)
+    shaped(both, "GetBucketLifecycleConfiguration", {}, deprecated=True)
+    with pytest.raises(SystemExit):
+        r.build({"s3": both}, "botocore test")
+
+
+def test_an_operation_signed_for_another_service_on_every_request_is_left_out_of_the_scope():
+    from botocore.loaders import Loader
+    partitions = Loader().load_data("partitions")
+    ruleset = {
+        "version": "1.0",
+        "parameters": {"Region": {"type": "String", "builtIn": "AWS::Region"},
+                       "UseOtherControl": {"type": "Boolean"}, "Bucket": {"type": "String"}},
+        "rules": [
+            {"type": "endpoint", "conditions": [{"fn": "booleanEquals", "argv": [{"ref": "UseOtherControl"}, True]}],
+             "endpoint": {"url": "https://other-control.example",
+                          "properties": {"authSchemes": [{"name": "sigv4", "signingName": "other"}]}}},
+            {"type": "endpoint", "conditions": [],
+             "endpoint": {"url": "https://s3.example",
+                          "properties": {"authSchemes": [{"name": "sigv4", "signingName": "s3"}]}}},
+        ],
+    }
+    s3 = model("rest-xml", "2006-03-01", ListBuckets=("GET", "/"), ListOtherBuckets=("GET", "/"),
+               CreateBucket=("PUT", "/{Bucket}"))
+    s3["metadata"]["signingName"] = "s3"
+    s3["operations"]["ListOtherBuckets"]["staticContextParams"] = {"UseOtherControl": {"value": True}}
+    # A member of its own bound to an endpoint parameter decides the endpoint per request: not every request's.
+    s3["operations"]["CreateBucket"]["staticContextParams"] = {"UseOtherControl": {"value": True}}
+    shaped(s3, "CreateBucket", {"Bucket": ("uri", "Bucket")})
+    s3["shapes"]["CreateBucketRequest"]["members"]["Bucket"]["contextParam"] = {"name": "Bucket"}
+
+    elsewhere = r.signed_elsewhere({"s3": s3}, {"s3": ruleset}, partitions)
+    assert elsewhere == {"s3": {"ListOtherBuckets": "other"}}
+    doc = r.build({"s3": s3}, "botocore test", elsewhere=elsewhere)
+    assert set(doc["models"]["s3"]["operations"]) == {"ListBuckets", "CreateBucket"}
+    assert doc["models"]["s3"]["signedElsewhere"] == {"ListOtherBuckets": "other"}
+    assert '"signedElsewhere": {"ListOtherBuckets": "other"}' in r.render(doc)
+    # Without it, GET / names two operations a request cannot tell apart.
+    with pytest.raises(SystemExit):
+        r.build({"s3": s3}, "botocore test")
 
 
 def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
@@ -191,3 +295,162 @@ def test_an_arn_label_the_controller_lets_span_slashes_is_greedy():
     doc = r.build({"oam": model("rest-json", "2022-06-10", TagResource=("PUT", "/tags/{ResourceArn}"),
                                 GetSink=("POST", "/GetSink"))}, "test")
     assert doc["models"]["oam"]["operations"]["TagResource"] == {"method": "PUT", "requestUri": "/tags/{ResourceArn+}"}
+
+
+PAGE = "https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html"
+SPEC = "https://github.com/apache/iceberg/blob/apache-iceberg-1.6.1/open-api/rest-catalog-open-api.yaml"
+RAW = "https://raw.githubusercontent.com/apache/iceberg/apache-iceberg-1.6.1/open-api/rest-catalog-open-api.yaml"
+DEFINITION_LINES = [
+    "paths:",                                          # 1
+    "  /v1/config:",                                   # 2
+    "    get:",                                        # 3
+    "      operationId: getConfig",                    # 4
+    "  /v1/{prefix}/namespaces:",                      # 5
+    "    parameters:",                                 # 6
+    "      - $ref: '#/components/parameters/prefix'",  # 7
+    "    get:",                                        # 8
+    "      operationId: listNamespaces",               # 9
+    "  /v1/{prefix}/namespaces/{namespace}:",          # 10
+    "    get:",                                        # 11
+    "      operationId: loadNamespaceMetadata",        # 12
+    "    delete:",                                     # 13
+    "      operationId: dropNamespace",                # 14
+    "  /v1/{prefix}/namespaces/{namespace}/tables:",   # 15
+    "    post:",                                       # 16
+    "      operationId: createTable",                  # 17
+    "  /v1/{prefix}/namespaces/{namespace}/tables/{table}:",  # 18
+    "    get:",                                        # 19
+    "      operationId: loadTable",                    # 20
+    "    head:",                                       # 21
+    "      operationId: tableExists",                  # 22
+]
+
+
+def operation_table(name: str, kind: str, path: str, action: str, event: str, line: int,
+                    spec: str = SPEC) -> str:
+    rows = [("Operation name", name), ("Type", kind), ("REST path", path), ("IAM action", action),
+            ("Lake Formation permissions", "ALL"), ("CloudTrail event", event),
+            ("Open API definition", f'<a href="{spec}#L{line}">{spec}#L{line}</a>')]
+    return "<table><tbody>" + "".join(f"<tr><td>{key}</td><td>{value}</td></tr>" for key, value in rows) \
+        + "</tbody></table>"
+
+
+def page(*tables: str) -> str:
+    return "<html><body><table><tr><th>Access pattern</th><th>Prefix</th><th>Example</th></tr></table>" \
+        + "".join(tables) + "</body></html>"
+
+
+ICEBERG = "Iceberg REST Catalog API"
+SERVED = page(
+    operation_table("GetConfig", ICEBERG, "GET /iceberg/v1/config", "glue:GetCatalog", "glue:GetCatalog", 3),
+    operation_table("ListNamespaces", ICEBERG, "GET/iceberg/v1/catalogs/{catalog}/namespaces", "glue:GetDatabase",
+                    "glue:GetDatabase", 8),
+    operation_table("LoadNamespaceMetadata", ICEBERG, "GET/iceberg/v1/catalogs/{catalog}/namespaces/{ns}",
+                    "glue:GetDatabase", "glue:GetDatabase", 11),
+    operation_table("DeleteNamespace", ICEBERG, "DELETE/iceberg/v1/catalogs/{catalog}/namespces/{ns}",
+                    "glue:DeleteDatabase", "glue:DeleteDatabase", 13),
+    operation_table("CreateTable", ICEBERG, "GET /iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables",
+                    "glue:CreateTable", "glue:CreateTable", 16),
+    operation_table("CreateTable", "AWS Glue extensions API",
+                    "POST/extensions/v1/catalogs/{catalog}/namespaces/{ns}/tables", "glue:CreateTable",
+                    "glue:CreateTable", 107,
+                    "https://github.com/awslabs/glue-extensions-for-iceberg/blob/main/glue-extensions-api.yaml"),
+    operation_table("LoadTable", ICEBERG, "GET /iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables/{table}",
+                    "glue:GetTable", "glue:GetTable", 19),
+    operation_table("TableExists", ICEBERG, "HEAD/iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables/{table}",
+                    "glue:GetTable", "glue:GetTable", 21),
+)
+GLUE = {"credentialScope": "glue", "page": PAGE, "type": ICEBERG}
+
+
+def fetcher(pages: dict[str, str]):
+    def fetch(url: str) -> str:
+        return pages[url]
+    return fetch
+
+
+def test_a_documented_endpoint_takes_each_rows_route_from_the_definition_it_links_under_the_pages_prefix():
+    model = r.build_documented(GLUE, fetcher({PAGE: SERVED, RAW: "\n".join(DEFINITION_LINES)}))
+
+    assert model["credentialScope"] == "glue"
+    assert model["apiVersion"] == "apache-iceberg-1.6.1"
+    assert model["operations"] == {
+        "CreateTable": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables"},
+        "DeleteDatabase": {"method": "DELETE", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}"},
+        "GetCatalog": {"method": "GET", "requestUri": "/iceberg/v1/config"},
+        # Rows of one operation are its route, in the page's order, and its alternatives, with their own method.
+        "GetDatabase": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces",
+                        "alternatives": [{"requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}",
+                                          "located": {}}]},
+        "GetTable": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}",
+                     "alternatives": [{"method": "HEAD", "requestUri":
+                                       "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}",
+                                       "located": {}}]},
+    }
+    # The page's misspelt segment and wrong method give way to the definition the row links, and are recorded.
+    assert model["documented"]["page"] == PAGE
+    assert model["documented"]["definitions"] == [RAW]
+    assert model["documented"]["pageDiffers"] == [
+        "DeleteNamespace: the page gives DELETE/iceberg/v1/catalogs/{catalog}/namespces/{ns}, its definition "
+        "DELETE /v1/{prefix}/namespaces/{namespace}",
+        "CreateTable: the page gives GET /iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables, its definition "
+        "POST /v1/{prefix}/namespaces/{namespace}/tables",
+    ]
+
+
+def test_a_row_whose_iam_action_is_not_its_cloudtrail_event_is_refused():
+    served = page(operation_table("ListNamespaces", ICEBERG, "GET/iceberg/v1/catalogs/{catalog}/namespaces",
+                                  "glue:GetDatabases", "glue:GetDatabase", 8))
+    with pytest.raises(SystemExit, match="is not its CloudTrail event"):
+        r.build_documented(GLUE, fetcher({PAGE: served, RAW: "\n".join(DEFINITION_LINES)}))
+
+
+def test_a_link_that_anchors_no_method_or_a_page_with_no_row_of_the_type_is_refused():
+    served = page(operation_table("ListNamespaces", ICEBERG, "GET/iceberg/v1/catalogs/{catalog}/namespaces",
+                                  "glue:GetDatabase", "glue:GetDatabase", 9))
+    with pytest.raises(SystemExit, match="does not anchor an operation's method"):
+        r.build_documented(GLUE, fetcher({PAGE: served, RAW: "\n".join(DEFINITION_LINES)}))
+    with pytest.raises(SystemExit, match="documents no operation"):
+        r.build_documented(GLUE, fetcher({PAGE: page(), RAW: ""}))
+
+
+def test_check_carries_the_documented_routes_over_and_verify_compares_them_with_the_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "DOCUMENTED", {"glue-iceberg-rest": GLUE})
+    for name in r.MODELS:
+        directory = tmp_path / "data" / name / "2020-01-01"
+        directory.mkdir(parents=True)
+        with gzip.open(directory / "service-2.json.gz", "wt", encoding="utf-8") as f:
+            json.dump(model("rest-json", "2020-01-01", Ping=("GET", "/ping")), f)
+    output = tmp_path / "rest-routes.json"
+    data = ["--botocore-data", str(tmp_path / "data"), "--output", str(output)]
+    documented = r.build_documented(GLUE, fetcher({PAGE: SERVED, RAW: "\n".join(DEFINITION_LINES)}))
+
+    # A regeneration with no vendored routes of the endpoint cannot read them offline.
+    with pytest.raises(SystemExit, match="--fetch-documented"):
+        r.main(data)
+    output.write_text(r.render(r.build({}, "test", {"glue-iceberg-rest": documented})), encoding="utf-8")
+    assert r.main(data) == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["models"]["glue-iceberg-rest"] == documented
+    assert r.main(data + ["--check"]) == 0
+
+    vendored = r.carried_documented(output.read_text(encoding="utf-8"))
+    assert r.verify_documented(vendored, fetcher({PAGE: SERVED, RAW: "\n".join(DEFINITION_LINES)})) == 0
+    moved = SERVED.replace("glue:GetCatalog", "glue:GetCatalogs")
+    assert r.verify_documented(vendored, fetcher({PAGE: moved, RAW: "\n".join(DEFINITION_LINES)})) == 1
+    fewer = SERVED.replace(
+        operation_table("TableExists", ICEBERG, "HEAD/iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables/{table}",
+                        "glue:GetTable", "glue:GetTable", 21), "")
+    assert r.verify_documented(vendored, fetcher({PAGE: fewer, RAW: "\n".join(DEFINITION_LINES)})) == 1
+
+
+def test_vendored_documented_routes_read_from_another_page_or_malformed_are_refused(monkeypatch):
+    monkeypatch.setattr(r, "DOCUMENTED", {"glue-iceberg-rest": GLUE})
+    documented = r.build_documented(GLUE, fetcher({PAGE: SERVED, RAW: "\n".join(DEFINITION_LINES)}))
+    elsewhere = json.loads(json.dumps(documented))
+    elsewhere["documented"]["page"] = "https://example.com/other.html"
+    with pytest.raises(SystemExit, match="are not read from"):
+        r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": elsewhere})))
+    malformed = json.loads(json.dumps(documented))
+    malformed["operations"]["GetCatalog"] = {"method": "FETCH", "requestUri": "/iceberg/v1/config"}
+    with pytest.raises(SystemExit, match="malformed"):
+        r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": malformed})))

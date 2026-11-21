@@ -78,6 +78,35 @@ class SesTagsTest {
                 () -> SesTags.validate(List.of(tag("bad!key", "v")))).getMessage());
     }
 
+    // probed: CreateEmailTemplate checks everything but the aws: prefix ahead of the template
+    @Test
+    void validateIgnoringSystemKeys_leavesTheReservedPrefixAlone() {
+        assertDoesNotThrow(() -> SesTags.validateIgnoringSystemKeys(null));
+        assertDoesNotThrow(() -> SesTags.validateIgnoringSystemKeys(List.of(tag("aws:x", "v"))));
+        assertEquals("Cannot provide multiple tags with the same key", assertThrows(AwsException.class,
+                () -> SesTags.validateIgnoringSystemKeys(List.of(tag("aws:x", "a"), tag("aws:x", "b")))).getMessage());
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> SesTags.validateIgnoringSystemKeys(List.of(tag("aws:" + "k".repeat(125), "v"))));
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy "
+                + "constraint: Member must have length less than or equal to 128", tooLong.getMessage());
+        // the character set still comes before the length
+        assertEquals("Tags can only contain letters, numbers, spaces, and the following special characters: "
+                + "_ . : / = + - @", assertThrows(AwsException.class,
+                () -> SesTags.validateIgnoringSystemKeys(List.of(tag("!" + "k".repeat(128), "v")))).getMessage());
+    }
+
+    @Test
+    void requireNoSystemKeys_refusesTheReservedPrefixInTheGivenWords() {
+        assertDoesNotThrow(() -> SesTags.requireNoSystemKeys(null, "Invalid tags"));
+        assertDoesNotThrow(() -> SesTags.requireNoSystemKeys(List.of(tag("k", "aws:v")), "Invalid tags"));
+        for (String key : List.of("aws:x", "AWS:x")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> SesTags.requireNoSystemKeys(List.of(tag(key, "v")), "Invalid tags"));
+            assertEquals("BadRequestException", e.getErrorCode());
+            assertEquals("Invalid tags", e.getMessage());
+        }
+    }
+
     @Test
     void keyTooLong_smithyLengthMessage() {
         AwsException e = assertThrows(AwsException.class,

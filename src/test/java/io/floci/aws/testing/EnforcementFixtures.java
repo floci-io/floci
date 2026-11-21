@@ -1,5 +1,7 @@
 package io.floci.aws.testing;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.floci.aws.core.common.Totp;
 import io.restassured.filter.Filter;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -11,6 +13,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -52,8 +55,9 @@ public final class EnforcementFixtures {
 
     /**
      * Deletes an IAM user, and first everything IAM wants gone before it will: inline policies,
-     * access keys, group memberships and attached managed policies. The IAM API reference lists
-     * all four among the items to remove "before attempting to delete a user", and Floci answers
+     * access keys, group memberships, attached managed policies and any MFA device, which is
+     * deactivated and then deleted as the virtual device it is. The IAM API reference lists all
+     * five among the items to remove "before attempting to delete a user", and Floci answers
      * {@code DeleteConflict} for each of them.
      *
      * @param authorization an IAM-scoped header. Signing with an account id reaches that
@@ -92,7 +96,52 @@ public final class EnforcementFixtures {
             iam(port, authorization, "DetachUserPolicy", "UserName", userName,
                     "PolicyArn", policyArn).statusCode(200);
         }
+        for (String serialNumber : iam(port, authorization, "ListMFADevices", "UserName", userName)
+                .statusCode(200).extract().xmlPath()
+                .getList("ListMFADevicesResponse.ListMFADevicesResult.MFADevices.member.SerialNumber",
+                        String.class)) {
+            iam(port, authorization, "DeactivateMFADevice", "UserName", userName,
+                    "SerialNumber", serialNumber).statusCode(200);
+            iam(port, authorization, "DeleteVirtualMFADevice", "SerialNumber", serialNumber).statusCode(200);
+        }
         iam(port, authorization, "DeleteUser", "UserName", userName).statusCode(200);
+    }
+
+    /**
+     * A virtual MFA device enabled for a user, holding the seed its codes come from so a caller
+     * can present one.
+     */
+    public record MfaDevice(String serialNumber, String seed) {
+
+        /** A code for the current time step, which authenticates once and is then spent. */
+        public String codeNow() {
+            return Totp.codeAt(seed, Totp.stepAt(Instant.now()));
+        }
+    }
+
+    /**
+     * Creates a virtual MFA device for {@code userName} and enables it with the two consecutive
+     * codes {@code EnableMFADevice} requires, which is how a client sets one up, and returns it
+     * with the seed to produce further codes from. {@link #removeUser} deactivates and deletes it
+     * with the user.
+     *
+     * <p>The seed arrives base64-encoded, as AWS returns {@code Base32StringSeed}, and the codes
+     * are computed over the base32 text inside it.
+     *
+     * @param authorization an IAM-scoped header for the account the user belongs to
+     */
+    public static MfaDevice enableMfaDevice(int port, String authorization, String userName) {
+        String member = "CreateVirtualMFADeviceResponse.CreateVirtualMFADeviceResult.VirtualMFADevice.";
+        XmlPath created = iam(port, authorization, "CreateVirtualMFADevice",
+                "VirtualMFADeviceName", userName + "-device").statusCode(200).extract().xmlPath();
+        String seed = new String(Base64.getDecoder().decode(
+                created.getString(member + "Base32StringSeed").trim()), StandardCharsets.UTF_8);
+        String serialNumber = created.getString(member + "SerialNumber");
+        long step = Totp.stepAt(Instant.now());
+        iam(port, authorization, "EnableMFADevice", "UserName", userName, "SerialNumber", serialNumber,
+                "AuthenticationCode1", Totp.codeAt(seed, step - 1),
+                "AuthenticationCode2", Totp.codeAt(seed, step)).statusCode(200);
+        return new MfaDevice(serialNumber, seed);
     }
 
     /** The access key {@link #createUser} issued, with the secret a request signer needs. */
@@ -421,6 +470,12 @@ public final class EnforcementFixtures {
             request = request.formParam(params[i], params[i + 1]);
         }
         return request.when().post("/").then();
+    }
+
+    /** A single-action, single-resource IAM statement, ready to place in a policy's Statement array. */
+    public static String statement(String effect, String action, String resource) {
+        return JsonNodeFactory.instance.objectNode().put("Effect", effect).put("Action", action)
+                .put("Resource", resource).toPrettyString();
     }
 
     private static RequestSpecification s3(int port, String authorization) {

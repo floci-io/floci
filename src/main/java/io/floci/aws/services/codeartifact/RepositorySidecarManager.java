@@ -184,6 +184,21 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * Direct dependencies of one package version, extracted from the metadata file for this
+     * format (the POM for Maven, {@code package.json} for npm, the wheel/sdist metadata for pypi,
+     * the {@code .nuspec} for NuGet). Only the 4 formats AWS itself documents for {@code
+     * ListPackageVersionDependencies} override this; the default throws {@link
+     * UnsupportedOperationException}, the same convention {@link #listPackageVersionAssetNames}
+     * already uses for a capability not every sidecar backs.
+     */
+    default List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        throw new UnsupportedOperationException(format() + " package version dependencies cannot be listed "
+                + "through this sidecar");
+    }
+
+    /**
      * Lists the asset name of every file published under one package version, for bridging
      * {@code CopyPackageVersions} when there is no generic-format record to enumerate assets from
      * the way {@code CodeArtifactPackageVersion#getAssets} does. The default throws {@link

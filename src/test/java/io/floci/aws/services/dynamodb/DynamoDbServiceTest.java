@@ -29,6 +29,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
@@ -1161,6 +1163,17 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void scanOfEmptyTableDoesNotReadFilterExpression() {
+        // Callers that skip the handler's validation (the Step Functions scan integration)
+        // only see a malformed FilterExpression once an item is evaluated.
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        DynamoDbService.ScanResult result = service.scan("Users", "nickname = = :n", null, null, null, null, null, region);
+        assertEquals(0, result.items().size());
+    }
+
+    @Test
     void scanWithLimit() {
         String region = "eu-west-1";
         createUsersTable(region);
@@ -1170,6 +1183,21 @@ class DynamoDbServiceTest {
 
         DynamoDbService.ScanResult result = service.scan("Users", null, null, null, null, 2, null, region);
         assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanOfAReloadedTableWithoutItemsReadsLikeAnEmptyTable() {
+        String region = "eu-west-1";
+        InMemoryStorage<String, TableDefinition> tables = new InMemoryStorage<>();
+        new DynamoDbService(tables).createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), null, null, List.of(), List.of(), List.of(),
+                "PAY_PER_REQUEST", region);
+        DynamoDbService reloaded = new DynamoDbService(tables);
+
+        assertEquals(List.of(0L, 0L, 0L, 0L),
+                reloaded.scan("Users", null, null, null, null, null, null, region).readBytes());
+        assertEquals(List.of(0L),
+                reloaded.scan("Users", null, null, null, null, null, null, null, 0, 4, region).readBytes());
     }
 
     @Test
@@ -4037,6 +4065,139 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", key, region);
         assertEquals("10", stored.get("counter").get("N").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = (:v) + (:w)                                  | a | {"N":"5"}
+            SET a = ((:v) + :w)                                  | a | {"N":"5"}
+            SET a = :w - (:v)                                    | a | {"N":"1"}
+            SET a = (n) + (:v)                                   | a | {"N":"12"}
+            SET a = (k[0]) + (k[1])                              | a | {"N":"9"}
+            SET a = (if_not_exists(n, :v)) + (:w)                | a | {"N":"13"}
+            SET a = if_not_exists(z, if_not_exists(n, :v)) + :w  | a | {"N":"13"}
+            SET a = if_not_exists((#n), :v)                      | a | {"N":"10"}
+            SET a = if_not_exists((z), (:v))                     | a | {"N":"2"}
+            SET a = if_not_exists(z, (n))                        | a | {"N":"10"}
+            SET a = if_not_exists(z, if_not_exists(n, :v))       | a | {"N":"10"}
+            SET a = if_not_exists(z, if_not_exists(y, :v))       | a | {"N":"2"}
+            SET a = if_not_exists(z, (if_not_exists((y), (:v)))) | a | {"N":"2"}
+            SET l = list_append((:l), (:m))                      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            SET l = list_append((if_not_exists(l, :l)), :m)      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            SET l = (list_append(:l, (:m)))                      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            """)
+    void updateItemAppliesParenthesizedAndNestedOperands(String expression, String attribute, String expected)
+            throws IOException {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", (ObjectNode) mapper.readTree("""
+                {"userId":{"S":"u1"},"n":{"N":"10"},"k":{"L":[{"N":"4"},{"N":"5"}]}}"""), region);
+        ObjectNode names = mapper.createObjectNode().put("#n", "n");
+        ObjectNode values = (ObjectNode) mapper.readTree("""
+                {":v":{"N":"2"},":w":{"N":"3"},":l":{"L":[{"S":"x"}]},":m":{"L":[{"S":"y"}]}}""");
+
+        service.updateItem("Users", item("userId", "u1"), null, expression, names, values, null, region);
+
+        assertEquals(mapper.readTree(expected), service.getItem("Users", item("userId", "u1"), region).get(attribute));
+    }
+
+    private static final String ABSENT_ATTRIBUTE =
+            "The provided expression refers to an attribute that does not exist in the item";
+    private static final String INCORRECT_TYPE = "An operand in the update expression has an incorrect data type";
+
+    private ObjectNode putOperandItem(String region) throws IOException {
+        createUsersTable(region);
+        ObjectNode stored = (ObjectNode) mapper.readTree("""
+                {"userId":{"S":"u1"},"n":{"N":"10"},"k":{"L":[{"N":"4"},{"N":"5"}]},
+                 "m":{"M":{"x":{"N":"1"}}},"s":{"S":"str"}}""");
+        service.putItem("Users", stored, region);
+        return stored;
+    }
+
+    private ObjectNode operandValues() throws IOException {
+        return (ObjectNode) mapper.readTree("""
+                {":v":{"N":"2"},":l":{"L":[{"S":"x"}]}}""");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = z                                      | absent
+            SET a = (z)                                    | absent
+            SET a = m.y                                    | absent
+            SET a = m.x.y                                  | absent
+            SET a = n.x                                    | absent
+            SET a = k[5]                                   | absent
+            SET a = m[0]                                   | absent
+            SET a = if_not_exists(z, y)                    | absent
+            SET a = if_not_exists(z, if_not_exists(y, x)) | absent
+            SET a = if_not_exists(m.y, m.z)                | absent
+            SET a = z + :v                                 | absent
+            SET a = :v + z                                 | absent
+            SET a = if_not_exists(z, y) + :v               | absent
+            SET l = list_append(z, :l)                     | absent
+            SET l = list_append(if_not_exists(z, y), :l)   | absent
+            SET b = :v, a = z                              | absent
+            SET a = z REMOVE n                             | absent
+            SET a = z + s                                  | absent
+            SET a = s + :v                                 | type
+            SET a = s + z                                  | type
+            SET l = list_append(s, :l)                     | type
+            SET l = list_append(s, z)                      | type
+            ADD s :v                                       | type
+            """)
+    void updateItemRefusesAnOperandTheItemCannotServe(String expression, String error) throws IOException {
+        String region = "eu-west-1";
+        ObjectNode stored = putOperandItem(region);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", item("userId", "u1"),
+                null, expression, null, operandValues(), null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("absent".equals(error) ? ABSENT_ATTRIBUTE : INCORRECT_TYPE, ex.getMessage());
+        assertEquals(stored, service.getItem("Users", item("userId", "u1"), region));
+    }
+
+    @Test
+    void updateItemRefusingAnAbsentOperandCreatesNoItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", item("userId", "new"),
+                null, "SET a = z", null, null, null, region));
+        assertEquals(ABSENT_ATTRIBUTE, ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "new"), region));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = z                  | absent
+            SET a = if_not_exists(z, y) | absent
+            SET a = s + :v             | type
+            SET l = list_append(s, :l) | type
+            ADD s :v                   | type
+            """)
+    void transactWriteItemsCancelsAnUpdateWhoseOperandTheItemCannotServe(String expression, String error)
+            throws IOException {
+        String region = "eu-west-1";
+        ObjectNode stored = putOperandItem(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"other"}}}}""");
+        ObjectNode update = mapper.createObjectNode();
+        ObjectNode member = update.putObject("Update");
+        member.put("TableName", "Users");
+        member.set("Key", item("userId", "u1"));
+        member.put("UpdateExpression", expression);
+        if (expression.contains(":")) {
+            member.set("ExpressionAttributeValues", operandValues());
+        }
+
+        TransactionCanceledException ex = assertThrows(TransactionCanceledException.class,
+                () -> service.transactWriteItems(List.of(put, update), region));
+        List<TransactionCanceledException.CancellationReason> reasons = ex.getCancellationReasons();
+        assertEquals("", reasons.get(0).code());
+        assertEquals("ValidationError", reasons.get(1).code());
+        assertEquals("absent".equals(error) ? ABSENT_ATTRIBUTE : INCORRECT_TYPE, reasons.get(1).message());
+        assertEquals(stored, service.getItem("Users", item("userId", "u1"), region));
+        assertNull(service.getItem("Users", item("userId", "other"), region));
     }
 
     @Test

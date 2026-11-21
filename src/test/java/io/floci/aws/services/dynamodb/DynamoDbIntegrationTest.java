@@ -1490,7 +1490,8 @@ class DynamoDbIntegrationTest {
                 {
                     "TableName": "TestTable",
                     "KeyConditionExpression": "pk = :pk",
-                    "FilterExpression": "total >= :min",
+                    "FilterExpression": "#total >= :min",
+                    "ExpressionAttributeNames": {"#total": "total"},
                     "ExpressionAttributeValues": {
                         ":pk": {"S": "user-1"},
                         ":min": {"N": "50"}
@@ -1516,7 +1517,8 @@ class DynamoDbIntegrationTest {
                 {
                     "TableName": "TestTable",
                     "KeyConditionExpression": "pk = :pk",
-                    "FilterExpression": "total >= :min",
+                    "FilterExpression": "#total >= :min",
+                    "ExpressionAttributeNames": {"#total": "total"},
                     "Limit": 2,
                     "ExpressionAttributeValues": {
                         ":pk": {"S": "user-1"},
@@ -6006,7 +6008,7 @@ given()
             "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                      | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
             "UpdateExpression": ""                                                                                                                   | Invalid UpdateExpression: The expression can not be empty;
             "UpdateExpression": "", "ConditionExpression": "a = :missing"                                                                            | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :missing
-            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved word: name
+            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved keyword: name
             "UpdateExpression": "SET q = :w", "AttributeUpdates": {"q": {"Action": "PUT", "Value": {"S": "w"}}}                                      | Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}
             """)
     void updateItemPutsExpressionErrorsInTheValidationEnvelope(String members, String message) {

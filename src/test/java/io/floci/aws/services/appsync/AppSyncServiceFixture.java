@@ -30,7 +30,12 @@ public final class AppSyncServiceFixture {
     }
 
     public static AppSyncService create(Clock clock) {
-        return create(clock, "http://localhost:4566", "us-east-1", null,
+        return create(clock, "us-east-1");
+    }
+
+    /** As above, answering for {@code region}, as a request there does: an API of another Region isn't found. */
+    public static AppSyncService create(Clock clock, String region) {
+        return create(clock, "http://localhost:4566", region, null,
                 AccountAwareStorageBackend.inMemory("000000000000"), null,
                 mock(SchemaRegistry.class), new LambdaAuthorizerCache());
     }

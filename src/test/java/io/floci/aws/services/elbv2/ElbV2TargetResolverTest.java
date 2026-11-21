@@ -1,5 +1,6 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.elbv2.model.TargetDescription;
@@ -30,7 +31,7 @@ class ElbV2TargetResolverTest {
         TargetDescription target = new TargetDescription();
         target.setId("i-1234567890abcdef0");
 
-        assertEquals("172.18.0.42", ElbV2TargetResolver.resolveHost(ec2Service, targetGroup, target));
+        assertEquals("172.18.0.42", ElbV2TargetResolver.resolve(ec2Service, null, targetGroup, target.getId(), 80).host());
     }
 
     @Test
@@ -47,7 +48,7 @@ class ElbV2TargetResolverTest {
         TargetDescription target = new TargetDescription();
         target.setId("i-1234567890abcdef0");
 
-        assertEquals("172.18.0.42", ElbV2TargetResolver.resolveHost(ec2Service, targetGroup, target));
+        assertEquals("172.18.0.42", ElbV2TargetResolver.resolve(ec2Service, null, targetGroup, target.getId(), 80).host());
     }
 
     @Test
@@ -58,7 +59,35 @@ class ElbV2TargetResolverTest {
         TargetDescription target = new TargetDescription();
         target.setId("10.0.0.12");
 
-        assertEquals("10.0.0.12", ElbV2TargetResolver.resolveHost(ec2Service, targetGroup, target));
+        assertEquals("10.0.0.12", ElbV2TargetResolver.resolve(ec2Service, null, targetGroup, target.getId(), 80).host());
+    }
+
+    @Test
+    void instancePortPublishedByATaskResolvesToTheTaskContainer() {
+        Ec2InstancePorts ports = new Ec2InstancePorts();
+        ports.bind("111122223333", "i-0abc", 32768, new Ec2InstancePorts.Endpoint("172.19.0.7", 8080));
+        TargetGroup targetGroup = new TargetGroup();
+        targetGroup.setTargetGroupArn("arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/tg/123456");
+        targetGroup.setTargetType("instance");
+
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.7", 8080),
+                ElbV2TargetResolver.resolve(mock(Ec2Service.class), ports, targetGroup, "i-0abc", 32768));
+    }
+
+    @Test
+    void instancePortNoTaskPublishesResolvesToTheInstanceContainer() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("172.18.0.42");
+        when(ec2Service.findInstanceById("111122223333", "i-0abc")).thenReturn(instance);
+        Ec2InstancePorts ports = new Ec2InstancePorts();
+        ports.bind("111122223333", "i-0abc", 32768, new Ec2InstancePorts.Endpoint("172.19.0.7", 8080));
+        TargetGroup targetGroup = new TargetGroup();
+        targetGroup.setTargetGroupArn("arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/tg/123456");
+        targetGroup.setTargetType("instance");
+
+        assertEquals(new Ec2InstancePorts.Endpoint("172.18.0.42", 22),
+                ElbV2TargetResolver.resolve(ec2Service, ports, targetGroup, "i-0abc", 22));
     }
 
     @Test

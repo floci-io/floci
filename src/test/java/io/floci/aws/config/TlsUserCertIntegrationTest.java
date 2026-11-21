@@ -89,6 +89,21 @@ class TlsUserCertIntegrationTest {
     }
 
     @Test
+    void tlsCertServesTheSamePemAsCaPemAsAPemFile() {
+        String caPem = given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString();
+
+        String tlsCert = given()
+            .when()
+                .get("/_floci/tls-cert")
+            .then()
+                .statusCode(200)
+                .contentType(startsWith("application/x-pem-file"))
+                .extract().asString();
+
+        assertEquals(caPem, tlsCert);
+    }
+
+    @Test
     void ssmPutParameterOverHttps() {
         given()
             .baseUri("https://localhost:" + testSslPort)

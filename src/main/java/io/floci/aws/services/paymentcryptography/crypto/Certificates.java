@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -21,7 +22,8 @@ import java.util.Base64;
  *
  * <p>The service gives a counterparty a certificate over a key pair it made for the occasion,
  * and reads the certificate a counterparty brings. A certificate travels in three shapes: PEM,
- * base64 of PEM (which is how the service returns one), and base64 of DER.
+ * base64 of PEM (which is how the service returns one), and base64 of DER. The PEM of a
+ * certificate signing request is written here too, under its own label.
  *
  * <p>Reading a certificate is the emulator's own business, through {@link Pem}; minting one
  * belongs to ACM's generator, which the service asks for a certificate with.
@@ -106,17 +108,32 @@ public final class Certificates {
     }
 
     /**
-     * Wrap DER as a PEM document.
+     * The certificate in DER.
      *
-     * @param der the certificate in DER
-     * @return the certificate in PEM
+     * @param certificate the certificate
+     * @return the certificate in DER
      */
-    public static String toPem(byte[] der) {
+    public static byte[] toDer(X509Certificate certificate) {
+        try {
+            return certificate.getEncoded();
+        } catch (CertificateEncodingException e) {
+            throw new IllegalArgumentException("the certificate does not encode: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Wrap DER as a PEM document of the given label.
+     *
+     * @param label the label the document carries, such as {@code CERTIFICATE}
+     * @param der the document in DER
+     * @return the document in PEM
+     */
+    public static String toPem(String label, byte[] der) {
         StringWriter writer = new StringWriter();
         try (JcaPEMWriter pemWriter = new JcaPEMWriter(writer)) {
-            pemWriter.writeObject(new PemObject("CERTIFICATE", der));
+            pemWriter.writeObject(new PemObject(label, der));
         } catch (IOException e) {
-            throw new IllegalStateException("cannot write the certificate as PEM", e);
+            throw new IllegalStateException("cannot write the document as PEM", e);
         }
         return writer.toString();
     }

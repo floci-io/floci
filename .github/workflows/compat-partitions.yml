@@ -90,6 +90,7 @@ jobs:
             -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
             -e FLOCI_TLS_ENABLED=true \
+            -e FLOCI_SERVICES_STEPFUNCTIONS_ALLOW_PLAINTEXT_HTTP=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             -e FLOCI_SERVICES_RDS_ENDPOINT_HOST=floci \
@@ -159,6 +160,119 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-partition-results-${{ env.REGION }}
+          path: test-results/
+          if-no-files-found: warn
+
+      - name: Dump floci logs
+        if: failure() || cancelled()
+        run: docker logs --tail 300 floci
+
+  # The amd64 half of the published image, which compatibility.yml no longer builds per pull request:
+  # the native image is where an arch-specific resource can go missing (snappy-java's JNI library is
+  # registered per platform), so the x86_64 nightly image runs sdk-test-python, whose Firehose
+  # compression delivery test needs that library, in the commercial partition on an amd64 runner.
+  sdk-test-python-amd64:
+    name: sdk-test-python / amd64
+    # A dispatch that names a region is about that partition alone, so it skips this job.
+    if: >-
+      !github.event.repository.fork
+      && ((github.event_name == 'workflow_dispatch' && !inputs.region)
+        || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: ${{ inputs.image || 'floci/floci:nightly' }}
+
+    steps:
+      - name: Pull the image and read the commit it was built from
+        id: image
+        run: |
+          docker pull --platform linux/amd64 "$IMAGE"
+          revision=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")
+          if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
+            echo "::error::$IMAGE has no org.opencontainers.image.revision label to match the tests to"
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.image.outputs.revision }}
+          sparse-checkout: |
+            compatibility-tests
+
+      - name: Create Docker network
+        run: docker network create compat-net
+
+      - name: Start floci
+        run: |
+          DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+          docker run -d --name floci --network compat-net \
+            -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$DOCKER_GID" \
+            -e FLOCI_BASE_URL=http://floci:4566 \
+            -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_HOSTNAME=floci \
+            -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
+            -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
+            -e FLOCI_TLS_ENABLED=true \
+            -e FLOCI_SERVICES_EC2_MOCK=true \
+            -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_RDS_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_SSOOIDC_LOCAL_PRINCIPAL_ID=11111111-2222-3333-4444-555555555555 \
+            "$IMAGE"
+
+      - name: Wait for floci to be healthy
+        run: |
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker logs --tail 50 floci
+          exit 1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: compatibility-tests/sdk-test-python
+          load: true
+          tags: compat-sdk-test-python
+          cache-from: type=gha,scope=sdk-test-python
+
+      - name: Run tests
+        run: |
+          mkdir -p test-results
+          FLOCI_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)
+          docker run --rm --network compat-net \
+            --dns "${FLOCI_IP}" \
+            -e FLOCI_ENDPOINT=http://floci:4566 \
+            -e FLOCI_S3_VHOST_ENDPOINT=http://floci:4566 \
+            -v "$(pwd)/test-results:/results" \
+            compat-sdk-test-python
+
+      - name: Generate test summary
+        if: always()
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
+        with:
+          paths: test-results/*.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compat-amd64-results
           path: test-results/
           if-no-files-found: warn
 

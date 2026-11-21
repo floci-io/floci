@@ -47,7 +47,8 @@ public class ElbV2QueryHandler {
         ACCOUNT_LIMITS.put("rules-per-application-load-balancer", "100");
         ACCOUNT_LIMITS.put("target-groups-per-application-load-balancer", "100");
         ACCOUNT_LIMITS.put("targets-per-application-load-balancer", "1000");
-        ACCOUNT_LIMITS.put("certificates-per-application-load-balancer", "25");
+        ACCOUNT_LIMITS.put("certificates-per-application-load-balancer",
+                String.valueOf(ElbV2Service.CERTIFICATES_PER_LOAD_BALANCER));
         ACCOUNT_LIMITS.put("condition-values-per-alb-rule", "5");
         ACCOUNT_LIMITS.put("condition-wildcards-per-alb-rule", "5");
     }
@@ -549,7 +550,7 @@ public class ElbV2QueryHandler {
                 .start("CreateRuleResponse", AwsNamespaces.ELB_V2)
                 .start("CreateRuleResult")
                   .start("Rules")
-                    .start("member").raw(ruleXml(rule)).end("member")
+                    .start("member").raw(ruleXml(rule, region)).end("member")
                   .end("Rules")
                 .end("CreateRuleResult")
                 .raw(AwsQueryResponse.responseMetadata())
@@ -569,7 +570,7 @@ public class ElbV2QueryHandler {
                 .start("DescribeRulesResult")
                   .start("Rules");
         for (Rule r : result) {
-            xml.start("member").raw(ruleXml(r)).end("member");
+            xml.start("member").raw(ruleXml(r, region)).end("member");
         }
         xml.end("Rules")
            .end("DescribeRulesResult")
@@ -600,7 +601,7 @@ public class ElbV2QueryHandler {
                 .start("ModifyRuleResponse", AwsNamespaces.ELB_V2)
                 .start("ModifyRuleResult")
                   .start("Rules")
-                    .start("member").raw(ruleXml(rule)).end("member")
+                    .start("member").raw(ruleXml(rule, region)).end("member")
                   .end("Rules")
                 .end("ModifyRuleResult")
                 .raw(AwsQueryResponse.responseMetadata())
@@ -629,7 +630,7 @@ public class ElbV2QueryHandler {
                 .start("SetRulePrioritiesResult")
                   .start("Rules");
         for (Rule r : updated) {
-            xml.start("member").raw(ruleXml(r)).end("member");
+            xml.start("member").raw(ruleXml(r, region)).end("member");
         }
         xml.end("Rules")
            .end("SetRulePrioritiesResult")
@@ -775,13 +776,13 @@ public class ElbV2QueryHandler {
     private Response handleAddListenerCertificates(MultivaluedMap<String, String> p, String region) {
         String listenerArn = p.getFirst("ListenerArn");
         List<String> certs = parseCertificateList(p, "Certificates");
-        service.addListenerCertificates(region, listenerArn, certs);
+        List<String> certificateList = service.addListenerCertificates(region, listenerArn, certs);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("AddListenerCertificatesResponse", AwsNamespaces.ELB_V2)
                 .start("AddListenerCertificatesResult")
                   .start("Certificates");
-        for (String c : certs) {
+        for (String c : certificateList) {
             xml.start("member").elem("CertificateArn", c).end("member");
         }
         xml.end("Certificates")
@@ -800,12 +801,22 @@ public class ElbV2QueryHandler {
 
     private Response handleDescribeListenerCertificates(MultivaluedMap<String, String> p, String region) {
         String listenerArn = p.getFirst("ListenerArn");
-        List<String> certs = service.describeListenerCertificates(region, listenerArn);
+        List<ElbV2Service.ListenerCertificate> certs =
+                service.describeListenerCertificates(region, listenerArn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeListenerCertificatesResponse", AwsNamespaces.ELB_V2)
                 .start("DescribeListenerCertificatesResult");
-        appendCertificates(xml, certs);
+        if (!certs.isEmpty()) {
+            xml.start("Certificates");
+            for (ElbV2Service.ListenerCertificate certificate : certs) {
+                xml.start("member")
+                     .elem("CertificateArn", certificate.certificateArn())
+                     .elem("IsDefault", String.valueOf(certificate.isDefault()))
+                   .end("member");
+            }
+            xml.end("Certificates");
+        }
         xml.end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
@@ -849,7 +860,9 @@ public class ElbV2QueryHandler {
         xml.elem("TargetGroupArn", tg.getTargetGroupArn());
         xml.elem("TargetGroupName", tg.getTargetGroupName());
         xml.elem("Protocol", safe(tg.getProtocol()));
-        xml.elem("ProtocolVersion", safe(tg.getProtocolVersion()));
+        if (isHttpProtocol(tg.getProtocol())) {
+            xml.elem("ProtocolVersion", safe(tg.getProtocolVersion()));
+        }
         if (tg.getPort() != null) xml.elem("Port", String.valueOf(tg.getPort()));
         xml.elem("VpcId", safe(tg.getVpcId()));
         xml.elem("HealthCheckProtocol", safe(tg.getHealthCheckProtocol()));
@@ -859,8 +872,10 @@ public class ElbV2QueryHandler {
         if (tg.getHealthCheckTimeoutSeconds() != null) xml.elem("HealthCheckTimeoutSeconds", String.valueOf(tg.getHealthCheckTimeoutSeconds()));
         if (tg.getHealthyThresholdCount() != null) xml.elem("HealthyThresholdCount", String.valueOf(tg.getHealthyThresholdCount()));
         if (tg.getUnhealthyThresholdCount() != null) xml.elem("UnhealthyThresholdCount", String.valueOf(tg.getUnhealthyThresholdCount()));
-        xml.elem("HealthCheckPath", safe(tg.getHealthCheckPath()));
-        xml.start("Matcher").elem("HttpCode", safe(tg.getMatcher())).end("Matcher");
+        if (isHttpProtocol(tg.getHealthCheckProtocol())) {
+            xml.elem("HealthCheckPath", safe(tg.getHealthCheckPath()));
+            xml.start("Matcher").elem("HttpCode", safe(tg.getMatcher())).end("Matcher");
+        }
         xml.start("LoadBalancerArns");
         for (String lbArn : tg.getLoadBalancerArns()) {
             xml.start("member").raw(lbArn).end("member");
@@ -871,6 +886,10 @@ public class ElbV2QueryHandler {
         return xml.build();
     }
 
+    private static boolean isHttpProtocol(String protocol) {
+        return "HTTP".equals(protocol) || "HTTPS".equals(protocol);
+    }
+
     private String listenerXml(Listener l) {
         XmlBuilder xml = new XmlBuilder();
         xml.elem("ListenerArn", l.getListenerArn());
@@ -878,10 +897,11 @@ public class ElbV2QueryHandler {
         if (l.getPort() != null) xml.elem("Port", String.valueOf(l.getPort()));
         xml.elem("Protocol", safe(l.getProtocol()));
         xml.elem("SslPolicy", l.getSslPolicy());
-        appendCertificates(xml, l.getCertificates());
+        appendCertificates(xml, l.getDefaultCertificate() == null ? List.of()
+                : List.of(l.getDefaultCertificate()));
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
-            xml.start("member").raw(actionXml(a)).end("member");
+            xml.start("member").raw(actionXml(a, "GENEVE".equals(l.getProtocol()))).end("member");
         }
         xml.end("DefaultActions");
         xml.start("AlpnPolicy");
@@ -892,6 +912,7 @@ public class ElbV2QueryHandler {
         return xml.build();
     }
 
+    /** The {@code Certificates} a listener carries, which is its default certificate alone. */
     private static void appendCertificates(XmlBuilder xml, List<String> certificates) {
         if (!certificates.isEmpty()) {
             xml.start("Certificates");
@@ -902,8 +923,10 @@ public class ElbV2QueryHandler {
         }
     }
 
-    private String ruleXml(Rule r) {
+    private String ruleXml(Rule r, String region) {
         XmlBuilder xml = new XmlBuilder();
+        Listener listener = service.getListener(region, r.getListenerArn());
+        boolean gatewayListener = listener != null && "GENEVE".equals(listener.getProtocol());
         xml.elem("RuleArn", r.getRuleArn());
         xml.elem("Priority", r.getPriority());
         xml.start("Conditions");
@@ -913,21 +936,28 @@ public class ElbV2QueryHandler {
         xml.end("Conditions");
         xml.start("Actions");
         for (Action a : r.getActions()) {
-            xml.start("member").raw(actionXml(a)).end("member");
+            xml.start("member").raw(actionXml(a, gatewayListener)).end("member");
         }
         xml.end("Actions");
         xml.elem("IsDefault", String.valueOf(r.isDefault()));
         return xml.build();
     }
 
-    private String actionXml(Action a) {
+    private String actionXml(Action a, boolean gatewayListener) {
         XmlBuilder xml = new XmlBuilder();
         xml.elem("Type", safe(a.getType()));
         if (a.getOrder() != null) xml.elem("Order", String.valueOf(a.getOrder()));
         if (a.getTargetGroupArn() != null) xml.elem("TargetGroupArn", a.getTargetGroupArn());
-        if (!a.getTargetGroups().isEmpty() || a.getTargetGroupArn() == null && "forward".equals(a.getType())) {
+        boolean shortFormForward = "forward".equals(a.getType())
+                && a.getTargetGroupArn() != null && a.getTargetGroups().isEmpty();
+        if (!a.getTargetGroups().isEmpty() || "forward".equals(a.getType())) {
             xml.start("ForwardConfig");
             xml.start("TargetGroups");
+            if (shortFormForward) {
+                xml.start("member").elem("TargetGroupArn", a.getTargetGroupArn());
+                if (!gatewayListener) xml.elem("Weight", "1");
+                xml.end("member");
+            }
             for (Action.TargetGroupTuple t : a.getTargetGroups()) {
                 xml.start("member");
                 xml.elem("TargetGroupArn", safe(t.getTargetGroupArn()));
@@ -935,9 +965,9 @@ public class ElbV2QueryHandler {
                 xml.end("member");
             }
             xml.end("TargetGroups");
-            if (a.getStickinessEnabled() != null) {
+            if (a.getStickinessEnabled() != null || (shortFormForward && !gatewayListener)) {
                 xml.start("TargetGroupStickinessConfig")
-                   .elem("Enabled", String.valueOf(a.getStickinessEnabled()));
+                   .elem("Enabled", String.valueOf(Boolean.TRUE.equals(a.getStickinessEnabled())));
                 if (a.getStickinessDurationSeconds() != null) {
                     xml.elem("DurationSeconds", String.valueOf(a.getStickinessDurationSeconds()));
                 }

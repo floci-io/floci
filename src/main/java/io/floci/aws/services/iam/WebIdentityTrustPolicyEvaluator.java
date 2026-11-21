@@ -15,7 +15,7 @@ import java.util.stream.StreamSupport;
 /**
  * Evaluates a role's trust policy for {@code sts:AssumeRoleWithWebIdentity}, matching the
  * {@code Federated} principal and the {@code Condition} block that pins an OIDC subject and
- * audience.
+ * audience, and the session name the request passes.
  *
  * <p>Separate from {@link AssumeRolePolicyEvaluator} on purpose. That evaluator serves the
  * {@code sts:AssumeRole} path, hardcodes that action, reads only {@code Principal.AWS}, and ignores
@@ -32,6 +32,7 @@ public class WebIdentityTrustPolicyEvaluator {
 
     private static final Logger LOG = Logger.getLogger(WebIdentityTrustPolicyEvaluator.class);
     private static final String WEB_IDENTITY_ACTION = "sts:assumerolewithwebidentity";
+    private static final String ROLE_SESSION_NAME_KEY = "sts:RoleSessionName";
 
     private final ObjectMapper objectMapper;
 
@@ -46,11 +47,12 @@ public class WebIdentityTrustPolicyEvaluator {
      *
      * <p>{@code claims} holds the OIDC condition context keyed <em>without</em> the provider
      * prefix — {@code sub}, {@code aud} — which this evaluator resolves against policy keys of the
-     * form {@code <provider-host-and-path>:sub}. An explicit {@code Deny} wins over any
-     * {@code Allow}, per AWS precedence.
+     * form {@code <provider-host-and-path>:sub}. {@code roleSessionName} is the request's
+     * {@code RoleSessionName}, which a policy reads as {@code sts:RoleSessionName}. An explicit
+     * {@code Deny} wins over any {@code Allow}, per AWS precedence.
      */
     public boolean allows(String trustPolicyDocument, String oidcProviderArn, String issuerKeyPrefix,
-                          Map<String, List<String>> claims) {
+                          Map<String, List<String>> claims, String roleSessionName) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -61,11 +63,14 @@ public class WebIdentityTrustPolicyEvaluator {
             LOG.warnv("Failed to parse web-identity trust policy: {0}", e.getMessage());
             return false;
         }
+        if (!TrustPolicyStatements.wellFormed(statements)) {
+            return false;
+        }
 
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode stmt : statements) {
-                switch (evaluate(stmt, oidcProviderArn, issuerKeyPrefix, claims)) {
+                switch (evaluate(stmt, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
@@ -74,7 +79,7 @@ public class WebIdentityTrustPolicyEvaluator {
             return allow;
         }
         if (statements.isObject()) {
-            return evaluate(statements, oidcProviderArn, issuerKeyPrefix, claims) == Match.ALLOW;
+            return evaluate(statements, oidcProviderArn, issuerKeyPrefix, claims, roleSessionName) == Match.ALLOW;
         }
         return false;
     }
@@ -82,17 +87,17 @@ public class WebIdentityTrustPolicyEvaluator {
     private enum Match { ALLOW, DENY, NO_MATCH }
 
     private Match evaluate(JsonNode stmt, String oidcProviderArn, String issuerKeyPrefix,
-                           Map<String, List<String>> claims) {
+                           Map<String, List<String>> claims, String roleSessionName) {
         if (!actionApplies(stmt)) {
             return Match.NO_MATCH;
         }
         if (!matchesFederatedPrincipal(stmt.get("Principal"), oidcProviderArn)) {
             return Match.NO_MATCH;
         }
-        if (!conditionsSatisfied(stmt.get("Condition"), issuerKeyPrefix, claims)) {
+        if (!conditionsSatisfied(stmt.get("Condition"), issuerKeyPrefix, claims, roleSessionName)) {
             return Match.NO_MATCH;
         }
-        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+        return TrustPolicyStatements.denies(stmt) ? Match.DENY : Match.ALLOW;
     }
 
     /**
@@ -167,7 +172,7 @@ public class WebIdentityTrustPolicyEvaluator {
      * using anything else does not match, which fails closed.
      */
     private boolean conditionsSatisfied(JsonNode conditionNode, String issuerKeyPrefix,
-                                        Map<String, List<String>> claims) {
+                                        Map<String, List<String>> claims, String roleSessionName) {
         if (conditionNode == null || conditionNode.isNull()) {
             // No condition constraints — the federated principal alone is enough.
             return true;
@@ -188,7 +193,7 @@ public class WebIdentityTrustPolicyEvaluator {
             while (keyIterator.hasNext()) {
                 Map.Entry<String, JsonNode> keyEntry = keyIterator.next();
                 if (!keySatisfied(operator, keyEntry.getKey(), keyEntry.getValue(),
-                        issuerKeyPrefix, claims)) {
+                        issuerKeyPrefix, claims, roleSessionName)) {
                     return false;
                 }
             }
@@ -197,8 +202,11 @@ public class WebIdentityTrustPolicyEvaluator {
     }
 
     private boolean keySatisfied(String operator, String conditionKey, JsonNode expected,
-                                 String issuerKeyPrefix, Map<String, List<String>> claims) {
-        List<String> actual = resolveClaim(conditionKey, issuerKeyPrefix, claims);
+                                 String issuerKeyPrefix, Map<String, List<String>> claims,
+                                 String roleSessionName) {
+        List<String> actual = ROLE_SESSION_NAME_KEY.equalsIgnoreCase(conditionKey)
+                ? (roleSessionName == null ? List.of() : List.of(roleSessionName))
+                : resolveClaim(conditionKey, issuerKeyPrefix, claims);
         List<String> expectedValues = textValues(expected);
         if (expectedValues.isEmpty()) {
             return false;

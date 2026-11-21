@@ -8,6 +8,7 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerHandle;
@@ -124,7 +125,7 @@ class ElastiCacheServiceTest {
         clusterFormation = mock(ValkeyClusterFormation.class);
         service = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService, provisioningIds);
+                kmsService, mock(CloudWatchLogsService.class), provisioningIds);
     }
 
     @Test
@@ -152,7 +153,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService svc = new ElastiCacheService(cm, pm, mock(ValkeyClusterFormation.class),
                 sf, cfg, mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"),
-                mock(KmsService.class), provisioningIds);
+                mock(KmsService.class), mock(CloudWatchLogsService.class), provisioningIds);
 
         svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null, "us-east-1");
 
@@ -234,7 +235,8 @@ class ElastiCacheServiceTest {
 
         Field locksField = ElastiCacheService.class.getDeclaredField("parameterGroupLocks");
         locksField.setAccessible(true);
-        Object monitor = ((ConcurrentHashMap<?, ?>) locksField.get(service)).get(name);
+        // Each group's monitor is keyed by its Region and name, as the group is.
+        Object monitor = ((ConcurrentHashMap<?, ?>) locksField.get(service)).get("us-east-1::" + name);
         ExecutorService pool = Executors.newSingleThreadExecutor();
         AtomicReference<Thread> writer = new AtomicReference<>();
         try {
@@ -1062,6 +1064,25 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void aClusterModeGroupGetsItsReplicationPasswordOnlyWhenAUserFirstSignsInToANode() {
+        stubPerNodeContainers();
+
+        service.createReplicationGroup(clusterRequest("grp", 2, 1));
+
+        // Until then every session is the node's unrestricted default user, which could read the password.
+        verify(clusterFormation, never()).secureReplication(anyString(), any());
+        ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validators =
+                ArgumentCaptor.forClass(ElastiCacheAuthProxy.PasswordValidator.class);
+        verify(proxyManager, times(4)).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(),
+                validators.capture());
+        validators.getAllValues().get(0).prepareClusterReplication();
+        validators.getAllValues().get(2).prepareClusterReplication();
+
+        Endpoint node = new Endpoint("localhost", 6379);
+        verify(clusterFormation, times(1)).secureReplication("grp", List.of(node, node, node, node));
+    }
+
+    @Test
     void clusterOnParameterGroupEnablesClusterModeForSingleShard() {
         stubPerNodeContainers();
 
@@ -1190,7 +1211,7 @@ class ElastiCacheServiceTest {
         when(config.hostname()).thenReturn(Optional.of("localhost"));
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class), new ElastiCacheProvisioningIds());
+                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class), mock(CloudWatchLogsService.class), new ElastiCacheProvisioningIds());
     }
 
     private static void stubPerNodeContainers(ElastiCacheContainerManager containerManager) {
@@ -1535,6 +1556,26 @@ class ElastiCacheServiceTest {
         service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
 
         verify(proxyManager).refreshUser("serverless-backing", "app");
+    }
+
+    @Test
+    void modifyUserAccessStringIsAppliedOnEveryNodeOfAClusterModeGroup() {
+        stubPerNodeContainers();
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "valkey", List.of("default-user-id", "app-user-id"), "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest("grp", "test",
+                AuthMode.PASSWORD, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
+                "default.valkey8.cluster.on", null, null, 2, 1,
+                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of(), List.of("app-group"), null));
+
+        service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
+
+        // Each node has a proxy and a backend ACL of its own, so each one installs the new rules.
+        for (String node : List.of("grp-0001-001", "grp-0001-002", "grp-0002-001", "grp-0002-002")) {
+            verify(proxyManager).refreshUser(node, "app");
+        }
     }
 
     @Test
@@ -1922,7 +1963,7 @@ class ElastiCacheServiceTest {
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
         svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
         pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");
@@ -2041,7 +2082,7 @@ class ElastiCacheServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
@@ -2091,7 +2132,7 @@ class ElastiCacheServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, mock(CloudWatchLogsService.class), provisioningIds);
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
@@ -2433,7 +2474,7 @@ class ElastiCacheServiceTest {
     private ElastiCacheService serviceAfterRestart() {
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService, provisioningIds);
+                kmsService, mock(CloudWatchLogsService.class), provisioningIds);
     }
 
     private ElastiCacheMemcachedService memcachedService() {

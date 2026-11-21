@@ -186,7 +186,7 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
         if (asg == null || !asg.isObject()) {
             return new LinkedHashMap<>();
         }
-        Object converted = toApiShape(ctx.engine().resolveNode(asg));
+        Object converted = CfnApiShapeConverter.convertToJava(ctx.engine().resolveNode(asg));
         if (converted instanceof Map<?, ?> map) {
             @SuppressWarnings("unchecked")
             Map<String, Object> typed = (Map<String, Object>) map;
@@ -209,51 +209,6 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return out;
-    }
-
-    /** Recursively converts a resolved CloudFormation node to the ECS API's camelCase Java shape. */
-    private Object toApiShape(JsonNode node) {
-        if (node == null || node.isNull() || node.isMissingNode()) {
-            return null;
-        }
-        if (node.isObject()) {
-            Map<String, Object> out = new LinkedHashMap<>();
-            node.fields().forEachRemaining(field -> {
-                Object value = toApiShape(field.getValue());
-                if (value != null) {
-                    out.put(decapitalize(field.getKey()), value);
-                }
-            });
-            return out;
-        }
-        if (node.isArray()) {
-            List<Object> out = new ArrayList<>();
-            for (JsonNode item : node) {
-                Object value = toApiShape(item);
-                if (value != null) {
-                    out.add(value);
-                }
-            }
-            return out;
-        }
-        if (node.isBoolean()) {
-            return node.booleanValue();
-        }
-        if (node.isIntegralNumber()) {
-            return node.asInt();
-        }
-        if (node.isNumber()) {
-            return node.asDouble();
-        }
-        String text = node.asText();
-        return text.isEmpty() ? null : text;
-    }
-
-    private String decapitalize(String key) {
-        if (key == null || key.isEmpty()) {
-            return key;
-        }
-        return Character.toLowerCase(key.charAt(0)) + key.substring(1);
     }
 
     private void deleteCapacityProvider(String physicalId) {

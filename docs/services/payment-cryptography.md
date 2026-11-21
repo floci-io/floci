@@ -11,7 +11,10 @@
 | `CreateKey` | Create a key with fresh material |
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
-| `DeleteKey` | Delete a key |
+| `DeleteKey` | Schedule a key for deletion |
+| `RestoreKey` | Cancel a scheduled key deletion |
+| `StartKeyUsage` | Start the use of a key |
+| `StopKeyUsage` | Stop the use of a key |
 | `CreateAlias` | Point an alias name at a key |
 | `GetAlias` | Get the key an alias name points at |
 | `ListAliases` | List the aliases of a region |
@@ -22,9 +25,21 @@
 | `GetPublicKeyCertificate` | The certificate of an asymmetric key |
 | `GetParametersForImport` | The token and the wrapping key certificate an import quotes back |
 | `GetParametersForExport` | The token and the signing key certificate an export quotes back |
+| `AddKeyReplicationRegions` | Add Regions to the key's replication |
+| `RemoveKeyReplicationRegions` | Remove Regions from the key's replication |
+| `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
+| `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
+| `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
+| `GetCertificateSigningRequest` | The certificate signing request a key pair signs |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
+| `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
+| `GetResourcePolicy` | Get the resource-based policy of a key |
+| `DeleteResourcePolicy` | Remove the resource-based policy of a key |
+| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
+| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
+| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -35,37 +50,80 @@
   algorithm: the leftmost three bytes of the CMAC of sixteen zero bytes under an AES
   key, and the ANSI X9.24 one for a Triple DES key. The material is held by the key
   while the emulator runs and is not written to the store.
-- **Regional:** keys, aliases and tags all live in the region they were made in. The
+- **Regional:** keys and aliases live in the region they were made in. The
   service is regional, and so is this.
 - **Alias names are unique in a region, not in an account:** the same name may name a
   key in two regions, and the two are two aliases. A name that is already taken in
   the key's own region is a `ConflictException`.
-- **Tags are the region's:** they are not part of the replication process, so a key in
-  another region carries its own tag set, and tagging one leaves the others alone.
-- **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
-  with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
-  A key that is gone does not come back: a tagging request for it is refused. The
-  service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
-- **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
-  created disabled or with tags comes back that way. The `KeyUsage` and the
+- **Tags follow the key they are on.** A key's tags live with it, and a replica is a
+  copy of its primary's material and metadata, so a replica carries the primary's tags
+  and a change to them is replicated. The alias names are the region's own: an alias
+  names a key in its own region, and a replica is named by an alias of that region.
+- **Deletion and restore:** `DeleteKey` disables the key and answers with the key, its
+  state `DELETE_PENDING` and the moment its deletion takes effect. The key is kept, so it
+  stays readable and keeps its aliases and tags until the waiting period ends.
+  `DeleteKeyInDays` is checked against the range the model states. `RestoreKey` cancels a
+  scheduled deletion and returns the key to `CREATE_COMPLETE` with no pending deletion
+  timestamp; a key that is not pending deletion is refused with `ConflictException`. The
+  reference's own example of the restore says that two members change, the state and the
+  pending timestamp, so the restored key stays disabled and keeps the moments of its use:
+  it is `StartKeyUsage` that enables a key again. The waiting period is not swept by a
+  timer: the emulator keeps the key pending rather than deleting it on a clock. A key that
+  is already pending deletion is refused with `ConflictException`, because the deletion is
+  already under way, and the replicas of the key carry its pending state and the moment the
+  deletion takes effect, as they carry the rest of its metadata. A replica is read-only, so
+  the deletion is cancelled on the primary: a request that names a replica is refused with
+  `ValidationException`.
+- **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
+  `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
+  comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer
   carries every mode of use the reference gives a key, the ones the key was not made
   with as false, so a caller reading them finds a boolean for each of them. The check
-  value is a CMAC, which is the only algorithm this service computes, so a request
-  naming another one is refused.
+  value is a CMAC under an AES key and the ANSI X9.24 value under a Triple DES one, and a
+  request that names another one is refused.
+- **The key attributes this service makes.** The algorithms are the Triple DES, the AES,
+  the RSA, the ECC and the keyed hash ones, so the hash a key carries is fixed at its
+  creation, as the reference's guide says. The keyed hash algorithms are for the
+  `TR31_M7_HMAC_KEY` usage alone, and the SHA-1 check value the reference's model also
+  names is refused. The classes are the symmetric key, the asymmetric key pair and the
+  public key, so the private key class the reference's model also names is refused. The
+  usage says what the key is for and the algorithm has to serve it, so a key of a MAC
+  usage may not be made of an AES key, and the asymmetric usages take the key pairs the
+  reference's table gives them.
+- **The usage is not checked against the reference's list.** The reference's page for the key
+  attributes lists the usages a key may have and says that it prevents the creation of a key
+  that is not valid. This service requires a usage and checks that the algorithm serves it, but
+  it does not check the usage itself, so a key of a usage the reference does not list is made
+  here and refused by the reference.
 - **Which key a request may name:** `KeyIdentifier` takes the ARN of a key, the ARN of
   an alias or the name of an alias, while `KeyArn` and `ResourceArn` take the ARN of
   a key alone, as the reference states them. A request naming a key another way is
   refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none. Each key in the list is the
-  summary the model names: its identifier, its state, its attributes, its check value
-  and its two flags.
-- **The members a request may name that the service does not read:** `CreateKey` and
-  `ImportKey` take `ReplicationRegions`, and `ImportKey` takes `RequesterComment`, and the
-  service reads none of them. No replica is made and no approval is recorded, because the
-  replication and the multi-party approval are not emulated.
+  summary the model names: its identifier, its state, its attributes, its check value,
+  its two flags and, for a key that is replicated, the kind of key it is and the region
+  it is the primary of.
+- **The members a request may name that the service does not read:** `ImportKey`,
+  `AssociateMpaTeam` and `DisassociateMpaTeam` take `RequesterComment`, and the service
+  reads none of it.
+- **The Multi-Party Approval team of a protected operation:** a protected operation has one
+  team, so a second association replaces the first. The association answers with the
+  operation, the team and the state of the association, and removing it answers with the
+  association as it was, its state now `DELETE_PENDING`, and the association is gone from
+  the service. An operation with no team is refused as the resource the reference cannot
+  find. The team's ARN is kept as the request names it: the emulator has no Multi-Party
+  Approval service to check it against. The requester's comment is read by nobody, so no
+  approval session is recorded.
+- **The approval session itself is not made:** the reference holds the import of a root
+  certificate pending until the team approves it, and answers with a key whose state is
+  `CREATE_IN_PROGRESS` and whose `MpaStatus` carries the session. The emulator has no
+  Multi-Party Approval service to ask, so the import is not held pending and the key is
+  imported at once. The protected operation is the one the reference names, the import of
+  a root public key certificate. The disassociation is not held either: the reference holds
+  it pending the approval of the team that is associated, and the emulator answers it with
+  the state `DELETE_PENDING` and takes the association away at once.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -74,9 +132,11 @@
   and `NextToken`, and answer with one page and the token that asks for the next.
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
-  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, or
-  under a key the two parties agreed with ECDH; it comes back under the same protections, and
-  a public key comes back under the certificate that carries it. A key that is not exportable
+  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, under
+  a TR-34 key block the service signs and wraps for the receiver, under an AS2805 cryptogram
+  the receiver's key encryption key protects, or under a key the two parties agreed with ECDH;
+  it comes back under the same protections, and a public key comes back under the certificate
+  that carries it. A key that is not exportable
   does not leave, a key pair has no material a key block could carry, and a counterparty's
   certificate that the named authority did not sign is refused. An export may name an initial
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
@@ -96,9 +156,51 @@
   is capped by the curve's strength, so P-256 carries no AES-192.
 - **The check value of an export:** a key block carries the check value of the key it
   carries, and a cryptogram carries none, because it carries no key block at all.
-- **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
-  refused with the error that says so, rather than answered with something of another kind,
-  and the refusal names the forms the service serves.
+- **The TR-34 key block:** a key leaves under a TR-31 block the service signs with its signing
+  key and wraps for the receiver under the receiver's certificate, in the `X9_TR34_2012`
+  format, and comes back the same way. The block carries the TR-31 header in the clear, the
+  nonce the two passes agree on, and the digest of the envelope it wraps, all under the
+  signature of the signing certificate, which has to chain to the named authority and be
+  inside its validity window. The block names its recipient by the receiver's certificate,
+  so the receiver can tell which of its keys the block is for. A block whose signature does
+  not verify, whose digest does not match, whose nonce is not the one the request quotes,
+  or that carries no header to say what it holds is refused.
+- **The cipher of a TR-34 block:** the key block is enciphered with the cipher the key needs,
+  as the reference does, so a key is never protected by something weaker than itself: a
+  Triple DES key under Triple DES and an AES key under AES-128. The key a block may carry is
+  therefore the one the guide's matrix allows for a receiver's certificate, which is a Triple
+  DES key or an AES-128 key, and an AES-128 key needs a receiver whose certificate is
+  RSA-3072 or RSA-4096.
+- **The signing key of a TR-34 block:** the service signs the block with the key the export
+  parameters issued, so the export has to name the export token they issued, and a request
+  that names its own signing key is refused. The signing key is an RSA one, because the
+  block's signature is an RSA signature, so `GetParametersForExport` takes `RSA_2048` and
+  refuses the other algorithms.
+- **The token of a TR-34 block:** the import has to name the import token the import
+  parameters issued, and a request that names none, or that names a wrapping key instead,
+  is refused with the reason rather than with a key that is not found.
+- **The headers a TR-34 export names:** a request may narrow the modes of use and the
+  exportability of the key, and it may name a version and optional blocks, and the header
+  the block carries says so, the same as it does for a TR-31 block.
+- **The nonce of a TR-34 block:** the nonce binds the block to the exchange, and it is
+  optional in the model, so a block made without one is read without the freshness it
+  carries. A request that names no nonce expects a block that carries none, so a block that
+  carries one may not come in under a request that names none.
+- **The AS2805 key cryptogram:** a key leaves under a key encryption key, bound to its
+  purpose by the AS2805 variant, and comes back the same way. The variant is exclusive-ored
+  into the key before it is encrypted, and the cryptogram carries a tag over the whole of
+  it, so a cryptogram that was changed does not open at all: the tag catches a wrong
+  wrapping key and a wrong variant as well as a changed ciphertext. The variants served
+  are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
+  `MESSAGE_AUTHENTICATION_KEY_VARIANT_24` and `PIN_ENCRYPTION_KEY_VARIANT_28`. A variant
+  says what the key is for, so a key may only leave under the variant that matches its own
+  usage, and the wrapping key has to be at least as strong as the key it carries, on the
+  import as well as on the export.
+- **The bytes of an AS2805 cryptogram are this emulator's own.** The layout of the standard
+  is not published, so the cryptogram this service reads and writes is its own
+  construction. A cryptogram another producer built does not open here, and one this
+  service built does not open there. The fields, the variant mapping and the key rules are
+  the ones the service publishes, and those are what it implements.
 - **The block headers a request names:** an export may name the modes of use, the
   exportability, the version and the optional blocks of the TR-31 block it produces, and
   the block carries them. An optional block is written with its length in hexadecimal, and
@@ -137,9 +239,96 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-- **Not yet emulated:** the multi-region replication operations, the resource policy
-  operations, the key usage operations, the key restore operation, the multi-party
-  approval operations and the certificate signing request.
+- **Multi-Region key replication:** a key may be replicated to other Regions, so the same
+  key material is usable in several of them. The key is created in the Region of the
+  request and is the *Primary Region key* there; every other Region holds a *Replica
+  Region key* with the same key identifier and its own ARN. A key that is replicated has
+  to be exportable, a replica cannot be replicated further, and a replica is read-only:
+  every change is made on the primary. `AddKeyReplicationRegions` and
+  `RemoveKeyReplicationRegions` change the Regions of a key, and the default Regions of
+  the account are set with `EnableDefaultKeyReplicationRegions` and
+  `DisableDefaultKeyReplicationRegions` and read with
+  `GetDefaultKeyReplicationRegions`. A key created while the account has default Regions
+  takes them unless it names its own, and says which it did. A key whose Regions are
+  changed afterwards has a configuration of its own, and says so. Taking the replica
+  Regions away is how the replication is turned off for a key, so a key that replicates
+  nowhere is not a multi-region key and carries no type at all. A Region a request names
+  has to be a name of a Region this service serves, and it has to be a Region of the
+  partition the key is in, as the reference says: a key is replicated within its own
+  partition and account. The Region of the primary is not one to replicate to, to add or
+  to take away, so a request that cannot be carried out is refused rather than answered as
+  if it had named no Region at all. A refused request leaves no key behind.
+- **The default Regions are the ones of the Region they are read in:** each Region has its
+  own default Regions, so a key created in a Region takes the default Regions of that
+  Region and not the ones of another. A key's own replication takes precedence over the
+  default Regions of its Region.
+- **A replica is a complete copy of the key:** it carries the primary's material, so the
+  key leaves the service from the Region of a replica as well as from the primary's, and
+  it carries the primary's tags, so a change to them reaches it. The alias names are the
+  Region's own, and an alias that names a replica goes with it when the replica does.
+  A replica answers with the kind of the key and the Region of its primary, and the
+  replication status and the defaults flag are the primary's alone, as the reference's
+  own answer shows.
+- **Not checked:** the permission to create a key in the Region a key is replicated to.
+  The permission is checked in the Region of the request, which is the Region the
+  replication is asked in.
+- **The replication is in sync at once:** the service does not model the progress of a
+  replication, so the status of a replica that is there is `SYNCHRONIZED` right away,
+  where the reference answers `IN_PROGRESS` until the replication has finished.
+- **The quotas of the reference are not enforced.** The reference holds two thousand keys
+  and two thousand aliases in a Region and throttles the control plane to five requests a
+  second. The emulator holds no such limit, and answers every request it is given.
+- **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
+  key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
+  a policy is answered with `ResourceNotFoundException` by both reads. The policy is a JSON
+  document, and one that does not parse, or that carries anything after the document, is
+  refused with `ValidationException`. A grant names an effect, a principal, an action and
+  a resource, and a policy that carries no statement, or a statement that names none of
+  them, is refused with `ValidationException`. An `Allow` statement that reaches every
+  principal and carries no condition is refused with `PublicPolicyException`, as the
+  reference refuses one: a principal that is everyone, and a grant that excludes a
+  principal and so reaches everyone else, both reach everyone. A statement that carries a
+  condition is taken to be narrowed by it, so a condition that narrows nothing is not read.
+  The resource a policy names must be every resource or the ARN of the key the policy is
+  on, so a policy that names another key is refused. The reference attaches a policy to the
+  primary key alone, so a replica takes none and a request that names one is refused. The
+  access the policy grants is not enforced: the service's operations are not among the ones
+  IAM checks. A key that is pending deletion keeps its policy, because the key is still
+  there.
+- **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
+  `StartKeyUsage` enables it again and records when it started. The moment recorded is the
+  moment the key changed state, so a request that names a key that is already in the state
+  it asks for changes nothing and keeps the moment it changed. A stopped key stays
+  readable and its material stays where it is, so it can be started again. A replica is
+  read-only, so the change is made on the primary, and a request that names a replica is
+  refused. The change reaches the replicas: a stop on the primary stops the use of the
+  replicas too, as the reference says. A key that is pending deletion is not the caller's
+  to start or stop: the reference does not publish the answer for that case, so the
+  request is refused with `ConflictException`, which is the code the service uses for a
+  request that conflicts with the state of a key.
+- **The certificate signing request of a key pair:** `GetCertificateSigningRequest` answers
+  with a request the key pair signs, over the subject the request names and with the digest
+  it names. The answer is the PEM of the request, base64 encoded, which is what the
+  reference's own answer carries, so a caller that decodes it holds the file the
+  `-----BEGIN CERTIFICATE REQUEST-----` and `-----END CERTIFICATE REQUEST-----` markers are
+  in. The key has to be a key pair the service holds the private half of: a key that is not
+  a key pair has no public half to certify, a key pair the service holds no private half of
+  has nothing to sign with, and a key that is disabled does no work. The reference
+  publishes no table of the keys this operation takes, so the rules here are this service's
+  own: the usage and the mode of use of the key are not narrowed, and the reference's own
+  flows are both served, the one that signs with a key pair of the digital signature usage
+  whose mode of use is `Sign` and the one that signs with a key pair of the TR-34 usage
+  whose modes of use are `Unwrap` and `Decrypt`. The signature algorithm is the one the
+  key's own algorithm gives with that digest, so an RSA key signs with an RSA algorithm and
+  an elliptic curve one with an ECDSA algorithm. The subject's members are written in the
+  order the reference's own request writes them, the most general member first: the
+  country, the state or province, the city, the organization, the organization unit, the
+  common name and the email address. The email address is written as an IA5String, which
+  holds ASCII alone, so an address with a character outside ASCII is refused with
+  `ValidationException` rather than signed with that character narrowed to a byte. The
+  model settles what the request may name: the digest is one of the four it names and the
+  subject carries a common name, so a request that names another digest or leaves the
+  common name out is refused with `ValidationException` by the model's own check.
 
 ## Configuration
 

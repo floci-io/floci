@@ -3,8 +3,9 @@ package io.floci.aws.services.s3;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
-import io.floci.aws.services.s3.EventStreamMessages.Message;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.EventStreamMessages;
+import io.floci.aws.testing.EventStreamMessages.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

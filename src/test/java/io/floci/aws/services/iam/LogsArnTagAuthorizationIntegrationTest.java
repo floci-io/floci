@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EnforcementFixtures.statement;
 import static io.floci.aws.testing.LogsAuthorizationFixtures.expectedTags;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -63,7 +64,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     void exactBareGroupArnGrant(String action) {
         String selected = group();
         String other = group(Map.of("team", "green"));
-        String caller = user(statement("Allow", action, arn(selected)));
+        String caller = user(statement("Allow", "logs:" + action, arn(selected)));
         invoke(caller, action, arn(other)).statusCode(400).body(containsString("AccessDeniedException"));
         assertTags(other, Map.of("team", "green"));
         assertSuccess(invoke(caller, action, arn(selected)), action);
@@ -75,7 +76,8 @@ class LogsArnTagAuthorizationIntegrationTest {
     void exactBareGroupArnDenyOverridesWildcard(String action) {
         String selected = group();
         String other = group();
-        String caller = user(statement("Allow", action, "*") + "," + statement("Deny", action, arn(selected)));
+        String caller = user(statement("Allow", "logs:" + action, "*") + ","
+                + statement("Deny", "logs:" + action, arn(selected)));
         ValidatableResponse response = invoke(caller, action, arn(selected));
         assertAll("the exact deny prevents access and preserves tags",
                 () -> response.statusCode(400).body(containsString("AccessDeniedException")),
@@ -102,7 +104,7 @@ class LogsArnTagAuthorizationIntegrationTest {
 
     private void verifyForeignArn(String action, String dimension, boolean root) {
         String local = group();
-        String caller = root ? ACCOUNT : user(statement("Allow", action, "*"));
+        String caller = root ? ACCOUNT : user(statement("Allow", "logs:" + action, "*"));
         String foreign = switch (dimension) {
             case "account" -> "arn:aws:logs:" + REGION + ":222222222222:log-group:" + local;
             case "region" -> "arn:aws:logs:us-west-2:" + ACCOUNT + ":log-group:" + local;
@@ -121,11 +123,18 @@ class LogsArnTagAuthorizationIntegrationTest {
         assertTags(local, expectedTags(action));
     }
 
+    /**
+     * A plain name where AWS takes an ARN names nothing the generated table reads, so the call is checked on
+     * {@code *}; the handler still reads it as the literal name of a historical group.
+     */
     @ParameterizedTest
     @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
     void incompleteArnPrefixRemainsALiteralLegacyName(String action) {
         String name = historicalGroupNamed("arn:archive-" + UUID.randomUUID(), Map.of("team", "blue"));
-        String caller = user(statement("Allow", action, arn(name)));
+        String scoped = user(statement("Allow", "logs:" + action, arn(name)));
+        invoke(scoped, action, name).statusCode(400).body(containsString("AccessDeniedException"));
+        assertTags(name, Map.of("team", "blue"));
+        String caller = user(statement("Allow", "logs:" + action, "*"));
         assertSuccess(invoke(caller, action, name), action);
         assertTags(name, expectedTags(action));
     }
@@ -148,7 +157,7 @@ class LogsArnTagAuthorizationIntegrationTest {
             case "marker" -> "x:log-group:" + local;
             default -> throw new IllegalArgumentException(shape);
         };
-        String caller = root ? ACCOUNT : user(statement("Allow", action, "*"));
+        String caller = root ? ACCOUNT : user(statement("Allow", "logs:" + action, "*"));
         ValidatableResponse response = invoke(caller, action, input);
         assertAll("noncanonical input cannot access the shortened local name",
                 () -> response.statusCode(400).body(containsString("ResourceNotFoundException")),
@@ -166,7 +175,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     void storedTagDenyUsesTheOwningGroup(String action) {
         String selected = group();
         String other = group(Map.of("team", "green"));
-        String caller = user(statement("Allow", action, "*") + ","
+        String caller = user(statement("Allow", "logs:" + action, "*") + ","
                 + "{\"Effect\":\"Deny\",\"Action\":\"logs:" + action + "\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}}");
         invoke(caller, action, arn(selected)).statusCode(400).body(containsString("AccessDeniedException"));
@@ -213,7 +222,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     void destinationTagReadUsesItsExactArn() {
         String selected = destination("blue");
         String other = destination("green");
-        String caller = user(statement("Allow", "ListTagsForResource", selected));
+        String caller = user(statement("Allow", "logs:ListTagsForResource", selected));
 
         invoke(caller, "ListTagsForResource", other).statusCode(400)
                 .body(containsString("AccessDeniedException"));
@@ -225,7 +234,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     void destinationResourceTagsControlConditionalAccess() {
         String selected = destination("blue");
         String other = destination("green");
-        String caller = user(statement("Allow", "ListTagsForResource", "*") + ","
+        String caller = user(statement("Allow", "logs:ListTagsForResource", "*") + ","
                 + "{\"Effect\":\"Deny\",\"Action\":\"logs:ListTagsForResource\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}}");
 
@@ -241,8 +250,8 @@ class LogsArnTagAuthorizationIntegrationTest {
         String other = "logs-destination-tag-" + UUID.randomUUID();
         registerDestinationCleanup(selected);
         registerDestinationCleanup(other);
-        String caller = user(statement("Allow", "PutDestination", destinationArn(selected)) + ","
-                + statement("Allow", "TagResource", "*") + ","
+        String caller = user(statement("Allow", "logs:PutDestination", destinationArn(selected)) + ","
+                + statement("Allow", "logs:TagResource", "*") + ","
                 + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
 
         putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
@@ -259,8 +268,8 @@ class LogsArnTagAuthorizationIntegrationTest {
         String other = "logs-destination-tag-" + UUID.randomUUID();
         registerDestinationCleanup(selected);
         registerDestinationCleanup(other);
-        String caller = user(statement("Allow", "PutDestination", "*") + ","
-                + statement("Allow", "TagResource", destinationArn(selected)) + ","
+        String caller = user(statement("Allow", "logs:PutDestination", "*") + ","
+                + statement("Allow", "logs:TagResource", destinationArn(selected)) + ","
                 + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
 
         putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
@@ -275,9 +284,9 @@ class LogsArnTagAuthorizationIntegrationTest {
         String other = "logs-destination-tag-" + UUID.randomUUID();
         registerDestinationCleanup(selected);
         registerDestinationCleanup(other);
-        String caller = user(statement("Allow", "PutDestination", "*") + ","
-                + statement("Allow", "TagResource", "*") + ","
-                + statement("Deny", "TagResource", destinationArn(selected)) + ","
+        String caller = user(statement("Allow", "logs:PutDestination", "*") + ","
+                + statement("Allow", "logs:TagResource", "*") + ","
+                + statement("Deny", "logs:TagResource", destinationArn(selected)) + ","
                 + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
 
         putTaggedDestination(caller, selected).statusCode(400).body(containsString("AccessDeniedException"));
@@ -350,11 +359,6 @@ class LogsArnTagAuthorizationIntegrationTest {
     private String user(String statements) {
         return LogsAuthorizationFixtures.user(cleanup, endpoint.getPort(), ACCOUNT, "logs-arn-tag-",
                 "arn-tags", statements);
-    }
-
-    private static String statement(String effect, String action, String resource) {
-        return "{\"Effect\":\"" + effect + "\",\"Action\":\"logs:" + action
-                + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private static String arn(String group) {

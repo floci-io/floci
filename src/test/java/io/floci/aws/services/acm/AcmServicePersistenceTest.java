@@ -69,6 +69,26 @@ class AcmServicePersistenceTest {
         assertEquals(cert.getCertificateChain(), loaded.getCertificateChain());
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the certificate whose ARN it is given, as tag calls leave them and a restart
+     * keeps them; nothing for an ARN of another account or Region, or of no certificate.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheCertificateTheArnNames(@TempDir Path dir) {
+        AcmService first = newService(dir);
+        String arn = first.requestCertificate("example.com", List.of(), ValidationMethod.DNS, null,
+                KeyAlgorithm.RSA_2048, null, null, Map.of("Env", "test"), REGION).getArn();
+        first.addTagsToCertificate(arn, Map.of("team", "data"), REGION);
+        first.removeTagsFromCertificate(arn, List.of(Map.of("Key", "Env")), REGION);
+
+        assertEquals(Map.of("team", "data"), first.storedTags(arn));
+        assertEquals(Map.of("team", "data"), newService(dir).storedTags(arn));
+        assertEquals(Map.of(), first.storedTags(arn.replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), first.storedTags(arn.replace(":" + REGION + ":", ":eu-west-1:")));
+        assertEquals(Map.of(), first.storedTags(arn + "0"));
+        assertEquals(Map.of(), first.storedTags("arn:aws:s3:::example"));
+    }
+
     private AcmService newService(Path dir) {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");

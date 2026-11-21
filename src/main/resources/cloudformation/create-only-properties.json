@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"
@@ -217,6 +222,10 @@
   ],
   "AWS::CodeBuild::Project": [
     "Name"
+  ],
+  "AWS::CodeDeploy::Application": [
+    "ApplicationName",
+    "ComputePlatform"
   ],
   "AWS::CodePipeline::CustomActionType": [
     "Category",
@@ -468,6 +477,34 @@
     "IpcMode",
     "EphemeralStorage"
   ],
+  "AWS::EFS::AccessPoint": [
+    "FileSystemId",
+    "ClientToken",
+    "CreationInfo",
+    "CreationInfo/OwnerUid",
+    "CreationInfo/OwnerGid",
+    "CreationInfo/Permissions",
+    "PosixUser",
+    "PosixUser/Uid",
+    "PosixUser/Gid",
+    "PosixUser/SecondaryGids",
+    "RootDirectory",
+    "RootDirectory/Path",
+    "RootDirectory/CreationInfo"
+  ],
+  "AWS::EFS::FileSystem": [
+    "AvailabilityZoneName",
+    "Encrypted",
+    "KmsKeyId",
+    "PerformanceMode"
+  ],
+  "AWS::EFS::MountTarget": [
+    "IpAddress",
+    "Ipv6Address",
+    "IpAddressType",
+    "SubnetId",
+    "FileSystemId"
+  ],
   "AWS::EKS::Cluster": [
     "OutpostConfig",
     "EncryptionConfig",
@@ -498,6 +535,19 @@
     "Engine",
     "NetworkType"
   ],
+  "AWS::ElastiCache::ReplicationGroup": [
+    "AtRestEncryptionEnabled",
+    "CacheSubnetGroupName",
+    "DataTieringEnabled",
+    "GlobalReplicationGroupId",
+    "KmsKeyId",
+    "NetworkType",
+    "Port",
+    "PreferredCacheClusterAZs",
+    "ReplicationGroupId",
+    "SnapshotArns",
+    "SnapshotName"
+  ],
   "AWS::ElastiCache::ServerlessCache": [
     "ServerlessCacheName",
     "KmsKeyId",
@@ -518,6 +568,9 @@
   ],
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
+  ],
+  "AWS::ElasticLoadBalancingV2::ListenerCertificate": [
+    "ListenerArn"
   ],
   "AWS::ElasticLoadBalancingV2::ListenerRule": [
     "ListenerArn"
@@ -825,7 +878,8 @@
   "AWS::Route53::HealthCheck": [
     "HealthCheckConfig/Type",
     "HealthCheckConfig/MeasureLatency",
-    "HealthCheckConfig/RequestInterval"
+    "HealthCheckConfig/RequestInterval",
+    "HealthCheckConfig/EndpointType"
   ],
   "AWS::Route53::HostedZone": [
     "Name",
@@ -853,13 +907,19 @@
     "DistanceMetric",
     "EncryptionConfiguration",
     "IndexName",
-    "MetadataConfiguration",
+    "MetadataConfiguration/NonFilterableMetadataKeys",
     "VectorBucketArn",
     "VectorBucketName"
   ],
   "AWS::S3Vectors::VectorBucket": [
     "VectorBucketName",
     "EncryptionConfiguration"
+  ],
+  "AWS::SES::ConfigurationSet": [
+    "Name"
+  ],
+  "AWS::SES::ConfigurationSetEventDestination": [
+    "ConfigurationSetName"
   ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"

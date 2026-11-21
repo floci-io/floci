@@ -12,6 +12,11 @@ public interface DurableFunctionInvoker {
 
     DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId, String traceId);
 
+    default DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                           String traceId, boolean logTail) {
+        return invoke(target, payload, requestId, traceId);
+    }
+
     record ResolvedDurableTarget(String accountId,
                                  String region,
                                  String functionName,
@@ -23,6 +28,9 @@ public interface DurableFunctionInvoker {
                                  boolean activeTracing) {
     }
 
-    record DurableInvocationResult(String requestId, byte[] payload, String functionError) {
+    record DurableInvocationResult(String requestId, byte[] payload, String functionError, String logResult) {
+        public DurableInvocationResult(String requestId, byte[] payload, String functionError) {
+            this(requestId, payload, functionError, null);
+        }
     }
 }

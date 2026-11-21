@@ -44,7 +44,7 @@ class ContainerLifecycleManagerLivenessTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config);
+                dockerClient, dockerClient, imageCacheService, containerDetector, config);
         when(dockerClient.inspectContainerCmd("c1")).thenReturn(inspectCmd);
     }
 

@@ -3,6 +3,8 @@ package io.floci.aws.services.s3;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -75,6 +77,35 @@ class S3PublicPolicyStatusTest {
                 {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
                 "Condition":{"ArnEquals":{"aws:PrincipalArn":"arn:aws:iam::111122223333:role/app"}}}]}
                 """));
+    }
+
+    @Test
+    void principalArnResourceWildcardWithFixedAccountIsNotPublic() {
+        for (String condition : List.of(
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}",
+                "\"StringLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}")) {
+            assertFalse(isPublic("""
+                    {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
+                    "Action":"s3:GetObject","Effect":"Allow","Condition":{%s}}]}
+                    """.formatted(condition)), condition);
+        }
+    }
+
+    @Test
+    void principalOrSourceArnWithWildcardAccountOrUnfixedSourceArnIsPublic() {
+        for (String condition : List.of(
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::*:role/app-*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::11112222333?:role/app\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam:::role/app-*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/${aws:username}\"}",
+                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:s3:::*\"}",
+                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:lambda:us-east-1:111122223333:function:app-*\"}")) {
+            assertTrue(isPublic("""
+                    {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
+                    "Action":"s3:GetObject","Effect":"Allow","Condition":{%s}}]}
+                    """.formatted(condition)), condition);
+        }
     }
 
     @Test
@@ -201,6 +232,27 @@ class S3PublicPolicyStatusTest {
                 {"Statement":[{"NotPrincipal":{"AWS":"arn:aws:iam::111122223333:root"},
                 "Resource":"*","Action":"s3:GetObject","Effect":"Allow"}]}
                 """));
+    }
+
+    @Test
+    void anAllowSpelledInAnotherCaseIsNotPublic() {
+        assertFalse(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:PutObject","Effect":"allow"}]}
+                """));
+    }
+
+    @Test
+    void aNotPrincipalThatNamesNobodyIsStillPublic() {
+        // S3 "begins by assuming that the policy is public" and calls it non-public only when it
+        // grants "only to fixed values" of a principal or a recognised condition key (S3 User
+        // Guide, "The meaning of public"). A NotPrincipal pins no principal to a fixed value, so
+        // the status stays public even where the readers that decide a request, held to who the
+        // statement covers, grant nobody anything.
+        for (String notPrincipal : List.of("[]", "[123]", "{}", "{\"AWS\":[]}")) {
+            assertTrue(isPublic("{\"Statement\":[{\"NotPrincipal\":" + notPrincipal
+                    + ",\"Resource\":\"*\",\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\"}]}"),
+                    notPrincipal);
+        }
     }
 
     @Test

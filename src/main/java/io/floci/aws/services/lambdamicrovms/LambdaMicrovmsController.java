@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.BuildSpec;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.Microvm;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmBuild;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmImage;
@@ -399,20 +400,20 @@ public class LambdaMicrovmsController {
     }
 
     private ObjectNode versionNode(MicrovmImage image, MicrovmImageVersion version) {
-        // A version response repeats the parent image's whole build spec. The
-        // data is all on the image, which this method already receives; it was
-        // simply never written out.
+        // Older records have no snapshot, so only their parent's last known inputs remain available.
+        BuildSpec buildSpec = version.buildSpec != null ? version.buildSpec : BuildSpec.from(image);
         ObjectNode node = objectMapper.createObjectNode();
         node.put("imageArn", image.imageArn);
         node.put("imageVersion", version.imageVersion);
         node.put("state", version.state);
         node.put("status", version.status);
         node.put("createdAt", EpochSeconds.fromInstant(version.createdAt));
-        node.put("updatedAt", EpochSeconds.fromInstant(image.updatedAt));
-        node.put("baseImageArn", image.baseImageArn);
-        node.put("baseImageVersion", image.baseImageVersion);
-        node.put("buildRoleArn", image.buildRoleArn);
-        node.putObject("codeArtifact").put("uri", image.codeArtifactUri);
+        node.put("updatedAt", EpochSeconds.fromInstant(
+                version.updatedAt != null ? version.updatedAt : version.createdAt));
+        node.put("baseImageArn", buildSpec.baseImageArn());
+        node.put("baseImageVersion", buildSpec.baseImageVersion());
+        node.put("buildRoleArn", buildSpec.buildRoleArn());
+        node.putObject("codeArtifact").put("uri", buildSpec.codeArtifactUri());
         // A version's description is its own and nothing sets it. It stays null
         // even once the parent image has one, which is why it cannot simply be
         // read off the image.

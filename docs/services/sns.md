@@ -56,6 +56,11 @@ reports or CloudWatch delivery logs.
 `AddPermission` and `RemovePermission` edit the topic's `Policy` attribute the way AWS does: the
 label becomes the statement's `Sid` and each account becomes its `root` principal. A topic with no
 policy set starts from the default one AWS gives a new topic, and `GetTopicAttributes` returns it.
+A policy may only grant SNS's own actions: `AddPermission`, and a `Policy` set through
+`SetTopicAttributes` or `CreateTopic`, answer `InvalidParameter` ("Policy statement action out of
+service scope!") for an `sns:` action SNS does not have, such as `sns:PublishBatch`, which AWS
+covers with `sns:Publish`. `Receive` is accepted, and action names in a policy are matched
+ignoring case. Wildcards, `NotAction` and other services' actions are not checked.
 Under IAM enforcement the topic policy decides what AWS services may publish to the topic, such as
 [SES's event destinations and notifications](ses.md#iam-enforcement), and takes part in an IAM
 caller's request the way any [resource-based policy](iam.md#resource-based-policies) does when the

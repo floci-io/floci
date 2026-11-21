@@ -3,6 +3,8 @@ package io.floci.aws.services.dsql.dataplane;
 import io.floci.aws.core.common.PostgresWire;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -136,6 +138,55 @@ class DsqlSessionTest {
 
         assertEquals("SQL statement \"DELETE FROM ONLY \"fk3\".\"c_cascade\" WHERE $1 OPERATOR(pg_catalog.=) \"pid\"\"",
                 fields.get('W'));
+    }
+
+    @Test
+    void parseMessageRoleNamesAreTranslated() {
+        byte[] parameterTypes = {0, 1, 0, 0, 0, 23};
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.writeBytes(PostgresWire.cStringBytes("s1"));
+        body.writeBytes(PostgresWire.cStringBytes("GRANT SELECT ON t TO app"));
+        body.writeBytes(parameterTypes);
+        PostgresWire.Message parse = new PostgresWire.Message((byte) 'P', body.toByteArray());
+
+        DsqlSession.ParseRewrite prefixed = DsqlSession.rewriteParse(parse, new PrefixedRoleNames("x"));
+        DsqlSession.ParseRewrite identity = DsqlSession.rewriteParse(parse, RoleNames.IDENTITY);
+
+        assertEquals("s1", prefixed.name());
+        assertEquals('P', prefixed.message().type());
+        PostgresWire.CString name = PostgresWire.cString(prefixed.message().body(), 0);
+        PostgresWire.CString query = PostgresWire.cString(prefixed.message().body(), name.next());
+        assertEquals("s1", name.value());
+        assertTrue(query.value().contains("dx_app"), query.value());
+        assertArrayEquals(parameterTypes, Arrays.copyOfRange(prefixed.message().body(), query.next(),
+                prefixed.message().body().length));
+        String untranslated = PostgresWire.cString(identity.message().body(), name.next()).value();
+        assertFalse(untranslated.contains("dx_app"), untranslated);
+        assertTrue(untranslated.contains("app"), untranslated);
+    }
+
+    @Test
+    void backendStartupUsesTheBackendRoleAndDatabase() {
+        Map<String, String> client = new LinkedHashMap<>();
+        client.put("user", "admin");
+        client.put("database", "postgres");
+        client.put("application_name", "psql");
+        client.put("options", "-c search_path=public --ignored=1");
+        Map<String, String> settings = DsqlSession.optionSettings(client.get("options"));
+
+        Map<String, String> external = DsqlSession.backendStartup(client, settings, "dx_admin", "dsql_x");
+        Map<String, String> docker = DsqlSession.backendStartup(client, settings, "admin", "postgres");
+
+        assertEquals("dx_admin", external.get("user"));
+        assertEquals("dsql_x", external.get("database"));
+        assertEquals("psql", external.get("application_name"));
+        assertEquals("-c search_path=public", external.get("options"));
+        assertEquals(List.of("user", "database", "application_name", "options"), List.copyOf(external.keySet()));
+        assertEquals("admin", docker.get("user"));
+        assertEquals("postgres", docker.get("database"));
+        assertEquals("admin", client.get("user"), "the client's own parameters are left as they are");
+        assertEquals(Map.of("user", "admin", "database", "postgres"),
+                DsqlSession.backendStartup(Map.of("user", "admin"), Map.of(), "admin", "postgres"));
     }
 
     private static byte[] error(Map<Character, String> fields) {

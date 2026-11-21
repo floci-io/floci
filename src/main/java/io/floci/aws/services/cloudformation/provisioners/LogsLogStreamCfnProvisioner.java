@@ -1,6 +1,5 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -139,8 +138,7 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static void setCleanup(StackResource resource, Identity identity, String region, boolean retainable) {
-        ObjectNode cleanup = address(identity, region).put("retainable", retainable).put("attempts", 0);
-        resource.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
+        CfnLifecycleRecords.setCleanup(resource, CLEANUP_ATTR, address(identity, region), retainable);
     }
 
     @Override
@@ -161,10 +159,8 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
 
     private void deletePending(StackResource resource) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        if (cleanup != null) {
-            delete(identity(cleanup), cleanup.path("region").asText());
-            resource.getAttributes().remove(CLEANUP_ATTR);
-        }
+        CfnLifecycleRecords.deletePending(resource, CLEANUP_ATTR, cleanup, false,
+                record -> delete(identity(record), record.path("region").asText()));
     }
 
     @Override
@@ -195,35 +191,14 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        return cleanup == null || retained(resource, cleanup) ? null : cleanup.path("name").asText();
+        return CfnLifecycleRecords.cleanupPhysicalId(resource, cleanup);
     }
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        if (cleanup == null) {
-            return resource.getAttributes().containsKey(UPDATE_ATTR)
-                    ? new UpdateCleanupResult(true, true, null, 0, null)
-                    : UpdateCleanupResult.notApplicable();
-        }
-        String name = cleanup.path("name").asText();
-        if (retained(resource, cleanup)) {
-            resource.getAttributes().remove(CLEANUP_ATTR);
-            return new UpdateCleanupResult(true, true, name, 0, null);
-        }
-        try {
-            deletePending(resource);
-            return new UpdateCleanupResult(true, true, name, 0, null);
-        } catch (RuntimeException failure) {
-            int attempts = cleanup.path("attempts").asInt() + 1;
-            cleanup.put("attempts", attempts);
-            resource.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
-            return new UpdateCleanupResult(true, false, name, attempts, failure.getMessage());
-        }
-    }
-
-    private static boolean retained(StackResource resource, JsonNode cleanup) {
-        return cleanup.path("retainable").asBoolean() && "Retain".equals(resource.getUpdateReplacePolicy());
+        return CfnLifecycleRecords.completePending(resource, CLEANUP_ATTR, UPDATE_ATTR, cleanup, true,
+                record -> delete(identity(record), record.path("region").asText()));
     }
 
     @Override
@@ -233,18 +208,7 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static ObjectNode read(StackResource resource, String attribute) {
-        String raw = resource.getAttributes().get(attribute);
-        if (raw == null) {
-            return null;
-        }
-        try {
-            JsonNode record = MAPPER.readTree(raw);
-            if (record.isObject()) {
-                return (ObjectNode) record;
-            }
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Invalid log stream lifecycle record for " + resource.getLogicalId(), e);
-        }
-        throw new IllegalStateException("Invalid log stream lifecycle record for " + resource.getLogicalId());
+        String error = "Invalid log stream lifecycle record for " + resource.getLogicalId();
+        return CfnLifecycleRecords.read(resource, attribute, error, error);
     }
 }

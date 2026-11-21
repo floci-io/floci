@@ -302,6 +302,7 @@ public class EcsJsonHandler {
                 ? req.path("executionRoleArn").asText() : null);
         request.setRequiresCompatibilities(parseCompatibilities(req.path("requiresCompatibilities")));
         request.setVolumes(parseVolumes(req.path("volumes")));
+        validateMountSources(request.getContainerDefinitions(), request.getVolumes());
         request.setRuntimePlatform(parseRuntimePlatform(req.path("runtimePlatform")));
         request.setEphemeralStorage(parseEphemeralStorage(req.path("ephemeralStorage")));
         request.setPidMode(parseChoice(req, "pidMode", PID_MODES));
@@ -748,13 +749,18 @@ public class EcsJsonHandler {
     }
 
     private Response handleListServicesByNamespace(JsonNode req, String region) {
-        String namespace = req.path("namespace").asText();
-        List<String> arns = service.listServicesByNamespace(namespace, region);
+        String namespace = req.hasNonNull("namespace") ? req.path("namespace").asText() : null;
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+        EcsService.ListPage page = service.listServicesByNamespace(namespace, maxResults, nextToken, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("serviceArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -1493,12 +1499,13 @@ public class EcsJsonHandler {
         return new HealthCheck(command, interval, timeout, retries, startPeriod);
     }
 
-    private List<Volume> parseVolumes(JsonNode node) {
+    public List<Volume> parseVolumes(JsonNode node) {
         List<Volume> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;
         }
         for (JsonNode item : node) {
+            validateVolume(item);
             String hostSourcePath = item.path("host").path("sourcePath").asText(null);
             if (hostSourcePath != null && !hostSourcePath.isBlank()) {
                 hostVolumePolicy.validate(hostSourcePath);
@@ -1511,6 +1518,61 @@ public class EcsJsonHandler {
                     EcsJsonPassthrough.capture(item, objectMapper, VOLUME_CONSUMED)));
         }
         return result;
+    }
+
+    private static void validateVolume(JsonNode item) {
+        if (!item.isObject()) {
+            return;
+        }
+        JsonNode efs = item.path("efsVolumeConfiguration");
+        String name = item.path("name").asText(null);
+        if ((efs.isObject() || item.path("s3filesVolumeConfiguration").isObject()
+                || item.path("configuredAtLaunch").asBoolean(false))
+                && (name == null || name.isBlank())) {
+            throw new AwsException("InvalidParameterException",
+                    "EFS, S3 Files, and configured-at-launch volumes require a name.", 400);
+        }
+        if (efs.isObject()) {
+            JsonNode authorization = efs.path("authorizationConfig");
+            String accessPointId = authorization.path("accessPointId").asText(null);
+            String transitEncryption = efs.path("transitEncryption").asText(null);
+            String iam = authorization.path("iam").asText(null);
+            if (((accessPointId != null && !accessPointId.isBlank()) || "ENABLED".equals(iam))
+                    && !"ENABLED".equals(transitEncryption)) {
+                throw new AwsException("InvalidParameterException",
+                        "Transit encryption must be ENABLED when EFS access point or IAM authorization is used.", 400);
+            }
+        }
+        int configurationCount = efs.isObject() ? 1 : 0;
+        for (String member : List.of("host", "dockerVolumeConfiguration",
+                "fsxWindowsFileServerVolumeConfiguration", "s3filesVolumeConfiguration", "configuredAtLaunch")) {
+            if (item.hasNonNull(member) && (!"configuredAtLaunch".equals(member) || item.path(member).asBoolean())) {
+                configurationCount++;
+            }
+        }
+        if (configurationCount > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "A task definition volume can specify only one volume configuration.", 400);
+        }
+    }
+
+    public static void validateMountSources(List<ContainerDefinition> containers, List<Volume> volumes) {
+        if (containers == null) {
+            return;
+        }
+        for (ContainerDefinition container : containers) {
+            if (container.getMountPoints() == null) {
+                continue;
+            }
+            for (MountPoint mount : container.getMountPoints()) {
+                String source = mount.sourceVolume();
+                if (source != null && !source.isBlank()
+                        && (volumes == null || volumes.stream().noneMatch(volume -> source.equals(volume.name())))) {
+                    throw new AwsException("InvalidParameterException",
+                            "Mount point sourceVolume must reference a task definition volume: " + source, 400);
+                }
+            }
+        }
     }
 
     /** Volume members the parser consumes; the rest round-trips verbatim. */
@@ -1548,7 +1610,7 @@ public class EcsJsonHandler {
                 auth.path("iam").asText(null));
     }
 
-    private List<MountPoint> parseMountPoints(JsonNode node) {
+    public List<MountPoint> parseMountPoints(JsonNode node) {
         List<MountPoint> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;

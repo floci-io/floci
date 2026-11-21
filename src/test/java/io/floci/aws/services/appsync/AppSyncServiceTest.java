@@ -527,6 +527,9 @@ class AppSyncServiceTest {
             "cn-north-1,     aws-cn",
             "us-isob-east-1, aws-iso-b"})
     void tagResourceAcceptsAnApiArnFromAnyPartition(String region, String partition) {
+        // The service answers for the Region of the API, as a request tagging it there does.
+        this.region = region;
+        service = newService(Clock.fixed(NOW, ZoneOffset.UTC));
         GraphqlApi api = service.createGraphqlApi(
                 Map.of("name", "p-" + region, "authenticationType", "API_KEY"), region);
         String apiArn = "arn:" + partition + ":appsync:" + region + ":000000000000:apis/" + api.getApiId();
@@ -705,6 +708,59 @@ class AppSyncServiceTest {
         assertTrue(refused.getMessage().contains("format"));
         assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
         assertEquals("original", service.getType(api.getApiId(), "Item").getDescription());
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createTypeRejectsMissingDefinitionEvenWithAnExplicitName(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> request = new HashMap<>();
+        request.put("name", "Item");
+        request.put("format", "SDL");
+        if (explicitNull) {
+            request.put("definition", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createType(api.getApiId(), request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(refused.getMessage().contains("definition"));
+        assertTrue(service.listTypes(api.getApiId(), null, null).items().isEmpty());
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getType(api.getApiId(), "Item")).getErrorCode());
+
+        request.put("definition", "type Item { id: ID }");
+        service.createType(api.getApiId(), request);
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createTypeRejectsMissingFormatWithoutStoringTheType(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> request = new HashMap<>();
+        request.put("definition", "type Item { id: ID }");
+        if (explicitNull) {
+            request.put("format", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createType(api.getApiId(), request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(refused.getMessage().contains("format"));
+        assertTrue(service.listTypes(api.getApiId(), null, null).items().isEmpty());
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getType(api.getApiId(), "Item")).getErrorCode());
+
+        request.put("format", "SDL");
+        service.createType(api.getApiId(), request);
         assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
     }
 }

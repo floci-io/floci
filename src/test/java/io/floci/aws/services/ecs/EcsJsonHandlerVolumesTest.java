@@ -2,6 +2,7 @@ package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
@@ -33,6 +35,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -109,6 +112,88 @@ class EcsJsonHandlerVolumesTest {
                   ]
                 }
                 """.formatted(sourcePath.replace("\\", "\\\\"));
+    }
+
+    private JsonNode registerRequestWithVolume(String volume) throws Exception {
+        return objectMapper.readTree("""
+                {"family":"invalid-volume","containerDefinitions":[{"name":"app","image":"busybox"}],
+                 "volumes":[%s]}
+                """.formatted(volume));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"efsVolumeConfiguration\":{\"fileSystemId\":\"fs-1234\"}}",
+            "{\"s3filesVolumeConfiguration\":{\"fileSystemArn\":\"arn:aws:s3:::files\"}}",
+            "{\"configuredAtLaunch\":true}"
+    })
+    void registerTaskDefinitionRequiresNamesForConfiguredVolumes(String volume) throws Exception {
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", registerRequestWithVolume(volume), "us-east-1"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"name\":\"shared\",\"host\":{},\"efsVolumeConfiguration\":{\"fileSystemId\":\"fs-1234\"}}",
+            "{\"name\":\"shared\",\"configuredAtLaunch\":true,\"dockerVolumeConfiguration\":{\"driver\":\"local\"}}"
+    })
+    void registerTaskDefinitionRejectsConflictingVolumeConfigurations(String volume) throws Exception {
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", registerRequestWithVolume(volume), "us-east-1"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ACCESS_POINT,", "ACCESS_POINT,DISABLED", "IAM,", "IAM,DISABLED"})
+    void registerTaskDefinitionRequiresTransitEncryptionForEfsAuthorization(
+            String authorizationKind, String transitEncryption) throws Exception {
+        ObjectNode volume = objectMapper.createObjectNode().put("name", "shared");
+        ObjectNode efs = volume.putObject("efsVolumeConfiguration").put("fileSystemId", "fs-1234");
+        if (transitEncryption != null) {
+            efs.put("transitEncryption", transitEncryption);
+        }
+        ObjectNode authorization = efs.putObject("authorizationConfig");
+        if ("ACCESS_POINT".equals(authorizationKind)) {
+            authorization.put("accessPointId", "fsap-1234");
+        } else {
+            authorization.put("iam", "ENABLED");
+        }
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", registerRequestWithVolume(volume.toString()), "us-east-1"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsMountFromUnknownVolume() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"family":"unknown-mount","containerDefinitions":[{"name":"app","image":"busybox",
+                "mountPoints":[{"sourceVolume":"missing","containerPath":"/data"}]}],
+                "volumes":[{"name":"shared"}]}
+                """);
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void registerTaskDefinitionKeepsOptionalGenericVolumeAndMountMembers() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"family":"optional-volume-members","containerDefinitions":[{"name":"app","image":"busybox",
+                "mountPoints":[{"containerPath":"/data"}]}],
+                "volumes":[{}, {"name":"docker","configuredAtLaunch":false,
+                "dockerVolumeConfiguration":{"driver":"local"}}]}
+                """);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+
+        JsonNode taskDefinition = objectMapper.valueToTree(response.getEntity()).path("taskDefinition");
+        assertEquals(2, taskDefinition.path("volumes").size());
+        assertEquals("docker", taskDefinition.path("volumes").get(1).path("name").asText());
     }
 
     @Test
@@ -306,6 +391,7 @@ class EcsJsonHandlerVolumesTest {
                       "efsVolumeConfiguration": {
                         "fileSystemId": "fs-0123456789abcdef0",
                         "rootDirectory": "/dps",
+                        "transitEncryption": "ENABLED",
                         "authorizationConfig": {"accessPointId": "fsap-0abc"}
                       }
                     }
@@ -338,6 +424,7 @@ class EcsJsonHandlerVolumesTest {
                       "name": "customer-data",
                       "efsVolumeConfiguration": {
                         "fileSystemId": "fs-0123456789abcdef0",
+                        "transitEncryption": "ENABLED",
                         "authorizationConfig": {"accessPointId": "fsap-0abc"}
                       }
                     }

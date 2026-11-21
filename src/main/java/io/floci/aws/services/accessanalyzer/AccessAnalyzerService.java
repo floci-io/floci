@@ -2,11 +2,13 @@ package io.floci.aws.services.accessanalyzer;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.accessanalyzer.model.Analyzer;
@@ -17,11 +19,12 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class AccessAnalyzerService implements Resettable {
+public class AccessAnalyzerService implements Resettable, StoredResourceArns {
     private static final Pattern ANALYZER_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]*");
     private static final Set<String> ANALYZER_TYPES = Set.of(
             "ACCOUNT",
@@ -86,6 +89,40 @@ public class AccessAnalyzerService implements Resettable {
     public synchronized void deleteAnalyzer(String region, String analyzerName) {
         getAnalyzer(region, analyzerName);
         analyzers.delete(storageKey(region, analyzerName));
+    }
+
+    @Override
+    public String namespace() {
+        return "access-analyzer";
+    }
+
+    /** A request names an analyzer by its name, which its ARN carries whole, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the analyzer whose ARN is {@code arn}, in the request's account, where the handlers read: an ARN of
+     * another account names none. Read in place under the Region the ARN names and the analyzer's name, an analyzer
+     * stored before storage was account-aware included, and matched on the whole ARN. An analyzer's tags are set
+     * when it is created, before it is stored, and never change.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "access-analyzer")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId()) || !parsed.resource().startsWith("analyzer/")) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(analyzers, parsed.accountId(),
+                        storageKey(parsed.region(), parsed.resource().substring("analyzer/".length())))
+                .filter(analyzer -> arn.equals(analyzer.getArn()))
+                .map(Analyzer::getTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     private static int analyzerLimit(String type) {

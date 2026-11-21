@@ -185,6 +185,25 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void aRequestIsOnAPathOfAServicesModelOnlyAsTheModelGivesIt() {
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        String encoded = "/tags/arn%3Aaws%3Ascheduler%3Aus-east-1%3A000000000000%3Aschedule-group%2Freports";
+        // Scheduler's /tags/{ResourceArn} takes the ARN as one segment, encoded as an SDK sends it, whatever method
+        // a request sends there.
+        assertTrue(IamActionRegistry.modelRoutes("scheduler", mockCtx("POST", encoded, none, null, "").getUriInfo()));
+        assertTrue(IamActionRegistry.modelRoutes("scheduler", mockCtx("PUT", encoded, none, null, "").getUriInfo()));
+        assertFalse(IamActionRegistry.modelRoutes("scheduler",
+                mockCtx("POST", "/tags/arn:aws:scheduler:us-east-1:000000000000:schedule-group/reports", none, null, "")
+                        .getUriInfo()));
+        assertFalse(IamActionRegistry.modelRoutes("scheduler", mockCtx("POST", "/tags", none, null, "").getUriInfo()));
+        // Control Tower's generated routes give the bare path the shared tags controller also serves it on.
+        assertTrue(IamActionRegistry.modelRoutes("controltower",
+                mockCtx("POST", "/tags", none, null, "").getUriInfo()));
+        // A scope whose routes are not vendored is not one the model can answer for.
+        assertTrue(IamActionRegistry.modelRoutes("sqs", mockCtx("POST", "/tags", none, null, "").getUriInfo()));
+    }
+
+    @Test
     void theLabelsOfTheVendoredRouteARequestMatchesAreItsPathsValuesDecoded() {
         MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
         assertEquals(Map.of("DomainName", "logs"),
@@ -507,6 +526,24 @@ class IamActionRegistryTest {
         assertEquals("lambda:ListLayers", registry.resolveRoute("lambda",
                 mockCtx("GET", "/2018-10-31/layers", other, MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("lambda:ListLayers", lambdaAction("GET", "/2018-10-31/layers"));
+    }
+
+    @Test
+    void aRestOperationRetainsItsModeledNameWhenItsAuthorizedActionDiffers() {
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("find", "LayerVersion");
+        ContainerRequestContext byArn = mockCtx("GET", "/2018-10-31/layers",
+                query, MediaType.APPLICATION_JSON_TYPE, "{}");
+        String action = registry.resolveRoute("lambda", byArn);
+        assertEquals("lambda:GetLayerVersion", action);
+        assertEquals("lambda:GetLayerVersionByArn", registry.operationForRoute("lambda", action, byArn));
+
+        ContainerRequestContext named = mockCtx("GET", "/2018-10-31/layers/shared/versions/1",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("lambda:GetLayerVersion",
+                registry.operationForRoute("lambda", registry.resolveRoute("lambda", named), named));
+        assertEquals("lambda:ListLayers", registry.operationForRoute("lambda", "lambda:ListLayers", byArn));
+        assertNull(registry.operationForRoute("lambda", null, byArn));
     }
 
     @Test
