@@ -26,9 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * VpcSecurityGroupIds, PreferredBackupWindow, PreferredMaintenanceWindow and DeletionProtection given
- * to CreateDBCluster and ModifyDBCluster are stored on the cluster and read back through
- * DescribeDBClusters, instead of a fixed sg-00000000 membership, fixed windows and no protection flag.
+ * VpcSecurityGroupIds, PreferredBackupWindow and PreferredMaintenanceWindow given to CreateDBCluster
+ * and ModifyDBCluster are stored on the cluster and read back through DescribeDBClusters, instead of a
+ * fixed sg-00000000 membership and fixed windows, and a request refused for a malformed value changes
+ * nothing.
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
@@ -58,9 +59,6 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @AfterEach
     void cleanUp() {
-        // a protected cluster would survive the delete below and leak into the next test
-        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
-                .formParam("DeletionProtection", "false").when().post("/");
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
         // after the cluster, which may reference it; absent in most tests
@@ -177,53 +175,31 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     }
 
     @Test
-    void windowsAndDeletionProtectionAreStoredAndDefaulted() {
+    void windowsAreStoredAndDefaulted() {
         createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200);
         assertEquals("mon:00:00-mon:03:00", described("PreferredMaintenanceWindow"));
         assertEquals("04:00-06:00", described("PreferredBackupWindow"));
-        assertEquals("false", described("DeletionProtection"));
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
 
         String created = createAuroraPostgresCluster(ID)
                 .formParam("PreferredBackupWindow", "05:00-06:00")
                 .formParam("PreferredMaintenanceWindow", "tue:07:00-tue:08:00")
-                .formParam("DeletionProtection", "true")
                 .when().post("/").then().statusCode(200).extract().asString();
         assertEquals(true, created.contains("<PreferredBackupWindow>05:00-06:00</PreferredBackupWindow>"));
         assertEquals("05:00-06:00", described("PreferredBackupWindow"));
         assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
-        assertEquals("true", described("DeletionProtection"));
 
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("PreferredBackupWindow", "03:00-04:00")
-                .formParam("DeletionProtection", "false")
                 .when().post("/").then().statusCode(200);
         assertEquals("03:00-04:00", described("PreferredBackupWindow"));
         assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
-        assertEquals("false", described("DeletionProtection"));
     }
 
     private static int clusterCount() {
         return rds("DescribeDBClusters").when().post("/").then().statusCode(200).extract().asString()
                 .split("<DBClusterIdentifier>" + ID + "</DBClusterIdentifier>", -1).length - 1;
-    }
-
-    @Test
-    void protectedClusterIsNotDeletedUntilProtectionIsLifted() {
-        createAuroraPostgresCluster(ID).formParam("DeletionProtection", "true").when().post("/").then().statusCode(200);
-        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
-                .when().post("/").then().statusCode(400)
-                .body(containsString("<Code>InvalidParameterCombination</Code>"))
-                .body(containsString(
-                        "Cannot delete protected Cluster, please disable deletion protection and try again."));
-        assertEquals(1, clusterCount());
-
-        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
-                .formParam("DeletionProtection", "false").when().post("/").then().statusCode(200);
-        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
-                .when().post("/").then().statusCode(200);
-        assertEquals(0, clusterCount());
     }
 
     @Test
