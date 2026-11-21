@@ -59,7 +59,7 @@ does not refuse a container provider its EKS has no cluster for, nor a second vi
 namespace: AWS documents no error for either. A `securityConfigurationId` must name a security
 configuration of the account. `schedulerConfiguration` is stored and returned, an empty object clears it
 on `UpdateVirtualCluster`, and `DescribeVirtualCluster` adds a `schedulerStatus` with the current queued
-and running job run counts; the limits are not enforced on `StartJobRun`. A virtual cluster created on an EKS
+and running job run counts. A virtual cluster created on an EKS
 cluster whose `authenticationMode` admits access entries (`API` or `API_AND_CONFIG_MAP`) is EKS access entry
 integrated, as the guide's cluster access management setup has it, and `ListVirtualClusters`'
 `eksAccessEntryIntegrated` keeps the ones that are, or are not; one on a cluster Floci's EKS does not have is
@@ -75,6 +75,16 @@ gives it. Otherwise the run is `COMPLETED` at once, or `RUNNING` for
 `job-run-duration-seconds` and then `COMPLETED`. `CancelJobRun` moves a run that has not finished to
 `CANCELLED`. A run with a `retryPolicyConfiguration` reports `retryPolicyExecution` with one attempt.
 The release label is not checked against EMR on EKS's releases.
+
+**Concurrent job limits.** `StartJobRun` applies the virtual cluster's limits, as the development guide's
+"Concurrent job limits for virtual clusters" describes them. At most `maxConcurrentJobRuns` runs are
+`RUNNING` at once, 1000 when it is not set. A run beyond that waits `PENDING` in the queue, and when a
+running slot frees up, the run first in the queue starts. Once `maxInQueueJobRuns` runs wait, `StartJobRun`
+refuses another with `ValidationException`. A run still queued 30 minutes after it was submitted is `FAILED`,
+as the guide's "buffered jobs fail after 30 minutes if no slot frees up" has it. A higher limit, a cleared
+one, or a cancelled run starts queued runs at once. The guide gives neither message, so the refusal's and
+the timed-out run's `stateDetails` are Floci's wording. A run takes its slot only while it is `RUNNING`, so
+with the default `job-run-duration-seconds` of `0` no run waits.
 
 **Job templates.** `StartJobRun` with a `jobTemplateId` takes `executionRoleArn`, `releaseLabel`,
 `jobDriver` and `configurationOverrides` from the template where the request leaves them out, and the
