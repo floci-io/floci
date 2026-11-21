@@ -1724,6 +1724,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean streamRetentionEnabled();
 
+        /**
+         * The most records a DynamoDB stream of the native engine keeps across its shards; the oldest goes first.
+         * AWS limits a stream by age rather than by count, so raise this when a consumer can fall far behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS
+         */
+        @WithDefault("1000")
+        int streamMaxRecords();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
