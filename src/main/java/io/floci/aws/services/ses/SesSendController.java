@@ -157,6 +157,7 @@ public class SesSendController {
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
+                requireSupportedHeaders(additionalHeaders);
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest simpleRequest = sendRequest
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
@@ -513,6 +514,15 @@ public class SesSendController {
             index++;
         }
         return out;
+    }
+
+    private static void requireSupportedHeaders(List<MessageHeader> headers) {
+        for (MessageHeader header : headers) {
+            if (!MessageHeader.isSupportedName(header.name())) {
+                throw new AwsException("BadRequestException",
+                        "Header <" + header.name() + "> is not supported", 400);
+            }
+        }
     }
 
     /**
