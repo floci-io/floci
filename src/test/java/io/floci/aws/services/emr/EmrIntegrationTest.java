@@ -236,6 +236,37 @@ class EmrIntegrationTest {
                 .body("Step.Status.State", equalTo("COMPLETED"));
     }
 
+    /** A step's own log destination and key, its StepMonitoringConfiguration, read back as DescribeStep's members. */
+    @Test
+    void aStepGivesBackItsOwnLogUriAndEncryptionKey() {
+        String cluster = emr("RunJobFlow", "{\"Name\":\"step-logs\",\"ReleaseLabel\":\"emr-7.11.0\","
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            List<String> ids = emr("AddJobFlowSteps", "{\"JobFlowId\":\"" + cluster + "\",\"Steps\":["
+                    + "{\"Name\":\"logged\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]},\"StepMonitoringConfiguration\":{"
+                    + "\"S3MonitoringConfiguration\":{\"LogUri\":\"s3://step-logs/\","
+                    + "\"EncryptionKeyArn\":\"arn:aws:kms:us-east-1:000000000000:key/k\"}}},"
+                    + "{\"Name\":\"plain\",\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{"
+                    + "\"Jar\":\"command-runner.jar\",\"Args\":[\"true\"]}}]}")
+                    .then().statusCode(200).extract().jsonPath().getList("StepIds", String.class);
+
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(0) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step.LogUri", equalTo("s3://step-logs/"))
+                    .body("Step.EncryptionKeyArn", equalTo("arn:aws:kms:us-east-1:000000000000:key/k"));
+            emr("DescribeStep", "{\"ClusterId\":\"" + cluster + "\",\"StepId\":\"" + ids.get(1) + "\"}")
+                    .then().statusCode(200)
+                    .body("Step", not(hasKey("LogUri")));
+            emr("ListSteps", "{\"ClusterId\":\"" + cluster + "\",\"StepIds\":[\"" + ids.get(0) + "\"]}")
+                    .then().statusCode(200)
+                    .body("Steps[0].LogUri", equalTo("s3://step-logs/"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + cluster + "\"]}").then().statusCode(200);
+        }
+    }
+
     @Test
     @Order(8)
     void listStepsNewestFirst() {

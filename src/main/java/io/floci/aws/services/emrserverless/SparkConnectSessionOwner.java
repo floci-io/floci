@@ -51,6 +51,10 @@ public abstract class SparkConnectSessionOwner<R> implements SparkConnectServers
     /** Checks the session again at its next deadline, or cancels its check where it has none. */
     protected abstract void checkLater(R stored);
 
+    /** Sets on the session what its server's first answer gives it, before it is saved IDLE; nothing by default. */
+    protected void ready(R stored) {
+    }
+
     @Override
     public void running(String sessionId) {
         inState(sessionId, SUBMITTED, stored -> {
@@ -69,6 +73,7 @@ public abstract class SparkConnectSessionOwner<R> implements SparkConnectServers
             session.setStartedAt(now);
             session.setIdleSince(now);
             session.setUpdatedAt(now);
+            ready(stored);
             save(stored);
             checkLater(stored);
             LOG.infov("Session {0} is ready", sessionId);

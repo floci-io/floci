@@ -25,6 +25,9 @@ public class EmrStep {
     private String state;
     private String stateChangeReason;
     private String executionRoleArn;
+    // Its StepMonitoringConfiguration's S3MonitoringConfiguration, null where it gives none.
+    private String logUri;
+    private String encryptionKeyArn;
     private boolean runInContainer;
     private String failureReason;
     private String failureMessage;
@@ -63,6 +66,12 @@ public class EmrStep {
 
     public String getExecutionRoleArn() { return executionRoleArn; }
     public void setExecutionRoleArn(String executionRoleArn) { this.executionRoleArn = executionRoleArn; }
+
+    public String getLogUri() { return logUri; }
+    public void setLogUri(String logUri) { this.logUri = logUri; }
+
+    public String getEncryptionKeyArn() { return encryptionKeyArn; }
+    public void setEncryptionKeyArn(String encryptionKeyArn) { this.encryptionKeyArn = encryptionKeyArn; }
 
     public boolean isRunInContainer() { return runInContainer; }
     public void setRunInContainer(boolean runInContainer) { this.runInContainer = runInContainer; }

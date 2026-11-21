@@ -55,6 +55,23 @@ class EmrServiceTest {
      * A tag call's {@code ResourceId} is the cluster the tag handlers find by it: one in the request's Region, or one
      * stored with no Region, which they find in any.
      */
+    /** A MERGE keeps the classifications it does not name, and merges the ones it does, nested ones included. */
+    @Test
+    void aMergeReconfigurationMergesNestedConfigurationsByClassification() {
+        String merged = EmrService.mergedConfigurations("""
+                [{"Classification":"hadoop-env","Configurations":[{"Classification":"export",
+                  "Properties":{"JAVA_HOME":"/usr/lib/jvm/java-17"}}]},
+                 {"Classification":"spark","Properties":{"maximizeResourceAllocation":"true"}}]""", """
+                [{"Classification":"hadoop-env","Configurations":[{"Classification":"export",
+                  "Properties":{"HADOOP_HEAPSIZE":"2048"}}]}]""");
+
+        assertEquals("[{\"Classification\":\"hadoop-env\",\"Configurations\":[{\"Classification\":\"export\","
+                + "\"Properties\":{\"JAVA_HOME\":\"/usr/lib/jvm/java-17\",\"HADOOP_HEAPSIZE\":\"2048\"}}]},"
+                + "{\"Classification\":\"spark\",\"Properties\":{\"maximizeResourceAllocation\":\"true\"}}]", merged);
+        assertEquals("[{\"Classification\":\"spark\"}]", EmrService.mergedConfigurations(null,
+                "[{\"Classification\":\"spark\"}]"));
+    }
+
     @Test
     void aTagCallsResourceIdIsTheClusterTheTagHandlersFind() {
         EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
