@@ -346,6 +346,33 @@ class DynamoDbStreamLifecycleTest {
     }
 
     @Test
+    void aConfiguredRecordCapReplacesTheDefault() {
+        DynamoDbStreamService streams = streams(new Settings(1, null, false, false, 1500));
+        String streamArn = enable(streams);
+        String horizon = streams.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+
+        for (int i = 0; i < 1200; i++) {
+            put(streams, "item-" + i);
+        }
+        assertEquals(1200, readAll(streams, streamArn, DynamoDbStreamService.SHARD_ID).size());
+        assertEquals(10, streams.getRecords(horizon, 10).records().size(), "nothing was trimmed under the cap");
+
+        for (int i = 1200; i < 1501; i++) {
+            put(streams, "item-" + i);
+        }
+        List<String> kept = keys(readAll(streams, streamArn, DynamoDbStreamService.SHARD_ID));
+        assertEquals(1500, kept.size());
+        assertEquals("item-1", kept.getFirst());
+        AwsException trimmed = assertThrows(AwsException.class, () -> streams.getRecords(horizon, 10));
+        assertEquals("TrimmedDataAccessException", trimmed.getErrorCode());
+    }
+
+    @Test
+    void aStreamMustKeepAtLeastOneRecord() {
+        assertThrows(IllegalArgumentException.class, () -> new Settings(1, null, false, false, 0));
+    }
+
+    @Test
     void theRecordCapTrimsTheStreamsOldestRecordWhicheverShardHoldsIt() {
         DynamoDbStreamService streams = streams(new Settings(2, null, false, false));
         String streamArn = enable(streams);
