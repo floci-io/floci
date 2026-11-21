@@ -436,6 +436,11 @@ public class CloudWatchMetricsService {
             rejectEvaluationInterval(alarm.getAlarmName(), evaluationInterval,
                     alarm.getMetricName() != null || !alarm.getMetrics().isEmpty());
         }
+        if (alarm.getStatistic() != null && !alarm.getStatistic().isBlank()
+                && alarm.getExtendedStatistic() != null && !alarm.getExtendedStatistic().isBlank()) {
+            throw CloudWatchMetricsException.invalidParameterCombination(
+                    "Statistic and ExtendedStatistic cannot both be specified.");
+        }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
         if (created) {

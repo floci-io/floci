@@ -435,6 +435,40 @@ class CloudWatchMetricsJsonHandlerTest {
     }
 
     @Test
+    void describeAlarms_returnsExtendedStatisticWhenSetAndOmitsWhenUnset() {
+        ObjectNode req = alarmRequest("P99Alarm");
+        req.put("ExtendedStatistic", "p99");
+
+        JsonNode alarm = describeFirstAlarm(req);
+
+        assertEquals("p99", alarm.get("ExtendedStatistic").asText());
+        assertFalse(alarm.has("Statistic"));
+
+        ObjectNode updatedReq = alarmRequest("P99Alarm");
+        updatedReq.put("Statistic", "Average");
+
+        JsonNode updatedAlarm = describeFirstAlarm(updatedReq);
+
+        assertEquals("Average", updatedAlarm.get("Statistic").asText());
+        assertFalse(updatedAlarm.has("ExtendedStatistic"));
+    }
+
+    @Test
+    void putMetricAlarm_rejectsStatisticAndExtendedStatisticTogether() {
+        ObjectNode req = alarmRequest("BothStatsAlarm");
+        req.put("Statistic", "Average");
+        req.put("ExtendedStatistic", "p99");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", req, REGION));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("InvalidParameterCombinationException", error.jsonType());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("BothStatsAlarm"), null, REGION).isEmpty());
+    }
+
+    @Test
     void describeAlarms_reportsStateTransitionedTimestampForBothAlarmKinds() {
         handler.handle("PutMetricAlarm", alarmRequest("TransitionedMetric"), REGION);
         ObjectNode composite = MAPPER.createObjectNode();
