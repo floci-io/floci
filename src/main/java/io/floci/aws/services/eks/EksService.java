@@ -1477,14 +1477,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         nodeGroup.setModifiedAt(now);
         String resolvedVersion = request.getVersion() != null ? request.getVersion() : cluster.getVersion();
         nodeGroup.setVersion(resolvedVersion);
-        nodeGroup.setReleaseVersion(request.getReleaseVersion() != null
-                ? request.getReleaseVersion() : resolvedVersion + "-eks-1");
+        String amiType = request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64";
+        nodeGroup.setReleaseVersion(defaultReleaseVersion(request.getReleaseVersion(), launchTemplateData,
+                resolvedVersion, amiType));
         nodeGroup.setStatus(NodegroupStatus.ACTIVE);
         nodeGroup.setCapacityType(request.getCapacityType() != null ? request.getCapacityType() : "ON_DEMAND");
         nodeGroup.setScalingConfig(request.getScalingConfig() != null ? request.getScalingConfig() : defaultScalingConfig());
         nodeGroup.setInstanceTypes(request.getInstanceTypes() != null ? request.getInstanceTypes() : List.of("t3.medium"));
         nodeGroup.setSubnets(request.getSubnets() != null ? request.getSubnets() : List.of());
-        nodeGroup.setAmiType(request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64");
+        nodeGroup.setAmiType(amiType);
         nodeGroup.setNodeRole(request.getNodeRole());
         nodeGroup.setDiskSize(request.getDiskSize() != null ? request.getDiskSize() : 20);
         nodeGroup.setResources(defaultNodeGroupResources(nodegroupName));
@@ -1637,6 +1638,23 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 ? null : group.getInstanceTypes().getFirst();
         String selectedType = clusterManager.selectNodeInstanceType(requestedType);
         return selectedType != null ? selectedType : EksClusterManager.DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    /**
+     * The release a node group reports: the one requested, else the custom AMI its launch template
+     * names, else the release of the recommended EKS optimized AMI for its version and AMI type.
+     */
+    private String defaultReleaseVersion(String requested, LaunchTemplateData launchTemplateData,
+                                         String kubernetesVersion, String amiType) {
+        if (requested != null) {
+            return requested;
+        }
+        if (launchTemplateData != null && launchTemplateData.getImageId() != null
+                && !launchTemplateData.getImageId().isBlank()) {
+            return launchTemplateData.getImageId();
+        }
+        return EksAmiReleaseVersions.recommended(clusterManager == null ? null : clusterManager.imageCatalog(),
+                kubernetesVersion, amiType).orElse(kubernetesVersion + "-eks-1");
     }
 
     private LaunchTemplateData validateLaunchTemplate(String region, Object launchTemplateObj) {
