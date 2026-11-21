@@ -9,21 +9,18 @@ A request no rule maps is the operation whose route it matches, checked as the a
 `iam-authorized-actions.json` names for it, or as its own; `IamRestRouteCoverageTest` builds a
 request on each route and compares the action the registry gives with that one.
 
-The credential scopes in `HAND_ROUTED`, none now, are authorized by the registry's rules alone, each for
-its reason, and their routes are vendored for the coverage test only, each with the query parameters and
-headers botocore requires its request to carry (`required`), which the registry's rules read. Operations
-sharing a route are told apart by what botocore models their requests as carrying: the query parameters
-and headers of the members their input requires (`requires`: S3's UploadPart, on `PUT /{Bucket}/{Key+}`
-with PutObject, requires `partNumber` and `uploadId`, CopyObject the `x-amz-copy-source` header), and a
-deprecated operation (`deprecated`) yields to a current one of the same route and conditions. An
-operation whose every request botocore's endpoint rules send to another service's endpoint, signed for
-it, is that service's (`signedElsewhere`: S3's ListDirectoryBuckets, signed `s3express`). Within any
-scope, the operations of a route must leave every request one operation: no two current ones requiring
-the same, and what any two require together required by one of them, the route requiring all a request
-carries being its operation (`shared_routes`). The generation fails otherwise. Supported shared-
-controller alternatives are generated beside the modeled URI, with member-location overrides for the
-bare route, and its own method where that is not the operation's. These alternatives describe existing
-Floci compatibility paths, not additional botocore operations.
+Operations sharing a route are told apart by what botocore models their requests as carrying: the query
+parameters and headers of the members their input requires (`requires`: S3's UploadPart, on
+`PUT /{Bucket}/{Key+}` with PutObject, requires `partNumber` and `uploadId`, CopyObject the
+`x-amz-copy-source` header), and a deprecated operation (`deprecated`) yields to a current one of the
+same route and conditions. An operation whose every request botocore's endpoint rules send to another
+service's endpoint, signed for it, is that service's (`signedElsewhere`: S3's ListDirectoryBuckets,
+signed `s3express`). Within any scope, the operations of a route must leave every request one operation:
+no two current ones requiring the same, and what any two require together required by one of them, the
+route requiring all a request carries being its operation (`shared_routes`). The generation fails
+otherwise. Supported shared-controller alternatives are generated beside the modeled URI, with
+member-location overrides for the bare route, and its own method where that is not the operation's.
+These alternatives describe existing Floci compatibility paths, not additional botocore operations.
 
 The models are botocore's `<model>/<apiVersion>/service-2.json` (Apache-2.0,
 https://github.com/boto/botocore), the latest API version of each, located as
@@ -60,9 +57,6 @@ from regen_query_services import latest_model_dir, load_model
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "src/main/resources/aws/rest-routes.json"
-
-# Credential scopes the registry's rules authorize alone, and why.
-HAND_ROUTED: dict[str, str] = {}
 
 # botocore model -> the credential scope Floci authorizes its requests under.
 MODELS: dict[str, str] = {
@@ -386,7 +380,6 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             raise SystemExit(f"error: {name} is both a botocore model and a documented endpoint")
         routes[name] = model
     routes = dict(sorted(routes.items()))
-    with_required(routes, models)
     with_conditions(routes, models)
     shared = shared_routes(routes)
     if shared:
@@ -397,7 +390,6 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
             "generator": "tools/aws/regen_rest_routes.py",
             "botocore": provenance,
         },
-        "handRouted": dict(sorted(HAND_ROUTED.items())),
         "models": routes,
     }
 
@@ -412,19 +404,6 @@ def required_members(model: dict, operation: str) -> dict[str, list[str]]:
     query = sorted(where for location, where in located if location == "querystring")
     headers = sorted(where.lower() for location, where in located if location == "header")
     return {**({"query": query} if query else {}), **({"headers": headers} if headers else {})}
-
-
-def with_required(routes: dict[str, dict], models: dict[str, dict]) -> None:
-    """Each operation of a hand-routed scope given what its request must carry (`required`), for the coverage test to
-    build the request the registry's rules read; the routes of other scopes, which requests are matched on, need it only
-    where operations share them (`with_conditions`)."""
-    for name, model in routes.items():
-        if model["credentialScope"] not in HAND_ROUTED or name not in models:
-            continue
-        for operation, route in model["operations"].items():
-            required = required_members(models[name], operation)
-            if required:
-                route["required"] = required
 
 
 def with_conditions(routes: dict[str, dict], models: dict[str, dict]) -> None:
@@ -552,11 +531,7 @@ def load_models(data: Path) -> dict[str, dict]:
 
 def render(doc: dict) -> str:
     """The document with one operation to a line, so a model's routes read as a table."""
-    lines = ["{", f'  "_source": {json.dumps(doc["_source"])},', '  "handRouted": {']
-    hand = list(doc["handRouted"].items())
-    for position, (scope, reason) in enumerate(hand):
-        lines.append(f"    {json.dumps(scope)}: {json.dumps(reason)}" + ("," if position < len(hand) - 1 else ""))
-    lines += ["  },", '  "models": {']
+    lines = ["{", f'  "_source": {json.dumps(doc["_source"])},', '  "models": {']
     models = list(doc["models"].items())
     for index, (name, model) in enumerate(models):
         lines.append(f"    {json.dumps(name)}: {{")

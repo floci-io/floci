@@ -53,8 +53,7 @@ class IamActionRegistryTest {
     @Test
     void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
         IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
-                {"handRouted": {},
-                 "models": {
+                {"models": {
                    "opensearch": {"credentialScope": "es", "operations": {
                      "ListDomainNames": {"method": "GET", "requestUri": "/unmapped/domain"},
                      "DescribeDomain": {"method": "GET", "requestUri": "/unmapped/domain/{DomainName}"}

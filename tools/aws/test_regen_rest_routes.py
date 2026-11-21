@@ -85,12 +85,10 @@ def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path, m
     assert r.main(data + ["--check"]) == 1
 
 
-def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused(monkeypatch):
-    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
+def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused():
     with pytest.raises(SystemExit):
         r.build({"lambda": model("rest-json", "2015-03-31", GetByName=("GET", "/things/{Name}"),
                                  GetById=("GET", "/things/{Id}/"))}, "botocore test")
-    # A scope the rules route alone is checked too: its routes are what the coverage test builds requests on.
     with pytest.raises(SystemExit):
         r.build({"s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
                              UploadPart=("PUT", "/{Bucket}/{Key+}"))}, "botocore test")
@@ -104,8 +102,7 @@ def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused(mo
                            UploadPart=("PUT", "/{Bucket}/{Key+}")), "UploadPart",
                      {"PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")}),
     }, "botocore test")
-    assert doc["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
-    assert set(doc["handRouted"]) == {"s3"}
+    assert "handRouted" not in doc
     # Only a route several operations share carries conditions; one operation in two models is one operation.
     assert "requires" not in doc["models"]["lambda"]["operations"]["ListTags"]
     assert "requires" not in doc["models"]["lambda"]["operations"]["GetThing"]
@@ -189,15 +186,6 @@ def test_an_operation_signed_for_another_service_on_every_request_is_left_out_of
     # Without it, GET / names two operations a request cannot tell apart.
     with pytest.raises(SystemExit):
         r.build({"s3": s3}, "botocore test")
-
-
-def test_the_hand_routed_scopes_are_rendered_with_their_reasons(monkeypatch):
-    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
-    text = r.render(r.build({"s3": model("rest-xml", "2006-03-01", HeadBucket=("HEAD", "/{Bucket}"))},
-                            "botocore test"))
-
-    assert json.loads(text)["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
-    assert text.splitlines()[2] == '  "handRouted": {'
 
 
 @pytest.mark.parametrize("status", [400, 401, 402, 403])
@@ -456,17 +444,3 @@ def test_vendored_documented_routes_read_from_another_page_or_malformed_are_refu
     malformed["operations"]["GetCatalog"] = {"method": "FETCH", "requestUri": "/iceberg/v1/config"}
     with pytest.raises(SystemExit, match="malformed"):
         r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": malformed})))
-
-
-def test_a_hand_routed_scopes_routes_list_all_their_requests_must_carry_for_the_coverage_test(monkeypatch):
-    monkeypatch.setattr(r, "HAND_ROUTED", {"s3": "the rules route it alone"})
-    s3 = shaped(model("rest-xml", "2006-03-01", CompleteMultipartUpload=("POST", "/{Bucket}/{Key+}"),
-                      PutObject=("PUT", "/{Bucket}/{Key+}")),
-                "CompleteMultipartUpload", {"UploadId": ("querystring", "uploadId")})
-    lam = shaped(model("rest-json", "2015-03-31", GetThing=("GET", "/things/{Name}")),
-                 "GetThing", {"Qualifier": ("querystring", "Qualifier")})
-    doc = r.build({"s3": s3, "lambda": lam}, "botocore test")
-    assert doc["models"]["s3"]["operations"]["CompleteMultipartUpload"]["required"] == {"query": ["uploadId"]}
-    assert "required" not in doc["models"]["s3"]["operations"]["PutObject"]
-    # A routed scope's requests are matched on its routes, which carry only what tells shared ones apart.
-    assert "required" not in doc["models"]["lambda"]["operations"]["GetThing"]
