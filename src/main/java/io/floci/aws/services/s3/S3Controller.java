@@ -197,11 +197,9 @@ public class S3Controller {
                     if (req != null) {
                         authHeader = req.getHeader("Authorization");
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
+                        // The connection's address: a client-sent X-Forwarded-For is not one, unless Quarkus's own proxy
+                        // settings trust the proxy that sent it, in which case remoteAddress() is the forwarded address.
+                        if (req.remoteAddress() != null) {
                             sourceIp = req.remoteAddress().host();
                         }
                     }
