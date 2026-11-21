@@ -715,7 +715,7 @@ class Route53IntegrationTest {
     }
 
     @Test
-    @Order(25)
+    @Order(27)
     void listResourceRecordSets_escapesWildcardRecordNameAsOctal() {
         String location = given()
                 .contentType(XML)

@@ -33,6 +33,32 @@ public final class Route53RecordName {
         return spell(name) + ".";
     }
 
+    /**
+     * Decoded DNS name with trailing dot and lowercased ASCII letters, used for ordering and
+     * {@code startRecordName} comparisons so octal-escaped bytes (such as {@code \052} for {@code *})
+     * sort by their underlying byte value rather than the leading backslash.
+     */
+    public static String sortKey(String name) {
+        if (name == null || name.isEmpty()) {
+            return name;
+        }
+        String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+        byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
+        StringBuilder decoded = new StringBuilder(bytes.length + 1);
+        for (int index = 0; index < bytes.length; index++) {
+            int value = bytes[index] & 0xFF;
+            if (value == '\\' && isEscapeCode(bytes, index + 1)) {
+                value = (bytes[index + 1] - '0') * 64 + (bytes[index + 2] - '0') * 8 + (bytes[index + 3] - '0');
+                index += 3;
+            }
+            if (value >= 'A' && value <= 'Z') {
+                value += 'a' - 'A';
+            }
+            decoded.append((char) value);
+        }
+        return decoded.append('.').toString();
+    }
+
     private static String spell(String name) {
         String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
         byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
