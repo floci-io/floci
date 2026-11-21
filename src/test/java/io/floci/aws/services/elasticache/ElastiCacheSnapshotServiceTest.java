@@ -56,6 +56,9 @@ class ElastiCacheSnapshotServiceTest {
         doAnswer(inv -> "headless".equals(inv.getArgument(0)) ? null
                 : ElastiCacheServiceFixture.containerHandle(inv.getArgument(0)))
                 .when(containerManager).tryStart(anyString(), anyString(), any());
+        doAnswer(inv -> "headless".equals(inv.getArgument(0)) ? null
+                : ElastiCacheServiceFixture.containerHandle(inv.getArgument(0)))
+                .when(containerManager).tryStart(anyString(), anyString(), anyString(), any());
         when(containerManager.snapshot("container-source")).thenReturn(RDB);
     }
 
@@ -70,8 +73,16 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("manual", snapshot.getSnapshotSource());
         assertEquals("source", snapshot.getReplicationGroupId());
         assertEquals("arn:aws:elasticache:us-east-1:000000000000:snapshot:snap", snapshot.getArn());
-        verify(containerManager).restore("container-restored", RDB);
+        verify(containerManager).tryStart("restored", "valkey/valkey:8", "us-east-1", RDB);
         assertEquals("restored", service.getReplicationGroup("restored").getReplicationGroupId());
+    }
+
+    @Test
+    void aGroupWithoutASnapshotStartsWithoutOne() {
+        group("plain");
+
+        verify(containerManager).tryStart("plain", "valkey/valkey:8", "us-east-1");
+        verify(containerManager, never()).tryStart(eq("plain"), anyString(), anyString(), any());
     }
 
     @Test
@@ -81,14 +92,14 @@ class ElastiCacheSnapshotServiceTest {
         AtomicReference<String> duringLoad = new AtomicReference<>();
         doAnswer(inv -> {
             duringLoad.set(fault(() -> service.getReplicationGroup("restored")));
-            return null;
-        }).when(containerManager).restore("container-restored", RDB);
+            return ElastiCacheServiceFixture.containerHandle("restored");
+        }).when(containerManager).tryStart("restored", "valkey/valkey:8", "us-east-1", RDB);
 
         service.createReplicationGroupFromSnapshot(request("restored", null), "snap");
 
         assertEquals("ReplicationGroupNotFoundFault", duringLoad.get());
         InOrder order = inOrder(containerManager, proxyManager);
-        order.verify(containerManager).restore("container-restored", RDB);
+        order.verify(containerManager).tryStart("restored", "valkey/valkey:8", "us-east-1", RDB);
         order.verify(proxyManager).startProxy(eq("restored"), any(), anyInt(), anyString(), anyInt(), any());
     }
 
@@ -177,20 +188,38 @@ class ElastiCacheSnapshotServiceTest {
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("restored")));
         verify(containerManager, never()).tryStart(eq("restored"), anyString(), any());
+        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyString(), any());
     }
 
     @Test
-    void aGroupTheRdbCannotBeLoadedIntoIsRemoved() {
+    void aGroupTheRdbCannotBeLoadedIntoIsRemovedAndTheRestIsKept() {
         group("source");
         service.createSnapshot("snap", "source", null);
-        doThrow(new IllegalStateException("DEBUG RELOAD failed"))
-                .when(containerManager).restore("container-restored", RDB);
+        doThrow(new ElastiCacheContainerManager.SnapshotRestoreException("the server could not load it"))
+                .when(containerManager).tryStart("restored", "valkey/valkey:8", "us-east-1", RDB);
 
         assertEquals("InvalidSnapshotState",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("restored")));
         verify(proxyManager, never()).startProxy(eq("restored"), any(), anyInt(), anyString(), anyInt(), any());
-        verify(containerManager).stop(any());
+        // The container of the failed start is removed by id, since no handle came back.
+        verify(containerManager).stopByGroupId("restored");
+        // Neither the group the snapshot came from nor the snapshot is lost.
+        assertEquals("source", service.getReplicationGroup("source").getReplicationGroupId());
+        assertEquals("available", service.getSnapshot("snap").getSnapshotStatus());
+        // The failed group's name and port are free again.
+        service.createReplicationGroupFromSnapshot(request("restored-again", null), "snap");
+    }
+
+    @Test
+    void withoutADockerDaemonASnapshotCannotBeRestoredAndNothingIsLeftBehind() {
+        group("source");
+        service.createSnapshot("snap", "source", null);
+
+        assertEquals("InvalidReplicationGroupState",
+                fault(() -> service.createReplicationGroupFromSnapshot(request("headless", null), "snap")));
+        assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("headless")));
+        verify(containerManager).stopByGroupId("headless");
     }
 
     @Test
@@ -201,6 +230,7 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("InvalidParameterCombination",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("sharded", "enabled"), "snap")));
         verify(containerManager, never()).tryStart(eq("sharded"), anyString(), any());
+        verify(containerManager, never()).tryStart(eq("sharded"), anyString(), anyString(), any());
     }
 
     @Test

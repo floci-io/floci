@@ -1917,18 +1917,18 @@ public interface EmulatorConfig {
         /**
          * Start and snapshot the backend of a Redis or Valkey replication group the way an image
          * with no shell and no CLI needs: server flags go to the container as arguments instead of
-         * the {@code VALKEY_EXTRA_FLAGS} hook, a snapshot is taken with {@code SAVE} over the RESP
-         * connection and read out of the container through the Docker archive API, and a snapshot
-         * is restored by placing its file in the data directory before the server starts, so no
-         * {@code DEBUG} command is involved. Off by default and never inferred from the image name:
-         * the default image keeps the {@code VALKEY_EXTRA_FLAGS} and CLI path.
+         * the {@code VALKEY_EXTRA_FLAGS} hook, and a snapshot is taken with {@code SAVE} over the
+         * RESP connection and read out of the container through the Docker archive API. Off by
+         * default and never inferred from the image name: the default image keeps the
+         * {@code VALKEY_EXTRA_FLAGS} and CLI path. Either way a snapshot is restored by placing its
+         * file in the data directory before the server starts, so no {@code DEBUG} command is involved.
          */
         @WithDefault("false")
         boolean shellLessBackend();
 
         /**
-         * Name of the snapshot file the server loads from its data directory at startup. Only used
-         * with {@link #shellLessBackend()}: a restore places the snapshot under this name, and a
+         * Name of the snapshot file the server loads from its data directory at startup. A restore
+         * places the snapshot under this name on either path, and with {@link #shellLessBackend()} a
          * snapshot export falls back to it when the server does not report {@code dbfilename}.
          * Set it to the name the image's server uses ({@code dump.rdb} for Redis and Valkey).
          */

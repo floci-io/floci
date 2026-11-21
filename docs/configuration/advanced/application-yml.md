@@ -228,7 +228,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       shell-less-backend: false               # true = image has no shell or CLI: flags as container arguments, snapshots via SAVE over RESP + Docker archive API
-      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup (used with shell-less-backend)
+      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup; a restore places the snapshot under it
 
     rds:
       enabled: true
