@@ -142,24 +142,21 @@ class IamPolicyNotFoundWordingIntegrationTest {
                 .formParam("PolicyArn", ABSENT), PLAIN);
     }
 
-    /**
-     * A permissions boundary that names no policy reads with the attach family, which is the
-     * reading rather than a recording.
-     */
+    /** A permissions boundary that names no policy answers the Scope ARN sentence, as recorded. */
     @Test
-    void aPermissionsBoundaryThatNamesNoPolicyReadsWithTheAttachFamily() {
+    void aPermissionsBoundaryThatNamesNoPolicyAnswersTheScopeSentence() {
         expectNotFound(iam("CreateUser").formParam("UserName", unique("boundary-user"))
-                .formParam("PermissionsBoundary", ABSENT), ATTACHABLE);
+                .formParam("PermissionsBoundary", ABSENT),
+                "Scope ARN: " + ABSENT + " does not exist or is not attachable.");
     }
 
-    /**
-     * The one case left as it was: a version id that names nothing on a policy that exists is
-     * about the version rather than the ARN, and nothing records it.
-     */
+    /** A version id that names nothing on a policy that exists is named inside the attach sentence. */
     @Test
-    void aVersionThatNamesNothingOnAPolicyThatExistsIsUnchanged() {
-        expectNotFound(iam("GetPolicyVersion").formParam("PolicyArn", createPolicy())
-                .formParam("VersionId", "v7"), "Policy version v7 does not exist.");
+    void aVersionThatNamesNothingOnAPolicyThatExistsAnswersTheAttachSentence() {
+        String arn = createPolicy();
+        expectNotFound(iam("GetPolicyVersion").formParam("PolicyArn", arn)
+                .formParam("VersionId", "v7"),
+                "Policy " + arn + " version v7 does not exist or is not attachable.");
     }
 
     /** The control: a policy that exists still reads, attaches and detaches. */

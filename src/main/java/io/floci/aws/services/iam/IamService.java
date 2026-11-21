@@ -951,7 +951,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamUser createUser(String userName, String path, String permissionsBoundaryArn) {
         if (permissionsBoundaryArn != null) {
             permissionsBoundaryArn =
-                    requirePolicy(permissionsBoundaryArn, PolicyNotFound.ATTACHABLE).getArn();
+                    requirePolicy(permissionsBoundaryArn, PolicyNotFound.BOUNDARY).getArn();
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
@@ -1861,7 +1861,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(policyName));
             if (nameTaken) {
                 throw new AwsException("EntityAlreadyExists",
-                        "Policy " + arn + " already exists.", 409);
+                        "A policy called " + policyName
+                                + " already exists. Duplicate names are not allowed.", 409);
             }
             String policyId = "ANPA" + randomId(16);
             IamPolicy policy = new IamPolicy(policyId, policyName, normalizedPath, arn, description, document);
@@ -1886,19 +1887,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * The two sentences IAM answers for a managed policy ARN it cannot resolve. They are not
+     * The three sentences IAM answers for a managed policy ARN it cannot resolve. They are not
      * interchangeable and the operation decides which it answers, each recorded against a real
      * account: {@code GetPolicy} and {@code TagPolicy} answer {@link #PLAIN}, recorded 2026-10-26,
      * as do the three detach operations, recorded 2026-10-29, while the attach family answers
      * {@link #ATTACHABLE}, recorded on {@code ListEntitiesForPolicy} 2026-10-25 and on
      * {@code CreatePolicyVersion}, {@code GetPolicyVersion} and {@code ListPolicyVersions}
-     * 2026-10-29. The clause is what tells the two apart: one says the ARN names nothing, the
-     * other that it names nothing this call could attach, and AWS answers the second for both of
-     * its own cases deliberately, so a caller cannot tell them apart either.
+     * 2026-10-29. The clause is what tells the first two apart: one says the ARN names nothing,
+     * the other that it names nothing this call could attach, and AWS answers the second for both
+     * of its own cases deliberately, so a caller cannot tell them apart either. {@link #BOUNDARY}
+     * is the third, answered for a permissions boundary on a user or role, and a version id that
+     * names nothing on a policy that exists is named inside {@link #ATTACHABLE}; the AWS Emulator
+     * Evaluation Suite asserts both wordings.
      *
      * <p>The operations no recording covers answer with their own family, which is this emulator's
-     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the remaining
-     * version operations and a permissions boundary with the attach family.
+     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the version
+     * operations that take a version id, {@code GetPolicyVersion}, {@code DeletePolicyVersion} and
+     * {@code SetDefaultPolicyVersion}, with the attach family.
      * {@code docs/services/iam.md} records which is which and what a later recording moves.
      */
     private enum PolicyNotFound {
@@ -1907,7 +1912,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         PLAIN("Policy %s was not found."),
 
         /** {@code Policy <arn> does not exist or is not attachable.} */
-        ATTACHABLE("Policy %s does not exist or is not attachable.");
+        ATTACHABLE("Policy %s does not exist or is not attachable."),
+
+        /** {@code Scope ARN: <arn> does not exist or is not attachable.}, a permissions boundary. */
+        BOUNDARY("Scope ARN: %s does not exist or is not attachable.");
 
         private final String template;
 
@@ -1983,7 +1991,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String requireBoundaryPolicy(String permissionsBoundaryArn) {
         return registeredPartnerBoundary(permissionsBoundaryArn)
                 ? permissionsBoundaryArn
-                : requirePolicy(permissionsBoundaryArn, PolicyNotFound.ATTACHABLE).getArn();
+                : requirePolicy(permissionsBoundaryArn, PolicyNotFound.BOUNDARY).getArn();
     }
 
     private int managedPolicyAttachmentCount(String policyArn) {
@@ -2268,8 +2276,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .orElseThrow(() -> PolicyNotFound.ATTACHABLE.of(policyArn, versionId));
         PolicyVersion version = policy.getVersions().get(versionId);
         if (version == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+            throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
         }
         return version;
     }
@@ -2284,8 +2291,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, PolicyVersion> versions = policy.getVersions();
         synchronized (versions) {
             if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+                throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
             }
             versions.remove(versionId);
         }
@@ -2306,8 +2312,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, PolicyVersion> versions = policy.getVersions();
         synchronized (versions) {
             if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+                throw PolicyNotFound.ATTACHABLE.of(policyArn, versionId);
             }
             versions.values().forEach(v -> v.setDefaultVersion(false));
             versions.get(versionId).setDefaultVersion(true);
@@ -2455,7 +2460,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     .map(arn -> requirePolicy(arn, PolicyNotFound.ATTACHABLE))
                     .map(IamPolicy::getArn).distinct().toList();
             if (boundaryArn != null) {
-                boundaryArn = requirePolicy(boundaryArn, PolicyNotFound.ATTACHABLE).getArn();
+                boundaryArn = requirePolicy(boundaryArn, PolicyNotFound.BOUNDARY).getArn();
             }
             Map<String, String> checkedInline = new LinkedHashMap<>();
             for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
@@ -2512,7 +2517,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = user.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for user " + userName + ".", 404);
+                    "The user policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2522,7 +2527,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamUser user = getUser(userName);
             if (user.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for user " + userName + ".", 404);
+                        "The user policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
             users.put(userName, user);
@@ -2557,7 +2562,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = group.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for group " + groupName + ".", 404);
+                    "The group policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2567,7 +2572,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamGroup group = getGroup(groupName);
             if (group.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for group " + groupName + ".", 404);
+                        "The group policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
             groups.put(groupName, group);
@@ -2780,7 +2785,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = role.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for role " + roleName + ".", 404);
+                    "The role policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2792,7 +2797,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             requireNotServiceLinked(role, roleName);
             if (role.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for role " + roleName + ".", 404);
+                        "The role policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
             roles.put(roleName, role);
@@ -2930,7 +2935,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (containsNameIgnoreCase(
                     instanceProfiles, InstanceProfile::getInstanceProfileName, instanceProfileName)) {
                 throw new AwsException("EntityAlreadyExists",
-                        "Instance profile " + instanceProfileName + " already exists.", 409);
+                        "Instance Profile " + instanceProfileName + " already exists.", 409);
             }
             String profileId = "AIPA" + randomId(16);
             String normalizedPath = normalizePath(path);
@@ -2952,7 +2957,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public InstanceProfile getInstanceProfile(String instanceProfileName) {
         return instanceProfiles.get(instanceProfileName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "Instance profile " + instanceProfileName + " cannot be found.", 404));
+                        "Instance Profile " + instanceProfileName + " cannot be found.", 404));
     }
 
     public void deleteInstanceProfile(String instanceProfileName) {
