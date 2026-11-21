@@ -180,9 +180,11 @@ Disabling a stream closes its open shards, each with an `EndingSequenceNumber`, 
 stays readable. A `GetRecords` call that reaches the end of a closed shard returns no
 `NextShardIterator`. `GetShardIterator` for a shard the stream does not have answers
 `ResourceNotFoundException`. The 1,000-record limit is for the whole stream: the oldest record goes
-first, whichever shard holds it. A closed shard that holds no records is dropped once the shard that
-replaced it has closed too, so a stream that rolls over lists at most two generations of shards while
-idle, and otherwise only the shards that still hold records.
+first, whichever shard holds it. AWS has no such limit, so if a consumer can fall more than 1,000
+records behind, for example one that starts at `LATEST` before a large seed, raise it with
+`FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS`. A closed shard that holds no records is dropped once
+the shard that replaced it has closed too, so a stream that rolls over lists at most two generations
+of shards while idle, and otherwise only the shards that still hold records.
 
 ## Time to Live
 
@@ -315,6 +317,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS` | `0` | Seconds a stream shard stays open before a child shard takes its keys. `0` keeps shards open |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED` | `false` | Expire stream shard iterators 15 minutes after they are returned, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
+| `FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS` | `1000` | Most records each stream keeps across its shards; the oldest goes first. Must be at least `1` |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
