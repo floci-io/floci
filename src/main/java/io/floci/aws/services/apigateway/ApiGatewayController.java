@@ -1652,6 +1652,7 @@ public class ApiGatewayController {
     public Response getV1VpcLinks(@Context HttpHeaders headers,
                                   @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
+        // VpcLink clashes with the imported API Gateway v2 model
         PaginatedResult<io.floci.aws.services.apigateway.model.VpcLink> page =
                 service.getVpcLinkPage(region, pageLimit(limit), position);
         return pageResponse(page, this::toV1VpcLinkNode);
