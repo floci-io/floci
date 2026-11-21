@@ -62,13 +62,15 @@ another.
 `CreateApplication` stores every configuration `UpdateApplication` does, `runtimeConfiguration`,
 `monitoringConfiguration`, `schedulerConfiguration`, `diskEncryptionConfiguration`,
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
-among them, and `GetApplication` returns each as it was written.
+among them, and `GetApplication` returns each as it was written, except for `schedulerConfiguration` (see
+**Concurrency and queuing** under job runs).
 
 `UpdateApplication` answers with the updated application, as `GetApplication` reports it.
 
 `UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
 `maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
-"Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
+"Updating Running Applications" describes, and a `schedulerConfiguration` naming only `maxConcurrentRuns`, as its
+"Job concurrency and queuing" page has it. For every other setting the API reference's "An application has to be in
 a stopped or created state in order to be updated" holds: a `STARTED` application's update naming one, even beside
 those or with its current value, is refused with `ValidationException`, "Application must be in a stopped or created
 state in order to be updated.", and so is an image change on an application with `initialCapacity` ("Custom image
@@ -92,11 +94,29 @@ In the default `immediate` runner mode, job runs are metadata only: nothing exec
 the job run states and `GetJobRun`'s response shape, and settles when it is read. In the `docker`
 runner mode a Spark run executes; see [Running Spark job runs](#running-spark-job-runs).
 
-* **Lifecycle**: a run is `RUNNING` from the moment it is submitted. With the default
+* **Lifecycle**: a run is `RUNNING` from the moment it is submitted, or from the moment it leaves the queue
+  (see **Concurrency and queuing**). With the default
   `job-run-duration-seconds` of `0`, a `BATCH` run is `SUCCESS` as soon as it starts; a positive
   duration keeps it `RUNNING` that long. A run whose duration would pass its
   `executionTimeoutMinutes` (720 when not given, as AWS reports it) is `CANCELLED` at the timeout.
   A `STREAMING` run stays `RUNNING` until it is cancelled.
+* **Concurrency and queuing**: as the user guide's "Job concurrency and queuing for an EMR Serverless
+  application" describes, at most `maxConcurrentRuns` of an application's batch and streaming runs run at once.
+  A run submitted beyond that is `QUEUED`, and the first queued run starts when one of them ends or is cancelled.
+  A run still queued `queueTimeoutMinutes` after it was submitted is `CANCELLED`, as the job run states give
+  a run that "has timed out" as a reason to be cancelled. Its `stateDetails` is Floci's wording, as no source
+  gives AWS's. A run that leaves the queue reports `queuedDurationMilliseconds`. A queued run is cancelled at
+  once, and keeps `StopApplication` from stopping the application. Queuing is "supported on Amazon EMR release
+  7.0.0 and higher" and "enabled by default on Amazon EMR release 7.3.0 and higher", the AWS runtime for Apache
+  Spark's releases included. An application that sets no `schedulerConfiguration` queues only from 7.3.0, with
+  the defaults of 15 runs and 360 minutes. `maxConcurrentRuns` must be 1 to 1000 and `queueTimeoutMinutes` 15
+  to 720, or the request is refused with `ValidationException`, in Floci's wording. Terraform's acceptance tests
+  record how AWS keeps the configuration. A member a request leaves out takes its default, and here keeps the
+  value already set where there is one. An empty object turns queuing off, on 7.3.0 and later too, and the
+  application then returns no `schedulerConfiguration`. Raising `maxConcurrentRuns` on a `STARTED` application
+  starts queued runs at once. With the default
+  `job-run-duration-seconds` of `0`, a `BATCH` run ends as it starts and never holds a slot, so only
+  `STREAMING` runs, or runs given a duration, wait.
 * **Auto-start**: a run submitted to a `CREATED` or `STOPPED` application starts the application,
   as `autoStartConfiguration.enabled` defaults to `true`. With auto-start turned off, the run is
   refused with `ValidationException` until the application is started. A run on a terminated
@@ -313,7 +333,9 @@ worker of its own on EMR Serverless (see **Executors** below).
   the default, or on the host's network or another container's network namespace, where two runs' ports would meet, the
   executors run in the driver's container instead, in Spark's local mode.
 
-* **States**: a run is `SCHEDULED` while its image is pulled and its container starts (the first run
+* **States**: a run beyond its application's `maxConcurrentRuns` is `QUEUED` first, its container not started until
+  it leaves the queue (see **Concurrency and queuing** under job runs). A run is `SCHEDULED` while its image is
+  pulled and its container starts (the first run
   of a release pulls its image, 3.5 to 4.3 GB unpacked; a pull still downloading after
   [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md), five minutes by default,
   is tried again, three attempts in all, so on a slow connection raise it or run `docker pull` on the
@@ -457,6 +479,6 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
-* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
+* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, the account's limit of 2000 `QUEUED` runs, `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Sessions in the `immediate` mode run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and a Spark Connect call to it is refused; the `docker` mode runs one (see [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)).
