@@ -272,6 +272,22 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
                 .when().delete(f.path("a/governed")).then().statusCode(204);
     }
 
+    /**
+     * A key of slashes alone, "/" sent as "/bucket//", is that object, checked as the object operation on it, not as
+     * the bucket its path would name without them.
+     */
+    @Test
+    void aKeyOfOnlySlashesIsCheckedAsThatObject() {
+        Fixture f = new Fixture("slash-only", false);
+        f.policy(f.allow("s3:PutObject", "s3:GetObject", "s3:DeleteObject"));
+        HttpResponse<String> put = f.raw("PUT", "/", null, f.accessKeyId, Map.of(), "one slash");
+        assertEquals(200, put.statusCode(), put.body());
+        HttpResponse<String> get = f.raw("GET", "/", null, f.accessKeyId, Map.of(), null);
+        assertEquals(200, get.statusCode(), get.body());
+        assertEquals("one slash", get.body());
+        assertEquals(204, f.raw("DELETE", "/", null, f.accessKeyId, Map.of(), null).statusCode());
+    }
+
     @Test
     void theBypassIsDecidedOnTheKeyARequestNamesEvenWithALeadingSlash() {
         // A key that starts with "/" travels as "//" after the bucket, which JAX-RS collapses to the

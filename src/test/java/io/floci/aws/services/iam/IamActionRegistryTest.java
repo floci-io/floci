@@ -637,8 +637,8 @@ class IamActionRegistryTest {
     @Test
     void aTrailingSlashIsCheckedAsTheRouteWithoutIt() {
         // The router matches /clusters/ as /clusters, so the rule ending at the route's last segment covers it.
-        // An S3 path is matched as sent: a key may end in a slash, and one of slashes alone arrives as
-        // S3SlashOnlyKeyFilter rewrites it, escaped.
+        // An S3 key may end in a slash, and one of slashes alone arrives as S3SlashOnlyKeyFilter rewrites it,
+        // escaped.
         String[][] routes = {
             {"eks", "POST", "/clusters/", "eks:CreateCluster"},
             {"eks", "GET", "/clusters/c/node-groups/ng/", "eks:DescribeNodegroup"},

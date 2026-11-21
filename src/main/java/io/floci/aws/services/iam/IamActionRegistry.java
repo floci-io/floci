@@ -626,9 +626,10 @@ public class IamActionRegistry {
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
-        // An S3 key may end in a slash, and one of slashes alone arrives escaped as S3SlashOnlyKeyFilter rewrites
-        // it (PUT /bucket// writes the key "/"), so an S3 path is matched as sent, not decoded.
-        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        // Matched on the path the router dispatched on, as every scope is: S3 too, whose key of slashes alone
+        // S3SlashOnlyKeyFilter rewrites escaped (PUT /bucket// writes the key "/"), and whose own reading of a key,
+        // which keeps the slashes it was sent with, names the object (RequestPathLabels).
+        String path = routedPath(ctx);
 
         for (ActionRule rule : RULES) {
             if (rule.matches(credentialScope, method, path, ctx)) {
@@ -736,7 +737,7 @@ public class IamActionRegistry {
                 || ctx.getUriInfo().getRequestUri() == null) {
             return false;
         }
-        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        String path = routedPath(ctx);
         return IamRestRoutes.vendored().ambiguous(credentialScope, ctx.getMethod().toUpperCase(),
                 withoutInternalPrefix(ctx, path), ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
                 ctx.getHeaders());
