@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -80,7 +81,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(2))
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.WriteCapacityUnits", equalTo(2));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -99,7 +100,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.GlobalSecondaryIndexes[0].WarmThroughput.ReadUnitsPerSecond", equalTo(2))
             .body("Table.GlobalSecondaryIndexes[0].WarmThroughput.WriteUnitsPerSecond", equalTo(4000));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -113,7 +114,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
         assertTrue(CfnStackWaits.failedResourceReason(stack, CFN_AUTH).contains("Requested ReadUnitsPerSecond for"
                 + " WarmThroughput for table is lower than ReadCapacityUnits of ProvisionedThroughput"));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -135,7 +136,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(1))
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.WriteCapacityUnits", equalTo(1));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -158,7 +159,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
         describe(table).body("Table.WarmThroughput.ReadUnitsPerSecond", equalTo(6000));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -185,7 +186,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
                 + " decreasing WarmThroughput is not supported"));
         describe(table).body("Table.WarmThroughput.ReadUnitsPerSecond", equalTo(4));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -205,7 +206,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.WarmThroughput.ReadUnitsPerSecond", equalTo(10))
             .body("Table.WarmThroughput.WriteUnitsPerSecond", equalTo(10));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -228,7 +229,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.ProvisionedThroughput.ReadCapacityUnits", equalTo(1))
             .body("Table.WarmThroughput.ReadUnitsPerSecond", equalTo(5000));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -250,7 +251,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(2))
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.WriteCapacityUnits", equalTo(2));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -266,7 +267,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
 
         describe(table).statusCode(400).body("__type", containsString("ResourceNotFoundException"));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     @Test
@@ -282,7 +283,7 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
 
         describe(table).statusCode(400).body("__type", containsString("ResourceNotFoundException"));
 
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
     private static String suffix() {
@@ -290,23 +291,10 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
     }
 
     private void cloudFormation(String stack, String action, String template) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
+        CfnRequests.cfn(action, stack)
             .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", stack)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
-    }
-
-    private void deleteStack(String stack) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DeleteStack")
-            .formParam("StackName", stack)
-        .when().post("/").then().statusCode(200);
-        CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);
     }
 
     private ValidatableResponse describe(String table) {

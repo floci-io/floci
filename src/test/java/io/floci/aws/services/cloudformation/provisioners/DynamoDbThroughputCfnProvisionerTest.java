@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
@@ -99,19 +98,11 @@ class DynamoDbThroughputCfnProvisionerTest {
             new DynamoDbFacade(backend, backend, new RegionResolver(REGION, "000000000000")));
 
     private ProvisionContext ctx() {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, REGION, "000000000000", "my-stack");
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(), REGION, "000000000000", "my-stack");
     }
 
     private ProvisionContext updateCtx(String priorProperties) throws Exception {
-        ProvisionContext create = ctx();
-        return new ProvisionContext(create.engine(), create.region(), create.accountId(),
-                create.stackName(), TABLE_NAME, event -> { }, props(priorProperties));
+        return ProvisionContexts.update(REGION, "000000000000", "my-stack", TABLE_NAME, priorProperties);
     }
 
     private JsonNode props(String json) throws Exception {

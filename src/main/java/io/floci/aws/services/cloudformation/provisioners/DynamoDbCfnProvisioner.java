@@ -473,15 +473,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static Long optionalUnits(JsonNode owner, String member, String pointer, ProvisionContext ctx) {
         JsonNode declared = owner.get(member);
         if (declared != null && declared.isArray()) {
-            throw new AwsException("InvalidRequest",
-                    "Property [" + member + "] expected type: Integer, found: JSONArray", 400);
+            throw CfnPropertyTypes.templateMismatch(member, "Integer", "JSONArray");
         }
         BigInteger units = ctx.resolveOptionalBigInteger(owner, member);
         if (units != null && units.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) {
-            throw new AwsException("InvalidRequest", "Model validation failed (" + pointer + "/" + member
-                    + ": expected type: Integer, found: String. This may occur when a numeric value exceeds"
-                    + " 32-bit integer max (2147483647). Consider using 'number' type or ensure value fits in"
-                    + " integer range.)", 400);
+            throw CfnPropertyTypes.modelValidation(pointer + "/" + member
+                    + ": expected type: Integer, found: String" + CfnPropertyTypes.INTEGER_RANGE_HINT + ")");
         }
         return units == null ? null : units.longValue();
     }

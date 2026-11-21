@@ -42,8 +42,7 @@ public interface DynamoDbTableAccess {
 
     /**
      * Creates a table with the declared throughput. An index takes its own capacity and warm
-     * throughput from its {@link GlobalSecondaryIndex}, and a provisioned table's indexes that carry
-     * none take the table's capacity.
+     * throughput from its {@link GlobalSecondaryIndex}.
      */
     TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                 List<AttributeDefinition> attributeDefinitions, boolean onDemand,
