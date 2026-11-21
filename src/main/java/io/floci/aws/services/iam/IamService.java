@@ -3483,10 +3483,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String accountPropertyNamespace(String key) {
         int separator = key == null ? -1 : key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
+            // AWS's own fixed text for this refusal, carrying the key exactly as the request
+            // sent it, so nothing here may reword it or trim the key. Which spellings reach it is
+            // this package's reading: no slash, several, and a trailing one share the sentence.
+            // The IAM page carries the recording behind it and what it does and does not cover.
             throw new AwsException("InvalidInput",
-                    "The property key '" + key + "' is not Namespace/PropertyName: a key has "
-                            + "exactly one forward slash, and neither a leading nor a trailing "
-                            + "one.", 400);
+                    "Property key must be in format Namespace/PropertyName: " + key, 400);
         }
         return key.substring(0, separator);
     }
