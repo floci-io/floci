@@ -30,7 +30,7 @@ class CfnCreateOnlyPropertiesTest {
     @Test
     void s3VectorsCreateOnlyPropertiesMatchTheRegistrySchemas() {
         assertEquals(Set.of("DataType", "Dimension", "DistanceMetric", "EncryptionConfiguration", "IndexName",
-                        "MetadataConfiguration", "VectorBucketArn", "VectorBucketName"),
+                        "MetadataConfiguration/NonFilterableMetadataKeys", "VectorBucketArn", "VectorBucketName"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::Index"));
         assertEquals(Set.of("VectorBucketName", "EncryptionConfiguration"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::VectorBucket"));

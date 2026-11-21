@@ -2,6 +2,7 @@ AWS::ApiGateway::ApiKey	StageKeys	accepted and ignored, as the ApiGatewayApiKeyC
 AWS::ApiGateway::Authorizer	AuthType	accepted and ignored
 AWS::ApiGateway::Authorizer	AuthorizerCredentials	accepted and ignored
 AWS::ApiGateway::Authorizer	IdentityValidationExpression	accepted and ignored
+AWS::ApiGateway::Authorizer	JwtConfiguration	accepted and ignored
 AWS::ApiGateway::Deployment	DeploymentCanarySettings	accepted and ignored
 AWS::ApiGateway::DomainName	EndpointAccessMode	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
 AWS::ApiGateway::DomainName	MutualTlsAuthentication	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
@@ -120,9 +121,11 @@ AWS::BedrockAgentCore::Memory	NamespaceKeys	accepted and not stored, a warning i
 AWS::BedrockAgentCore::Memory	StreamDeliveryResources	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	CapacityProviderConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	FilesystemConfigurations	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	HooksConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	LifecycleConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	PlatformVersion	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	RequestHeaderConfiguration	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	ResourceConfigurations	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning is logged
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
@@ -593,6 +596,7 @@ AWS::RedshiftServerless::Workgroup	SnapshotOwnerAccount	documented as ignored (d
 AWS::RedshiftServerless::Workgroup	Workgroup	accepted and ignored
 AWS::Route53::HostedZone	HostedZoneFeatures	accepted and ignored
 AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
+AWS::Route53::RecordSet	AZAffinity	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
 AWS::Route53::RecordSet	Comment	accepted and ignored
 AWS::Route53::RecordSet	GeoLocation	accepted and ignored
