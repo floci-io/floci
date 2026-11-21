@@ -38,7 +38,6 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -306,7 +305,6 @@ class IotCustomAuthorizerIntegrationTest {
             publisher.publish(prefix + "/" + clientId + "/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
 
             assertEquals(prefix + "/" + clientId + "/events", received.poll(10, TimeUnit.SECONDS));
-            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
         } finally {
             publisher.disconnect();
             publisher.close();

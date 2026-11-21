@@ -281,21 +281,25 @@ class IotMqttMutualTlsIntegrationTest {
 
     static MqttClient connect(String uri, String clientId, SSLSocketFactory socketFactory) throws Exception {
         MqttClient client = new MqttClient(uri, clientId, new MemoryPersistence());
-        MqttConnectOptions options = new MqttConnectOptions();
-        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
-        options.setCleanSession(true);
-        options.setConnectionTimeout(10);
-        options.setAutomaticReconnect(false);
-        if (socketFactory != null) {
-            options.setSocketFactory(socketFactory);
-        }
         try {
-            client.connect(options);
+            client.connect(mqtt3Options(socketFactory, true));
         } catch (MqttException e) {
             client.close();
             throw e;
         }
         return client;
+    }
+
+    static MqttConnectOptions mqtt3Options(SSLSocketFactory socketFactory, boolean cleanSession) {
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
+        options.setCleanSession(cleanSession);
+        options.setConnectionTimeout(10);
+        options.setAutomaticReconnect(false);
+        if (socketFactory != null) {
+            options.setSocketFactory(socketFactory);
+        }
+        return options;
     }
 
     private static org.eclipse.paho.mqttv5.client.MqttClient mqtt5Client(String clientId) throws Exception {

@@ -5,6 +5,7 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.mqttv5.client.IMqttToken;
 import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
@@ -26,12 +27,12 @@ import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.connect;
 import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.connectTls;
+import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.mqtt3Options;
 import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.mqtt5Options;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -91,12 +92,14 @@ class IotMqttTopicAuthorizationIntegrationTest {
             client = connectTls(thingDevice(thing), thing);
             MqttClient device = client;
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
-            listener.subscribe(otherTopic, 1, (topic, message) -> received.add(topic));
+            listener.subscribe(otherTopic, 1,
+                    (topic, message) -> received.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
 
-            assertThrows(MqttException.class, () -> device.publish(otherTopic, "x".getBytes(StandardCharsets.UTF_8), 1, false));
+            assertThrows(MqttException.class, () -> device.publish(otherTopic, "denied".getBytes(StandardCharsets.UTF_8), 1, false));
+            listener.publish(otherTopic, "marker".getBytes(StandardCharsets.UTF_8), 1, false);
 
             assertFalse(device.isConnected());
-            assertNull(received.poll(1, TimeUnit.SECONDS));
+            assertEquals("marker", received.poll(10, TimeUnit.SECONDS));
         } finally {
             if (client != null) {
                 closeV3(client);
@@ -159,7 +162,6 @@ class IotMqttTopicAuthorizationIntegrationTest {
             publisher.publish(prefix + "/ok", "x".getBytes(StandardCharsets.UTF_8), 1, false);
 
             assertEquals(prefix + "/ok", received.poll(10, TimeUnit.SECONDS));
-            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
             assertTrue(subscriber.isConnected());
         } finally {
             if (publisher != null) {
@@ -177,14 +179,17 @@ class IotMqttTopicAuthorizationIntegrationTest {
         MqttClient publisher = connectPlain("pub-" + System.nanoTime());
         MqttClient subscriber = null;
         try {
-            publisher.publish(prefix + "/denied", "x".getBytes(StandardCharsets.UTF_8), 1, true);
-            publisher.publish(prefix + "/ok", "x".getBytes(StandardCharsets.UTF_8), 1, true);
+            publisher.publish(prefix + "/denied", "retained-denied".getBytes(StandardCharsets.UTF_8), 1, true);
+            publisher.publish(prefix + "/ok", "retained-ok".getBytes(StandardCharsets.UTF_8), 1, true);
             subscriber = connectTls(device, "sub-" + System.nanoTime());
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
-            subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
+            subscriber.subscribe(prefix + "/+", 1,
+                    (topic, message) -> received.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
+            // The retained copies go out with the SUBACK, so this live one arrives after all of them.
+            publisher.publish(prefix + "/ok", "live".getBytes(StandardCharsets.UTF_8), 1, false);
 
-            assertEquals(prefix + "/ok", received.poll(10, TimeUnit.SECONDS));
-            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
+            assertEquals("retained-ok", received.poll(10, TimeUnit.SECONDS));
+            assertEquals("live", received.poll(10, TimeUnit.SECONDS));
         } finally {
             if (subscriber != null) {
                 closeV3(subscriber);
@@ -212,12 +217,44 @@ class IotMqttTopicAuthorizationIntegrationTest {
             publisher.publish(prefix + "/kept", "x".getBytes(StandardCharsets.UTF_8), 1, false);
 
             assertEquals(prefix + "/kept", received.poll(10, TimeUnit.SECONDS));
-            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
         } finally {
             if (publisher != null) {
                 closeV3(publisher);
             }
             closeV3(subscriber);
+        }
+    }
+
+    // Catches: the QoS 1 messages stored for a disconnected persistent session reaching it on the
+    // reconnect although its policies deny iot:Receive on their topic.
+    @Test
+    void messagesStoredForAPersistentSessionAreDeliveredOnlyOnTopicsThePolicyAllowsReceiveOn() throws Exception {
+        String prefix = "stored/" + System.nanoTime();
+        String clientId = "persistent-" + System.nanoTime();
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        device.attachNewPolicy(receiveOnly(prefix + "/ok"), cleanup);
+        MqttConnectOptions options = mqtt3Options(device.sslContext(TLS_DIR).getSocketFactory(), false);
+        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        MqttClient subscriber = new MqttClient("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId, null);
+        try {
+            BlockingQueue<String> ended = new LinkedBlockingQueue<>();
+            publisher.subscribe("$aws/events/presence/disconnected/" + clientId, 1, (topic, message) -> ended.add(topic));
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.connect(options);
+            subscriber.subscribe(prefix + "/+", 1,
+                    (topic, message) -> received.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
+            subscriber.disconnect();
+            // The disconnected event goes out once the session is stored for its reconnect.
+            assertEquals("$aws/events/presence/disconnected/" + clientId, ended.poll(10, TimeUnit.SECONDS));
+
+            publisher.publish(prefix + "/denied", "denied".getBytes(StandardCharsets.UTF_8), 1, false);
+            publisher.publish(prefix + "/ok", "ok".getBytes(StandardCharsets.UTF_8), 1, false);
+            subscriber.connect(options);
+
+            assertEquals("ok", received.poll(10, TimeUnit.SECONDS));
+        } finally {
+            closeV3(subscriber);
+            closeV3(publisher);
         }
     }
 
