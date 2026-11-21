@@ -929,6 +929,7 @@ class RdsQueryHandlerTest {
                 isNull(), isNull(), eq(false), any(),
                 isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), eq(false)))
                 .thenReturn(cluster);
+        when(service.setClusterSettings(any(), eq("mycluster"), any(), eq(true))).thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBClusterIdentifier", "mycluster");

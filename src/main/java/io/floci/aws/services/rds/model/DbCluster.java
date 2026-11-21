@@ -51,6 +51,16 @@ public class DbCluster {
     private boolean deletionProtection;
     private boolean copyTagsToSnapshot;
     private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
+    // Null on a cluster stored before these were kept; the response falls back to the defaults.
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    /** MonitoringInterval documents 0 as its default. */
+    private int monitoringInterval;
+    private String monitoringRoleArn;
+    private boolean performanceInsightsEnabled;
+    private Integer performanceInsightsRetentionPeriod;
+    private String databaseInsightsMode;
     private String kmsKeyId;
 
     private String dockerVolumeName;
@@ -266,4 +276,22 @@ public class DbCluster {
         enabledCloudwatchLogsExports = value == null ? new ArrayList<>() : new ArrayList<>(value);
     }
 
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String value) { preferredBackupWindow = value; }
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String value) { preferredMaintenanceWindow = value; }
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> value) {
+        vpcSecurityGroupIds = value == null ? new ArrayList<>() : new ArrayList<>(value);
+    }
+    public int getMonitoringInterval() { return monitoringInterval; }
+    public void setMonitoringInterval(int value) { monitoringInterval = value; }
+    public String getMonitoringRoleArn() { return monitoringRoleArn; }
+    public void setMonitoringRoleArn(String value) { monitoringRoleArn = value; }
+    public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
+    public void setPerformanceInsightsEnabled(boolean value) { performanceInsightsEnabled = value; }
+    public Integer getPerformanceInsightsRetentionPeriod() { return performanceInsightsRetentionPeriod; }
+    public void setPerformanceInsightsRetentionPeriod(Integer value) { performanceInsightsRetentionPeriod = value; }
+    public String getDatabaseInsightsMode() { return databaseInsightsMode; }
+    public void setDatabaseInsightsMode(String value) { databaseInsightsMode = value; }
 }
