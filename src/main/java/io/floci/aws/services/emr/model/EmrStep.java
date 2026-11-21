@@ -31,6 +31,8 @@ public class EmrStep {
     private boolean runInContainer;
     private String failureReason;
     private String failureMessage;
+    // Whether its cancel is pending after SEND_INTERRUPT, its process sent SIGTERM and free to finish on its own.
+    private boolean interrupted;
     private Instant creationDateTime;
     private Instant startDateTime;
     private Instant endDateTime;
@@ -78,6 +80,9 @@ public class EmrStep {
 
     public String getFailureReason() { return failureReason; }
     public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+
+    public boolean isInterrupted() { return interrupted; }
+    public void setInterrupted(boolean interrupted) { this.interrupted = interrupted; }
 
     public String getFailureMessage() { return failureMessage; }
     public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }

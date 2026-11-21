@@ -307,8 +307,8 @@ public class EmrHandler {
 
     private Response handleCancelSteps(JsonNode request) {
         requireMembers(request, "StepIds");
-        List<EmrService.CancelStepInfo> infos = service.cancelSteps(
-                text(request, "ClusterId"), stringList(request.path("StepIds")));
+        List<EmrService.CancelStepInfo> infos = service.cancelSteps(text(request, "ClusterId"),
+                stringList(request.path("StepIds")), text(request, "StepCancellationOption"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("CancelStepsInfoList");
         for (EmrService.CancelStepInfo info : infos) {

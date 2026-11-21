@@ -301,11 +301,34 @@ class EmrServiceTest {
                 + " and cluster " + oldId + " runs emr-4.7.2.", older.getMessage());
         assertThrows(AwsException.class, () -> service.cancelSteps(firstId, List.of("s-1")));
         assertEquals(1, service.cancelSteps(patchedId, List.of("s-1")).size());
-        // "A maximum of 256 steps are allowed in each CancelSteps request."
+        // "With earlier releases, the maximum is 256 steps per request."
         List<String> ids = Collections.nCopies(257, "s-1");
         AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(patchedId, ids));
-        assertEquals("A CancelSteps request can cancel at most 256 steps, and this one names 257.",
+        assertEquals("A CancelSteps request can cancel at most 256 steps on release emr-5.0.3, and this one names 257.",
                 tooMany.getMessage());
+    }
+
+    /** "With Amazon EMR releases 7.14.0 and later, the maximum number of steps you can cancel per request is 100." */
+    @Test
+    void cancelStepsTakesAtMost100StepsFromRelease714AndOnlyTheTwoOptions() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster current = cluster("current", true);
+        current.setReleaseLabel("emr-7.14.0");
+        String currentId = service.runJobFlow(current, REGION).getId();
+        EmrCluster earlier = cluster("earlier", true);
+        earlier.setReleaseLabel("emr-7.13.0");
+        String earlierId = service.runJobFlow(earlier, REGION).getId();
+        List<String> ids = Collections.nCopies(101, "s-1");
+
+        AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(currentId, ids));
+        assertEquals("A CancelSteps request can cancel at most 100 steps on release emr-7.14.0, and this one names"
+                + " 101.", tooMany.getMessage());
+        assertEquals(101, service.cancelSteps(earlierId, ids).size());
+        assertEquals(1, service.cancelSteps(currentId, List.of("s-1"), "TERMINATE_PROCESS").size());
+        AwsException option = assertThrows(AwsException.class,
+                () -> service.cancelSteps(currentId, List.of("s-1"), "SIGKILL"));
+        assertEquals("ValidationException", option.getErrorCode());
+        assertTrue(option.getMessage().contains("'stepCancellationOption'"), option.getMessage());
     }
 
     @Test
