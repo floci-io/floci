@@ -12,6 +12,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
@@ -347,6 +348,41 @@ class CloudFormationEksIntegrationTest {
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
+    }
+
+    @Test
+    void aRefusedSubnetOrSecurityGroupChangeRollsTheStackBackAndAReorderingIsNoChange() {
+        String stack = "cfn-eks-net-" + Long.toString(System.nanoTime(), 36);
+        // {subnets, security groups, expected status}: a replaced subnet and a dropped list are changes, an order is not
+        String[][] steps = {{"SubA, SubC", "Sg", "UPDATE_ROLLBACK_COMPLETE"},
+                {"SubA, SubB", "", "UPDATE_ROLLBACK_COMPLETE"}, {"SubB, SubA", "Sg", "UPDATE_COMPLETE"}};
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, netStack("SubA, SubB", "Sg"), "CREATE_COMPLETE");
+            JsonPath before = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            for (String[] step : steps) {
+                CfnStackWaits.updateStack(client, stack, netStack(step[0], step[1]), step[2]);
+                JsonPath after = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+                for (String list : List.of("subnetIds", "securityGroupIds")) {
+                    assertEquals(before.getList("cluster.resourcesVpcConfig." + list).stream().sorted().toList(),
+                            after.getList("cluster.resourcesVpcConfig." + list).stream().sorted().toList(), step[0] + step[1]);
+                }
+            }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String netStack(String subnets, String groups) {
+        Function<String, String> refs = names -> names.isEmpty() ? "" : "{\"Ref\": \""
+                + names.replace(", ", "\"}, {\"Ref\": \"") + "\"}";
+        return "{\"Resources\": {\"Vpc\": {\"Type\": \"AWS::EC2::VPC\", \"Properties\": {\"CidrBlock\": \"10.7.0.0/16\"}},"
+                + "\"Sg\": {\"Type\": \"AWS::EC2::SecurityGroup\", \"Properties\": {\"GroupDescription\": \"eks\","
+                + " \"VpcId\": {\"Ref\": \"Vpc\"}}}," + subnet("SubA", "10.7.1.0/24", "us-east-1a")
+                + subnet("SubB", "10.7.2.0/24", "us-east-1b") + subnet("SubC", "10.7.3.0/24", "us-east-1c")
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE
+                + "\"ResourcesVpcConfig\": {\"SubnetIds\": [" + refs.apply(subnets) + "]"
+                + (groups.isEmpty() ? "" : ", \"SecurityGroupIds\": [" + refs.apply(groups) + "]") + "}}}}}";
     }
 
     @Test
