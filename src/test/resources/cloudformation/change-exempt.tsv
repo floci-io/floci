@@ -110,6 +110,7 @@ AWS::ElasticLoadBalancingV2::LoadBalancer	prior entity found by reusesPriorEntit
 AWS::ElasticLoadBalancingV2::TargetGroup	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::ApiDestination	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::Archive	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::Events::Connection	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::Events::EventBus	update not yet on the engine's changes (#6606)
 AWS::Events::EventBusPolicy	update not yet on the engine's changes (#6606)
 AWS::Events::Rule	update not yet on the engine's changes (#6606)
