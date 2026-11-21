@@ -67,6 +67,11 @@ class SecretTargetAttachmentCfnProvisionerTest {
         docDbService = mock(DocDbService.class);
         when(secretsManagerService.claimTargetAttachment(any(), any(), any())).thenReturn(true);
         when(secretsManagerService.canManageTargetAttachment(any(), any(), any())).thenReturn(true);
+        // Where clients connect, which is the endpoint's own port unless it advertises the requested Port.
+        when(rdsService.connectablePort(any(DbInstance.class)))
+                .thenAnswer(invocation -> invocation.<DbInstance>getArgument(0).getEndpoint().port());
+        when(rdsService.connectablePort(any(DbCluster.class)))
+                .thenAnswer(invocation -> invocation.<DbCluster>getArgument(0).getEndpoint().port());
         provisioner = CfnProvisionerFixture.builder()
                 .secretsManager(secretsManagerService)
                 .objectMapper(mapper)
@@ -121,6 +126,30 @@ class SecretTargetAttachmentCfnProvisionerTest {
         assertFalse(detached.has("dbInstanceIdentifier"));
         verify(secretsManagerService).releaseTargetAttachment(
                 SECRET_ARN, "stack/Attachment", REGION);
+    }
+
+    @Test
+    void anAttachedSecretCarriesThePortClientsConnectToRatherThanTheAdvertisedOne() throws Exception {
+        stubSecretValues("{\"username\":\"admin\",\"password\":\"secret\"}");
+        DbInstance instance = dbInstance();
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("cluster");
+        cluster.setEngine(DatabaseEngine.MYSQL);
+        cluster.setEndpoint(new DbEndpoint("cluster.local", 3306));
+        when(rdsService.getDbInstance("database", REGION)).thenReturn(instance);
+        when(rdsService.getDbCluster("cluster", REGION)).thenReturn(cluster);
+        // The endpoints advertise the requested 5432 and 3306; the proxies listen on 7001 and 7002.
+        when(rdsService.connectablePort(instance)).thenReturn(7001);
+        when(rdsService.connectablePort(cluster)).thenReturn(7002);
+
+        provision(instanceProperties());
+        provision(properties("AWS::RDS::DBCluster", "cluster"));
+
+        ArgumentCaptor<String> values = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService, Mockito.times(2)).putSecretValue(
+                eq(SECRET_ARN), values.capture(), isNull(), isNull(), eq(REGION), isNull());
+        assertEquals(7001, mapper.readTree(values.getAllValues().get(0)).path("port").asInt());
+        assertEquals(7002, mapper.readTree(values.getAllValues().get(1)).path("port").asInt());
     }
 
     @Test

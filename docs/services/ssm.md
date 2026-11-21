@@ -35,6 +35,10 @@ the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDoc
 without its leading `/`. `CreateDocument` is checked against `document/<name>`, and `CreateAssociation` against the
 association and the `document/<name>` its `Name` gives.
 
+`CreateAssociation` also runs a document another account shared with the caller through
+`ModifyDocumentPermission`, given in `Name` by its ARN. With IAM enforcement on, the caller's policy must allow
+that ARN. A document the owner did not share is `InvalidDocument`.
+
 `GetParameters` returns successful parameters alphabetically by `Name`, preserving
 the selected versions and labels.
 
@@ -91,6 +95,42 @@ without a label filter continue to return the latest version of each parameter.
 | `ListCommandInvocations` | List command invocation records |
 | `CancelCommand` | Cancel pending or in-progress command invocations |
 
+### Documents
+
+| Action | Description |
+|---|---|
+| `CreateDocument` | Create a document with its content, type and tags |
+| `GetDocument` | Get a document's content, the default version or the one `DocumentVersion` names |
+| `DescribeDocument` | Get a document's description, tags included |
+| `UpdateDocument` | Store new content as the next document version; unchanged content is refused with `DuplicateDocumentContent` |
+| `DeleteDocument` | Delete a document and the accounts it was shared with |
+| `ListDocuments` | List documents, filtered by `Filters` or `DocumentFilterList` |
+| `ModifyDocumentPermission` | Share a document with other accounts, or stop sharing it |
+| `DescribeDocumentPermission` | List the accounts a document is shared with |
+
+### Associations
+
+| Action | Description |
+|---|---|
+| `CreateAssociation` | Associate a document with an instance or with targets. Floci does not run it, so the association reports `Success` at once |
+| `DescribeAssociation` | Get an association by ID, or by document name and instance |
+| `UpdateAssociation` | Change an association's name, document version, targets, parameters or schedule, and raise its version |
+| `DeleteAssociation` | Delete an association by ID, or by document name and instance |
+| `ListAssociations` | List associations, filtered by `AssociationFilterList` |
+
+### Service settings and maintenance windows
+
+| Action | Description |
+|---|---|
+| `GetServiceSetting` | Get a service setting's value, or its default when it was never changed |
+| `UpdateServiceSetting` | Change a service setting's value |
+| `ResetServiceSetting` | Return a service setting to its default |
+| `DescribeMaintenanceWindows` | Always returns an empty list; maintenance windows are not modeled |
+
+The service settings Floci knows are `/ssm/documents/console/public-sharing-permission`,
+`/ssm/parameter-store/default-parameter-tier`, `/ssm/parameter-store/high-throughput-enabled` and
+`/ssm/managed-instance/activation-tier`. Any other setting ID is refused with `ServiceSettingNotFound`.
+
 ### ec2messages Agent Protocol
 
 | Action | Description |
@@ -98,6 +138,9 @@ without a label filter continue to return the latest version of each parameter.
 | `GetMessages` | Agent polls for pending command messages |
 | `AcknowledgeMessage` | Agent acknowledges receipt of a command message |
 | `SendReply` | Agent reports command output and status |
+| `FailMessage` | Agent reports that it could not run a command message; the invocation becomes `Failed` |
+| `DeleteMessage` | Agent discards a command message |
+| `GetEndpoint` | Returns Floci's own base URL as the endpoint for the requested protocol |
 
 ## Run Command Execution
 
@@ -190,6 +233,11 @@ architectures and Kubernetes versions, so `GetParameter`, `GetParameters` and `G
 resolve them to the catalog's AMI ids. As on AWS they are read-only and belong to no account,
 so they do not appear in `DescribeParameters`.
 
+Each recommended EKS optimized AMI path also has a `recommended/release_version` leaf, which
+the EKS managed node group Terraform module reads by default. As on AWS its value is the
+Kubernetes patch version and the AMI build date, such as `1.34.1-20230315`: the patch version
+Floci runs for that Kubernetes version and the catalog image's creation date.
+
 Floci also answers the Amazon Linux 2023 ECS optimized AMI `recommended/image_id` and
 `recommended` parameters under `/aws/service/ecs/optimized-ami/`. The image ID points to
 the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON with the
@@ -203,6 +251,7 @@ and `20.04`/`focal` (amd64, `ebs-gp2`), each at `stable/current`.
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
+aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/release_version
 aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
 aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 ```

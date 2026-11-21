@@ -1,14 +1,9 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
@@ -18,12 +13,11 @@ import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.TargetDispatcher;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -55,8 +49,8 @@ class EcsEventBridgeIntegrationTest {
             return null;
         }).when(dispatcher).dispatch(anyString(), any(), anyString(), anyString(), any());
 
-        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
-        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory();
+        RegionResolver regionResolver = new RegionResolver(REGION, EcsServiceFixtures.ACCOUNT);
+        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -75,15 +69,10 @@ class EcsEventBridgeIntegrationTest {
 
         EcsEventPublisher eventPublisher = new EcsEventPublisher(eventBridgeService, regionResolver, objectMapper);
 
-        ecsService = new EcsService(
-                regionResolver,
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                storageFactory,
-                eventPublisher
-        );
-        ecsService.initializeStorage();
+        ecsService = EcsServiceFixtures.builder()
+                .storageFactory(storageFactory)
+                .eventPublisher(eventPublisher)
+                .build();
     }
 
     private static TaskDefinition registerTaskDef(EcsService service, String family, String image) {
@@ -192,22 +181,5 @@ class EcsEventBridgeIntegrationTest {
                 && "STOPPED".equals(evt.path("detail").path("lastStatus").asText())
                 && taskArn.equals(evt.path("detail").path("taskArn").asText())
         ), "Expected STOPPED ECS Task State Change event with matching taskArn in delivered events");
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                        String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
     }
 }

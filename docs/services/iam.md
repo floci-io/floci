@@ -2,6 +2,13 @@
 
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+## AWS managed policy identifiers
+
+AWS managed policy resource paths and names resolve without regard to letter case.
+Responses retain the catalog's canonical ARN and policy name. Attachments and
+permissions boundaries use that same identity, so alternate spellings do not create
+duplicate attachments or prevent removal. Unknown policies still return `NoSuchEntity`.
+
 ## AWS Sign-In login credentials
 
 Floci also implements the AWS Sign-In data-plane flow used by the AWS CLI login credentials
@@ -442,6 +449,69 @@ violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
 `src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
 generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
+### What a malformed policy ARN answers
+
+`PolicyArn` is `arnType` on every operation that takes one, 20 to 2048 characters and no pattern,
+so the declared check refuses a shorter value and nothing holds the rest to parsing as an ARN. What
+AWS answers beyond that length is recorded rather than published, and it is two sentences rather
+than one, both `ValidationError` with a 400 and a sender fault.
+
+- Attaching names the value: `ARN <value> is not valid.` Recorded on `AttachRolePolicy` for a bare
+  policy name on 2026-11-03, and on `AttachUserPolicy`, `AttachGroupPolicy` and `AttachRolePolicy`
+  for a value that is no ARN at all on 2026-11-06.
+- Everything else answers `Invalid ARN:  Could not be parsed!`, which is wholly fixed: the slot the
+  value would fill renders empty, so two spaces follow the colon and the request's value never
+  appears in it. Recorded on the three `Detach*Policy` operations on 2026-11-06, on
+  `ListEntitiesForPolicy` on 2026-11-03 and on `GetPolicy` on 2026-10-29.
+
+The remaining operations that take the member, the tag and version families among them, carry no
+recording and answer the parse sentence with those eight: one member read by one parser answers one
+way, and the attach side is the exception the recordings name. That is this emulator's reading
+under the standing decision rather than a measurement. A value that parses as an ARN and names no
+policy is unchanged by all of this, still the 404 `NoSuchEntity` each operation already answered.
+
+An older recording disagrees about the attach side and is no longer followed. LocalStack's
+AWS-validated snapshots have `AttachUserPolicy` and `AttachRolePolicy` answering the parse sentence
+for a 21-character value that is no ARN and for a bare policy name, validated 2025-03-06 and
+2025-06-19, where all three 2026 recordings have the attach side naming the value. Two
+AWS-validated sources disagree on one operation and one class of input, seventeen months apart, so
+the reading here is that AWS reworded that side between them and the newer recordings are what this
+emulator follows. A recording that shows otherwise moves this paragraph and `IamArnShapes`.
+
+`PolicySourceArn`, which the two principal simulators resolve an entity from, carries the same type
+and one more recorded case: a value of `*` answers `InvalidInput` 400, `Invalid Entity Arn: * does
+not clearly define entity type and name.`, where the member's declared minimum is 20 and that value
+is one character, so AWS's entity parse runs ahead of its length check for it. Recorded on
+`SimulatePrincipalPolicy` on 2026-11-03. `GetContextKeysForPrincipalPolicy` takes the same member
+through the same resolver and answers it the same way, which is a reading rather than a recording.
+A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
+`Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+### What a policy ARN that names nothing answers
+
+IAM answers two sentences for a managed policy ARN it cannot resolve, both 404 `NoSuchEntity`, and
+they are not interchangeable: the operation decides which one it gives. `Policy <arn> was not
+found.` says the ARN names nothing. `Policy <arn> does not exist or is not attachable.` says it
+names nothing this call could attach, and AWS answers it for both of its own cases on purpose, so a
+caller cannot tell an absent policy from an unattachable one.
+
+Recorded against a real account: `GetPolicy` and `TagPolicy` answer the first, on 2026-10-26, as do
+`DetachUserPolicy`, `DetachGroupPolicy` and `DetachRolePolicy`, on 2026-10-29, including for a
+policy that exists and is not attached, where this emulator used to add a clause naming the user,
+group or role. `ListEntitiesForPolicy` answers the second, on 2026-10-25, and so do
+`CreatePolicyVersion`, `GetPolicyVersion` and `ListPolicyVersions`, on 2026-10-29, with
+`GetPolicyVersion` naming the version inside the same sentence: `Policy <arn> version <id> does not
+exist or is not attachable.` The attach operations answer the second as well, which is where an
+AWS-managed name under the wrong path lands.
+
+The operations no recording covers answer with their own family, which is this emulator's reading
+rather than a measurement. `UntagPolicy` and `ListPolicyTags` read with `TagPolicy`, and
+`DeletePolicyVersion`, `SetDefaultPolicyVersion` and a permissions boundary that names no policy
+read with the attach family. `DeletePolicy` reads with `GetPolicy`. One case stays as it was
+because nothing records it and no family settles it: a version id that names nothing on a policy
+that exists keeps `Policy version <id> does not exist.`, which is about the version rather than the
+ARN. A recording for any of those moves that operation alone, the sentences being sited per
+operation in `IamService.PolicyNotFound`.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -568,6 +638,27 @@ documentation says "this operation does not return tags, even though they are an
 returned object", even though the `InstanceProfile` shape itself carries no such exclusion note.
 Tags on a role embedded in `InstanceProfileList` are always omitted, matching `GetInstanceProfile`'s
 own documented role subset.
+
+### What the instance profile pair refuses
+
+An instance profile holds one role, and both halves of that are recorded against a real account on
+2026-10-29.
+
+Adding a second role is `LimitExceeded` 409 with `Cannot exceed quota for
+InstanceSessionsPerInstanceProfile: 1`. The quota name is what tells an operator or a quota-aware
+client which of the operation's limits fired, and it is that one: AWS publishes no
+roles-per-instance-profile quota by any name, and this package used to answer prose instead of the
+`Cannot exceed quota for <name>: <n>` form it already writes for nine other quotas.
+
+Removing a role the profile does not hold is `NoSuchEntity` 404 with `Role <roleName> in Instance
+Profile <instanceProfileName> cannot be found.`, where this package removed nothing and answered
+200. A role that was deleted while the profile still lists it is a different case and is still
+removable, which is what the profile's own list decides.
+
+The two CloudFormation paths that detach a role read the profile's list and then remove what it
+named, so a pairing some other caller detaches in between is tolerated there rather than failing a
+stack delete or an update part way; a profile that has itself gone still ends the delete where it
+always did.
 
 ### Access Keys
 
@@ -807,6 +898,42 @@ with `UpdateUser` carries all of them to the new name, along with its login prof
 group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
 resource or trust policy that referred to the old name still refers to it after a rename.
 
+### What a session's token costs, and when it is refused
+
+AWS holds a session token to one limit: STS "has replaced the packed policy size and the overall
+session token size limits with a single token size limit of 4,096 bytes", so "the assembled session
+token must fit within 4,096 bytes" and "the separate packed policy limit, which made failures hard
+to predict, has been removed". A request whose token will not fit is refused with
+`PackedPolicyTooLarge` 400, whose "error message reports the session token size and the maximum
+allowed size, both in bytes": `Serialized token too large for session. Token size of <N> bytes
+exceeds the maximum allowed limit of 4096 bytes.` What a session that does fit consumed is
+published as a percentage. `SessionTokenUtilization` is "the percentage of the 4,096-byte limit
+consumed", and `PackedPolicySize` "now reports the same value as SessionTokenUtilization", kept
+"for backward compatibility" where the API reference marks it deprecated.
+
+This emulator refused nothing and published that member as a flat zero on every session, so a
+caller could neither see what its session cost nor be told it was over. Both are answered now, on
+the four operations that carry state into the token they mint: `AssumeRole`, `AssumeRoleWithSAML`,
+`AssumeRoleWithWebIdentity` and `GetFederationToken`. The refusal is read before anything is
+minted, which is where AWS answers it. A token asked through `MinimumSessionTokenSize` to be the
+limit itself therefore leaves nothing to carry a policy or a tag on top of it, and a request that
+asks for both is refused. `GetDelegatedAccessToken` carries no such state, and the member stays out
+of its response as the model deprecates it there. `SessionTokenSize` and `SessionTokenUtilization`,
+the two members the model now carries beside `PackedPolicySize`, are not published yet.
+
+The measure is this emulator's own and the number will differ from AWS's. It is the token this
+emulator will mint for the request, whose length `MinimumSessionTokenSize` can ask to be raised,
+plus the state the request asks to carry into it in UTF-8 bytes: the inline document, every policy
+ARN, and every tag key and value. AWS assembles the real thing instead, and its size follows the
+input in neither direction. STS "serializes and compresses your session policies and tags when
+assembling the token", where "compression results vary based on the actual content, not just its
+length" and "two sets of tags with identical character counts can produce different token sizes",
+so a repetitive set can assemble smaller than the bytes it was written in. The one size recorded
+here ran larger than its input: for a request of 50 tags with 124-character keys and 256-character
+values, every field inside its own limit, AWS reported 26092 bytes against the limit of 4096, where
+those fields are about 19000 bytes of input. A recording of a second size would let the measure be
+calibrated, and that is the only thing this reading waits on.
+
 ### Policy Simulation
 
 | Action | Description |
@@ -825,18 +952,35 @@ nor de-duplicated, matching AWS's own documented
 example response, which repeats a key referenced by more than one statement.
 
 `SimulatePrincipalPolicy` populates the principal keys itself when the policy source is an IAM
-user, as AWS's simulator does: the guide lists `aws:PrincipalAccount`, `aws:PrincipalId`,
-`aws:PrincipalType`, `aws:Type`, `aws:UserId` and `aws:UserName` as "populated for you", with the
-caller providing "the values for all other condition keys", so a policy scoped to
+user, as AWS's simulator does: the guide gives the principal context it fills in as
+`aws:PrincipalAccount`, `aws:PrincipalId`, `aws:PrincipalType`, `aws:UserId` and `aws:UserName`,
+with the caller providing "the values for all other condition keys", so a policy scoped to
 `${aws:username}` simulates the way it is evaluated. What a simulation gets is the principal half
 of the request context, the same keys the enforcement filter writes: `aws:PrincipalArn`,
-`aws:PrincipalType`, `aws:username`, `aws:userid` and the account. `aws:PrincipalId` and
-`aws:Type` are in no request context here, so a simulation does not populate them either; a
-statement matching on one matches nothing, as it would on an enforced request. A value passed in
-`ContextEntries` wins, being the one the call asked to simulate with, whatever case it spells the
-key in. A role named as the policy source is not a session, so there is no session name for an
-`aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
-matching on one does not match.
+`aws:PrincipalType`, `aws:username` and `aws:userid`. `aws:PrincipalId` is in no request context
+here, so a simulation does not populate it either; a statement matching on it matches nothing, as
+it would on an enforced request. A value passed in `ContextEntries` wins, being the one the call
+asked to simulate with, whatever case it spells the key in. A role named as the policy source is
+not a session, so there is no session name for an `aws:userid` and no documented
+`aws:PrincipalType` for it; those keys stay absent and a statement matching on one does not match.
+
+The keys that describe the account a policy source names rather than the credential it stands for
+are populated for a user and a role alike: `aws:PrincipalAccount`, and the organization context the
+guide lists beside the principal context, `aws:PrincipalOrgID`, `aws:PrincipalOrgMasterAccountId`
+and `aws:PrincipalOrgPaths`. AWS ties that list to exactly the policies a simulation is handed:
+"because these keys are populated for you, SCPs and other policies that use principal or
+organization conditions are evaluated correctly". The organization is the one holding that account,
+asked of Organizations, so an account in no organization carries none of the three and a condition
+on them matches nothing, which is the availability both published keys declare, "included in the
+request context only if the principal is a member of an organization". `aws:PrincipalOrgPaths`
+carries the path down to the account's parent and stops there: an account's entity path is built
+"using the IDs of the organization, root, and all OUs in the path down to and including the OU" and
+ends with the account's own id, while the key's own published condition compares
+`o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/ou-ab12-22222222/` with `StringEquals` and "returns true for
+principals in accounts that are attached directly to the ou-ab12-22222222 OU", which a value
+carrying the account id could never equal. An account the organization holds at its root, the
+management account among them, carries `o-.../r-.../`. `SimulateCustomPolicy` names no principal,
+so none of these keys are populated for it, and a level keyed on one of them matches nothing there.
 
 `aws:PrincipalTag/<key>` must be supplied in `ContextEntries`, even when the policy source is a
 tagged user or role. The simulator does not populate stored identity tags.
@@ -854,10 +998,85 @@ the shape. The length wording follows the captures of real IAM length violations
 bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
-(`ResourcePolicy`), and neither returns `MatchedStatements`, `ResourceSpecificResults`, or a
-`PermissionsBoundaryDecisionDetail`: only the top-level `EvalDecision` is populated, so which
-policy allowed an action is not reported even where AWS names one, `PolicyInputList.1` in its own
-example for the principal simulator.
+(`ResourcePolicy`), so a cross-account simulation is not modelled and `EvalDecisionDetails`, which
+"is populated for only cross-account simulations", carries nothing. The reference distinguishes the
+two ways of carrying nothing, and both are answered: "if the simulation evaluates policies within
+the same account and includes a resource ARN, then the parameter is present but the response is
+empty. If the simulation evaluates policies within the same account and specifies all resources
+(`*`), then the parameter is not returned."
+
+A result names the statements that decided it. `MatchedStatements` reports each one by the policy
+it came from and the place it sits in that policy's text: a supplied document is
+`PolicyInputList.N`, the identifier AWS's own example reports and the position the member arrived
+under, and a policy the principal holds is named by its own name with the type the published list
+gives it, `user`, `group` or `role` for a policy embedded in the entity holding it and
+`user-managed` or `aws-managed` for a managed one. A grant the account applies without attaching
+anything, such as the password self-service grant, is named by neither: no policy names it and AWS
+publishes no spelling for one, so only its position is reported. The positions are the published
+convention, which AWS's own example fixes to the character: its document opens the statement with a
+brace in column 15 of line 3 and the response reports column 16, so each position is the character
+just past the statement's braces. An allow reports every statement that allowed, an explicit deny
+reports the one that denied, "the deny statement is the only entry included in the result", and an
+implicit deny reports none. The top-level list is "the union of matched statements across all
+requested resources" held to the sentence beside it, "only statements that contributed to the
+reported decision are included", so an action allowed on one resource and denied on another reports
+the deny alone.
+
+`MissingContextValues` names the "context keys that are required by the included input policies but
+that were not provided by one of the input parameters". A key is wanted when a statement the
+evaluation reaches for the action names it: the variables its resources are written with, whichever
+element it writes them in, `Resource` or `NotResource`, since both are resolved before a resource can
+be compared at all and a value supplied for either can change the answer, and, for a statement whose
+resources match, the keys its conditions compare. A statement the action does not match is reached by nothing
+and wants nothing, which is what gives each resource's list its own content, and the top-level list
+is "the deduplicated set of missing context values across all requested resources", one key however
+two statements spell it, a context key not being case sensitive. A key the call supplied with no
+values at all counts as supplied, an empty set being a value rather than an absence, and a `${...}`
+in a document whose version gives variables no meaning names no key. A key an operator answers for
+without a value is not one the policy requires, and is not named: an `...IfExists` operator says
+"if the key is not present, evaluate the condition element as true", a `Null` asking for absence is
+satisfied by the absence itself, a `ForAllValues` quantifier holds over no values, and a negated
+operator holds against a key that matches nothing. A `Null` asking for presence does require the
+key, and names it.
+
+`OrganizationsDecisionDetail` reports whether the organization levels allowed the action, for a
+simulation that was handed any, and `PermissionsBoundaryDecisionDetail` whether the boundary allowed
+it, for one that carries a boundary; the boundary's is reported for each resource as well, as AWS's
+same-account example shows. Each top-level flag is the most restrictive of the resources' answers,
+as every other top-level field is.
+
+A simulation answers with one result per action, whatever the call named for resources: "the
+simulator now returns a single `EvaluationResult` per action, regardless of how many resource ARNs
+are provided", its top-level fields carrying "the aggregate decision across all requested
+resources" and its `EvalDecision` "the most restrictive decision across all resources (for example,
+if any resource produces `explicitDeny`, the top-level decision is `explicitDeny`)". So an action
+allowed on one resource and denied on another answers the deny at the top, and only an action
+allowed on every resource the call named answers `allowed` there. Each named resource answers for
+itself under `ResourceSpecificResults`, carrying its own ARN and `EvalResourceDecision`, which is
+where the reference sends a client that read them off the top-level result before: "if your
+application parses evaluation results per resource ARN, update your code to read per-resource
+decisions from `ResourceSpecificResults` rather than from the top-level result". A simulation whose
+resource is `*`, "either explicitly, or when the `ResourceArns` parameter blank", carries no
+per-resource section at all, which is the case the reference answers at the top level alone.
+
+`EvalResourceName` names no resource at the top. It carries "the ARN template for the simulated
+resource type (for example, `arn:${Partition}:s3:::${BucketName}/${KeyName}`), or `*` if no ARN
+format is defined for the action. This is not a specific customer-provided resource ARN", so it
+describes the action rather than anything the call named. The templates come from the generated
+tables built from AWS's Service Reference, which publishes the resource types each action acts on
+and each type's ARN formats: `iam:GetUser` answers
+`arn:${Partition}:iam::${Account}:user/${UserNameWithPath}`, and `ssm:GetParameter` its parameter
+template. Where an action's published types carry more than one format, floci answers `*`, the
+value the field publishes for an action with no format at all, and so does an action of a namespace
+no generated table reads. Which of several templates AWS names is published in no machine-readable
+source: `s3:GetObject` acts on an object and on an access point object, and the field's own example
+names the object's, so `s3:GetObject` and `ec2:RunInstances`, which acts on eighteen types, both
+answer `*` here where AWS names a template. Outside IAM's own actions the table is keyed by the
+operation a request is dispatched as, so an action whose name is not its operation's answers `*`
+too: `lambda:InvokeFunction` is the action of the `Invoke` operation, and what joins the two names
+is published in no machine-readable source either. An action is read whatever case it is written
+in, policy action names being case-insensitive.
+
 `ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
 entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
 not by the declared type.
@@ -870,11 +1089,23 @@ statements is `FullAWSAccess` semantics and is skipped. A level whose document d
 policy is an `InvalidInput` naming the item's position. The levels a call hands in are the whole of
 the organization a simulation runs against: the SCPs the principal's own account sits under are not
 applied, matching the console, which includes SCPs only when "AWS Organizations SCPs" is ticked.
-One difference from AWS's simulator is known and open: AWS
-documents that "the policy simulator doesn't evaluate SCPs that have global conditions", while this
-walk evaluates a condition in an SCP exactly as the live evaluation does. So a simulation here can
-decide a level AWS's simulator passes over, and the published sentence does not say whether what
-AWS skips is the statement carrying the condition or the policy holding it.
+A condition in a level is evaluated exactly as the live evaluation reads it, which is
+what AWS documents of its own simulator: "the policy simulator evaluates SCPs, including condition
+keys and resource scoping in deny statements", and where an identity-based policy's global keys are
+read without regard to which services support them, "service control policies (SCPs) are evaluated
+with service-aware logic, including global condition keys". A value the call supplies reaches a
+level's condition like any other, which is the API's own half of that: "with the AWS CLI or AWS API,
+you can provide values for condition keys that are referenced by SCPs", where the console sets
+values only for the keys its other policy types reference. The keys a level reads without being
+given them are the populated context below.
+
+AWS keeps SCPs out of both halves of what a result reports, "for security reasons": the matched
+statements "do not include statements from SCPs", and a context key "referenced only by an SCP" is
+not returned among the missing ones, the decision still being answered. Both exclusions are kept
+here: a deny that came from a level reports no statement, and a key only a level references is not
+among the missing ones. The same sentence keeps a session policy and the permissions boundary out
+of the matched statements, "only statements from identity-based and resource-based policies appear
+here", and the boundary's effect is reported under its own detail instead.
 
 `ResourceHandlingOption` is read by both simulators, which hold a named scenario to the resources
 it requires, "to enforce the presence of the required resources to ensure reliable simulation
@@ -1143,6 +1374,51 @@ The generator's only modeled error, `ReportGenerationLimitExceeded`, reports con
 for the account and stays unreachable here: a job is complete the moment it is created, so two can
 never overlap.
 
+### A service namespace that names no service
+
+`ServiceNamespace` and `ServiceNamespaces` are patterned `^[\w-]*$`, so a word-shaped value such as
+`amazon-s3` satisfies everything the model declares and still names no AWS service. AWS checks the
+value against its own namespaces and refuses what it does not publish, where this emulator used to
+answer 200 with an empty policy list per namespace asked for, telling a caller the identity reaches
+nothing rather than that the question was wrong.
+
+The two operations that take one word it differently, and both are recorded against a real account
+on 2026-11-03, each `InvalidInput` 400 with a sender fault:
+
+- `ListPoliciesGrantingServiceAccess` answers `Invalid service namespace: [<namespace>]`, the
+  brackets being AWS's own. The recording covers one rejected value; several are rendered inside
+  the one pair of brackets, which is this emulator's reading of a sentence AWS writes for the
+  plural.
+- `GetServiceLastAccessedDetailsWithEntities` answers `Service namepace <namespace> is either
+  invalid or unsupported.` The misspelling of `namespace` is AWS's and is kept: a client matching
+  the message has to match what the service sends.
+
+The catalog is the vendored one generated from AWS's Service Reference index, read through
+`AwsServiceNamespaces.isPublished`, so nothing hand-maintains a second list. The check runs after
+the declared constraints, which is the order this package refuses request inputs in: a value that
+breaks the published pattern `[\w-]*` is answered that pattern, and only a well-formed value
+reaches the catalog.
+
+Both members are vendored for that to hold. `ServiceNamespace` always was.
+`ListPoliciesGrantingServiceAccess` carried no entry for `ServiceNamespaces` at all, so nothing
+held its members to anything, and a value with a space in it used to reach the catalog check and be
+answered `InvalidInput` where AWS answers `ValidationError`. The member is read now, each value
+held to `serviceNamespaceType` and the list to its own bounds of 1 to 200, which also moves two
+answers that were this emulator's own: a request carrying no namespace is the required member the
+model declares rather than `InvalidInput` and a sentence AWS writes nowhere, and a list over 200 is
+the model's bound rather than a check beside it.
+
+A namespace the job itself reports is readable on `GetServiceLastAccessedDetailsWithEntities`
+whether the catalog publishes it or not, which is why the job is read before the namespace is
+judged, and why a job id naming nothing is answered as a missing job rather than as a bad
+namespace. Which of the two a request breaking both is answered is recorded nowhere. The catalog is vendored, so it is as new as the last regeneration, where a policy may grant
+a service published after it: `GenerateServiceLastAccessedDetails` keeps the namespaces the
+policies name, so the report would list that service and a request for its entities would then be
+refused, which is this emulator disagreeing with itself. Nothing else is exempt: a namespace the
+job does not report and the catalog does not publish is still refused, and the list operation,
+which takes namespaces as input rather than reporting them, holds every value to the catalog. A
+service published after the vendored index is a regeneration away, not a runtime lookup.
+
 ### Multi-Factor Authentication
 
 | Action | Description |
@@ -1210,6 +1486,35 @@ hold reports that user instead.
 Hardware TOTP tokens and FIDO security keys are not modeled, so `ListMFADevices` returns only
 virtual devices where AWS would return every type.
 
+#### What a refused device answers
+
+Every MFA refusal here is the sentence AWS was recorded answering, and the sentences are not shared
+between the two services.
+
+`EnableMFADevice` and `ResyncMFADevice` answer `InvalidAuthenticationCode` 403 with
+`Authentication code for device is not valid.`, wholly fixed text, recorded 2026-11-05, and the
+refusal leaves the device as it found it: a refused enable leaves an unassigned device unassigned,
+and a refused resync leaves the assignment it requires in place, since resync is for a device that
+is already the user's. A second virtual device at the same path and
+name is `EntityAlreadyExists` 409 with `MFA device already exists.`, recorded the same day, where
+this emulator used to name the entity type and describe the collision.
+
+`GetSessionToken` answers a failed claim 403 `AccessDenied` in one of two sentences, by which half
+of the claim failed, both wholly fixed and neither echoing the serial or the code:
+
+- a serial no device of the caller's answers to, `MultiFactorAuthentication failed, unable to
+  validate MFA code.  Please verify your MFA serial number is valid and associated with this
+  user.`, recorded 2026-10-29. The two consecutive spaces after `MFA code.` are AWS's own.
+- a code the device did not produce, or produced for a step already spent,
+  `MultiFactorAuthentication failed with invalid MFA one time pass code. `, recorded 2026-11-13.
+  That sentence ends in a single space, which is also AWS's own.
+
+A caller cannot tell the two apart from the code or the status, so the sentence is the only signal,
+which is why it is held byte for byte here. `AssumeRole` takes the same pair through the same seam
+and carries no recording of its own, so it answers the same two sentences, which is a reading
+rather than a measurement. A request naming one member and not the other is read as the half it
+left out: no code is a code that cannot validate, no serial a device nothing can be looked up by.
+
 #### What a device affects
 
 An enabled device is a device a session can be minted behind, and that session is what a statement
@@ -1232,6 +1537,12 @@ conditioned on MFA reads:
   the session then carries differs by operation, as it does on AWS: a `GetSessionToken` session is
   MFA-authenticated on its own requests, while an assumed-role session is not, "once the user has
   assumed the role, no further MFA checks are made".
+- **A device decides what a session token may reach.** Under enforcement a `GetSessionToken` session
+  calls IAM only where a device minted it, "you cannot call any IAM API operations unless MFA
+  authentication information is included in the request", and reaches no STS operation but
+  `AssumeRole` and `GetCallerIdentity` either way. The refusal names the operation and what the
+  credentials do not carry; see [STS MFA](sts.md#mfa). An assumed-role session carries no such
+  limit.
 
 What a device still does not reach is the console sign-in AWS also gates on one, there being no
 sign-in here, and the hardware and FIDO device types above, so the device behind a session is
@@ -1968,6 +2279,15 @@ When enabled, Floci creates the `floci-deployer` user if it does not already exi
 
 Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
+The default access key ID, `floci`, is shorter than IAM allows: `DeleteAccessKey` and `UpdateAccessKey` take an `AccessKeyId` of 16 to 128 characters matching `[\w]+`, so the AWS SDKs and Floci refuse the default with a validation error, and `DeleteUser` then refuses the user with `DeleteConflict` while the key exists. To provision with the deployer and then retire it, set an ID in IAM's format, for example (any value other than `floci` must be in that format, or Floci refuses to start):
+
+```bash
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID=AKIAFLOCIDEPLOYER001
+```
+
+The secret access key stays `floci`. Seeding runs at every start, so under persistent storage a retired deployer comes back on the next start unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` is turned off. When the ID changes, seeding deletes the deployer's key seeded under the earlier ID, so an install that already seeded `floci` can then retire the deployer; keys created for the deployer with `CreateAccessKey` are kept.
+
 ## IAM Enforcement Mode
 
 By default Floci accepts any credentials without enforcing IAM policies — all requests are allowed through regardless of what policies are attached to the calling identity. This preserves backward compatibility and keeps the default setup frictionless.
@@ -2012,8 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
-Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
+DynamoDB, SSM, KMS, IAM and API Gateway. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2021,7 +2340,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda and AWS Glue they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups and Amazon CloudWatch Logs they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2211,9 +2530,10 @@ A Scheduler request is checked against `schedule/<group>/<name>`, the group from
 `GroupName` on a create or an update, from `groupName` otherwise, and the `default` group when neither
 names one, as botocore documents ("If you omit this, the default schedule group is used"), or
 `schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
-`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
-is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
-route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A Lambda request
+`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`, from the generated table. A DSQL request
+is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN its modeled
+`/tags/{resourceArn}` carries, from the generated table; `CreateCluster` and `ListClusters` against
+`cluster/*`, as DSQL checks them, `ListClusters` from a measured entry. A Lambda request
 is checked on what the table reads from it, as for the other services it reads. A function named by its
 name, its ARN, a partial ARN (`123456789012:function:my-function`, its Region optional) or its resource
 part (`function:my-function`) is the function of that name, an ARN keeping its account and Region beside
@@ -2231,26 +2551,32 @@ request on the ARN it names. A managed MicroVM image named by its name is checke
 account, where the Service Reference puts the type; named by its ARN, in `aws`, the account that ARN
 names.
 
-An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
-checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
-a cluster it does not hold, and `CreateCluster` against the cluster its body names, as the EKS user
-guide's example policy for creating a cluster grants it. A node group, Fargate profile, add-on,
-access entry or Pod Identity association route is checked against the ARN EKS holds that resource
-under, which ends in an id the request does not carry, so a policy names it with a wildcard, such as
-`nodegroup/<cluster>/<name>/*`; listing or creating them, and the other routes under a cluster, are
-checked against the cluster. A name holding an encoded `/` is read as one name, as EKS reads it.
-`DescribeUpdate` is checked against the add-on the update was made to, since the updates Floci keeps
-are its add-ons' and EKS returns one whether or not the request names its add-on, and otherwise
-against the cluster. An EKS tagging request is checked against the caller's own cluster named after
-the ARN's last `/`, whatever the ARN names before it, as EKS looks it up.
+An SQS request is checked on the queue its `QueueUrl` reaches, found as SQS's handlers find it, and
+`CreateQueue` and `GetQueueUrl` on the queue their `QueueName` names, all from the generated table.
+`StartMessageMoveTask` is checked for its own action on each queue ARN it carries, a named destination
+included, and on nothing more when it names no destination and the messages go back to the queues they
+came from. `ListQueues`, and `CancelMessageMoveTask`, whose `TaskHandle` names no queue, are checked on
+`*`, so a grant scoped to a queue, or to the account's queues, does not allow cancelling a move task: it
+takes a grant on `*`.
+
+An EKS request is checked on what the generated table reads from it, in the caller's account, where
+EKS looks everything up. A cluster route is checked against `cluster/<name>`, the name its path gives,
+and `CreateCluster` against the cluster its body names, from a measured entry quoting the EKS user
+guide's example policy for creating a cluster, as the Service Reference lists no resource type for it.
+A node group, add-on or Fargate profile, whose ARN ends in an id EKS minted, is checked against the ARN
+EKS holds it under, found by the names its path gives in the request's Region, or with its names open
+when EKS holds none; an access entry, Pod Identity association, identity provider config or capability
+is checked with the parts of its ARN the request does not give open, so a policy names it with a
+wildcard, such as `access-entry/<cluster>/*`. Listing or creating them, and the other routes under a
+cluster, are checked against the cluster. An EKS tagging request is checked against the ARN its
+`/tags/{resourceArn}` carries, and EKS tags the resource whose ARN is that whole ARN.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
-and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
-it is signed with. The ARN is
+and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
 whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
-serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty, Security Hub and EKS tag only on
 `/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
 encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
@@ -2707,6 +3033,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - Aurora DSQL cluster policies take part the same way for a control plane call on the cluster, and when a client connects to the cluster's endpoint. See [DSQL](dsql.md#authentication).
 - SQS queue policies take part the same way for a call on the queue; see [SQS](sqs.md#queue-policies-under-iam-enforcement).
 - EventBridge event bus policies, the statements `PutPermission` adds, take part the same way for a call on the bus; see [EventBridge](eventbridge.md#event-bus-policies-under-iam-enforcement).
+- A role's trust policy takes part the same way for `sts:AssumeRole` on the role, with the role as its resource: a trust policy names no `Resource`. It is not consulted for IAM actions on the role, such as `iam:GetRole` or `iam:PassRole`. See [STS trust policy enforcement](sts.md#trust-policy-enforcement).
 - API Gateway REST API policies are stored but not evaluated.
 - A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES and Lambda, when it reads the code of a Web Function revision from S3, are the services checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement) and [Lambda Web Functions](lambda-web-functions.md#emulation-behavior).
 
@@ -2760,19 +3087,22 @@ These identities always bypass enforcement (backward-compatible defaults):
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
-**CloudWatch Logs streams.** `logs:CreateLogStream` and `logs:DeleteLogStream` evaluate the
-specific log-stream ARN, so policies can allow or deny one stream within a group. Their
-`aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
-account and region. Both stream operations check the documented group and stream name constraints
+**CloudWatch Logs streams.** `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:PutLogEvents` and
+`logs:GetLogEvents` are checked on the log-stream ARN their group and stream names give, from the generated
+table, so policies can allow or deny one stream within a group. A stream ARN carries no
+`aws:ResourceTag/<key>`: Floci holds no tags on a stream, and nothing AWS publishes gives a stream its group's.
+`CreateLogStream` and `DeleteLogStream` check the documented group and stream name constraints
 before changing storage, preventing delimiter aliases from targeting another stream.
 These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
-**CloudWatch Logs groups.** `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy` and
-`DeleteRetentionPolicy` accept policy resources naming the selected group with a bare ARN
-or its legacy `:*` form. Both forms participate in each statement, including explicit denies
-and `NotResource`, without bypassing session, boundary or SCP ceilings. The three operations on
-existing groups read that group's resource tags; creation uses the request's `tags` for
+**CloudWatch Logs groups.** An operation on a log group, `FilterLogEvents`, `DescribeLogStreams`, metric and
+subscription filters and `StartQuery` among them, is checked on the group's bare ARN, as the Service Reference
+formats a log group, from the generated table. `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy`,
+`DeleteRetentionPolicy` and `TagLogGroup` also accept policy resources naming the selected group with its legacy
+`:*` form. Both forms participate in each statement, including explicit denies
+and `NotResource`, without bypassing session, boundary or SCP ceilings. An operation on an
+existing group reads that group's resource tags; creation uses the request's `tags` for
 `aws:RequestTag/<key>` and `aws:TagKeys`. Tagged creation additionally requires either
 `logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on either group ARN form.
 The group name constraints apply before mutation, and deletion preserves streams and filters
@@ -2780,22 +3110,24 @@ whose stored group identity belongs to another historical group. These four oper
 or `*` in a group name. Historical names remain taggable through the ARN tagging APIs below;
 they cannot be newly created or deleted through the group lifecycle APIs. Stored names are not migrated.
 
-**CloudWatch Logs ARN tagging.** For log groups, `logs:TagResource`, `logs:UntagResource`
-and `logs:ListTagsForResource` evaluate the group's ARN without a trailing `:*`. The ARN must
+**CloudWatch Logs ARN tagging.** `logs:TagResource`, `logs:UntagResource` and
+`logs:ListTagsForResource` are checked on the ARN their `resourceArn` carries, from the generated table, for each
+type the Service Reference gives them: a log group, a destination, a delivery source, a delivery destination or a
+delivery. For a log group the ARN must
 identify a group in the request's account, region and partition; a different owner or resource
 kind returns `ResourceNotFoundException` without reading or changing a local group's tags.
-All three actions use the group's existing `aws:ResourceTag/<key>` conditions. `TagResource`
+All three actions use the resource's existing `aws:ResourceTag/<key>` conditions. `TagResource`
 also provides `aws:RequestTag/<key>` and `aws:TagKeys`; `UntagResource` provides `aws:TagKeys`.
 An unauthorized request cannot partially add or remove tags. These ownership checks also apply
 when IAM enforcement is disabled. Shared tag mutations reject storage aliases whose stored group
 name differs from the requested name, without migrating historical records.
 
-This support covers log groups. Tagging destinations and other CloudWatch Logs resource types
-remains unsupported. Plain-name inputs are used literally, including incomplete prefixes such as
+The tag handlers also take a plain group name, used literally, including incomplete prefixes such as
 `arn:archive`; arbitrary `:log-group:` substrings never select a different group. Structurally complete
 ARNs take precedence over plain-name interpretation and must identify a local group. A trailing `:*`
 is accepted on a canonical local group ARN. These compatibility forms are not a claim that AWS accepts
-them for these APIs. Other Logs actions retain their existing wildcard resource evaluation.
+them for these APIs, and authorization reads `resourceArn` as AWS does: a plain name names nothing the
+table reads, so the call is checked on `*`, and a group ARN with a trailing `:*` is checked as written.
 
 **CloudWatch Logs account policies.** `PutAccountPolicy` also needs the action for the type of
 policy it creates, checked against `*` like `logs:PutAccountPolicy` itself: `logs:PutDataProtectionPolicy`
@@ -2849,7 +3181,7 @@ so a denied request gets `AccessDenied` even for a cluster that does not exist. 
 that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
-from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, DynamoDB, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
 the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
@@ -3044,7 +3376,8 @@ variable can only resolve to a key floci populates, which is the list under
 
 A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
 session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
-`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `aws:CurrentTime`,
+`aws:EpochTime`, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
 and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
 `aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
 trust policy and the value it sits in matches nothing.
@@ -3099,8 +3432,40 @@ floci populates:
     `GenerateOrganizationsAccessReport`.
   - `iam:DelegationRequestOwner` from `OwnerId` on `ListDelegationRequests`, which is how the
     owner grant scopes a holder's listing to its own requests. The seven other delegation
-    actions the Service Reference lists the key on read it from the stored request rather than
-    from a parameter, so they stay in `notRead`.
+    actions take the key from the request they name rather than from a parameter, which the
+    `fromResource` entries below do.
+
+  The table's `fromResource` entries read a key the Service Reference publishes on a resource
+  type rather than on an action, which makes its value the stored resource's rather than the
+  request's. One key is published that way: `iam:DelegationRequestOwner`, on
+  `delegation-request`, for `AcceptDelegationRequest`, `AssociateDelegationRequest`,
+  `CreateDelegationRequest`, `GetDelegationRequest`, `GetHumanReadableSummary`,
+  `RejectDelegationRequest` and `SendDelegationToken`. Each entry carries the type, the member
+  of its record the value is read from and the type's ARN format, so the enforcement filter
+  asks the service holding the resource an ARN names for what its record keeps there, the same
+  per-resource read that gives a resource its tags. Which member carries the owner is the one
+  thing neither botocore nor the Service Reference says, so the generator states it under the
+  rules it states anything by hand: AWS's own word, quoted and linked. The
+  [IAM guide](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html)
+  says the key "Filters access based on the AWS identity or principal that owns the delegation
+  request" and that "The owner of a delegation request is the AWS identity or principal in the
+  customer account that initiated or received the delegation request", which is the `OwnerId`
+  botocore's record of the type holds, and writes the example as `"ArnEquals":
+  {"iam:DelegationRequestOwner": "${aws:PrincipalArn}"}` so that "you allow users to manage only
+  delegation requests that they own".
+
+  A request that names no delegation request carries no value for the key, so a conditioned
+  allow does not match and a conditioned deny does not apply. That covers
+  `CreateDelegationRequest`, whose request does not exist yet while it is authorized, and any
+  request still unclaimed, which records no owner until it is. The owner is answered to the
+  account that owns the request and to no other, the line the service itself draws when it
+  reads one request by id.
+
+  Floci differs from AWS on one action here: the same guide page lists
+  `UpdateDelegationRequest` among the operations the key supports, and the Service Reference
+  does not publish it on that action or on a resource type it acts on. The generated reading is
+  what Floci follows, so a policy conditioning `UpdateDelegationRequest` on the key matches
+  nothing here while AWS evaluates it.
 
   The table's `fromTarget` entries read `iam:PermissionsBoundary` from the role or user the
   request names in `RoleName` or `UserName`: its stored boundary, on the 15 actions on an
@@ -3142,9 +3507,7 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
   `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
-  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
-  `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
-  `logs:DeleteRetentionPolicy` use the owning log group's tags. Any other ARN a request is checked on
+  Any other ARN a request is checked on
   takes the resource-tag keys the generated `resourceTagKeys` table in `iam-request-resources.json` gives
   its type (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`), which `regen_iam_request_resources.py`
   reads from the Service Reference for every namespace it reads, valued from the tags the type's service
@@ -3157,8 +3520,29 @@ floci populates:
   crawlers, triggers, workflows, connections, databases, tables and other resources it tags, Step Functions for its
   state machines, their versions and executions (the state machine's tags) and activities, CodeBuild for its
   projects and report groups, Athena for its workgroups and data catalogs, Redshift Serverless for its namespaces,
-  workgroups and snapshots, and DynamoDB for its tables and their indexes (the table's tags). Tag keys differing
-  only in case are one condition key holding every value.
+  workgroups and snapshots, DynamoDB for its tables and their indexes (the table's tags), ECR for its
+  repositories, Redshift for its clusters, snapshots, parameter groups, subnet groups, snapshot copy grants,
+  snapshot schedules, event subscriptions and integrations, SSM for its parameters, documents and associations,
+  EMR for its clusters and sessions, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its
+  instances, permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource
+  shares, Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for
+  its scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
+  instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
+  pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, Managed Service
+  for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its
+  DB instances, DB clusters, parameter groups and backups, CloudTrail for its trails, Budgets for its budgets and budget
+  actions, AWS FIS for its experiment templates, experiments and actions, CodePipeline for its pipelines, webhooks and
+  custom action types, DataSync for its agents, locations and tasks, Global Accelerator for its accelerators, listeners
+  and endpoint groups, EMR Serverless for its applications, job runs and sessions, EMR on EKS for its virtual clusters,
+  job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
+  subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
+  controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
+  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
+  Aurora DSQL for its clusters, EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
+  associations and access entries, Resource Groups for its groups, CloudWatch Logs for its log groups,
+  destinations, delivery sources, delivery destinations and deliveries, and Pricing Calculator for its workload
+  estimates. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3221,6 +3605,17 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalOrgID`, `aws:PrincipalOrgMasterAccountId` and `aws:PrincipalOrgPaths`: the
+  organization the caller's account belongs to, asked of Organizations when it is deployed and
+  written beside the keys above by the same writer, so every context a request is evaluated
+  against sees them, including the callers a service builds for itself rather than resolving from
+  a credential: the trust caller a state machine's execution role is checked as, the account-root
+  principal a site falls back to, and the principals a trust policy is asked about on behalf of an
+  account. All three are "included in the request context only if the principal is a
+  member of an organization", so a caller whose account is in none carries none of them and a
+  condition on one matches nothing. The path ends at the organizational unit holding the account,
+  `o-.../r-.../ou-.../`, which is the value the key's own published condition compares with
+  `StringEquals`, and is `o-.../r-.../` for an account the organization holds at its root.
 - `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
   `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
   from that identity's account and copied for the request; later requests see tag updates and
@@ -3271,6 +3666,24 @@ floci populates:
   `GetSessionToken`, and decides an `AssumeRole` without outliving it; a call that presents one also
   publishes the keys for that call itself, so the permission to make it can be conditioned on MFA.
   See [STS MFA](sts.md#mfa).
+- `aws:TokenIssueTime`: when the temporary credentials the request is signed with were issued, as
+  an ISO 8601 date, for every STS session (`AssumeRole` and its SAML and web identity forms,
+  `GetSessionToken`, `GetFederationToken`, `AssumeRoot`) and every role session floci issues
+  itself (Lambda execution roles, EC2 instance profiles, ECS task roles). The guide says it "is
+  included in the request context only when the principal uses temporary credentials to make the
+  request" and "is not present in AWS CLI, AWS API, or AWS SDK requests that are made using access
+  keys", so it is absent for an IAM user access key and for the account root. It is the key the
+  `AWSRevokeOlderSessions` policy of
+  [revoking role sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)
+  matches: a `Deny` on `DateLessThan` `aws:TokenIssueTime` refuses the sessions issued before that
+  time and leaves later sessions and long-term keys alone. A session stored by an earlier floci
+  version, which did not record its issue time, carries no value for it.
+- `aws:CurrentTime` and `aws:EpochTime`: the time of the request, which the guide says "is always
+  included in the request context": `aws:CurrentTime` as an ISO 8601 date, `aws:EpochTime` as
+  whole seconds since January 1, 1970, so it matches the `Date` and the `Numeric` operators.
+  They are on every request the enforcement filter checks, its `iam:PassRole` checks included,
+  in the context S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, in a
+  role trust policy's context, and in that of a call an AWS service makes on its own behalf.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
@@ -3336,6 +3749,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `sts:RoleSessionName` and `sts:ExternalId`: the `RoleSessionName` and `ExternalId` an `AssumeRole` request
+  passes, as given, for the caller's identity-based policies, permissions boundary, session policy and SCPs, as
+  the role's trust policy reads them (see [STS](sts.md)); `sts:ExternalId` is absent when the request passes none.
+  The actions and request members come from the same `request-condition-keys.json`.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
+  evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
+  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
@@ -3424,6 +3844,14 @@ Note that `aws:PrincipalArn` is populated for the account-root principal too, as
 `arn:aws:iam::<account>:root`, so a principal-scoped guardrail keyed on `aws:PrincipalArn`
 (for example a `DenyRootUser` statement matching `arn:aws:iam::*:root`) fires against it —
 consistent with the account root already being bounded by SCPs above.
+
+The keys that name the organization are populated for a real request as well, so an SCP keyed on
+the organization it guards fires against the accounts inside it: `aws:PrincipalOrgID`,
+`aws:PrincipalOrgMasterAccountId` and `aws:PrincipalOrgPaths` are written for every principal the
+filter resolves and for the account-root principal beside it, which is what AWS means by "because
+these keys are populated for you, SCPs and other policies that use principal or organization
+conditions are evaluated correctly". An identity policy and a resource policy read them from the
+same context, and an account in no organization carries none of them.
 
 A level containing an SCP document that fails to parse denies every action at that level. The
 ceiling cannot tell what an unreadable guardrail would have said, and every target also carries
@@ -3534,6 +3962,26 @@ Four deviations to be aware of:
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
 
+## Service-linked role refusals
+
+A service-linked role is immutable, and this package refuses eleven actions on one. Only one of
+those refusals is recorded, and it is worded differently from the rest: `UpdateRole` changing
+`MaxSessionDuration` answers `UnmodifiableEntity` 400 with `<roleName> is an AWS service linked
+role, max session duration cannot be changed.`, recorded 2026-10-29, where the clause names the
+change refused rather than the service the role is linked to.
+
+The other ten keep this package's own sentence, `Role <name> is a service-linked role for
+<principal>; request the change through that service.` Nothing records them, the clause AWS would
+write for each cannot be inferred from the one that is recorded, and AWS may not refuse all of them
+this way at all, so inventing ten clauses would put words in AWS's mouth. A recording for any of
+them moves that action alone. The same guard stands on one path no IAM action reaches, the policy
+replacement an IAM Identity Center permission set provisions a role through, which is why ten
+actions carry the sentence where eleven call sites test the mark.
+
+The description is not one of the eleven: AWS documents it as editable on any role, and both
+`UpdateRole` carrying only a description and `UpdateRoleDescription` are taken here, with the guard
+standing on the duration.
+
 ## Partitions
 
 IAM is global, so its ARNs take the partition of the region a request is signed for:
@@ -3549,6 +3997,7 @@ of the role it was issued for, whatever region later calls are signed for. See [
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` | `floci` | Access key ID of the seeded deployer's key: `floci`, or 16 to 128 word characters, which make it deletable |
 | `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 | `FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH` | _(unset)_ | A JSON file of partner account id to boundary ARN to policy document, standing in for the permissions boundaries AWS registers for a delegation partner by email; unset means none is registered |
 

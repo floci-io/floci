@@ -5,6 +5,7 @@ import org.jboss.logging.Logger;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * What a resource policy's condition has to say for an {@code Allow} to everyone not to count as
@@ -16,6 +17,7 @@ import java.util.Set;
 public final class PublicAccessConditions {
 
     private static final Logger LOG = Logger.getLogger(PublicAccessConditions.class);
+    private static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
 
     /**
      * The trusted condition keys of IAM's block public access definition that Lambda and DSQL both
@@ -51,9 +53,15 @@ public final class PublicAccessConditions {
         return value.indexOf('*') >= 0 || value.indexOf('?') >= 0;
     }
 
-    /** An ARN of six fields whose account has no wildcard. */
+    /** An ARN of six fields with no wildcard, or with a 12-digit account when it has one. */
     public static boolean pinsAccount(String arn) {
-        return AwsArnUtils.isArn(arn) && !hasWildcard(AwsArnUtils.parse(arn).accountId());
+        return AwsArnUtils.isArn(arn)
+                && (!hasWildcard(arn) || ACCOUNT_ID.matcher(AwsArnUtils.parse(arn).accountId()).matches());
+    }
+
+    /** An ARN that pins its account and has no policy variable in it. */
+    public static boolean isFixedAccountArn(String arn) {
+        return pinsAccount(arn) && !arn.contains("${");
     }
 
     /**

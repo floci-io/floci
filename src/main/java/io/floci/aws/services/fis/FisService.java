@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.TagHandler;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
@@ -23,7 +26,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.math.BigInteger;
-import java.time.Instant;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -34,9 +39,13 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.random.RandomGenerator;
 import java.util.regex.Matcher;
@@ -45,11 +54,13 @@ import java.util.regex.Pattern;
 /**
  * Stateful AWS Fault Injection Service control plane.
  *
- * <p>Experiments are intentionally management-plane only: Floci records valid FIS state
- * transitions and resolved target snapshots without applying faults to local resources.</p>
+ * <p>Experiments are management-plane only, recording valid FIS state transitions and resolved
+ * target snapshots without applying faults to local resources, except for the
+ * {@code aws:fis:inject-api-*} actions: {@link FisApiFaultFilter} fails the calls a running one
+ * impairs, and each completes once its duration runs out.</p>
  */
 @ApplicationScoped
-public class FisService implements TagHandler {
+public class FisService implements TagHandler, StoredResourceArns {
 
     private static final String SERVICE = "fis";
     private static final int MAX_PAGE_SIZE = 100;
@@ -72,17 +83,32 @@ public class FisService implements TagHandler {
     private static final Pattern TARGET_PARAMETER_VALUE =
             Pattern.compile("^[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+$");
     private static final Pattern TAG_VALUE = Pattern.compile("^[A-Za-z0-9 _.:/=+\\-@]*$");
+    private static final Duration MIN_ACTION_DURATION = Duration.ofMinutes(1);
+    private static final Duration MAX_ACTION_DURATION = Duration.ofHours(12);
+    private static final String ACTION_RUNNING = "The action is running in safe emulation mode.";
 
     private final FisStores stores;
     private final ObjectMapper mapper;
     private final RegionResolver regionResolver;
     private final FisCatalog catalog;
     private final RandomGenerator random;
+    private final BooleanSupplier injectApiAnyService;
+    private final Clock clock;
+    /**
+     * The accounts and Regions, by {@link #apiFaultKey}, where an experiment holding an inject-api action runs. Only
+     * these are looked into for faults, so a request from any other account, whatever account ID it names, is answered
+     * without a scan and leaves nothing behind.
+     */
+    private final Set<String> apiFaultKeys = ConcurrentHashMap.newKeySet();
+    private volatile boolean apiFaultKeysLoaded;
+    /** The faults running in each of {@link #apiFaultKeys}, until the first of them ends. */
+    private final Map<String, ApiFaultSnapshot> apiFaults = new ConcurrentHashMap<>();
 
     @Inject
     public FisService(StorageFactory storageFactory, ObjectMapper mapper,
-                      RegionResolver regionResolver, FisCatalog catalog) {
-        this(new FisStores(storageFactory), mapper, regionResolver, catalog, new Random());
+                      RegionResolver regionResolver, FisCatalog catalog, EmulatorConfig config) {
+        this(new FisStores(storageFactory), mapper, regionResolver, catalog, new Random(),
+                () -> config.services().fis().injectApiAnyService(), Clock.systemUTC());
     }
 
     FisService(FisStores stores, ObjectMapper mapper,
@@ -92,11 +118,18 @@ public class FisService implements TagHandler {
 
     FisService(FisStores stores, ObjectMapper mapper,
                RegionResolver regionResolver, FisCatalog catalog, RandomGenerator random) {
+        this(stores, mapper, regionResolver, catalog, random, () -> false, Clock.systemUTC());
+    }
+
+    FisService(FisStores stores, ObjectMapper mapper, RegionResolver regionResolver, FisCatalog catalog,
+               RandomGenerator random, BooleanSupplier injectApiAnyService, Clock clock) {
         this.stores = stores;
         this.mapper = mapper;
         this.regionResolver = regionResolver;
         this.catalog = catalog;
         this.random = random;
+        this.injectApiAnyService = injectApiAnyService;
+        this.clock = clock;
     }
 
     public synchronized ObjectNode createExperimentTemplate(String region, JsonNode request) {
@@ -201,8 +234,8 @@ public class FisService implements TagHandler {
         return wrap("action", action);
     }
 
-    public ObjectNode getExperiment(String region, String id) {
-        return wrap("experiment", requireExperiment(region, id));
+    public synchronized ObjectNode getExperiment(String region, String id) {
+        return wrap("experiment", progressed(region, requireExperiment(region, id)));
     }
 
     public ObjectNode getExperimentTargetAccountConfiguration(
@@ -278,9 +311,9 @@ public class FisService implements TagHandler {
                 scope(region, "templates"), node -> node.path("id").asText());
     }
 
-    public ObjectNode listExperiments(
+    public synchronized ObjectNode listExperiments(
             String region, Integer maxResults, String nextToken, String experimentTemplateId) {
-        List<ObjectNode> experiments = copiedScan(stores.experiments, experimentPrefix(region));
+        List<ObjectNode> experiments = progressedExperiments(region);
         if (experimentTemplateId != null) {
             validateName(experimentTemplateId, "experimentTemplateId");
             experiments.removeIf(experiment ->
@@ -314,6 +347,13 @@ public class FisService implements TagHandler {
         }
         String templateId = requireText(input, "experimentTemplateId", 64);
         ObjectNode template = requireTemplate(region, templateId);
+        // A template stored before its inject-api parameters were checked is checked before it runs.
+        template.path("actions").forEach(action -> {
+            String actionId = action.path("actionId").asText();
+            if (FisApiFault.isInjectApiAction(actionId)) {
+                validateInjectApiParameters(actionId, action.path("parameters"));
+            }
+        });
         List<ObjectNode> configurations = targetAccountConfigurations(region, templateId);
         if ("multi-account".equals(template.path("experimentOptions").path("accountTargeting").asText())
                 && configurations.isEmpty()) {
@@ -382,7 +422,7 @@ public class FisService implements TagHandler {
                 reason = "The action is waiting for its dependencies.";
             } else {
                 status = "running";
-                reason = "The action is running in safe emulation mode.";
+                reason = ACTION_RUNNING;
             }
             action.set("state", state(status, reason));
             if (!"pending".equals(status)) {
@@ -414,17 +454,22 @@ public class FisService implements TagHandler {
         }
 
         putExperiment(region, id, experiment);
+        if (holdsInjectApiAction(experiment)) {
+            apiFaultKeys.add(apiFaultKey(region));
+        }
+        apiFaults.clear();
         ObjectNode response = wrap("experiment", experiment);
         saveIdempotentResponse(region, "start-experiment", clientToken, input, response);
         return response;
     }
 
     public synchronized ObjectNode stopExperiment(String region, String id) {
-        ObjectNode experiment = requireExperiment(region, id);
+        ObjectNode experiment = progressed(region, requireExperiment(region, id));
         String current = experiment.path("state").path("status").asText();
         if (!TERMINAL_EXPERIMENT_STATES.contains(current)) {
             stopExperimentNode(experiment, "The experiment was stopped by the user.");
             putExperiment(region, id, experiment);
+            apiFaults.clear();
         }
         return wrap("experiment", experiment);
     }
@@ -481,7 +526,8 @@ public class FisService implements TagHandler {
             throw validation("Safety lever status must be engaged or disengaged.");
         }
         if ("engaged".equals(status)) {
-            for (ObjectNode experiment : copiedScan(stores.experiments, experimentPrefix(region))) {
+            apiFaults.clear();
+            for (ObjectNode experiment : progressedExperiments(region)) {
                 String experimentStatus = experiment.path("state").path("status").asText();
                 if (!TERMINAL_EXPERIMENT_STATES.contains(experimentStatus)) {
                     stopExperimentNode(experiment, "The experiment was stopped because the safety lever was engaged.");
@@ -585,6 +631,53 @@ public class FisService implements TagHandler {
         tagKeys.forEach(this::validateTagKey);
         tagKeys.forEach(current::remove);
         saveResourceTags(region, resource, current);
+    }
+
+    @Override
+    public String namespace() {
+        return SERVICE;
+    }
+
+    /** A request names a template, an experiment or an action by the id its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the experiment template, the experiment or the action whose ARN is {@code arn}, in the request's
+     * account, where the tag handlers read: an ARN of another account names none. Read in place under the Region the
+     * ARN names and the id it ends in, a record stored before storage was account-aware included; a template or an
+     * experiment is matched on the whole ARN it records, an action, whose ARN is built rather than stored, on the ARN
+     * built for it. A tag call stores a new record, one at a time, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = regionResolver.getAccountId();
+        int separator = parsed.resource().indexOf('/');
+        if (!parsed.accountId().equals(account) || separator <= 0) {
+            return Map.of();
+        }
+        String region = parsed.region();
+        String id = parsed.resource().substring(separator + 1);
+        Map<String, String> tags = switch (parsed.resource().substring(0, separator)) {
+            case "experiment-template" -> AccountAwareStorageBackend.readInAccount(stores.templates, account,
+                            templateKey(region, id))
+                    .filter(template -> arn.equals(template.getArn())).map(ExperimentTemplate::getTags).orElse(null);
+            case "experiment" -> AccountAwareStorageBackend.readInAccount(stores.experiments, account,
+                            experimentKey(region, id))
+                    .filter(experiment -> arn.equals(experiment.getArn())).map(Experiment::getTags).orElse(null);
+            case "action" -> arn.equals(regionResolver.buildArn(SERVICE, region, "action/" + id))
+                    ? AccountAwareStorageBackend.readInAccount(stores.actionTags, account, actionTagsKey(region, id))
+                            .orElse(null)
+                    : null;
+            default -> null;
+        };
+        return tags == null ? Map.of() : new LinkedHashMap<>(tags);
     }
 
     private void validateCreateTemplate(ObjectNode input) {
@@ -805,6 +898,9 @@ public class FisService implements TagHandler {
                     throw validation("Action " + actionId + " requires parameter " + parameter.getKey() + ".");
                 }
             });
+            if (FisApiFault.isInjectApiAction(actionId)) {
+                validateInjectApiParameters(actionId, parameters);
+            }
             ObjectNode actionTargets = action.has("targets")
                     ? requireObject(action.path("targets"), "action targets")
                     : mapper.createObjectNode();
@@ -1209,6 +1305,279 @@ public class FisService implements TagHandler {
         return target;
     }
 
+    /**
+     * The parameters AWS's action reference gives the {@code aws:fis:inject-api-*} actions: a {@code service} it
+     * supports ({@code ec2} or {@code kinesis}, or any while {@code inject-api-any-service} is on), a
+     * {@code percentage} from 1 to 100, comma-separated {@code operations}, and a {@code duration} from one minute
+     * to 12 hours in ISO 8601 format.
+     */
+    private void validateInjectApiParameters(String actionId, JsonNode parameters) {
+        String service = parameters.path("service").asText();
+        if (!injectApiAnyService.getAsBoolean() && !FisApiFault.AWS_SERVICES.contains(service)) {
+            throw validation("Action " + actionId + " supports the services ec2 and kinesis, not " + service + ".");
+        }
+        int percentage = percentage(parameters);
+        if (percentage < 1 || percentage > 100) {
+            throw validation("The percentage of action " + actionId + " must be a whole number from 1 to 100.");
+        }
+        if (operations(parameters).isEmpty()) {
+            throw validation("Action " + actionId + " requires the operations to inject the fault into, "
+                    + "separated using commas.");
+        }
+        Duration duration = actionDuration(parameters);
+        if (duration == null
+                || duration.compareTo(MIN_ACTION_DURATION) < 0 || duration.compareTo(MAX_ACTION_DURATION) > 0) {
+            throw validation("The duration of action " + actionId
+                    + " must be from one minute to 12 hours in ISO 8601 format, such as PT1M.");
+        }
+    }
+
+    /** An inject-api action's {@code percentage}, or 0 when it is not a whole number. */
+    private static int percentage(JsonNode parameters) {
+        try {
+            return Integer.parseInt(parameters.path("percentage").asText());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** The operations an inject-api action names, or none when an entry between its commas is empty. */
+    private static Set<String> operations(JsonNode parameters) {
+        String[] names = parameters.path("operations").asText().split(",", -1);
+        Set<String> operations = new HashSet<>();
+        for (String name : names) {
+            if (name.isEmpty()) {
+                return Set.of();
+            }
+            operations.add(name);
+        }
+        return operations;
+    }
+
+    /** An action's {@code duration} parameter, or null when it has none or it is not an ISO 8601 duration. */
+    private static Duration actionDuration(JsonNode parameters) {
+        try {
+            return Duration.parse(parameters.path("duration").asText());
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The inject-api faults running now in the caller's account and {@code region}. The answer is kept until the
+     * first of them runs out, or until an experiment starts or stops; an account and Region where none runs is
+     * answered from {@link #apiFaultKeys} alone, so a request made there costs a set lookup.
+     */
+    public List<FisApiFault> activeApiFaults(String region) {
+        if (!apiFaultKeysLoaded) {
+            loadApiFaultKeys();
+        }
+        String key = apiFaultKey(region);
+        if (!apiFaultKeys.contains(key)) {
+            return List.of();
+        }
+        ApiFaultSnapshot snapshot = apiFaults.get(key);
+        if (snapshot != null && now() < snapshot.validUntil()) {
+            return snapshot.faults();
+        }
+        return refreshApiFaults(region, key);
+    }
+
+    /** Finds, once, the experiments with inject-api actions that were running when Floci last stopped. */
+    private synchronized void loadApiFaultKeys() {
+        if (apiFaultKeysLoaded) {
+            return;
+        }
+        List<Experiment> experiments = stores.experiments instanceof AccountAwareStorageBackend<Experiment> accounts
+                ? accounts.scanAllAccounts()
+                : stores.experiments.scan(key -> true);
+        for (Experiment stored : experiments) {
+            ObjectNode experiment = toObjectNode(stored);
+            if (holdsInjectApiAction(experiment)) {
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(experiment.path("arn").asText());
+                apiFaultKeys.add(arn.accountId() + "::" + arn.region());
+            }
+        }
+        apiFaultKeysLoaded = true;
+    }
+
+    private synchronized List<FisApiFault> refreshApiFaults(String region, String key) {
+        // Requests that found the answer out of date queue here; the first works it out for the rest.
+        ApiFaultSnapshot current = apiFaults.get(key);
+        if (current != null && now() < current.validUntil()) {
+            return current.faults();
+        }
+        List<FisApiFault> faults = new ArrayList<>();
+        double validUntil = Double.POSITIVE_INFINITY;
+        boolean held = false;
+        for (ObjectNode experiment : progressedExperiments(region)) {
+            if (!holdsInjectApiAction(experiment)) {
+                continue;
+            }
+            held = true;
+            Map<String, Set<String>> resolvedArns = null;
+            for (JsonNode action : experiment.path("actions")) {
+                String actionId = action.path("actionId").asText();
+                if (!FisApiFault.isInjectApiAction(actionId)
+                        || !"running".equals(action.path("state").path("status").asText())) {
+                    continue;
+                }
+                if (resolvedArns == null) {
+                    resolvedArns = resolvedArnsByTarget(region, experiment.path("id").asText());
+                }
+                JsonNode parameters = action.path("parameters");
+                double endTime = action.path("startTime").asDouble() + durationSeconds(parameters);
+                validUntil = Math.min(validUntil, endTime);
+                String service = parameters.path("service").asText();
+                if (injectApiAnyService.getAsBoolean() || FisApiFault.AWS_SERVICES.contains(service)) {
+                    // An experiment started before its parameters were checked can still name a service out of
+                    // scope; it impairs nothing then, as its percentage of 0 would not either.
+                    faults.add(new FisApiFault(FisApiFault.Kind.of(actionId), service,
+                            Set.copyOf(operations(parameters)), percentage(parameters),
+                            resolvedArns.getOrDefault(action.path("targets").path("Roles").asText(), Set.of()),
+                            endTime));
+                }
+            }
+        }
+        if (!held) {
+            apiFaultKeys.remove(key);
+            apiFaults.remove(key);
+            return List.of();
+        }
+        ApiFaultSnapshot snapshot = new ApiFaultSnapshot(List.copyOf(faults), validUntil);
+        apiFaults.put(key, snapshot);
+        return snapshot.faults();
+    }
+
+    /** Whether a running experiment holds an inject-api action that is running or still to start. */
+    private static boolean holdsInjectApiAction(ObjectNode experiment) {
+        if (!"running".equals(experiment.path("state").path("status").asText())) {
+            return false;
+        }
+        for (JsonNode action : experiment.path("actions")) {
+            String status = action.path("state").path("status").asText();
+            if (FisApiFault.isInjectApiAction(action.path("actionId").asText())
+                    && ("running".equals(status) || "pending".equals(status))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The number of accounts and Regions whose faults are kept, for tests. */
+    int keptApiFaultKeys() {
+        return apiFaultKeys.size() + apiFaults.size();
+    }
+
+    private Map<String, Set<String>> resolvedArnsByTarget(String region, String experimentId) {
+        Map<String, Set<String>> arns = new HashMap<>();
+        for (ObjectNode resolved : copiedScan(stores.resolvedTargets, resolvedTargetPrefix(region, experimentId))) {
+            arns.computeIfAbsent(resolved.path("targetName").asText(), name -> new HashSet<>())
+                    .add(resolved.path("targetInformation").path("arn").asText());
+        }
+        return arns;
+    }
+
+    private String apiFaultKey(String region) {
+        return regionResolver.getAccountId() + "::" + region;
+    }
+
+    private record ApiFaultSnapshot(List<FisApiFault> faults, double validUntil) {
+    }
+
+    private List<ObjectNode> progressedExperiments(String region) {
+        List<ObjectNode> experiments = copiedScan(stores.experiments, experimentPrefix(region));
+        experiments.forEach(experiment -> progressed(region, experiment));
+        return experiments;
+    }
+
+    /** The experiment as it stands now, stored again when time has moved it on. */
+    private ObjectNode progressed(String region, ObjectNode experiment) {
+        if (advance(experiment)) {
+            putExperiment(region, experiment.path("id").asText(), experiment);
+        }
+        return experiment;
+    }
+
+    /**
+     * Moves a running experiment on to now: an inject-api action completes once its duration has run out, a pending
+     * action starts when the last of the actions it starts after completes, and the experiment completes once every
+     * action has completed or been skipped. Nothing runs on a timer, so each read works out what has happened since
+     * the last one, at the times it happened. The other actions run until the experiment is stopped, as before.
+     *
+     * @return whether anything changed
+     */
+    private boolean advance(ObjectNode experiment) {
+        if (!"running".equals(experiment.path("state").path("status").asText())
+                || !(experiment.path("actions") instanceof ObjectNode actions)) {
+            return false;
+        }
+        double now = now();
+        boolean changed = false;
+        boolean moved = true;
+        while (moved) {
+            moved = false;
+            for (JsonNode node : actions) {
+                ObjectNode action = (ObjectNode) node;
+                String status = action.path("state").path("status").asText();
+                if ("pending".equals(status)) {
+                    OptionalDouble start = dependenciesCompleted(actions, action);
+                    if (start.isPresent() && start.getAsDouble() <= now) {
+                        action.set("state", state("running", ACTION_RUNNING));
+                        action.put("startTime", start.getAsDouble());
+                        moved = true;
+                    }
+                } else if ("running".equals(status)
+                        && FisApiFault.isInjectApiAction(action.path("actionId").asText())) {
+                    double end = action.path("startTime").asDouble() + durationSeconds(action.path("parameters"));
+                    if (end <= now) {
+                        action.set("state", state("completed", "The action completed."));
+                        action.put("endTime", end);
+                        moved = true;
+                    }
+                }
+            }
+            changed |= moved;
+        }
+        if (changed && allActionsFinished(actions)) {
+            double end = 0;
+            for (JsonNode action : actions) {
+                end = Math.max(end, action.path("endTime").asDouble());
+            }
+            experiment.set("state", state("completed", "The experiment completed."));
+            experiment.put("endTime", end);
+        }
+        return changed;
+    }
+
+    /** When the last of the actions {@code action} starts after completed, or empty while one has not. */
+    private static OptionalDouble dependenciesCompleted(ObjectNode actions, ObjectNode action) {
+        double start = 0;
+        for (JsonNode dependency : action.path("startAfter")) {
+            JsonNode before = actions.path(dependency.asText());
+            if (!"completed".equals(before.path("state").path("status").asText())) {
+                return OptionalDouble.empty();
+            }
+            start = Math.max(start, before.path("endTime").asDouble());
+        }
+        return OptionalDouble.of(start);
+    }
+
+    private static boolean allActionsFinished(ObjectNode actions) {
+        for (JsonNode action : actions) {
+            String status = action.path("state").path("status").asText();
+            if (!"completed".equals(status) && !"skipped".equals(status)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static double durationSeconds(JsonNode parameters) {
+        Duration duration = actionDuration(parameters);
+        return duration == null ? Double.POSITIVE_INFINITY : duration.toMillis() / 1000.0;
+    }
+
     private void stopExperimentNode(ObjectNode experiment, String reason) {
         double timestamp = now();
         experiment.set("state", state("stopped", reason));
@@ -1490,7 +1859,7 @@ public class FisService implements TagHandler {
     }
 
     private long activeExperimentCount(String region) {
-        return copiedScan(stores.experiments, experimentPrefix(region)).stream()
+        return progressedExperiments(region).stream()
                 .filter(experiment -> !TERMINAL_EXPERIMENT_STATES.contains(
                         experiment.path("state").path("status").asText()))
                 .count();
@@ -1656,7 +2025,7 @@ public class FisService implements TagHandler {
     }
 
     private double now() {
-        return EpochSeconds.fromInstant(Instant.now());
+        return EpochSeconds.fromInstant(clock.instant());
     }
 
     private String key(String region, String type, String id) {

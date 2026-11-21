@@ -41,10 +41,19 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
     @Override
     public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
                                              String traceId) {
+        return invoke(target, payload, requestId, traceId, false);
+    }
+
+    @Override
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                          String traceId, boolean logTail) {
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(target.accountId(), target.region(),
                 target.functionName(), target.version());
         InvokeResult result = RequestScopes.callAs(target.accountId(),
-                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId, traceId));
-        return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError());
+                () -> logTail
+                        ? executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId, traceId, true)
+                        : executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId, traceId));
+        return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError(),
+                result.getLogResult());
     }
 }

@@ -1,10 +1,8 @@
 package io.floci.aws.services.glue;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Crawler;
@@ -25,6 +23,7 @@ import io.floci.aws.services.glue.model.TriggerCondition;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,7 +61,7 @@ class GlueTriggerServiceTest {
     @BeforeEach
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         glueService = new GlueService(storageFactory, new GlueSchemaRegistryService(storageFactory, regionResolver),
                 regionResolver, new ResourceGroupsTaggingService(storageFactory),
                 new KmsService(storageFactory, regionResolver));
@@ -746,18 +745,5 @@ class GlueTriggerServiceTest {
         }
 
         assertEquals(1, runsOf("load").size());
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        }
     }
 }

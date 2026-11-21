@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -19,7 +20,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
-@TestProfile(StrictProtocolClaimingIntegrationTest.StrictClaimingProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class SwfLegacyProtocolIntegrationTest {
 
     private static final String LEGACY_PREFIX = "com.amazonaws.swf.service.model.SimpleWorkflowService.";

@@ -481,7 +481,8 @@ class VerdaccioSidecarClientTest {
     }
 
     private VerdaccioSidecarManager manager() {
-        return new VerdaccioSidecarManager(containerBuilder, lifecycleManager, config);
+        return new VerdaccioSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     private VerdaccioSidecarClient client(VerdaccioSidecarManager manager) {

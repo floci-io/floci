@@ -3,10 +3,10 @@ package io.floci.aws.services.rds;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -31,7 +31,7 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
 
     @Test
     void tagsGivenAtCreateAreReadableThroughListTagsForResource() {
-        String arn = createCluster()
+        String arn = createAuroraPostgresCluster(ID)
                 .formParam("Tags.Tag.1.Key", "Accounting").formParam("Tags.Tag.1.Value", "gna")
                 .formParam("Tags.Tag.2.Key", "BusinessSolution").formParam("Tags.Tag.2.Value", "gue")
                 .when().post("/").then().statusCode(200)
@@ -48,7 +48,7 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
     @Test
     void tagsAreAlsoReturnedAsTheTagListOfDescribeDbClusters() {
         // The Terraform AWS provider reads a cluster's tags from here, not from ListTagsForResource.
-        createCluster()
+        createAuroraPostgresCluster(ID)
                 .formParam("Tags.Tag.1.Key", "Accounting").formParam("Tags.Tag.1.Value", "gna")
                 .when().post("/").then().statusCode(200)
                 .body(containsString("<TagList><Tag><Key>Accounting</Key><Value>gna</Value></Tag></TagList>"));
@@ -60,7 +60,7 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
 
     @Test
     void tagsAreAlsoReadInTheMemberForm() {
-        String arn = createCluster()
+        String arn = createAuroraPostgresCluster(ID)
                 .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "platform")
                 .when().post("/").then().statusCode(200)
                 .extract().path("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.DBClusterArn");
@@ -73,7 +73,7 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
 
     @Test
     void kmsKeyIdRoundTripsFromCreateToDescribe() {
-        createCluster()
+        createAuroraPostgresCluster(ID)
                 .formParam("StorageEncrypted", "true").formParam("KmsKeyId", KEY_ARN)
                 .when().post("/").then().statusCode(200)
                 .body(containsString("<KmsKeyId>" + KEY_ARN + "</KmsKeyId>"));
@@ -86,7 +86,7 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
 
     @Test
     void aClusterCreatedWithoutThemHasNoTagsAndNoKmsKeyId() {
-        String arn = createCluster().when().post("/").then().statusCode(200)
+        String arn = createAuroraPostgresCluster(ID).when().post("/").then().statusCode(200)
                 .body(not(containsString("<KmsKeyId>")))
                 .extract().path("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.DBClusterArn");
 
@@ -96,14 +96,5 @@ class RdsClusterCreateTagsAndKmsKeyIntegrationTest {
         rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
                 .when().post("/").then().statusCode(200)
                 .body(not(containsString("<KmsKeyId>")));
-    }
-
-    private static RequestSpecification createCluster() {
-        return rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password");
     }
 }

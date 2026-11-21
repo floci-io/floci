@@ -14,7 +14,7 @@ public class EnabledControl {
     private String driftStatus;
     private String lastOperationIdentifier;
     private JsonNode parameters;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     public EnabledControl() {
     }

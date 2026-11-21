@@ -63,6 +63,8 @@ import software.amazon.awssdk.services.iot.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iot.model.GetPolicyResponse;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleResponse;
+import software.amazon.awssdk.services.iot.model.GetV2LoggingOptionsRequest;
+import software.amazon.awssdk.services.iot.model.GetV2LoggingOptionsResponse;
 import software.amazon.awssdk.services.iot.model.IndexNotReadyException;
 import software.amazon.awssdk.services.iot.model.IndexStatus;
 import software.amazon.awssdk.services.iot.model.InvalidRequestException;
@@ -85,7 +87,10 @@ import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsResponse;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesResponse;
+import software.amazon.awssdk.services.iot.model.LogEventConfiguration;
+import software.amazon.awssdk.services.iot.model.LogLevel;
 import software.amazon.awssdk.services.iot.model.NamedShadowIndexingMode;
+import software.amazon.awssdk.services.iot.model.NotConfiguredException;
 import software.amazon.awssdk.services.iot.model.RemoveThingFromThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.ResourceAlreadyExistsException;
 import software.amazon.awssdk.services.iot.model.ResourceNotFoundException;
@@ -93,6 +98,7 @@ import software.amazon.awssdk.services.iot.model.SearchIndexRequest;
 import software.amazon.awssdk.services.iot.model.SearchIndexResponse;
 import software.amazon.awssdk.services.iot.model.ServerCertificateStatus;
 import software.amazon.awssdk.services.iot.model.ServiceType;
+import software.amazon.awssdk.services.iot.model.SetV2LoggingOptionsRequest;
 import software.amazon.awssdk.services.iot.model.SqsAction;
 import software.amazon.awssdk.services.iot.model.Tag;
 import software.amazon.awssdk.services.iot.model.TagResourceRequest;
@@ -155,6 +161,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -286,6 +293,50 @@ class IotTest {
                 .domainConfigurationName(name)
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void v2LoggingOptions() {
+        String account = String.valueOf(ThreadLocalRandom.current().nextLong(100_000_000_000L, 1_000_000_000_000L));
+        String roleArn = TestFixtures.globalArn("iam", account, "role/iot-logging");
+        try (IotClient accountIot = TestFixtures.iotClient(account)) {
+            assertThatThrownBy(() -> accountIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().build()))
+                    .isInstanceOf(NotConfiguredException.class);
+            assertThatThrownBy(() -> accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
+                    .defaultLogLevel(LogLevel.ERROR).build()))
+                    .isInstanceOf(InvalidRequestException.class);
+
+            accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
+                    .roleArn(roleArn)
+                    .defaultLogLevel(LogLevel.WARN)
+                    .eventConfigurations(LogEventConfiguration.builder()
+                            .eventType("Connect").logLevel(LogLevel.DEBUG).build())
+                    .build());
+            accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder().disableAllLogs(true).build());
+            assertThatThrownBy(() -> accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
+                    .defaultLogLevel("TRACE").build()))
+                    .isInstanceOf(InvalidRequestException.class);
+
+            GetV2LoggingOptionsResponse options =
+                    accountIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().verbose(true).build());
+            assertThat(options.roleArn()).isEqualTo(roleArn);
+            assertThat(options.defaultLogLevel()).isEqualTo(LogLevel.WARN);
+            assertThat(options.disableAllLogs()).isTrue();
+            assertThat(options.hasEventConfigurations()).isFalse();
+
+            for (LogLevel level : List.of(LogLevel.DEBUG, LogLevel.INFO, LogLevel.ERROR, LogLevel.WARN,
+                    LogLevel.DISABLED)) {
+                accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder().defaultLogLevel(level).build());
+                assertThat(accountIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().build())
+                        .defaultLogLevel()).isEqualTo(level);
+            }
+        }
+
+        String otherAccount = String.valueOf(Long.parseLong(account) + 1);
+        try (IotClient otherIot = TestFixtures.iotClient(otherAccount)) {
+            assertThatThrownBy(() -> otherIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().build()))
+                    .isInstanceOf(NotConfiguredException.class);
+        }
     }
 
     @Test

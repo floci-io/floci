@@ -47,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -259,6 +260,8 @@ class EcsContainerManagerVolumesTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));

@@ -486,7 +486,8 @@ class BagetterSidecarClientTest {
     }
 
     private BagetterSidecarManager manager() {
-        return new BagetterSidecarManager(containerBuilder, lifecycleManager, config);
+        return new BagetterSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     private BagetterSidecarClient client(BagetterSidecarManager manager) {

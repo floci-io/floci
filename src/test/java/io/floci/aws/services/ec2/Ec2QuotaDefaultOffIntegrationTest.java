@@ -1,24 +1,12 @@
 package io.floci.aws.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 
 @QuarkusTest
-@TestProfile(Ec2QuotaDefaultOffIntegrationTest.Disabled.class)
 class Ec2QuotaDefaultOffIntegrationTest {
-    public static class Disabled implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.servicequotas.standard-on-demand-vcpus", "5");
-        }
-    }
-
     @Test
     void defaultOffKeepsSixMicroInstancesAcceptable() {
         try {

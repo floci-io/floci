@@ -12,13 +12,11 @@ import software.amazon.awssdk.services.apigateway.model.BadRequestException;
 import software.amazon.awssdk.services.apigateway.model.GetAuthorizersResponse;
 import software.amazon.awssdk.services.apigateway.model.NotFoundException;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,22 +54,10 @@ class ApiGatewayAuthorizerPagingIntegrationTest {
                 assertEquals(1, first.items().size());
                 assertNotNull(first.position());
 
-                List<String> seen = new ArrayList<>();
-                List<String> cursors = new ArrayList<>();
-                seen.add(first.items().get(0).id());
-                String position = first.position();
-                for (int page = 0; position != null && page < created.size(); page++) {
-                    assertFalse(cursors.contains(position), "position repeated: " + position);
-                    cursors.add(position);
-                    String next = position;
-                    GetAuthorizersResponse response = client.getAuthorizers(request -> request.restApiId(apiId)
-                            .limit(1).position(next));
-                    assertEquals(1, response.items().size());
-                    assertFalse(seen.contains(response.items().get(0).id()), "authorizer repeated");
-                    seen.add(response.items().get(0).id());
-                    position = response.position();
-                }
-                assertNull(position);
+                List<String> seen = ApiGatewayPagingWalk.oneItemPerPageIds(
+                        position -> client.getAuthorizers(
+                                request -> request.restApiId(apiId).limit(1).position(position)),
+                        GetAuthorizersResponse::items, GetAuthorizersResponse::position, Authorizer::id);
                 assertEquals(3, seen.size());
                 assertEquals(created, new HashSet<>(seen));
             } finally {

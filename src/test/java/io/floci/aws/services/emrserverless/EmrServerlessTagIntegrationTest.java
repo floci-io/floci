@@ -320,7 +320,7 @@ class EmrServerlessTagIntegrationTest {
     }
 
     @Test
-    void aJobRunArnMustBeTheRunsOwnAndSessionArnsNameNothing() {
+    void aJobRunArnMustBeTheRunsOwnAndAnUnknownSessionsArnNamesNothing() {
         String[] owner = createApplication("{}");
         String[] other = createApplication("{}");
         String[] run = startJobRun(owner[0], "{ \"team\": \"data\" }");

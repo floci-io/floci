@@ -749,13 +749,18 @@ public class EcsJsonHandler {
     }
 
     private Response handleListServicesByNamespace(JsonNode req, String region) {
-        String namespace = req.path("namespace").asText();
-        List<String> arns = service.listServicesByNamespace(namespace, region);
+        String namespace = req.hasNonNull("namespace") ? req.path("namespace").asText() : null;
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+        EcsService.ListPage page = service.listServicesByNamespace(namespace, maxResults, nextToken, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("serviceArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 

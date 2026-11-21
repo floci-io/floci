@@ -16,7 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A China deployment that allows unknown regions serves a region no partition publishes in its
- * own partition, so DescribeRegions lists the China regions for it, not the commercial ones.
+ * own partition, so DescribeRegions lists the China regions for it, not the commercial ones, and
+ * the AWS-managed prefix lists are China's.
  */
 @QuarkusTest
 @TestProfile(Ec2DescribeRegionsUnknownRegionIntegrationTest.ChinaAllowUnknownRegionsProfile.class)
@@ -51,6 +52,22 @@ class Ec2DescribeRegionsUnknownRegionIntegrationTest {
 
         assertTrue(names.contains("us-east-1"), names.toString());
         assertFalse(names.contains("cn-north-1"), names.toString());
+    }
+
+    @Test
+    void anUnknownRegionServesTheDeploymentPartitionsManagedPrefixLists() {
+        Response response = given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(UNKNOWN, "ec2"))
+                .formParam("Action", "DescribeManagedPrefixLists")
+                .formParam("Version", "2016-11-15")
+                .when().post("/").then().statusCode(200).contentType("application/xml")
+                .extract().response();
+        List<String> names = response.xmlPath().getList("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName");
+        List<String> arns = response.xmlPath().getList("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListArn");
+
+        assertTrue(names.contains("com.amazonaws." + UNKNOWN + ".s3"), names.toString());
+        assertFalse(names.contains("com.amazonaws.global.cloudfront.origin-facing"), names.toString());
+        assertTrue(arns.contains("arn:aws-cn:ec2:" + UNKNOWN + ":aws:prefix-list/pl-63a5400a"), arns.toString());
     }
 
     public static final class ChinaAllowUnknownRegionsProfile implements QuarkusTestProfile {

@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.net.Socket;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -30,7 +31,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
     private final Supplier<SSLContext> tlsContext;
-    private final ElastiCacheBackendAcl backendAcl = new ElastiCacheBackendAcl();
+    private final ElastiCacheBackendAcl backendAcl;
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
@@ -49,6 +50,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         this.passwordValidator = passwordValidator;
         this.sigV4Validator = sigV4Validator;
         this.tlsContext = tlsContext;
+        this.backendAcl = new ElastiCacheBackendAcl(passwordValidator::clusterMode);
     }
 
     @Override
@@ -86,18 +88,43 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     @Override
     protected void initializeBackend(Socket backend, String username) throws IOException {
-        boolean members = passwordValidator.hasMembers();
-        if (!members && !backendAcl.initialized()) {
+        if (!controlsBackendAccess()) {
             return;
         }
-        // Disabling default without configuring replication credentials breaks cluster nodes.
-        // Until that path is implemented, fail closed rather than ignore the user's ACL.
-        if (passwordValidator.clusterMode()) {
-            throw new IOException("Cluster-mode user ACL transport is not supported yet");
+        String name = userOrDefault(username);
+        backendAcl.authenticate(backend, name, accessString(name));
+    }
+
+    @Override
+    protected List<String> backendCredentials(String username) throws IOException {
+        if (!controlsBackendAccess()) {
+            return super.backendCredentials(username);
         }
-        String name = username == null || username.isEmpty() ? "default" : username;
-        backendAcl.authenticate(backend, name,
-                () -> members ? passwordValidator.accessString(name) : "on ~* &* +@all");
+        String name = userOrDefault(username);
+        return backendAcl.credentials(backendHost(), backendPort(), name, accessString(name));
+    }
+
+    /**
+     * Whether sessions run as private backend users: once the cache has users, and for as long as the
+     * backend keeps its default user off. Readies a cluster's replication before its first such session.
+     */
+    private boolean controlsBackendAccess() throws IOException {
+        if (!passwordValidator.hasMembers() && !backendAcl.initialized()) {
+            return false;
+        }
+        if (!backendAcl.initialized() && passwordValidator.clusterMode()) {
+            try {
+                passwordValidator.prepareClusterReplication();
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not give the nodes of {0} their replication credentials", groupId);
+                throw new IOException("Cluster replication is not ready for access strings", e);
+            }
+        }
+        return true;
+    }
+
+    private Supplier<String> accessString(String name) {
+        return () -> passwordValidator.hasMembers() ? passwordValidator.accessString(name) : "on ~* &* +@all";
     }
 
     /**
@@ -105,7 +132,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
      * failure is logged and the sessions keep their old permissions until the user authenticates again.
      */
     public void refreshUser(String username) {
-        String name = username == null || username.isEmpty() ? "default" : username;
+        String name = userOrDefault(username);
         try {
             backendAcl.reapply(backendHost(), backendPort(), name, () -> passwordValidator.accessString(name));
         } catch (IOException e) {
@@ -127,8 +154,25 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     }
 
     @Override
+    protected boolean checksCredentials() {
+        return passwordValidator.hasMembers() || currentAuthMode() != AuthMode.NO_AUTH;
+    }
+
+    @Override
+    protected boolean signsInWithIam(String username) {
+        if (!passwordValidator.hasMembers()) {
+            return currentAuthMode() == AuthMode.IAM;
+        }
+        AuthMode userMode = passwordValidator.memberAuthMode(userOrDefault(username));
+        if (userMode == null && username != null) {
+            userMode = passwordValidator.memberAuthMode(username);
+        }
+        return userMode == AuthMode.IAM;
+    }
+
+    @Override
     protected boolean authenticate(String username, String password) {
-        String effectiveUser = (username == null || username.isEmpty()) ? "default" : username;
+        String effectiveUser = userOrDefault(username);
         if (passwordValidator.hasMembers()) {
             if ("default".equals(effectiveUser)) {
                 if (passwordValidator.validatePassword(username, password)) {
@@ -205,6 +249,14 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
         default boolean clusterMode() {
             return false;
+        }
+
+        /**
+         * Readies every node of a cluster-mode cache for replication without the {@code default} user,
+         * before a node turns it off for its first session under an access string. Called again by
+         * every node's first such session, so it does its work once per cluster.
+         */
+        default void prepareClusterReplication() {
         }
 
         default boolean hasMembers() {

@@ -39,6 +39,11 @@ public class EmrCluster {
     private boolean autoTerminate;
     private boolean unhealthyNodeReplacement;
     private boolean keepJobFlowAliveWhenNoSteps;
+    // RunJobFlow's SessionEnabled: whether the cluster takes Spark Connect sessions.
+    private boolean sessionEnabled;
+    // Whether its security configuration turned on runtime roles as it was created; null for a cluster stored before
+    // Floci kept it.
+    private Boolean runtimeRoleEnabled;
     private int normalizedInstanceHours;
     private int stepConcurrencyLevel = 1;
     private int ebsRootVolumeSize;
@@ -74,7 +79,7 @@ public class EmrCluster {
     private Instant terminatingDateTime;
     // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
     private List<EmrErrorDetail> errorDetails = new ArrayList<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
     private List<EmrInstanceFleet> instanceFleets = new ArrayList<>();
@@ -247,4 +252,10 @@ public class EmrCluster {
 
     public List<EmrInstanceFleet> getInstanceFleets() { return instanceFleets; }
     public void setInstanceFleets(List<EmrInstanceFleet> instanceFleets) { this.instanceFleets = instanceFleets; }
+
+    public boolean isSessionEnabled() { return sessionEnabled; }
+    public void setSessionEnabled(boolean sessionEnabled) { this.sessionEnabled = sessionEnabled; }
+
+    public Boolean getRuntimeRoleEnabled() { return runtimeRoleEnabled; }
+    public void setRuntimeRoleEnabled(Boolean runtimeRoleEnabled) { this.runtimeRoleEnabled = runtimeRoleEnabled; }
 }

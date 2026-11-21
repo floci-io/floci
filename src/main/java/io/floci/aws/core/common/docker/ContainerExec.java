@@ -91,6 +91,18 @@ public final class ContainerExec {
      */
     public static Result run(DockerClient dockerClient, String containerId, String[] cmd, List<String> env,
                              int timeoutSeconds, OutputStream stdout, OutputStream stderr) {
+        return run(dockerClient, dockerClient, containerId, cmd, env, timeoutSeconds, stdout, stderr);
+    }
+
+    /**
+     * As {@link #run(DockerClient, String, String[], List, int, OutputStream, OutputStream)}, the command's
+     * output read over {@code streamingDockerClient}: for a command that may run for a long time, such as a
+     * user's script, so its output stream holds a streaming lease rather than a control-plane one. The exec
+     * is still created and inspected on {@code dockerClient}.
+     */
+    public static Result run(DockerClient dockerClient, DockerClient streamingDockerClient, String containerId,
+                             String[] cmd, List<String> env, int timeoutSeconds, OutputStream stdout,
+                             OutputStream stderr) {
         ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
@@ -118,7 +130,7 @@ public final class ContainerExec {
                 }
             }
         };
-        dockerClient.execStartCmd(execId).exec(callback);
+        streamingDockerClient.execStartCmd(execId).exec(callback);
 
         try {
             // docker-java closes the attach stream on completion, timeout, or interruption.

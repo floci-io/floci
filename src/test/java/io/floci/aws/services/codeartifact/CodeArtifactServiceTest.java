@@ -1,10 +1,13 @@
 package io.floci.aws.services.codeartifact;
 
+import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.PerKeyContainerPool;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -34,6 +37,7 @@ import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -52,8 +56,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -138,6 +144,86 @@ class CodeArtifactServiceTest {
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
                 packageGroupStore, regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient, bagetterClient)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repositoryAdmissionDoesNotHoldServiceMonitorDuringStartup(boolean failStartup) throws Exception {
+        service.createDomain(REGION, "admission", null, Map.of());
+        service.createRepository(REGION, "admission", null, "repo", null, null, Map.of());
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        PerKeyContainerPool pool = new PerKeyContainerPool(lifecycle, "/health");
+        SidecarRepositoryLease lease = new SidecarRepositoryLease("test", pool);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finishStartup = new CountDownLatch(1);
+        CountDownLatch secondAdmission = new CountDownLatch(1);
+        AtomicInteger admissions = new AtomicInteger();
+        doAnswer(invocation -> {
+            lease.registerRepository(invocation.getArgument(0));
+            return null;
+        }).when(pypiserverClient).registerRepository(anyString());
+        doAnswer(invocation -> {
+            if (admissions.incrementAndGet() == 2) {
+                secondAdmission.countDown();
+            }
+            lease.beginUse(invocation.getArgument(0));
+            return null;
+        }).when(pypiserverClient).beginUse(anyString());
+        String id = service.resolveContainerIdAndBeginUse(
+                "pypi", REGION, "admission", null, "repo", pypiserverClient);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/health", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        String endpoint = "http://127.0.0.1:" + server.getAddress().getPort();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                Future<String> startup = executor.submit(() -> pool.ensureReady(id, () -> {
+                    started.countDown();
+                    try {
+                        assertTrue(finishStartup.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                    if (failStartup) {
+                        throw new IllegalStateException("controlled startup failure");
+                    }
+                    return new PerKeyContainerPool.StartedContainer("owned-container", endpoint);
+                }));
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                Future<String> admission = executor.submit(() -> service.resolveContainerIdAndBeginUse(
+                        "pypi", REGION, "admission", null, "repo", pypiserverClient));
+                assertTrue(secondAdmission.await(5, TimeUnit.SECONDS));
+                Future<DomainView> unrelated = executor.submit(() ->
+                        service.createDomain(REGION, "unrelated", null, Map.of()));
+                assertDoesNotThrow(() -> unrelated.get(2, TimeUnit.SECONDS),
+                        "A same-repository admission must not hold the service monitor during startup");
+                assertEquals(id, admission.get(2, TimeUnit.SECONDS));
+                finishStartup.countDown();
+                if (failStartup) {
+                    assertEquals("controlled startup failure", assertThrows(
+                            ExecutionException.class,
+                            () -> startup.get(5, TimeUnit.SECONDS)).getCause().getMessage());
+                } else {
+                    assertEquals(endpoint, startup.get(5, TimeUnit.SECONDS));
+                }
+                lease.release(id);
+                lease.endUse(id);
+                verify(lifecycle, never()).stopAndRemoveStrict(anyString(), any());
+                lease.endUse(id);
+                if (!failStartup) {
+                    verify(lifecycle).stopAndRemoveStrict("owned-container", null);
+                }
+            } finally {
+                finishStartup.countDown();
+            }
+        } finally {
+            lease.stopManagedContainers();
+            server.stop(0);
+        }
     }
 
     // -------------------------------------------------------------- domains

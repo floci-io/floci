@@ -16,7 +16,6 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -118,32 +117,43 @@ public class DockerDsqlBackend implements DsqlBackend {
         }
     }
 
+    @Override
+    public List<String> rolesToDrop(DsqlCluster cluster) {
+        return List.of();
+    }
+
     private String containerName(DsqlCluster cluster) {
         return ContainerStorageHelper.dockerName(config, "dsql-" + cluster.getIdentifier());
     }
 
+    /**
+     * Waits up to 90 seconds, trying every 250 ms, until the container's PostgreSQL lets the
+     * superuser in and answers {@code SELECT 1}. Any failure is tried again, a refused login
+     * included: the container trusts its connections, so nothing about a login is configured
+     * that waiting could not outlast.
+     */
     private static void awaitReady(DsqlDatabases.Backend backend) throws SQLException {
-        Instant deadline = Instant.now().plus(READY_TIMEOUT);
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
-                statement.execute("SELECT 1");
-                return;
-            } catch (SQLException e) {
-                last = e;
-                try {
-                    Thread.sleep(250);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new SQLException("Interrupted while the database started", interrupted);
-                }
+        DsqlDatabases.awaitConnection(() -> answering(DsqlDatabases.superuser(backend)), READY_TIMEOUT,
+                DsqlDatabases.READY_INTERVAL, false, "The database").close();
+    }
+
+    /** {@code connection} once it answers {@code SELECT 1}; closed, and the failure thrown, if not. */
+    private static Connection answering(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("SELECT 1");
+            return connection;
+        } catch (SQLException e) {
+            try {
+                connection.close();
+            } catch (SQLException closing) {
+                e.addSuppressed(closing);
             }
+            throw e;
         }
-        throw new SQLException("The database did not start within " + READY_TIMEOUT.toSeconds() + " s", last);
     }
 
     private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException {
-        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, DsqlEndpoint.ADMIN);
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, DsqlEndpoint.ADMIN, "", "", false);
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }

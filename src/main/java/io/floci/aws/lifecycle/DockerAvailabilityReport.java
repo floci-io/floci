@@ -103,7 +103,7 @@ public class DockerAvailabilityReport {
     /** A service whose container work goes somewhere other than the local daemon. */
     boolean runsWithoutLocalDocker(String service) {
         return switch (service) {
-            case "lambda" -> "kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim());
+            case "lambda" -> !"docker".equalsIgnoreCase(config.services().lambda().executor().trim());
             case "athena" -> isSet(config.services().duck().url());
             case "verifiedpermissions" -> isSet(config.services().verifiedpermissions().cedarUrl());
             default -> false;

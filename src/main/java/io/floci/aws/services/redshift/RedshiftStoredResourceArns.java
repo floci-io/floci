@@ -6,11 +6,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * What IAM asks Redshift of the resources a request names: what a snapshot records as its {@code KmsKeyId}, the key a
- * restore asks KMS to decrypt with as the caller.
+ * restore asks KMS to decrypt with as the caller, and the tags of the resource an ARN names.
  */
 @ApplicationScoped
 public class RedshiftStoredResourceArns implements StoredResourceArns {
@@ -39,5 +40,10 @@ public class RedshiftStoredResourceArns implements StoredResourceArns {
             return Optional.empty();
         }
         return redshift.findSnapshotAt(arn).map(Snapshot::getKmsKeyId).filter(key -> !key.isBlank());
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        return redshift.storedTags(arn);
     }
 }

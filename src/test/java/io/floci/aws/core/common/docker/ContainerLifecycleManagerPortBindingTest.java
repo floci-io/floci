@@ -141,7 +141,7 @@ class ContainerLifecycleManagerPortBindingTest {
         ImageCacheService imageCacheService = mock(ImageCacheService.class);
         when(imageCacheService.ensureImageExists(any())).thenAnswer(invocation -> invocation.getArgument(0));
         ContainerLifecycleManager manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, mock(ContainerDetector.class), config);
+                dockerClient, dockerClient, imageCacheService, mock(ContainerDetector.class), config);
 
         manager.create(spec);
 

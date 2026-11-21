@@ -116,7 +116,15 @@ Floci lazily creates the managed **AWS Control Tower Account Factory Portfolio**
 Account Factory product the first time `ListPortfolios`, `ListAcceptedPortfolioShares`,
 `SearchProducts` or `ProvisionProduct` is called. `SearchProductsAsAdmin` does not trigger
 this, so the Account Factory product is absent from the admin view until one of those
-operations has run.
+operations has run in a Region. Each Region of an account gets a catalog of its own, as
+Floci's Control Tower seeds a landing zone in each; provisioning the Account Factory product in
+a second Region reuses the Organizations account whose `AccountEmail` matches.
+
+Every other resource is Regional too: portfolios, products, TagOptions, service actions,
+constraints, plans and provisioned products are listed and reached only in the Region they
+were created in. `CopyProduct` copies a product of any Region of the request's partition into
+the Region the request is sent to.
+
 `ProvisionProduct` resolves the product named by `ProductId` or `ProductName` and rejects one the catalog does not hold with `ResourceNotFoundException`; a request naming neither is rejected with `InvalidParametersException`. A supplied `ProvisioningArtifactId` or `ProvisioningArtifactName` must belong to that product, and when neither is supplied the product's first artifact is used.
 
 When the resolved product is the Account Factory product, `ProvisionProduct` creates a real Organizations member account through the Organizations service — reusing an existing account when `AccountEmail` already matches one — moves it under the OU named by the `ManagedOrganizationalUnit` provisioning parameter, and persists an `AVAILABLE` provisioned product of type `CONTROL_TOWER_ACCOUNT`. Organizational-unit display labels such as `Infrastructure (ou-...)` are resolved to their underlying OU IDs. Any other product persists an `AVAILABLE` provisioned product of type `CFN_STACK` and never touches Organizations.

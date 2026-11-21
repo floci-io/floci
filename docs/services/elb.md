@@ -145,7 +145,7 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 - EC2 refuses deletion of subnets and VPCs still referenced by load balancers with `DependencyViolation`. These account- and region-scoped dependencies follow persisted load balancer state; changing subnets or deleting the load balancer releases its old references. A CloudFormation update that names other subnets in `Subnets` or `SubnetMappings` moves the load balancer the way `SetSubnets` does, and a rolled-back update moves it back. An independent target group does not prevent subnet or VPC deletion.
 - HTTP listener sockets are preserved when listener actions change and are restarted only when socket-level settings such as port change.
 - Gateway listeners require `Protocol` and `Port` to be omitted on create and modify. Their control-plane response reports `GENEVE` without a port. CloudFormation preserves omitted gateway listener settings on create and update; other load balancer types retain their existing `HTTP` and port 80 defaults.
-- Instance targets are resolved through EC2 instance private addresses so local load balancer traffic can reach containers.
+- Instance targets are resolved through EC2 instance private addresses so local load balancer traffic can reach containers. An instance port that an ECS task on that container instance publishes resolves to the task's container instead, which is how an ECS service in `bridge` or `host` network mode serves an `instance` target group (see [ECS](ecs.md)).
 - Target health starts in `initial` state with reason `Elb.RegistrationInProgress` and is updated by Floci's health checker when monitoring is active.
 - A newly registered Application Load Balancer target (HTTP/HTTPS target group or Lambda target) becomes healthy after its first successful check. Network and Gateway target groups retain `HealthyThresholdCount` for initial admission. The threshold applies to every group when recovering from `unhealthy`.
 - Health checks probe the target group's `HealthCheckPort` when it is a port number, and each target's own port when it is `traffic-port` (the default).
@@ -212,11 +212,13 @@ on the listener socket.
 
 ### Health checks
 
-For non-Lambda targets, the checker sends an HTTP or HTTPS GET to `HealthCheckPath`
-on `HealthCheckPort`, or the target's traffic port when configured as `traffic-port`.
+For non-Lambda targets, the checker probes `HealthCheckPort`, or the target's traffic
+port when configured as `traffic-port`. With `HealthCheckProtocol=TCP` it opens a
+connection and passes once the target accepts it; `HealthCheckPath` and the matcher are
+not used. Otherwise it sends an HTTP or HTTPS GET to `HealthCheckPath`, and
 `HealthCheckProtocol` selects TLS independently of the target's application protocol.
-The response-code matcher and healthy/unhealthy thresholds affect target health.
-`HealthCheckProtocol=TCP` does not perform a TCP-only probe.
+The response-code matcher (HTTP and HTTPS checks) and healthy/unhealthy thresholds
+affect target health.
 Lambda targets are not actively probed. In ELBv2 mock mode, sockets
 and active monitoring are disabled. While a target group has a `healthy` target, the
 proxy routes only to its `healthy` targets, so a newly registered target in `initial`

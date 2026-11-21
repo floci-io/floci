@@ -45,6 +45,12 @@ public final class ResteasyRequests {
         return request != null ? queryParameters(request) : uriInfo.getQueryParameters();
     }
 
+    /** The query string as the client sent it, read without building the absolute request URI. */
+    public static String rawQuery(UriInfo uriInfo) {
+        ResteasyReactiveRequestContext request = CurrentRequestManager.get();
+        return request != null ? request.serverRequest().query() : uriInfo.getRequestUri().getRawQuery();
+    }
+
     private static MultivaluedMap<String, String> queryParameters(ResteasyReactiveRequestContext request) {
         if (request.serverRequest().query() == null) {
             return NO_QUERY;

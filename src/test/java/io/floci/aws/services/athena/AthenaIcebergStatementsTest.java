@@ -109,6 +109,7 @@ class AthenaIcebergStatementsTest {
         assertNull(AthenaIcebergStatements.target("UPDATE other_catalog.lake.events SET a = 1"));
         assertNull(AthenaIcebergStatements.target("SELECT * FROM events"));
         assertNull(AthenaIcebergStatements.target("INSERT INTO"));
+        assertNull(AthenaIcebergStatements.target("INSERT INTO \"events VALUES (1)"));
     }
 
     @Test

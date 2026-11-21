@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudformation.provisioners.ProvisionContext;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.scheduler.SchedulerService;
+import io.floci.aws.services.ses.SesConfigurationSetService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MainSources;
 import org.junit.jupiter.api.Test;
@@ -71,6 +72,14 @@ class CfnProvisionerFixtureTest {
 
         assertTrue(serves(fixture, "AWS::Scheduler::Schedule"));
         assertTrue(serves(fixture, "AWS::Scheduler::ScheduleGroup"));
+    }
+
+    @Test
+    void sesConfigurationSetsWireEventDestinations() {
+        CfnProvisionerFixture.Builder fixture = CfnProvisionerFixture.builder()
+                .sesConfigurationSets(mock(SesConfigurationSetService.class));
+
+        assertTrue(serves(fixture, "AWS::SES::ConfigurationSetEventDestination"));
     }
 
     @Test

@@ -21,6 +21,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -55,6 +56,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestProfile(EmrServerlessCustomImageNightlyIntegrationTest.Profile.class)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+// Bounded waits: two pushes of up to thirty minutes each and five job runs of up to five minutes each, 85 minutes, past
+// the default two; with its setup's 21, the Nightly checks job's timeout counts them.
+@Timeout(value = 85, unit = TimeUnit.MINUTES)
 class EmrServerlessCustomImageNightlyIntegrationTest {
 
     /**
@@ -97,7 +101,9 @@ class EmrServerlessCustomImageNightlyIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    // The base image's pull alone may take its twenty minutes.
     @BeforeEach
+    @Timeout(value = 21, unit = TimeUnit.MINUTES)
     void setUp() throws InterruptedException {
         // Enabled, the check needs Docker: without a daemon it fails rather than pass having run nothing.
         assertTrue(DockerAvailability.isAvailable(), "the nightly check needs a Docker daemon");

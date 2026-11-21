@@ -9,7 +9,7 @@ import java.util.Map;
 public class SnapshotCopyGrant {
     private String snapshotCopyGrantName;
     private String kmsKeyId;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public SnapshotCopyGrant() {}
 

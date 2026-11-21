@@ -211,7 +211,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                 n -> requireLaunchConfiguration(region, n));
         if (ctx.isUpdate()) {
             ReplacementCleanup.endRollbackRetry(r);
-            if (!launchConfigurationRequiresReplacement(props, ctx)
+            if (!ctx.changes(LAUNCH_CONFIGURATION, props).requiresReplacement()
                     && ctx.reusesPriorEntity(name) && prior != null) {
                 return;
             }
@@ -234,19 +234,6 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
         ReplacementCleanup.record(r, ctx, before);
-    }
-
-    private static boolean launchConfigurationRequiresReplacement(JsonNode props, ProvisionContext ctx) {
-        PropertyChanges changes = ctx.changes(LAUNCH_CONFIGURATION, props);
-        if (changes.requiresReplacement()) {
-            return true;
-        }
-        if (ctx.priorProperties() == null) {
-            return false;
-        }
-        // The shared replacement flag currently omits newly added create-only properties.
-        return changes.byName().values().stream()
-                .anyMatch(change -> change.createOnly() && change.kind() == PropertyChanges.Kind.ADDED);
     }
 
     @Override

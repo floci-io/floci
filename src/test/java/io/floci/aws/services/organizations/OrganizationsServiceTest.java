@@ -91,6 +91,29 @@ class OrganizationsServiceTest {
                 service.listTagsForResource(MANAGEMENT_ACCOUNT, status.getAccountId()));
     }
 
+    @Test
+    void renameAccountRenamesAMemberAccountAndTheManagementAccount() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+
+        service.renameAccount(member, "Renamed Member");
+        service.renameAccount(MANAGEMENT_ACCOUNT, "Renamed Management");
+
+        assertEquals("Renamed Member", service.describeAccount(MANAGEMENT_ACCOUNT, member).getName());
+        assertEquals("Renamed Management", service.describeAccount(MANAGEMENT_ACCOUNT, MANAGEMENT_ACCOUNT).getName());
+        assertEquals(Set.of("Renamed Member", "Renamed Management"), Set.copyOf(service.listAccounts(MANAGEMENT_ACCOUNT)
+                .stream().map(OrganizationAccount::getName).toList()));
+        assertEquals("Renamed Member", service.findAccount(member).orElseThrow().getName());
+    }
+
+    @Test
+    void accountInNoOrganizationIsNeitherFoundNorRenamed() {
+        service.renameAccount(OUTSIDER_ACCOUNT, "Outsider");
+
+        assertTrue(service.findAccount(OUTSIDER_ACCOUNT).isEmpty());
+    }
+
     /** The (member account, role name, management account) triples a provisioner received. */
     private static final class RecordedProvisions implements AccountAccessRoleProvisioner {
         final List<String> calls = new ArrayList<>();

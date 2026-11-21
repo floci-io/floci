@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.BindException;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.StandardProtocolFamily;
 import java.net.URI;
 import java.net.UnixDomainSocketAddress;
@@ -23,11 +24,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -77,6 +81,102 @@ class RetryingDockerHttpClientTest {
 
     private static RuntimeException brokenPipe() {
         return new RuntimeException(new IOException("Broken pipe"));
+    }
+
+    /** A monotonic clock the tests advance by hand: an attempt or a backoff takes exactly what it adds. */
+    private final AtomicLong clockNanos = new AtomicLong();
+
+    private RetryingDockerHttpClient onTheTestClock(DockerHttpClient delegate, long backoffMillis,
+                                                    Duration callTimeout, long backoffOversleepMillis) {
+        return new RetryingDockerHttpClient(delegate, 6, backoffMillis, callTimeout, clockNanos::get,
+                millis -> clockNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(millis + backoffOversleepMillis)));
+    }
+
+    private void spend(Duration time) {
+        clockNanos.addAndGet(time.toNanos());
+    }
+
+    // Catches: the call timeout bounding each attempt, so a silent daemon held a replayable call for
+    // six times the setting plus backoff (30 minutes at the default) before it failed.
+    @Test
+    void aDaemonThatNeverAnswersFailsTheCallAtTheCallTimeoutNotAfterEveryAttempt() {
+        Duration callTimeout = Duration.ofSeconds(300);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            spend(callTimeout);
+            throw new RuntimeException(new SocketTimeoutException("Read timed out"));
+        });
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, callTimeout, 0L);
+        Request inspect = Request.builder().method(Request.Method.GET).path("/containers/abc/json").build();
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> client.execute(inspect));
+
+        assertInstanceOf(SocketTimeoutException.class, failure.getCause());
+        assertEquals(1, delegate.calls.get(), "an attempt that times out at the limit leaves no time to retry");
+    }
+
+    @Test
+    void fastTransientFailuresAreStillRetriedWithinTheCallTimeout() {
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt < 3) {
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, Duration.ofSeconds(300), 0L);
+
+        assertSame(ok, client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
+        assertEquals(3, delegate.calls.get());
+    }
+
+    @Test
+    void noRetryStartsWhoseBackoffWouldEndPastTheCallTimeout() {
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 200L, Duration.ofMillis(500), 0L);
+
+        assertThrows(RuntimeException.class,
+                () -> client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
+
+        // Backoffs of 200 then 400 ms: the second would end past 500 ms, so only two attempts run.
+        assertEquals(2, delegate.calls.get());
+        assertEquals(Duration.ofMillis(200).toNanos(), clockNanos.get(), "only the first backoff was slept");
+    }
+
+    // Catches: a backoff that overslept the deadline still starting the next attempt.
+    @Test
+    void aBackoffThatOversleepsTheCallTimeoutStartsNoFurtherAttempt() {
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        // The 200 ms backoff fits the 500 ms limit when it starts, but the wait returns 600 ms later.
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 200L, Duration.ofMillis(500), 400L);
+
+        assertThrows(RuntimeException.class,
+                () -> client.execute(Request.builder().method(Request.Method.GET).path("/_ping").build()));
+
+        assertEquals(1, delegate.calls.get());
+    }
+
+    // Catches: the call timeout cutting the retries of an image pull, which has no response timeout and
+    // may take longer than it to answer before a dropped connection.
+    @Test
+    void aLongLivedStreamKeepsItsRetriesPastTheCallTimeout() {
+        Response ok = mock(Response.class);
+        Duration callTimeout = Duration.ofSeconds(300);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt < 3) {
+                spend(callTimeout.multipliedBy(2));
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = onTheTestClock(delegate, 500L, callTimeout, 0L);
+        Request pull = Request.builder().method(Request.Method.POST).path("/images/create?fromImage=alpine").build();
+
+        assertSame(ok, client.execute(pull));
+        assertEquals(3, delegate.calls.get(), "a pull is retried whatever the call timeout");
     }
 
     @Test
@@ -559,7 +659,7 @@ class RetryingDockerHttpClientTest {
     @Test
     void producerWrapsEachTransportInItsOwnReplayPolicy() {
         DockerHttpClient raw = new FakeTransport(attempt -> null);
-        DockerHttpClient controlPlane = DockerClientProducer.wrapForRole(raw, "control-plane");
+        DockerHttpClient controlPlane = DockerClientProducer.wrapForRole(raw, "control-plane", Duration.ofSeconds(30));
 
         assertSame(RetryingDockerHttpClient.class, controlPlane.getClass(),
                 "the control-plane transport must be wrapped in the retry decorator");
@@ -568,7 +668,7 @@ class RetryingDockerHttpClientTest {
         FakeTransport failing = new FakeTransport(attempt -> {
             throw brokenPipe();
         });
-        DockerHttpClient streaming = DockerClientProducer.wrapForRole(failing, "streaming");
+        DockerHttpClient streaming = DockerClientProducer.wrapForRole(failing, "streaming", Duration.ofSeconds(30));
         Request logs = Request.builder().method(Request.Method.GET).path("/containers/abc/logs?follow=1").build();
 
         assertInstanceOf(RetryingDockerHttpClient.class, streaming,

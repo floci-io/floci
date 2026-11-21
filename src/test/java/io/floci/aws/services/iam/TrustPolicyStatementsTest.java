@@ -55,8 +55,8 @@ class TrustPolicyStatementsTest {
         String document = "{\"Version\":\"2012-10-17\",\"Statement\":[" + String.join(",", statements) + "]}";
         return switch (path) {
             case ASSUME_ROLE -> assumeRole.allows(document, new IamService.CallerArns(USER, USER), ACCOUNT, Map.of());
-            case WEB_IDENTITY -> webIdentity.allows(document, OIDC_PROVIDER, OIDC_PREFIX, Map.of());
-            case SAML -> saml.allows(document, SAML_PROVIDER, Map.of());
+            case WEB_IDENTITY -> webIdentity.allows(document, OIDC_PROVIDER, OIDC_PREFIX, Map.of(), "session");
+            case SAML -> saml.allows(document, SAML_PROVIDER, Map.of(), "session");
         };
     }
 

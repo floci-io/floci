@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.services.ecs.EcsService;
@@ -66,7 +67,7 @@ public class ScheduleInvoker {
     private final RedshiftDataService redshiftDataService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
-    private final String defaultRegion;
+    private final RegionResolver regionResolver;
     private final ServiceRegistry serviceRegistry;
 
     @Inject
@@ -79,6 +80,7 @@ public class ScheduleInvoker {
                            RedshiftDataService redshiftDataService,
                            ObjectMapper objectMapper,
                            EmulatorConfig config,
+                           RegionResolver regionResolver,
                            ServiceRegistry serviceRegistry) {
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -89,7 +91,7 @@ public class ScheduleInvoker {
         this.redshiftDataService = redshiftDataService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
-        this.defaultRegion = config.defaultRegion();
+        this.regionResolver = regionResolver;
         this.serviceRegistry = serviceRegistry;
     }
 
@@ -113,7 +115,7 @@ public class ScheduleInvoker {
             return "{}";
         }
         String arn = target.getArn();
-        String region = regionOf(schedule, defaultRegion);
+        String region = regionResolver.regionOf(schedule.getArn());
         String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
@@ -569,10 +571,5 @@ public class ScheduleInvoker {
 
     private static String extractRegion(String arn, String defaultRegion) {
         return AwsArnUtils.regionOrDefault(arn, defaultRegion);
-    }
-
-    /** The region a schedule lives in, taken from its ARN; {@code defaultRegion} answers for one without. */
-    static String regionOf(Schedule schedule, String defaultRegion) {
-        return AwsArnUtils.regionOrDefault(schedule.getArn(), defaultRegion);
     }
 }

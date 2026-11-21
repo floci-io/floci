@@ -7,6 +7,7 @@ import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -36,10 +37,14 @@ class RdsStorageTypeIntegrationTest {
     }
 
     private static RequestSpecification create(String id, String engine) {
+        return create(id, engine, "20");
+    }
+
+    private static RequestSpecification create(String id, String engine, String storage) {
         return query("CreateDBInstance").formParam("DBInstanceIdentifier", id)
                 .formParam("Engine", engine).formParam("DBInstanceClass", "db.t3.micro")
                 .formParam("MasterUsername", "admin").formParam("MasterUserPassword", "password123")
-                .formParam("AllocatedStorage", "20");
+                .formParam("AllocatedStorage", storage);
     }
 
     private static String type(Response response, String action) {
@@ -74,6 +79,7 @@ class RdsStorageTypeIntegrationTest {
                 assertEquals(200, read.statusCode());
                 assertEquals(storageType, read.xmlPath().getString(path + "StorageType"));
                 assertTrue(read.xmlPath().getList(path + "Iops").isEmpty());
+                assertEquals("0", read.xmlPath().getString(path + "StorageThroughput"));
             }
         } finally {
             delete(createdId);
@@ -91,6 +97,140 @@ class RdsStorageTypeIntegrationTest {
                     () -> assertEquals("gp3", type(created, "CreateDBInstance")),
                     () -> assertEquals("gp3", described.xmlPath().getString(
                             "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance.StorageType")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    private static List<String> described(String id, String field) {
+        return query("DescribeDBInstances").formParam("DBInstanceIdentifier", id).post("/").xmlPath().getList(
+                "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance." + field);
+    }
+
+    @Test
+    void iopsAndStorageThroughputAreStoredAndTheGp3BaselineFillsOmissions() {
+        String gp2 = "storage-iops-gp2";
+        String gp3 = "storage-iops-gp3";
+        String io1 = "storage-iops-io1";
+        try {
+            create(gp2).formParam("StorageType", "gp2").post("/").then().statusCode(200);
+            create(gp3).formParam("StorageType", "gp3").post("/").then().statusCode(200);
+            create(io1, "postgres", "100").formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            assertAll(() -> assertTrue(described(gp2, "Iops").isEmpty()),
+                    () -> assertEquals(List.of("0"), described(gp2, "StorageThroughput")),
+                    () -> assertEquals(List.of("3000"), described(gp3, "Iops")),
+                    () -> assertEquals(List.of("125"), described(gp3, "StorageThroughput")),
+                    () -> assertEquals(List.of("2000"), described(io1, "Iops")),
+                    () -> assertEquals(List.of("0"), described(io1, "StorageThroughput")));
+
+            Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", gp3)
+                    .formParam("Iops", "6000").formParam("StorageThroughput", "250").post("/");
+            assertEquals(200, changed.statusCode(), changed.asString());
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", gp3)
+                    .formParam("BackupRetentionPeriod", "3").post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(List.of("6000"), described(gp3, "Iops")),
+                    () -> assertEquals(List.of("250"), described(gp3, "StorageThroughput")));
+        } finally {
+            delete(gp2);
+            delete(gp3);
+            delete(io1);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"mysql,500,12000,500", "mysql,20,3000,125", "mysql,399,3000,125", "mysql,400,12000,500", "sqlserver-se,500,3000,125"})
+    void gp3BaselineDependsOnEngineAndSize(String engine, String storage, String iops, String throughput) {
+        String id = "storage-baseline-" + engine;
+        try {
+            Response created = query("CreateDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("Engine", engine).formParam("DBInstanceClass", "db.t3.micro")
+                    .formParam("MasterUsername", "admin").formParam("MasterUserPassword", "password123")
+                    .formParam("AllocatedStorage", storage).formParam("StorageType", "gp3").post("/");
+            assertEquals(200, created.statusCode(), created.asString());
+            assertAll(() -> assertEquals(List.of(iops), described(id, "Iops")),
+                    () -> assertEquals(List.of(throughput), described(id, "StorageThroughput")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void iopsAreOmittedOnceTheTypeStopsCarryingThem() {
+        String id = "storage-iops-to-gp2";
+        try {
+            create(id).formParam("StorageType", "gp3").formParam("Iops", "6000")
+                    .formParam("StorageThroughput", "250").post("/").then().statusCode(200);
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp2")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertTrue(described(id, "Iops").isEmpty()),
+                    () -> assertEquals(List.of("0"), described(id, "StorageThroughput")));
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(List.of("3000"), described(id, "Iops")),
+                    () -> assertEquals(List.of("125"), described(id, "StorageThroughput")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void anIopsFigureFromIo1DoesNotSurviveASwitchToGp3() {
+        String id = "storage-io1-to-gp3";
+        try {
+            create(id, "postgres", "100").formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertEquals(List.of("3000"), described(id, "Iops"));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void iopsAndThroughputAreRefusedOnATypeThatDoesNotCarryThem() {
+        String id = "storage-refuse-members";
+        try {
+            create(id, "postgres", "100").formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            Response throughput = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageThroughput", "250").post("/");
+            Response iops = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageType", "gp2").formParam("Iops", "3000").post("/");
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(400, throughput.statusCode(), throughput.asString()),
+                    () -> assertTrue(throughput.asString().contains("InvalidParameterCombination")),
+                    () -> assertEquals(400, iops.statusCode(), iops.asString()),
+                    () -> assertTrue(iops.asString().contains("InvalidParameterCombination")),
+                    () -> assertEquals(List.of("125"), described(id, "StorageThroughput")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void iopsZeroMovesAnIo1InstanceToGp2() {
+        String id = "storage-io1-iops-zero";
+        try {
+            create(id, "postgres", "100").formParam("StorageType", "io1").formParam("Iops", "2000")
+                    .post("/").then().statusCode(200);
+            Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageType", "gp2").formParam("Iops", "0").post("/");
+            assertAll(() -> assertEquals(200, changed.statusCode(), changed.asString()),
+                    () -> assertTrue(described(id, "Iops").isEmpty()),
+                    () -> assertEquals(List.of("gp2"), described(id, "StorageType")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void createWithIopsAndNoTypeDefaultsToIo1() {
+        String id = "storage-iops-default-io1";
+        try {
+            Response created = create(id, "postgres", "100").formParam("Iops", "2000").post("/");
+            assertAll(() -> assertEquals(200, created.statusCode(), created.asString()),
+                    () -> assertEquals(List.of("io1"), described(id, "StorageType")),
+                    () -> assertEquals(List.of("2000"), described(id, "Iops")));
         } finally {
             delete(id);
         }

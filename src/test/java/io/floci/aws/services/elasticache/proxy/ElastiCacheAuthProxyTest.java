@@ -27,16 +27,43 @@ class ElastiCacheAuthProxyTest {
     }
 
     @Test
-    void clusterModeFailsClosedBeforeChangingBackendReplicationCredentials() {
-        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
-        when(validator.hasMembers()).thenReturn(true);
-        when(validator.clusterMode()).thenReturn(true);
-        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("cluster", AuthMode.IAM, "127.0.0.1", 6379,
-                validator, mock(SigV4Validator.class));
-        Socket backend = mock(Socket.class);
+    void aUserSignsInWithIamWhenItsAuthenticationModeIsIam() {
+        ElastiCacheAuthProxy.PasswordValidator members = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        when(members.hasMembers()).thenReturn(true);
+        when(members.memberAuthMode("iam-user")).thenReturn(AuthMode.IAM);
+        when(members.memberAuthMode("app")).thenReturn(AuthMode.PASSWORD);
+        when(members.memberAuthMode("default")).thenReturn(AuthMode.NO_AUTH);
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-users", AuthMode.PASSWORD, "127.0.0.1", 6379,
+                members, mock(SigV4Validator.class));
 
-        assertThrows(IOException.class, () -> proxy.initializeBackend(backend, "subscriber"));
-        verifyNoInteractions(backend);
+        assertTrue(proxy.signsInWithIam("iam-user"));
+        assertFalse(proxy.signsInWithIam("app"));
+        assertFalse(proxy.signsInWithIam(null), "AUTH <password> signs in as the default user");
+        assertFalse(proxy.signsInWithIam("stranger"));
+
+        ElastiCacheAuthProxy.PasswordValidator withoutMembers = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        assertTrue(new ElastiCacheAuthProxy("grp-iam", AuthMode.IAM, "127.0.0.1", 6379, withoutMembers,
+                mock(SigV4Validator.class)).signsInWithIam(null));
+        assertFalse(new ElastiCacheAuthProxy("grp-token", AuthMode.PASSWORD, "127.0.0.1", 6379, withoutMembers,
+                mock(SigV4Validator.class)).signsInWithIam(null));
+    }
+
+    @Test
+    void credentialsAreCheckedAfterSignInWheneverTheCacheHasUsersOrAnAuthToken() {
+        ElastiCacheAuthProxy.PasswordValidator openDefault = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        when(openDefault.hasMembers()).thenReturn(true);
+        when(openDefault.memberAuthMode("default")).thenReturn(AuthMode.NO_AUTH);
+        ElastiCacheAuthProxy usersWithOpenDefault = new ElastiCacheAuthProxy("grp-open-default", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, openDefault, mock(SigV4Validator.class));
+        assertFalse(usersWithOpenDefault.authRequired());
+        assertTrue(usersWithOpenDefault.checksCredentials(),
+                "a session of the open default user can still sign in as another user");
+
+        ElastiCacheAuthProxy.PasswordValidator withoutMembers = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        assertTrue(new ElastiCacheAuthProxy("grp-token", AuthMode.PASSWORD, "127.0.0.1", 6379, withoutMembers,
+                mock(SigV4Validator.class)).checksCredentials());
+        assertFalse(new ElastiCacheAuthProxy("grp-open", AuthMode.NO_AUTH, "127.0.0.1", 6379, withoutMembers,
+                mock(SigV4Validator.class)).checksCredentials(), "a cache without auth answers AUTH itself");
     }
 
     @Test

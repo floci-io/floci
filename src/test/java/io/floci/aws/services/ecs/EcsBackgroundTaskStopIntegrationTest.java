@@ -7,9 +7,9 @@ import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -32,23 +32,15 @@ import static org.mockito.Mockito.when;
  * request context, and account-aware storage reads the account from that context. Only a running
  * Arc container has one, so this runs in Quarkus, in Docker mode over a container manager that
  * stops nothing for real: a stop that landed in the wrong account would leave the task's own
- * cluster still counting it.
+ * cluster still counting it. {@link CloudFormationSettingsProfile} turns Docker mode on, with no
+ * sweep of a previous run's containers, which the mock would refuse.
  */
 @QuarkusTest
-@TestProfile(EcsBackgroundTaskStopIntegrationTest.DockerModeProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EcsBackgroundTaskStopIntegrationTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "111122223333";
-
-    /** Docker mode, with no sweep of a previous run's containers, which the mock would refuse. */
-    public static final class DockerModeProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.mock", "false",
-                    "floci.services.ecs.reconcile-containers-on-startup", "false");
-        }
-    }
 
     @Inject
     EcsService ecsService;

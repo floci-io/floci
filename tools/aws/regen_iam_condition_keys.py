@@ -17,6 +17,11 @@ file does not list. --verify compares every pair and key type with the live refe
 fails on any difference, added pairs included: a key missing from the context stops a
 conditioned Allow matching and a conditioned Deny applying. --source reads a saved reference.
 
+A key the reference publishes on a resource type rather than on the action is the stored resource's
+value, and MEASURED names the member of that type's record it is read from, which neither botocore nor
+the reference says; its pairs go in fromResource with the type, that member and the type's ARN format,
+and the reader asks the type's service for what the record holds there.
+
 Resource tag keys use the same fromTarget route as permissions boundaries for existing roles
 and users. Unsupported targets and exceptions are recorded in notRead with a reason. requestTags
 lists the request tag keys of actions marked IsTaggingOnly in the reference, with their list
@@ -63,13 +68,40 @@ TARGET_MEMBERS = ("RoleName", "UserName")
 # Keys whose value, on an action without the member, does not come from the request.
 NOT_IN_REQUEST = {
     "iam:AccountPropertyNamespaces": "the value is the namespaces of the properties read or written",
-    "iam:DelegationRequestOwner": "the value is the delegation request's owner",
     "iam:FIDO-FIPS-140-2-certification": "the value comes from the FIDO Alliance Metadata Service",
     "iam:FIDO-FIPS-140-3-certification": "the value comes from the FIDO Alliance Metadata Service",
     "iam:FIDO-certification": "the value comes from the FIDO Alliance Metadata Service",
     "iam:RegisterSecurityKey": "the value is the MFA device's registration state",
     "iam:RoleTemplateARN": "the value is the role template a service acquires the role from",
     "iam:ServiceSpecificCredentialServiceName": "the value is the named credential's service",
+}
+
+# MEASURED: the member of a resource's record a key's value is read from, where neither botocore nor the
+# Service Reference says it.
+#
+# This is the only place in this generator that states where a value comes from rather than deriving it, and it
+# is closed to everything but AWS's own word. An entry is admitted only when ALL of these hold:
+#
+#   1. From AWS. Its evidence is AWS itself: a policy probe run against real AWS published with its cases and
+#      results in a Floci pull request, an AWS response recorded verbatim, or AWS's documentation saying it in
+#      so many words, the sentence quoted. An analogy with another key, the request's shape and what a Floci
+#      handler does are NOT evidence.
+#   2. Absent from the metadata. The reference publishes the key on a resource type rather than on the action,
+#      so no action list names it, and botocore names no request member after it.
+#   3. Named by botocore. The type's record holds the member, as a string, so the value the reader asks for is
+#      one botocore says the record carries.
+#   4. Linked. The evidence carries an https link to itself.
+#
+# The generator refuses an entry that breaks 3 or 4, and the reference decides 2; review enforces 1.
+MEASURED: dict[str, tuple[str, str]] = {
+    "iam:DelegationRequestOwner": (
+        "OwnerId",
+        'AWS\'s IAM User Guide says the key "Filters access based on the AWS identity or principal that owns '
+        'the delegation request", and that "The owner of a delegation request is the AWS identity or principal '
+        'in the customer account that initiated or received the delegation request", which is what botocore\'s '
+        "record of the type holds in OwnerId; the Service Reference publishes the key on the delegation-request "
+        "type without saying which member carries it "
+        "(https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html)"),
 }
 
 
@@ -107,10 +139,50 @@ def member_type(model, operation, path):
         shape = model["shapes"][member["shape"]]
     return shape["type"]
 
-def classify(pairs, types, model, resource_types=None):
-    """The read, fromTarget and notRead entries for the reference's pairs."""
+def measured_resources(reference):
+    """For each pair a resource type carries a MEASURED key on, that type and its ARN format."""
+    resources = {r["Name"]: (set(r.get("ConditionKeys") or []), (r.get("ARNFormats") or [None])[0])
+                 for r in reference["Resources"]}
+    found = {}
+    for action in reference["Actions"]:
+        listed = set(action.get("ActionConditionKeys") or [])
+        for named in action.get("Resources", []):
+            keys, arn = resources.get(named["Name"], (set(), None))
+            for key in set(named.get("ConditionKeys", keys)) & set(MEASURED) - listed:
+                found[("iam:" + action["Name"], key)] = (named["Name"], arn)
+    return dict(sorted(found.items()))
+
+def record_shape(model, resource_type):
+    """The botocore shape holding a resource type's record, named after the type (delegation-request
+    is DelegationRequest), or None when the model has none."""
+    name = "".join(part[:1].upper() + part[1:] for part in resource_type.split("-"))
+    return model["shapes"].get(name)
+
+def require_measured_admitted(model, measured):
+    """A MEASURED entry is refused unless botocore names its member on the type's record as a string and
+    its evidence links to itself."""
+    for (action, key), (resource_type, arn) in sorted(measured.items()):
+        member, evidence = MEASURED[key]
+        if "https://" not in evidence:
+            raise ValueError(f"MEASURED gives {key} with no link to the evidence of AWS it rests on")
+        if arn is None:
+            raise ValueError(f"MEASURED gives {key} on {resource_type}, which has no ARN format")
+        record = record_shape(model, resource_type)
+        if record is None:
+            raise ValueError(f"MEASURED gives {key} on {resource_type}, whose record botocore does not hold")
+        held = record.get("members", {}).get(member)
+        if held is None:
+            raise ValueError(f"MEASURED reads {key} from {member}, which botocore's {resource_type} record "
+                             f"does not hold")
+        if model["shapes"][held["shape"]]["type"] != "string":
+            raise ValueError(f"MEASURED reads {key} from {member}, which is not a string member")
+        del action
+
+def classify(pairs, types, model, resource_types=None, measured=None):
+    """The read, fromTarget, fromResource and notRead entries for the reference's pairs."""
     resource_types = resource_types or {}
-    read, from_target, not_read = [], [], []
+    measured = measured or {}
+    read, from_target, from_resource, not_read = [], [], [], []
     for action, key in sorted(pairs):
         operation = model["operations"].get(action.split(":", 1)[1])
         if (action, key) in BY_HAND:
@@ -147,6 +219,11 @@ def classify(pairs, types, model, resource_types=None):
             if key not in RESOURCE_TAG_KEYS:
                 raise ValueError(f"{action}: no member names the role or user {key} is read from")
             reason = "no member names a stored role or user whose resource tags can be read"
+        elif member is None and (action, key) in measured:
+            resource_type, arn = measured[(action, key)]
+            from_resource.append({"action": action, "key": key, "type": resource_type,
+                                  "member": MEASURED[key][0], "arn": arn})
+            continue
         elif member is None:
             reason = NOT_IN_REQUEST.get(key, "no member named after the key")
         elif not set(types.get(key, [])) <= READ_TYPES:
@@ -160,7 +237,8 @@ def classify(pairs, types, model, resource_types=None):
     for entry in from_target + not_read:
         if entry["key"] in RESOURCE_TAG_KEYS:
             entry["resources"] = resource_types.get((entry["action"], entry["key"]), [])
-    return read, from_target, not_read
+    require_measured_admitted(model, measured)
+    return read, from_target, from_resource, not_read
 
 def require_by_hand_listed(pairs):
     stale = sorted(set(BY_HAND) - set(pairs))
@@ -208,14 +286,15 @@ def validate_request_tags(entries, model):
 
 def pairs_of(document):
     return sorted((e["action"], e["key"])
-                  for e in document["read"] + document["fromTarget"] + document["notRead"])
+                  for e in document["read"] + document["fromTarget"] + document["fromResource"]
+                  + document["notRead"])
 
 def render(document):
     """The document with one entry to a line."""
     lines = ["{"]
     for key in ("source", "botocore", "types"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
-    for section, tail in (("read", ","), ("fromTarget", ","), ("notRead", ","),
+    for section, tail in (("read", ","), ("fromTarget", ","), ("fromResource", ","), ("notRead", ","),
                           ("requestTags", "")):
         entries = document[section]
         lines.append(f'  "{section}": [')
@@ -240,8 +319,9 @@ def main(argv=None):
         model = load_model(latest_model_dir(resolve_botocore_data(args.botocore_data)[0], "iam"))
         resource_types = {(e["action"], e["key"]): e["resources"]
                           for e in document["fromTarget"] + document["notRead"] if e["key"] in RESOURCE_TAG_KEYS}
-        if classify(pairs, document["types"], model, resource_types) != (
-                document["read"], document["fromTarget"], document["notRead"]):
+        measured = {(e["action"], e["key"]): (e["type"], e["arn"]) for e in document["fromResource"]}
+        if classify(pairs, document["types"], model, resource_types, measured) != (
+                document["read"], document["fromTarget"], document["fromResource"], document["notRead"]):
             raise ValueError("IAM condition key members differ from pinned botocore")
         validate_request_tags(document["requestTags"], model)
         return 0
@@ -265,8 +345,8 @@ def main(argv=None):
         if set(pairs) != vendored or document["types"] != types:
             raise ValueError("IAM condition keys differ from AWS Service Reference")
         model = load_model(latest_model_dir(resolve_botocore_data(args.botocore_data)[0], "iam"))
-        if classify(pairs, types, model, resource_tag_types(reference)) != (
-                document["read"], document["fromTarget"], document["notRead"]):
+        if classify(pairs, types, model, resource_tag_types(reference), measured_resources(reference)) != (
+                document["read"], document["fromTarget"], document["fromResource"], document["notRead"]):
             raise ValueError("IAM condition key targets differ from AWS Service Reference")
         if request_tag_context(reference, model) != document["requestTags"]:
             raise ValueError("IAM tag condition keys differ from AWS Service Reference")
@@ -274,11 +354,12 @@ def main(argv=None):
     require_by_hand_listed(pairs)
     data, provenance = resolve_botocore_data(args.botocore_data)
     model = load_model(latest_model_dir(data, "iam"))
-    read, from_target, not_read = classify(pairs, types, model, resource_tag_types(reference))
+    read, from_target, from_resource, not_read = classify(
+        pairs, types, model, resource_tag_types(reference), measured_resources(reference))
     request_tags = request_tag_context(reference, model)
     OUTPUT.write_text(render({"source": URL, "botocore": provenance, "types": types,
-                              "read": read, "fromTarget": from_target, "notRead": not_read,
-                              "requestTags": request_tags}))
+                              "read": read, "fromTarget": from_target, "fromResource": from_resource,
+                              "notRead": not_read, "requestTags": request_tags}))
     return 0
 
 

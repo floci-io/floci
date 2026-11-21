@@ -1,12 +1,12 @@
 package io.floci.aws.services.route53resolver;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.Route53ResolverRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -27,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 @QuarkusTest
 class Route53ResolverCustomResourcesConsumerTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/route53resolver/aws4_request";
     /** Same access key (so the same account) in a second region, for region-scoping tests. */
@@ -44,13 +43,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     private static Response callAs(String authHeader, String action, String body) {
-        return given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", authHeader)
-                .body(body)
-            .when()
-                .post("/");
+        return Route53ResolverRequests.call(action, body, authHeader).extract().response();
     }
 
     // ---------- CreateFirewallDomainList / DeleteFirewallDomainList ----------

@@ -2,9 +2,9 @@ package io.floci.aws.services.lambda;
 
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
@@ -22,7 +21,7 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 @QuarkusTest
-@TestProfile(LambdaExecutionRoleDockerIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 class LambdaExecutionRoleDockerIntegrationTest {
 
     private static final String BASE_PATH = "/2015-03-31";
@@ -150,18 +149,6 @@ class LambdaExecutionRoleDockerIntegrationTest {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.lambda.ephemeral", "true",
-                    "quarkus.http.test-port", "4587",
-                    "floci.port", "4587",
-                    "floci.base-url", "http://localhost:4587");
         }
     }
 }

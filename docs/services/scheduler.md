@@ -45,9 +45,11 @@ window are skipped. The dispatcher ticks every
 
 Rate schedules use the same dispatcher whether created or updated directly or
 through Step Functions. A changed future `StartDate` takes effect before the
-first dispatch. The dispatcher keeps its last-fire state in memory; past dates,
-restart, post-dispatch updates and re-enable timing have not been verified
-against live AWS. Fixed-anchor recurrence is not implemented.
+first dispatch. When a schedule last fired is stored with it, so with persistence
+on a restart neither fires a one-time schedule again nor fires an immediate
+catch-up for a rate or cron schedule; a one-time schedule updated to a later time
+fires again at that time. Past dates, post-dispatch updates and re-enable timing
+have not been verified against live AWS. Fixed-anchor recurrence is not implemented.
 
 Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
 `PutEvents`, and unqualified Step Functions state machine ARNs. Templated

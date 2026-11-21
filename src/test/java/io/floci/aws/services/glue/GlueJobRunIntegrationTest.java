@@ -1,23 +1,30 @@
 package io.floci.aws.services.glue;
 
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.testing.GlueRequests;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class GlueJobRunIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String ROLE = "arn:aws:iam::000000000000:role/my-role";
+    private static final String ACCOUNT_ID = "000000000000";
+    private static final String REGION = "us-east-1";
+    private static final String ROLE = "arn:aws:iam::" + ACCOUNT_ID + ":role/my-role";
+
+    @Inject
+    EmulatorConfig config;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -25,11 +32,7 @@ class GlueJobRunIntegrationTest {
     }
 
     private static ValidatableResponse call(String action, String body) {
-        return given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue." + action)
-                .body(body)
-        .when().post("/")
-        .then();
+        return GlueRequests.call(action, ACCOUNT_ID, REGION, body);
     }
 
     @Test
@@ -58,5 +61,11 @@ class GlueJobRunIntegrationTest {
         call("GetJobRuns", "{ \"JobName\": \"" + jobName + "\" }")
                 .statusCode(400)
                 .body("__type", equalTo("EntityNotFoundException"));
+    }
+
+    @Test
+    void scriptsAreNotRunUnlessTheRunnerModeIsDocker() {
+        assertEquals("immediate", config.services().glue().runnerMode());
+        assertEquals("public.ecr.aws/glue/aws-glue-libs:5", config.services().glue().image());
     }
 }

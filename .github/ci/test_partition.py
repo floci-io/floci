@@ -1,5 +1,6 @@
 """Run with python3 -m unittest discover -s .github/ci -p 'test_partition.py'."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,8 +22,10 @@ class PartitionTest(unittest.TestCase):
         path.write_text(annotation + '\nclass Fixture {}\n')
 
     def invoke(self, total, index):
+        # One slow class, as SLOW_CLASSES weighed the EMR runner before it moved to the nightly checks.
+        env = dict(os.environ, PARTITION_SLOW_CLASSES='{"SlowDockerIntegrationTest": 650}')
         return subprocess.run([sys.executable, str(PATH), str(self.classes), str(total), str(index)],
-                              cwd=self.root, capture_output=True, text=True)
+                              cwd=self.root, capture_output=True, text=True, env=env)
 
     def shards(self, classes, total):
         self.classes.write_text('\n'.join(classes) + '\n')
@@ -92,46 +95,43 @@ class PartitionTest(unittest.TestCase):
                          self.shards(['third/C', 'second/B', 'first/A'], 2))
 
     def test_a_slow_class_in_a_profile_keeps_other_classes_off_its_shard(self):
-        self.source('p/EmrDockerRunnerDockerIntegrationTest', '@TestProfile(Docker.class)')
+        self.source('p/SlowDockerIntegrationTest', '@TestProfile(Docker.class)')
         plain = ['p/C%03d' % n for n in range(40)]
-        shards = self.shards(['p/EmrDockerRunnerDockerIntegrationTest'] + plain, 2)
-        self.assertEqual([['p/EmrDockerRunnerDockerIntegrationTest'], plain], shards)
+        shards = self.shards(['p/SlowDockerIntegrationTest'] + plain, 2)
+        self.assertEqual([['p/SlowDockerIntegrationTest'], plain], shards)
 
     def test_a_group_holding_a_slow_class_is_placed_before_a_larger_group(self):
-        self.source('p/EmrHiveStepsDockerIntegrationTest', '@TestProfile(Docker.class)')
+        self.source('p/SlowDockerIntegrationTest', '@TestProfile(Docker.class)')
         for name in ('p/A', 'p/B', 'p/C', 'p/D'):
             self.source(name, '@TestProfile(Zeta.class)')
-        shards = self.shards(['p/A', 'p/B', 'p/C', 'p/D', 'p/EmrHiveStepsDockerIntegrationTest'], 2)
-        self.assertEqual(['p/EmrHiveStepsDockerIntegrationTest'], shards[0])
+        shards = self.shards(['p/A', 'p/B', 'p/C', 'p/D', 'p/SlowDockerIntegrationTest'], 2)
+        self.assertEqual(['p/SlowDockerIntegrationTest'], shards[0])
 
     def test_a_slow_class_without_a_profile_is_placed_before_the_others(self):
         plain = ['p/A', 'p/B', 'p/C']
-        shards = self.shards(plain + ['p/EmrDockerRunnerDockerIntegrationTest'], 2)
-        self.assertEqual([['p/EmrDockerRunnerDockerIntegrationTest'], plain], shards)
+        shards = self.shards(plain + ['p/SlowDockerIntegrationTest'], 2)
+        self.assertEqual([['p/SlowDockerIntegrationTest'], plain], shards)
 
     def test_a_slow_class_is_known_by_its_name_whatever_its_package(self):
         plain = ['some/other/C%03d' % n for n in range(40)]
-        shards = self.shards(['some/where/EmrHiveStepsDockerIntegrationTest'] + plain, 2)
-        self.assertEqual(['some/where/EmrHiveStepsDockerIntegrationTest'], shards[0])
+        shards = self.shards(['some/where/SlowDockerIntegrationTest'] + plain, 2)
+        self.assertEqual(['some/where/SlowDockerIntegrationTest'], shards[0])
 
-    def test_two_slow_classes_of_one_profile_are_separate_from_each_other_and_ordinary_members(self):
-        self.source('p/EmrDockerRunnerDockerIntegrationTest', '@TestProfile(Docker.class)')
-        self.source('p/EmrHiveStepsDockerIntegrationTest', '@TestProfile(Docker.class)')
+    def test_a_slow_class_is_separate_from_ordinary_members_of_its_profile(self):
+        self.source('p/SlowDockerIntegrationTest', '@TestProfile(Docker.class)')
         self.source('p/A', '@TestProfile(Docker.class)')
         self.source('p/B', '@TestProfile(Docker.class)')
-        classes = ['p/EmrDockerRunnerDockerIntegrationTest', 'p/EmrHiveStepsDockerIntegrationTest', 'p/A', 'p/B']
-        shards = self.shards(classes, 3)
-        self.assertEqual([['p/EmrDockerRunnerDockerIntegrationTest'],
-                          ['p/EmrHiveStepsDockerIntegrationTest'], ['p/A', 'p/B']], shards)
+        classes = ['p/SlowDockerIntegrationTest', 'p/A', 'p/B']
+        self.assertEqual([['p/SlowDockerIntegrationTest'], ['p/A', 'p/B']],
+                         self.shards(classes, 2))
 
     def test_a_slow_class_that_no_longer_exists_is_named_and_changes_nothing(self):
-        self.classes.write_text('p/A\np/EmrHiveStepsDockerIntegrationTest\n')
+        self.classes.write_text('p/A\np/B\n')
         result = self.invoke(2, 1)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual('p/EmrHiveStepsDockerIntegrationTest\n', result.stdout)
+        self.assertEqual('p/A\n', result.stdout)
         self.assertIn('::warning title=partition.sh::stale SLOW_CLASSES key: no test class named '
-                      'EmrDockerRunnerDockerIntegrationTest', result.stderr)
-        self.assertNotIn('EmrHiveStepsDockerIntegrationTest', result.stderr)
+                      'SlowDockerIntegrationTest', result.stderr)
 
     def test_invalid_shard_arguments_fail_without_emitting_assignments(self):
         self.classes.write_text('p/A\np/B\n')

@@ -2,6 +2,7 @@ AWS::ApiGateway::ApiKey	StageKeys	accepted and ignored, as the ApiGatewayApiKeyC
 AWS::ApiGateway::Authorizer	AuthType	accepted and ignored
 AWS::ApiGateway::Authorizer	AuthorizerCredentials	accepted and ignored
 AWS::ApiGateway::Authorizer	IdentityValidationExpression	accepted and ignored
+AWS::ApiGateway::Authorizer	JwtConfiguration	accepted and ignored
 AWS::ApiGateway::Deployment	DeploymentCanarySettings	accepted and ignored
 AWS::ApiGateway::DomainName	EndpointAccessMode	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
 AWS::ApiGateway::DomainName	MutualTlsAuthentication	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
@@ -50,7 +51,6 @@ AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
 AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
 AWS::ApiGatewayV2::Integration	Description	accepted and ignored
 AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
-AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
 AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored
 AWS::ApiGatewayV2::Route	ApiKeyRequired	accepted and ignored
 AWS::ApiGatewayV2::Route	ModelSelectionExpression	accepted and ignored
@@ -121,10 +121,11 @@ AWS::BedrockAgentCore::Memory	NamespaceKeys	accepted and not stored, a warning i
 AWS::BedrockAgentCore::Memory	StreamDeliveryResources	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	CapacityProviderConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	FilesystemConfigurations	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	HooksConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	LifecycleConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	PlatformVersion	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	RequestHeaderConfiguration	accepted and not stored, a warning is logged
-AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	ResourceConfigurations	accepted and not stored, a warning is logged
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
 AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
@@ -144,10 +145,8 @@ AWS::CloudTrail::Trail	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationCriteria	accepted and ignored
-AWS::CloudWatch::Alarm	EvaluationInterval	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationWindow	accepted and ignored
 AWS::CloudWatch::Alarm	ExtendedStatistic	accepted and ignored
-AWS::CloudWatch::Alarm	Metrics	accepted and ignored
 AWS::CloudWatch::Alarm	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ThresholdMetricId	accepted and ignored
 AWS::CloudWatch::Alarm	WarmUpConfiguration	accepted and ignored
@@ -156,6 +155,7 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
+AWS::DSQL::Cluster	MetricGroups	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -164,7 +164,6 @@ AWS::DynamoDB::GlobalTable	ReadProvisionedThroughputSettings	accepted and ignore
 AWS::DynamoDB::GlobalTable	SSESpecification	accepted and ignored
 AWS::DynamoDB::GlobalTable	TableType	accepted and ignored
 AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
-AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
@@ -172,12 +171,10 @@ AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
-AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored
 AWS::DynamoDB::Table	ResourcePolicy	accepted and ignored
 AWS::DynamoDB::Table	SSESpecification	accepted and ignored
 AWS::DynamoDB::Table	TableClass	accepted and ignored
 AWS::DynamoDB::Table	VectorIndexes	accepted and ignored
-AWS::DynamoDB::Table	WarmThroughput	accepted and ignored
 AWS::EC2::EIP	Address	accepted and ignored
 AWS::EC2::EIP	Domain	accepted and ignored
 AWS::EC2::EIP	InstanceId	accepted and ignored
@@ -289,26 +286,20 @@ AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
-AWS::EKS::Cluster	AccessConfig	accepted and ignored
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
 AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
-AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
-AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
-AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
 AWS::EKS::Cluster	StorageConfig	accepted and ignored
-AWS::EKS::Cluster	Tags	accepted and ignored
 AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
@@ -322,7 +313,6 @@ AWS::EKS::Nodegroup	NodeRepairConfig	accepted and ignored
 AWS::EKS::Nodegroup	ReleaseVersion	accepted and ignored
 AWS::EKS::Nodegroup	RemoteAccess	accepted and ignored
 AWS::EKS::Nodegroup	ScalingConfig	accepted and ignored
-AWS::EKS::Nodegroup	Tags	accepted and ignored
 AWS::EKS::Nodegroup	Taints	accepted and ignored
 AWS::EKS::Nodegroup	UpdateConfig	accepted and ignored
 AWS::EKS::Nodegroup	Version	accepted and ignored
@@ -370,19 +360,12 @@ AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supp
 AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
 AWS::IAM::ManagedPolicy	Description	accepted and ignored
-AWS::IAM::ManagedPolicy	Groups	accepted and ignored
 AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
-AWS::IAM::ManagedPolicy	Users	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
-AWS::KMS::Key	EnableKeyRotation	accepted and ignored
-AWS::KMS::Key	Enabled	accepted and ignored
-AWS::KMS::Key	KeyPolicy	accepted and ignored
-AWS::KMS::Key	MultiRegion	accepted and ignored
-AWS::KMS::Key	Origin	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored
 AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
 AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored
@@ -462,7 +445,6 @@ AWS::RDS::DBCluster	DBClusterInstanceClass	accepted and ignored
 AWS::RDS::DBCluster	DBInstanceParameterGroupName	accepted and ignored
 AWS::RDS::DBCluster	DatabaseInsightsMode	accepted and ignored
 AWS::RDS::DBCluster	DeleteAutomatedBackups	accepted and ignored
-AWS::RDS::DBCluster	DeletionProtection	accepted and ignored
 AWS::RDS::DBCluster	Domain	accepted and ignored
 AWS::RDS::DBCluster	DomainIAMRoleName	accepted and ignored
 AWS::RDS::DBCluster	EnableCloudwatchLogsExports	accepted and ignored
@@ -481,13 +463,10 @@ AWS::RDS::DBCluster	PerformanceInsightsEnabled	accepted and ignored
 AWS::RDS::DBCluster	PerformanceInsightsKmsKeyId	accepted and ignored
 AWS::RDS::DBCluster	PerformanceInsightsRetentionPeriod	accepted and ignored
 AWS::RDS::DBCluster	Port	accepted and ignored
-AWS::RDS::DBCluster	PreferredBackupWindow	accepted and ignored
-AWS::RDS::DBCluster	PreferredMaintenanceWindow	accepted and ignored
 AWS::RDS::DBCluster	ReplicationSourceIdentifier	accepted and ignored
 AWS::RDS::DBCluster	ScalingConfiguration	accepted and ignored
 AWS::RDS::DBCluster	StorageType	accepted and ignored
 AWS::RDS::DBCluster	Tags	accepted and ignored
-AWS::RDS::DBCluster	VpcSecurityGroupIds	accepted and ignored
 AWS::RDS::DBCluster	WithExpressConfiguration	accepted and ignored
 AWS::RDS::DBClusterParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBClusterParameterGroup	Tags	accepted and ignored
@@ -613,6 +592,7 @@ AWS::RedshiftServerless::Workgroup	SnapshotOwnerAccount	documented as ignored (d
 AWS::RedshiftServerless::Workgroup	Workgroup	accepted and ignored
 AWS::Route53::HostedZone	HostedZoneFeatures	accepted and ignored
 AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
+AWS::Route53::RecordSet	AZAffinity	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
 AWS::Route53::RecordSet	Comment	accepted and ignored
 AWS::Route53::RecordSet	GeoLocation	accepted and ignored
@@ -644,7 +624,6 @@ AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
-AWS::SNS::Topic	DisplayName	accepted and ignored
 AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored

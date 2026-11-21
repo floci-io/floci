@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -36,7 +37,7 @@ import static org.mockito.Mockito.when;
  * mock mode off so that a launch reaches the container manager, mocked here as there.
  */
 @QuarkusTest
-@TestProfile(Ec2CapturedImageReclaimIntegrationTest.ContainerBackedEc2.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class Ec2CreateKeyPairLaunchIntegrationTest {
 
     @Inject

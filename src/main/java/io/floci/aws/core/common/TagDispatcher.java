@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -83,7 +84,9 @@ public class TagDispatcher {
         String region = regionResolver.resolveRegion(headers);
         String effectiveBody = (body == null || body.isBlank()) ? "{}" : body;
         try {
-            JsonNode node = objectMapper.readTree(effectiveBody);
+            JsonNode node = handler.strictTagValidation()
+                    ? objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(effectiveBody)
+                    : objectMapper.readTree(effectiveBody);
             Map<String, String> tags = parseTags(handler, node);
             handler.tagResource(region, arn, tags);
             return successResponse;

@@ -37,7 +37,8 @@
 # every operation, is generated from botocore's emr-containers model by
 # tools/aws/regen_emr_containers_shapes.py.
 # src/main/resources/aws/account-request-shapes.json, the Account Management request constraints of the
-# contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
+# contact and account information operations, is generated from botocore's Account model by
+# tools/aws/regen_account_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
@@ -317,6 +318,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_eks_shapes.py
 	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
+	$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
 	$(PYTHON) tools/aws/regen_iam_paginators.py
@@ -498,6 +500,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_rpcv2_cbor_shapes.py --check || { \
+		echo "error: RPC v2 CBOR wire shapes are stale; run make aws-data-sync-botocore."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_query_services.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/query-services.json is out of date."; \
@@ -583,6 +589,7 @@ iam-action-resources-verify: ## CI gate (online): every vendored IAM action reso
 # module that generator imports. Given CHANGED, the paths a pull request changes, iam-data-verify
 # runs only the checks covering one of them, so a pull request is not failed by drift in a file it
 # leaves alone; without it, as on the weekly run, it runs every check.
+# CHANGED_FILE carries the same paths without putting a large diff in argv or the environment.
 IAM_PASSED_ROLES_GENERATOR := tools/aws/regen_iam_passed_roles.py tools/aws/regen_iam_authorized_actions.py \
 	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
@@ -615,16 +622,19 @@ DOCUMENTED_ROUTES_PATHS := src/main/resources/aws/rest-routes.json tools/aws/reg
 	tools/aws/test_regen_rest_routes.py tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
-	tools/aws/test_regen_iam_request_resources.py
+	tools/aws/test_regen_iam_request_resources.py tools/aws/sources/athena-glue-ddl-permissions.json \
+	tools/aws/fetch_athena_glue_ddl_permissions.py tools/aws/test_fetch_athena_glue_ddl_permissions.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
 	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; requestkeys=0; routes=0; \
+	changed="$(strip $(CHANGED))"; \
+	if [ -n "$(CHANGED_FILE)" ]; then changed=$$(cat "$(CHANGED_FILE)") || exit 1; fi; \
 	covers() { \
-		[ -z "$(strip $(CHANGED))" ] && return 0; \
-		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
+		[ -z "$$changed" ] && return 0; \
+		for path in $$changed; do case " $$1 " in *" $$path "*) return 0;; esac; done; \
 		echo "not checked, as the change touches none of its files: $$2"; \
 		return 1; \
 	}; \
@@ -928,7 +938,7 @@ s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition actio
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
 
 .PHONY: request-condition-keys-sync request-condition-keys-check request-condition-keys-verify
-request-condition-keys-sync: ## Regenerate the Lambda Web, Redshift and Route 53 request condition keys from AWS and botocore
+request-condition-keys-sync: ## Regenerate the Lambda Web, Redshift, Route 53 and STS request condition keys from AWS and botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py
 request-condition-keys-check: ## Check the request condition key members against pinned botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py --check

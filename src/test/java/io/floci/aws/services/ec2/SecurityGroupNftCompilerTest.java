@@ -89,6 +89,20 @@ class SecurityGroupNftCompilerTest {
         assertFalse(nft.contains("daddr 172.18.0.2 accept"), "only DNS is allowed to the resolver");
     }
 
+    @Test
+    void theEcsTaskMetadataEndpointStaysReachableOnItsOneListenerOnly() {
+        SecurityGroup group = new SecurityGroup();
+        group.setVpcId("vpc-1");
+        group.setOwnerId("000000000000");
+
+        String nft = SecurityGroupNftCompiler.compile(endpoint("eni-a", "10.0.0.2", "172.17.0.2", group),
+                List.of(), Map.of(), List.of());
+
+        assertTrue(nft.contains("add rule inet floci_sg egress ip daddr 169.254.170.2 tcp dport 80 accept\n"), nft);
+        assertFalse(nft.contains("daddr 169.254.170.2 accept"), "only the endpoint's listener is allowed");
+        assertFalse(nft.contains("saddr 169.254.170.2"), "replies ride the established rule; nothing opens ingress");
+    }
+
     /** A group allowing tcp/443 from {@code cidrIpv6} only. */
     private static SecurityGroup ipv6Group(String cidrIpv6) {
         SecurityGroup group = new SecurityGroup();

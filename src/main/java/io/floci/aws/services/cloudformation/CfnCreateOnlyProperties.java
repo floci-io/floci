@@ -8,6 +8,7 @@ import org.jboss.logging.Logger;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,21 +20,24 @@ public final class CfnCreateOnlyProperties {
 
     private static final Logger LOG = Logger.getLogger(CfnCreateOnlyProperties.class);
     private static final String RESOURCE_NAME = "cloudformation/create-only-properties.json";
-    private static final Map<String, Set<String>> PROPERTIES = load();
+    private static final String CONDITIONAL_RESOURCE_NAME =
+            "cloudformation/conditional-create-only-properties.json";
+    private static final Map<String, Set<String>> PROPERTIES = load(RESOURCE_NAME);
+    private static final Map<String, Set<String>> CONDITIONAL_PROPERTIES = load(CONDITIONAL_RESOURCE_NAME);
 
     private CfnCreateOnlyProperties() {
     }
 
-    private static Map<String, Set<String>> load() {
-        try (InputStream in = CfnCreateOnlyProperties.class.getClassLoader().getResourceAsStream(RESOURCE_NAME)) {
+    private static Map<String, Set<String>> load(String resourceName) {
+        try (InputStream in = CfnCreateOnlyProperties.class.getClassLoader().getResourceAsStream(resourceName)) {
             if (in == null) {
-                LOG.warnv("Resource {0} not found on classpath", RESOURCE_NAME);
+                LOG.warnv("Resource {0} not found on classpath", resourceName);
                 return Collections.emptyMap();
             }
             ObjectMapper mapper = new ObjectMapper();
             return mapper.readValue(in, new TypeReference<Map<String, Set<String>>>() {});
         } catch (Exception e) {
-            LOG.warnv(e, "Failed to load {0}", RESOURCE_NAME);
+            LOG.warnv(e, "Failed to load {0}", resourceName);
             return Collections.emptyMap();
         }
     }
@@ -68,6 +72,18 @@ public final class CfnCreateOnlyProperties {
         return PROPERTIES.getOrDefault(resourceType, Collections.emptySet());
     }
 
+    /** Schema pointers that require replacement, including conditionally create-only paths. */
+    static Set<String> replacementPointers(String resourceType) {
+        Set<String> schemaPointers = getCreateOnlyProperties(resourceType);
+        Set<String> conditionalPointers = CONDITIONAL_PROPERTIES.get(resourceType);
+        if (conditionalPointers == null || conditionalPointers.isEmpty()) {
+            return schemaPointers;
+        }
+        Set<String> pointers = new HashSet<>(schemaPointers);
+        pointers.addAll(conditionalPointers);
+        return pointers;
+    }
+
     /** True when the registry table has an entry for the type, so its pointers are authoritative. */
     public static boolean hasSchema(String resourceType) {
         return PROPERTIES.containsKey(resourceType);
@@ -80,7 +96,7 @@ public final class CfnCreateOnlyProperties {
      * element's subtree.
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
-        for (String pointer : getCreateOnlyProperties(resourceType)) {
+        for (String pointer : replacementPointers(resourceType)) {
             if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
@@ -104,7 +120,7 @@ public final class CfnCreateOnlyProperties {
     /** The subtrees of the new properties that sit under a create-only pointer of the type. */
     public static List<JsonNode> createOnlySubtrees(String resourceType, JsonNode props) {
         List<JsonNode> out = new ArrayList<>();
-        for (String pointer : getCreateOnlyProperties(resourceType)) {
+        for (String pointer : replacementPointers(resourceType)) {
             collect(props, pointer.split("/"), 0, out);
         }
         return out;

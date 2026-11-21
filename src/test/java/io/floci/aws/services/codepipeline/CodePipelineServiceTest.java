@@ -7,6 +7,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.codebuild.CodeBuildService;
 import io.floci.aws.services.codebuild.model.Build;
@@ -55,7 +56,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -796,6 +799,81 @@ class CodePipelineServiceTest {
                 return response;
             });
         }
+    }
+
+    /**
+     * IAM's lookup reads the tags of the pipeline, the webhook or the custom action type the ARN names, as the tag
+     * calls and PutWebhook leave them, and nothing for a stage, another account's, another Region's or an unknown one.
+     */
+    @Test
+    void storedTagsAreTheTagsOfThePipelineWebhookOrActionTypeTheArnNames() throws Exception {
+        String pipelineArn = "arn:aws:codepipeline:us-east-1:000000000000:stored";
+        handle("CreatePipeline", pipelineRequest("stored", "[{\"key\": \"team\", \"value\": \"web\"}]"));
+        handle("TagResource", "{\"resourceArn\": \"" + pipelineArn
+                + "\", \"tags\": [{\"key\": \"team\", \"value\": \"data\"}, {\"key\": \"env\", \"value\": \"dev\"}]}");
+        handle("UntagResource", "{\"resourceArn\": \"" + pipelineArn + "\", \"tagKeys\": [\"env\"]}");
+        String actionTypeArn = "arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/StoredProvider/1";
+        handle("CreateCustomActionType", customActionTypeRequest("StoredProvider", 1));
+        handle("PutWebhook", """
+                {"webhook": {"name": "stored-hook", "targetPipeline": "stored", "targetAction": "ManualApproval"},
+                 "tags": [{"key": "team", "value": "ops"}]}
+                """);
+        String webhookArn = "arn:aws:codepipeline:us-east-1:000000000000:webhook:stored-hook";
+
+        assertEquals("codepipeline", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(pipelineArn));
+        assertEquals(Map.of("k0", "v"), service.storedTags(actionTypeArn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(webhookArn));
+        assertTrue(service.storedTags(pipelineArn + "/Approve").isEmpty());
+        assertTrue(service.storedTags(pipelineArn.replace(ACCOUNT, "111122223333")).isEmpty());
+        assertTrue(service.storedTags(pipelineArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(actionTypeArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(webhookArn.replace("stored-hook", "missing")).isEmpty());
+        assertTrue(service.storedTags(pipelineArn.replace(":stored", ":missing")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:codebuild:us-east-1:000000000000:project/stored").isEmpty());
+    }
+
+    /** A pipeline stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwarePipelineInPlace() {
+        InMemoryStorage<String, CodePipelinePipeline> raw = new InMemoryStorage<>();
+        StorageFactory factory = mock(StorageFactory.class);
+        doAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT))
+                .when(factory).create(anyString(), anyString(), any());
+        doReturn(new AccountAwareStorageBackend<>(raw, null, ACCOUNT))
+                .when(factory).create(anyString(), eq("codepipeline-pipelines.json"), any());
+        CodePipelineService legacyState = new CodePipelineService(factory, mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                configWithPollInterval(500L));
+        CodePipelinePipeline legacy = new CodePipelinePipeline();
+        legacy.setName("legacy");
+        legacy.setRegion(REGION);
+        legacy.setArn("arn:aws:codepipeline:us-east-1:000000000000:legacy");
+        legacy.setTags(Map.of("team", "data"));
+        raw.put(REGION + ":legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getArn()));
+        assertEquals(Set.of(REGION + ":legacy"), raw.keys());
+    }
+
+    /** A two-stage pipeline of manual approvals named {@code name}, with the {@code tags} list. */
+    private static String pipelineRequest(String name, String tags) {
+        return """
+                {
+                    "pipeline": {
+                        "name": "%s",
+                        "roleArn": "arn:aws:iam::000000000000:role/codepipeline-role",
+                        "artifactStore": {"type": "S3", "location": "codepipeline-artifacts"},
+                        "stages": [
+                            {"name": "Approve", "actions": [{"name": "ManualApproval", "actionTypeId":
+                                {"category": "Approval", "owner": "AWS", "provider": "Manual", "version": "1"}}]},
+                            {"name": "Complete", "actions": [{"name": "ManualApprovalComplete", "actionTypeId":
+                                {"category": "Approval", "owner": "AWS", "provider": "Manual", "version": "1"}}]}
+                        ]
+                    },
+                    "tags": %s
+                }
+                """.formatted(name, tags);
     }
 
     private static String customActionTypeRequest(String provider, int tagCount) {

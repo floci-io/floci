@@ -24,6 +24,15 @@ public interface RoleNames {
     /** The backend name of the role called {@code logical}: a role's exact name, never a specifier. */
     String toBackend(String logical);
 
+    /**
+     * The backend name of a role named in SQL. Only an unquoted keyword is a role specifier
+     * ({@code PUBLIC}, {@code CURRENT_USER} and the like); a {@code quoted} identifier always names
+     * a role, as PostgreSQL reads it.
+     */
+    default String toBackend(String logical, boolean quoted) {
+        return toBackend(logical);
+    }
+
     String toLogical(String backend);
 
     boolean isIdentity();

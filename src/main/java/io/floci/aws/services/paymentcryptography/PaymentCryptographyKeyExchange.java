@@ -173,7 +173,7 @@ final class PaymentCryptographyKeyExchange {
             X509Certificate certificate = certificates.signCertificate(subject, subjectPublicKey,
                     issuer, issuerPrivateKey, List.of(), false, null, notBefore, notAfter);
             byte[] der = certificate.getEncoded();
-            return new Certificates.Minted(der, Certificates.toPem(der));
+            return new Certificates.Minted(der, Certificates.toPem("CERTIFICATE", der));
         } catch (IOException e) {
             throw new IllegalStateException("cannot mint a certificate", e);
         } catch (Exception e) {
@@ -248,15 +248,7 @@ final class PaymentCryptographyKeyExchange {
     private Exported exportTr31(String region, PaymentCryptographyKey key, byte[] clear,
                                 Map<String, Object> material) {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
-        PaymentCryptographyKey protection = usableKey(wrappingKeyIdentifier, region);
-        if (!PaymentCryptographyService.isKeyEncryptionKey(protection.getKeyUsage())) {
-            throw validation("the key " + protection.getArn() + " is not a key encryption key, so "
-                    + "it cannot wrap a key block");
-        }
-        if (!PaymentCryptographyService.mayWrap(protection)) {
-            throw validation("the key " + protection.getArn() + " does not have the mode of use "
-                    + "Wrap, which it needs to wrap a key");
-        }
+        PaymentCryptographyKey protection = wrappingKey(wrappingKeyIdentifier, region);
         String tooWeak = PaymentCryptographyKeyStrength.refusal(
                 protection.getKeyAlgorithm(), key.getKeyAlgorithm());
         if (tooWeak != null) {
@@ -558,6 +550,144 @@ final class PaymentCryptographyKeyExchange {
     }
 
     /** A key out of a block the two parties agreed with ECDH. */
+
+    /**
+     * The material of a key that came under a key the two parties agreed with, and goes out
+     * under another key.
+     *
+     * <p>The key material never leaves the service: the block comes in under the key the two
+     * parties agreed with ECDH, it is opened there, and it is wrapped again under the key the
+     * request names. The block that goes out carries the attributes of the key it holds, so
+     * the key that is translated is the same key on the way out.
+     *
+     * @param region the region the request is in
+     * @param material the request's members
+     * @return the wrapped key, its check value and the format it is in
+     */
+    Map<String, Object> translateKeyMaterial(String region, Map<String, Object> material) {
+        Map<String, Object> incoming = object(material, "IncomingKeyMaterial");
+        Map<String, Object> incomingBlock = object(incoming, "DiffieHellmanTr31KeyBlock");
+        Map<String, Object> outgoing = object(material, "OutgoingKeyMaterial");
+        Map<String, Object> outgoingBlock = object(outgoing, "Tr31KeyBlock");
+
+        String wrappingKeyIdentifier = text(outgoingBlock, "WrappingKeyIdentifier");
+        PaymentCryptographyKey protection = wrappingKey(wrappingKeyIdentifier, region);
+
+        Agreed agreed = agreed(region, incomingBlock);
+        String block = text(incomingBlock, "WrappedKeyBlock");
+        byte[] clear;
+        try {
+            clear = PaymentCryptographyTr31.unwrap(block, agreed.derived());
+        } catch (RuntimeException e) {
+            throw validation("the key block did not open under the key the two parties agreed: "
+                    + e.getMessage());
+        }
+        // The block that came in carries the attributes of the key it holds, and the block
+        // that goes out carries the same ones. The usage and the mode of use are read
+        // through the helpers the import reads them through, and they refuse a value this
+        // service does not serve, so a block that names one is refused here rather than
+        // answered with a block the import would refuse.
+        String usage = PaymentCryptographyTr31.usageOf(block);
+        String mode = PaymentCryptographyTr31.modeOf(block);
+        String exportability = PaymentCryptographyTr31.exportabilityOf(block);
+        String usageName = PaymentCryptographyService.usageName(usage);
+        PaymentCryptographyService.modesFor(mode);
+        if (!"E".equals(exportability) && !"N".equals(exportability) && !"S".equals(exportability)) {
+            throw validation("the key block carries the exportability '" + exportability
+                    + "', which is not one of E, N or S");
+        }
+        if ("N".equals(exportability)) {
+            // The key in the block may not leave the service again, and the block that goes
+            // out is handed to the caller, so a key that may not leave is refused.
+            throw validation("the key block carries the exportability N, so the key in it may "
+                    + "not leave the service and may not be translated out of it");
+        }
+
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(
+                PaymentCryptographyService.algorithmOf(block, clear.length));
+        // The usage binds the key to its purpose, so a key whose algorithm does not serve
+        // that purpose is not one the service makes. The rule is the one the import and the
+        // creation enforce, and a block that breaks it is refused here rather than answered
+        // with a block the import would refuse.
+        String badAlgorithm = PaymentCryptographyKeyAlgorithm.refusal(usageName, algorithm);
+        if (badAlgorithm != null) {
+            throw validation(badAlgorithm);
+        }
+        // The agreed key opens the block that comes in, and the wrapping key closes the one
+        // that goes out, so both have to be at least as strong as the key they protect. The
+        // rule is the one the import and the export enforce.
+        requireAgreedStrength(agreed, algorithm.name());
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(protection.getKeyAlgorithm(),
+                algorithm.name());
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
+        requireCheckValueAlgorithm(material, algorithm);
+
+        String wrapped = PaymentCryptographyTr31.wrap(clear,
+                PaymentCryptographyKeyRules.material(protection),
+                PaymentCryptographyService.isAes(protection),
+                PaymentCryptographyTr31.algorithmInHeader(block),
+                usage,
+                mode,
+                exportability,
+                PaymentCryptographyTr31.versionOf(block),
+                PaymentCryptographyTr31.optionalBlocksOf(block));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("WrappedKeyMaterial", wrapped);
+        out.put("KeyCheckValue", PaymentCryptographyCrypto.checkValue(clear, algorithm));
+        out.put("WrappedKeyMaterialFormat", "TR31_KEY_BLOCK");
+        return Map.of("WrappedKey", out);
+    }
+
+    /**
+     * The check value algorithm a request names, and it has to be the one the key has.
+     *
+     * <p>An AES key's check value is a CMAC and a Triple DES key's is the ANSI X9.24 one,
+     * so a request that names another one asks for a value the service does not compute,
+     * and it is refused rather than answered with the value of another algorithm.
+     *
+     * @param material the request's members
+     * @param algorithm the algorithm of the key that is translated
+     */
+    private static void requireCheckValueAlgorithm(Map<String, Object> material,
+                                                  PaymentCryptographyKeyAlgorithm algorithm) {
+        String wanted = text(material, "KeyCheckValueAlgorithm");
+        if (wanted.isEmpty()) {
+            return;
+        }
+        String own = algorithm.checkValueAlgorithm();
+        if (!own.equals(wanted)) {
+            throw validation("the check value algorithm " + wanted + " is not the one a "
+                    + algorithm.name() + " key has, which is " + own);
+        }
+    }
+
+    /**
+     * The strength of the key the two parties agreed, held against the key it protects.
+     *
+     * <p>The agreement is only as strong as the curve it was made on, so the weaker of the
+     * derivation and the two curves decides, the way the export decides.
+     *
+     * @param agreed the agreed key
+     * @param algorithm the algorithm of the key the agreement protects
+     */
+    private static void requireAgreedStrength(Agreed agreed, String algorithm) {
+        int derivedBits = Math.min(
+                PaymentCryptographyKeyStrength.bitsOf(agreed.deriveAlgorithm().name()),
+                Math.min(
+                        PaymentCryptographyKeyStrength.eccBitsOf(
+                                agreed.serviceKey().getKeyAlgorithm()),
+                        PaymentCryptographyKeyStrength.eccBitsOf((ECKey) agreed.counterpartyKey())));
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(derivedBits,
+                PaymentCryptographyKeyStrength.bitsOf(algorithm),
+                agreed.deriveAlgorithm().name(), algorithm);
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
+    }
+
     private Imported importEcdh(String region, Map<String, Object> material) {
         String block = text(material, "WrappedKeyBlock");
         Agreed agreed = agreed(region, material);
@@ -574,18 +704,7 @@ final class PaymentCryptographyKeyExchange {
         boolean exportable = exportableOnImport(PaymentCryptographyTr31.exportabilityOf(block));
         String algorithm = PaymentCryptographyService.algorithmOf(block, clear.length);
         // The derived key protects the imported one, so it has to be as strong as it.
-        int derivedBits = Math.min(
-                PaymentCryptographyKeyStrength.bitsOf(agreed.deriveAlgorithm().name()),
-                Math.min(
-                        PaymentCryptographyKeyStrength.eccBitsOf(
-                                agreed.serviceKey().getKeyAlgorithm()),
-                        PaymentCryptographyKeyStrength.eccBitsOf((ECKey) agreed.counterpartyKey())));
-        String tooWeak = PaymentCryptographyKeyStrength.refusal(derivedBits,
-                PaymentCryptographyKeyStrength.bitsOf(algorithm),
-                agreed.deriveAlgorithm().name(), algorithm);
-        if (tooWeak != null) {
-            throw validation(tooWeak);
-        }
+        requireAgreedStrength(agreed, algorithm);
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
                 PaymentCryptographyService.modesFor(mode),
                 exportable, clear, null, null, null, "SYMMETRIC_KEY");
@@ -668,12 +787,7 @@ final class PaymentCryptographyKeyExchange {
 
     /** The name the key factory knows the key's algorithm by. */
     private static String keyFactoryAlgorithm(PaymentCryptographyKey key) {
-        PaymentCryptographyKeyAlgorithm algorithm =
-                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
-        if (algorithm != null && algorithm.rsa) {
-            return "RSA";
-        }
-        return "EC";
+        return PaymentCryptographyService.isRsa(key) ? "RSA" : "EC";
     }
 
     /**
@@ -749,7 +863,7 @@ final class PaymentCryptographyKeyExchange {
     private static String certificatePem(String certText) {
         try {
             X509Certificate certificate = Certificates.parseCertificate(certText);
-            return Certificates.toPem(certificate.getEncoded());
+            return Certificates.toPem("CERTIFICATE", certificate.getEncoded());
         } catch (GeneralSecurityException | RuntimeException e) {
             throw validation("the public key certificate is not a certificate: " + e.getMessage());
         }
@@ -825,24 +939,6 @@ final class PaymentCryptographyKeyExchange {
     private static Map<String, Object> object(Map<String, Object> material, String name) {
         Object value = material == null ? null : material.get(name);
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
-    }
-
-    /**
-     * Refuses a key that is not TDES, and returns its algorithm: AS2805
-     * cryptography is all TDES.
-     *
-     * @param algorithmName the key's algorithm
-     * @param role what the key is, for the refusal
-     * @return the algorithm
-     */
-    private static PaymentCryptographyKeyAlgorithm requireTdes(String algorithmName, String role) {
-        PaymentCryptographyKeyAlgorithm algorithm =
-                PaymentCryptographyKeyAlgorithm.from(algorithmName);
-        if (algorithm == null || !algorithm.isTdes()) {
-            throw validation("an AS2805 key is a TDES key, but the " + role + " is "
-                    + algorithmName);
-        }
-        return algorithm;
     }
 
     /**
@@ -927,6 +1023,29 @@ final class PaymentCryptographyKeyExchange {
             throw validation("the key " + key.getArn() + " does not have the mode of use Verify, "
                     + "so it cannot be used for " + what);
         }
+    }
+
+    /**
+     * The key a block is wrapped under, and it has to be one that may wrap.
+     *
+     * <p>The export and the translation both wrap a block under a key the request names, so
+     * they insist on the same of it: a key encryption key that is allowed to wrap.
+     *
+     * @param identifier the key's identifier
+     * @param region the region the key is in
+     * @return the key the block is wrapped under
+     */
+    private PaymentCryptographyKey wrappingKey(String identifier, String region) {
+        PaymentCryptographyKey protection = usableKey(identifier, region);
+        if (!PaymentCryptographyService.isKeyEncryptionKey(protection.getKeyUsage())) {
+            throw validation("the key " + protection.getArn() + " is not a key encryption key, so "
+                    + "it cannot wrap a key block");
+        }
+        if (!PaymentCryptographyService.mayWrap(protection)) {
+            throw validation("the key " + protection.getArn() + " does not have the mode of use "
+                    + "Wrap, which it needs to wrap a key");
+        }
+        return protection;
     }
 
     /**
@@ -1131,7 +1250,8 @@ final class PaymentCryptographyKeyExchange {
 
     /** The import parameters of an issued token, as the answer carries them. */
     private static Map<String, Object> importParameters(Issued issued) {
-        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
+        String certificate64 = Certificates.pemBase64(
+                Certificates.toPem("CERTIFICATE", issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ImportToken", issued.token);
         out.put("WrappingKeyCertificate", certificate64);
@@ -1190,7 +1310,8 @@ final class PaymentCryptographyKeyExchange {
 
     /** The export parameters of an issued token, as the answer carries them. */
     private static Map<String, Object> exportParameters(Issued issued) {
-        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
+        String certificate64 = Certificates.pemBase64(
+                Certificates.toPem("CERTIFICATE", issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ExportToken", issued.token);
         out.put("SigningKeyCertificate", certificate64);
@@ -1308,11 +1429,11 @@ final class PaymentCryptographyKeyExchange {
                     + "which it needs to wrap a key cryptogram");
         }
         requireKeyEncryptionKey(kek);
-        requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
+        PaymentCryptographyKeyRules.requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
         // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
         // an AS2805 cryptogram.
         PaymentCryptographyKeyAlgorithm algorithm =
-                requireTdes(key.getKeyAlgorithm(), "key " + key.getArn());
+                PaymentCryptographyKeyRules.requireTdes(key.getKeyAlgorithm(), "key " + key.getArn());
         String tooWeak = PaymentCryptographyKeyStrength.refusal(kek.getKeyAlgorithm(),
                 key.getKeyAlgorithm());
         if (tooWeak != null) {
@@ -1442,7 +1563,7 @@ final class PaymentCryptographyKeyExchange {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
         PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
         requireKeyEncryptionKey(kek);
-        requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
+        PaymentCryptographyKeyRules.requireTdes(kek.getKeyAlgorithm(), "AS2805 wrapping key " + kek.getArn());
         // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
         // The model names no error code of its own for this, so it is a validation error,
         // as the rest of the refusals about a key's modes of use are.
@@ -1454,7 +1575,8 @@ final class PaymentCryptographyKeyExchange {
         String algorithmName = text(material, "KeyAlgorithm");
         // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
         // an AS2805 cryptogram.
-        PaymentCryptographyKeyAlgorithm algorithm = requireTdes(algorithmName, "carried key");
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyRules.requireTdes(algorithmName, "carried key");
         // The wrapping key has to be at least as strong as the key it protects, the same
         // rule the export enforces, so a cryptogram that the export would refuse to write
         // does not open here either.

@@ -87,7 +87,7 @@ class CognitoSignUpTriggerReentrancyTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566",
                 regionResolver, lambdaService, null, codes,
-                new CognitoMessageDispatcher(null, smsService, "us-east-1"), null);
+                new CognitoMessageDispatcher(null, smsService, regionResolver), null);
     }
 
     @AfterEach
@@ -157,7 +157,7 @@ class CognitoSignUpTriggerReentrancyTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), userStore,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566",
                 regionResolver, lambdaService, null, codes,
-                new CognitoMessageDispatcher(null, sns, "us-east-1"), null);
+                new CognitoMessageDispatcher(null, sns, regionResolver), null);
         UserPool pool = pool(Map.of("PostConfirmation", FUNCTION));
         UserPoolClient client = client(pool);
         service.signUp(client.getClientId(), "alice", "Perm1234!", Map.of("phone_number", PHONE), Map.of(), Map.of());

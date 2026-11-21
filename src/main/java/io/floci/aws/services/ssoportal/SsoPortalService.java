@@ -54,7 +54,7 @@ public class SsoPortalService {
             if (accounts.containsKey(assignment.accountId())) {
                 return;
             }
-            PortalAccountInfo info = organizationsService.findAccountForPortal(assignment.accountId())
+            PortalAccountInfo info = organizationsService.findAccount(assignment.accountId())
                     .map(account -> new PortalAccountInfo(account.getId(), account.getName(), account.getEmail()))
                     .orElseGet(() -> new PortalAccountInfo(assignment.accountId(), null, null));
             accounts.put(assignment.accountId(), info);

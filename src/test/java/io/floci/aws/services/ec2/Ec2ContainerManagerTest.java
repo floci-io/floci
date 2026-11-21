@@ -44,12 +44,14 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.testing.HelperShellFixture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.stubbing.Answer;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -1661,6 +1663,9 @@ class Ec2ContainerManagerTest {
         verify(harness.logStreamer, timeout(2000)).streamToCloudWatchLogs(
             any(String.class), any(String.class), eq("us-west-2"), eq(TEST_USER_DATA_OUTPUT)
         );
+        // The script's output holds its connection for as long as it runs, so it uses the streaming pool.
+        verify(harness.streamingDockerClient).execStartCmd("userdata-exec");
+        verify(harness.dockerClient, never()).execStartCmd("userdata-exec");
     }
 
     @Test
@@ -2601,6 +2606,8 @@ class Ec2ContainerManagerTest {
 
         DockerClient dockerClient = mock(DockerClient.class);
         stubDockerPing(dockerClient, true);
+        DockerClient streamingDockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getStreamingDockerClient()).thenReturn(streamingDockerClient);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
@@ -2640,8 +2647,9 @@ class Ec2ContainerManagerTest {
                         reachableEndpoint,
                         executor,
                         userDataTimeout);
-        return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
-                portAllocator, portForwardManager, config, vpcNetworkManager, new CopyOnWriteArrayList<>());
+        return new LaunchHarness(manager, lifecycleManager, dockerClient, streamingDockerClient, metadataServer,
+                logStreamer, builder, portAllocator, portForwardManager, config, vpcNetworkManager,
+                new CopyOnWriteArrayList<>());
     }
 
     // ── startup reconciliation of EC2 containers orphaned by a previous run ──────
@@ -2835,7 +2843,7 @@ class Ec2ContainerManagerTest {
                     ? userDataExec : metadataExec;
         });
 
-        when(harness.dockerClient().execStartCmd(anyString())).thenAnswer(invocation -> {
+        Answer<ExecStartCmd> start = invocation -> {
             String execId = invocation.getArgument(0);
             ExecStartCmd execStart = mock(ExecStartCmd.class);
             when(execStart.exec(any())).thenAnswer(startInvocation -> {
@@ -2850,7 +2858,9 @@ class Ec2ContainerManagerTest {
                 return callback;
             });
             return execStart;
-        });
+        };
+        when(harness.dockerClient().execStartCmd(anyString())).thenAnswer(start);
+        when(harness.streamingDockerClient().execStartCmd(anyString())).thenAnswer(start);
 
         InspectExecCmd inspectExec = mock(InspectExecCmd.class);
         InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
@@ -3179,6 +3189,7 @@ class Ec2ContainerManagerTest {
     private record LaunchHarness(Ec2ContainerManager manager,
                                  ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
+                                 DockerClient streamingDockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
                                  ContainerBuilder.Builder builder,
@@ -3213,7 +3224,8 @@ class Ec2ContainerManagerTest {
                 return metadataExec;
             });
 
-            when(dockerClient.execStartCmd(anyString())).thenAnswer(invocation -> {
+            // Startable on either client, so a test can verify which pool each exec's output used.
+            Answer<ExecStartCmd> start = invocation -> {
                 String execId = invocation.getArgument(0);
                 ExecStartCmd execStart = mock(ExecStartCmd.class);
                 when(execStart.exec(any())).thenAnswer(startInvocation -> {
@@ -3230,7 +3242,9 @@ class Ec2ContainerManagerTest {
                     return callback;
                 });
                 return execStart;
-            });
+            };
+            when(dockerClient.execStartCmd(anyString())).thenAnswer(start);
+            when(streamingDockerClient.execStartCmd(anyString())).thenAnswer(start);
 
             InspectExecCmd inspectExec = mock(InspectExecCmd.class);
             InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);

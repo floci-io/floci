@@ -16,7 +16,7 @@ public class LogGroup {
     private Integer retentionInDays;
     private boolean deletionProtectionEnabled;
     private String kmsKeyId;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public LogGroup() {}
 

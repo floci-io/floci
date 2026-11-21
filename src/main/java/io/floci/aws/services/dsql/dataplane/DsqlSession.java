@@ -1,8 +1,10 @@
 package io.floci.aws.services.dsql.dataplane;
 
 import io.floci.aws.config.TlsProxyServer;
+import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.dsql.DsqlIdentifiers;
+import org.jboss.logging.Logger;
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SNIMatcher;
@@ -13,6 +15,7 @@ import javax.net.ssl.StandardConstants;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -23,7 +26,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -44,6 +47,8 @@ import java.util.stream.Stream;
  * connection an hour.
  */
 final class DsqlSession {
+
+    private static final Logger LOG = Logger.getLogger(DsqlSession.class);
 
     static final Duration CONNECTION_LIFETIME = Duration.ofHours(1);
     // DSQL's (measured): a startup packet of 10,000 bytes or more, and a client message over 10 MiB,
@@ -97,6 +102,8 @@ final class DsqlSession {
     private volatile byte[] cancelKeyData;
     private volatile boolean cancelledForAge;
     private volatile char transactionStatus = 'I';
+    // How the client's role names read in the database: the same in a database of the cluster's own.
+    private volatile RoleNames roleNames = RoleNames.IDENTITY;
 
     DsqlSession(Socket socket, DsqlEndpoint endpoint) {
         this.socket = socket;
@@ -224,6 +231,16 @@ final class DsqlSession {
         }
 
         DsqlDatabases.Backend target = admission.route().backend();
+        // The client's role, admitted by its own name, logs in to the database by the backend's.
+        String backendUser = target.roleNames().toBackend(user);
+        String backendPassword = target.credentials().passwordFor(backendUser);
+        if (!endpoint.prepareLogin(target, backendUser)) {
+            refuse(out, "08006", ACCESS_DENIED, null);
+            return;
+        }
+        roleNames = target.roleNames();
+        BackendAuthenticator authenticator = backendPassword == null ? null
+                : new BackendAuthenticator(backendUser, backendPassword, target.credentials().scramOnly());
         endpoint.opened(admission.route(), tls);
         Socket backend = new Socket();
         try (backend) {
@@ -232,12 +249,8 @@ final class DsqlSession {
             socket.setSoTimeout(0);
             InputStream backendIn = new BufferedInputStream(backend.getInputStream());
             OutputStream backendOut = new BufferedOutputStream(backend.getOutputStream());
-            Map<String, String> backendStartup = new LinkedHashMap<>(startupParameters);
-            backendStartup.remove("options");
-            if (!optionSettings.isEmpty()) {
-                backendStartup.put("options", backendOptions(optionSettings));
-            }
-            backendStartup.put("database", target.database());
+            Map<String, String> backendStartup = backendStartup(startupParameters, optionSettings, backendUser,
+                    target.database());
             principalArn = admission.principalArn();
             backendOut.write(PostgresWire.startupMessage(backendStartup));
             backendOut.flush();
@@ -247,7 +260,7 @@ final class DsqlSession {
             databaseSocket = backend;
 
             Thread toClient = Thread.ofVirtual().name("dsql-backend-" + sessionId)
-                    .start(() -> relayToClient(backendIn, out, admission.route(), tls));
+                    .start(() -> relayToClient(backendIn, out, admission.route(), tls, authenticator));
             Thread lifetime = Thread.ofVirtual().name("dsql-lifetime-" + sessionId).start(() -> {
                 try {
                     Thread.sleep(CONNECTION_LIFETIME.toMillis());
@@ -313,17 +326,14 @@ final class DsqlSession {
                 PostgresWire.write(backendOut, 'Q', PostgresWire.cStringBytes(rewriteSimpleQuery(query)));
             }
             case 'P' -> {
-                PostgresWire.CString name = PostgresWire.cString(message.body(), 0);
-                PostgresWire.CString query = PostgresWire.cString(message.body(), name.next());
-                DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query.value());
+                ParseRewrite parse = rewriteParse(message, roleNames);
+                DsqlStatements.Query rewritten = parse.query();
                 String tag = rewritten.overridesTags() && rewritten.commandTags().size() == 1
                         ? rewritten.commandTags().get(0) : null;
                 synchronized (batches) {
-                    extendedBatch().parses.addLast(new Named(name.value(), tag));
+                    extendedBatch().parses.addLast(new Named(parse.name(), tag));
                 }
-                PostgresWire.write(backendOut, 'P', PostgresWire.cStringBytes(name.value()),
-                        PostgresWire.cStringBytes(rewritten.sql()),
-                        Arrays.copyOfRange(message.body(), query.next(), message.body().length));
+                PostgresWire.write(backendOut, parse.message());
             }
             case 'B' -> {
                 PostgresWire.CString portal = PostgresWire.cString(message.body(), 0);
@@ -529,12 +539,29 @@ final class DsqlSession {
      * ReadyForQuery ends: the extended-protocol messages sent since the last Sync, if any.
      */
     private String rewriteSimpleQuery(String query) {
-        DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query);
+        DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query, roleNames);
         synchronized (batches) {
             Batch batch = endBatch();
             rewritten.commandTags().forEach(tag -> batch.results.addLast(new Named(null, tag)));
         }
         return rewritten.sql();
+    }
+
+    /** A Parse message as the database gets it: its statement's name, its query rewritten, and the message. */
+    record ParseRewrite(String name, DsqlStatements.Query query, PostgresWire.Message message) {
+    }
+
+    /** {@code parse} with its query in the database's syntax and role names, the rest of it as it was. */
+    static ParseRewrite rewriteParse(PostgresWire.Message parse, RoleNames roleNames) {
+        byte[] body = parse.body();
+        PostgresWire.CString name = PostgresWire.cString(body, 0);
+        PostgresWire.CString query = PostgresWire.cString(body, name.next());
+        DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query.value(), roleNames);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(PostgresWire.cStringBytes(name.value()));
+        out.writeBytes(PostgresWire.cStringBytes(rewritten.sql()));
+        out.write(body, query.next(), body.length - query.next());
+        return new ParseRewrite(name.value(), rewritten, new PostgresWire.Message((byte) 'P', out.toByteArray()));
     }
 
     /**
@@ -620,6 +647,23 @@ final class DsqlSession {
                 .filter(name -> name.contains(".")).findFirst().orElse(null);
     }
 
+    /**
+     * The startup the database gets: the client's parameters, with only the {@code options} settings
+     * DSQL counts, logging in as {@code backendUser} to {@code database}, the cluster's own.
+     */
+    static Map<String, String> backendStartup(Map<String, String> startupParameters,
+                                              Map<String, String> optionSettings, String backendUser,
+                                              String database) {
+        Map<String, String> backendStartup = new LinkedHashMap<>(startupParameters);
+        backendStartup.remove("options");
+        if (!optionSettings.isEmpty()) {
+            backendStartup.put("options", backendOptions(optionSettings));
+        }
+        backendStartup.put("user", backendUser);
+        backendStartup.put("database", database);
+        return backendStartup;
+    }
+
     /** {@code settings} as PostgreSQL's {@code options}, whose backslash escapes the next character. */
     static String backendOptions(Map<String, String> settings) {
         List<String> words = new ArrayList<>();
@@ -627,17 +671,53 @@ final class DsqlSession {
         return String.join(" ", words);
     }
 
-    private void relayToClient(InputStream backendIn, OutputStream out, DsqlEndpoint.Route route, Socket client) {
+    /**
+     * Relays what the database sends to the client. Until its ReadyForQuery, the database's answers
+     * to the startup are held back, and a password it asks for is answered by {@code authenticator}
+     * (null where the database wants none) without the client seeing any of it.
+     */
+    private void relayToClient(InputStream backendIn, OutputStream out, DsqlEndpoint.Route route, Socket client,
+                               BackendAuthenticator authenticator) {
         try {
             List<PostgresWire.Message> startup = new ArrayList<>();
             boolean started = false;
+            boolean authenticating = false;
             while (true) {
                 PostgresWire.Message message = PostgresWire.read(backendIn, MAX_DATABASE_MESSAGE, "message");
                 if (!started) {
                     // DSQL refuses a connection instead of authenticating it, so what the database
                     // answers the startup waits for its ReadyForQuery, and a refusal takes its place.
                     switch (message.type()) {
+                        case 'R' -> {
+                            boolean ok = message.body().length >= 4 && PostgresWire.int32(message.body(), 0) == 0;
+                            if (ok) {
+                                // An unfinished SCRAM exchange means the server never proved it knows the password.
+                                if (authenticator != null && !answerAuthentication(message, authenticator)) {
+                                    refuse(out, "08006", ACCESS_DENIED, null);
+                                    closeQuietly(client);
+                                    return;
+                                }
+                                authenticating = false;
+                                startup.add(message);
+                                continue;
+                            }
+                            authenticating = true;
+                            if (!answerAuthentication(message, authenticator)) {
+                                refuse(out, "08006", ACCESS_DENIED, null);
+                                closeQuietly(client);
+                                return;
+                            }
+                            continue;
+                        }
                         case 'E' -> {
+                            if (authenticating) {
+                                // The database's own words would name the backend role.
+                                LOG.warnv("DSQL session {0} could not log in to the cluster database: {1}",
+                                        sessionId, PostgresWire.parseFields(message.body(), 0).get('M'));
+                                refuse(out, "08006", ACCESS_DENIED, null);
+                                closeQuietly(client);
+                                return;
+                            }
                             startup.clear();
                             message = new PostgresWire.Message(message.type(), withSessionId(message.body()));
                         }
@@ -747,6 +827,32 @@ final class DsqlSession {
             // The database or the client ended the connection: the client's side is closed with it.
             closeQuietly(client);
         }
+    }
+
+    /**
+     * Answers the database's request for a password, never seen by the client; false, with the
+     * cause logged but no secret, when it cannot be answered.
+     */
+    private boolean answerAuthentication(PostgresWire.Message request, BackendAuthenticator authenticator)
+            throws IOException {
+        if (authenticator == null) {
+            LOG.warnv("DSQL session {0}: the cluster database asks for a password Floci does not have", sessionId);
+            return false;
+        }
+        Optional<PostgresWire.Message> answer;
+        try {
+            answer = authenticator.answer(request);
+        } catch (IOException e) {
+            LOG.warnv("DSQL session {0} could not log in to the cluster database: {1}", sessionId, e.getMessage());
+            return false;
+        }
+        if (answer.isPresent()) {
+            synchronized (databaseWrites) {
+                PostgresWire.write(databaseOut, answer.get());
+                databaseOut.flush();
+            }
+        }
+        return true;
     }
 
     /**
