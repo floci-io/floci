@@ -440,6 +440,11 @@ floci:
     # here WINS over the annotation.
     breaker-failure-threshold: 3
     breaker-probe-interval-seconds: 5
+    # FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES: most container creates and starts sent to the daemon at
+    # once; more wait up to connection-request-timeout-seconds for one to finish. 0 = twice the CPUs
+    # Floci sees, at least 4. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.maxConcurrentLaunches: a value set here WINS over the annotation.
+    max-concurrent-launches: 0
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
