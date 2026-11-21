@@ -1197,13 +1197,13 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/models")
-    public Response getModels(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getModels(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                              @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<io.floci.aws.services.apigateway.model.Model> models = service.getModels(region, apiId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        models.forEach(m -> items.add(toModelNode(m)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        // Model clashes with the imported API Gateway v2 model
+        PaginatedResult<io.floci.aws.services.apigateway.model.Model> page =
+                service.getModelPage(region, apiId, pageLimit(limit), position);
+        return pageResponse(page, this::toModelNode);
     }
 
     @GET

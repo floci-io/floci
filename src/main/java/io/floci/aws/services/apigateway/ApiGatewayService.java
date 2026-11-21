@@ -2501,6 +2501,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return modelStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<Model> getModelPage(String region, String apiId, Integer limit, String position) {
+        return pageById(getModels(region, apiId), Model::getId, limit, position);
+    }
+
     public void deleteModel(String region, String apiId, String modelName) {
         getModel(region, apiId, modelName);
         modelStore.delete(modelKey(region, apiId, modelName));
