@@ -8,6 +8,7 @@ import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
+import io.floci.aws.services.iam.IamCloudTrailEvents;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -37,6 +38,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
@@ -1285,6 +1287,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         + " on resource: \"" + resource + "\""
                         + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
                 emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region, denyMessage);
+                emitIamDenialIfApplicable(akid, action, credentialScope, ctx, region, denyMessage);
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx, resource));
                 return true;
             }
@@ -1702,6 +1705,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         } catch (RuntimeException e) {
             // The request is refused either way; a record that could not be written is logged, not raised.
             LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+        }
+    }
+
+    /**
+     * Records an IAM API call IAM enforcement refused as the CloudTrail management event IAM records
+     * for the calls it runs, with the refusal naming the caller, the action and the resource.
+     */
+    private void emitIamDenialIfApplicable(String akid, String action, String credentialScope,
+                                           ContainerRequestContext ctx, String region, String denyMessage) {
+        if (!"iam".equals(credentialScope) || !cloudTrailService.hasTrails()) {
+            return;
+        }
+        try {
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            IamConditionContextResolver.formParameters(ctx).forEach(params::putSingle);
+            CloudTrailService.ManagementEventInput event = IamCloudTrailEvents.denied(params, akid, region,
+                    currentVertxRequest.getCurrent(), queryAccessDeniedCode(credentialScope), denyMessage);
+            if (event != null) {
+                cloudTrailService.emitManagementEvent(event);
+            }
+        } catch (RuntimeException e) {
+            // The request is refused either way; a record that could not be written is logged, not raised.
+            LOG.warnv(e, "CloudTrail denial emission failed for {0}", action);
         }
     }
 
