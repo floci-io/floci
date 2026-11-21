@@ -77,6 +77,8 @@ public class CloudTrailService implements StoredResourceArns {
      */
     private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
 
+    private final CloudTrailEventHistory eventHistory = new CloudTrailEventHistory();
+
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
                              IamService iamService, ObjectMapper mapper) {
@@ -487,13 +489,17 @@ public class CloudTrailService implements StoredResourceArns {
     public record ManagementEventInput(String eventSource, String eventName, String region, String accessKeyId,
                                        ObjectNode requestParameters, ObjectNode responseElements) {}
 
-    /** Records one management write and returns the event only when a logging trail selects it. */
+    /**
+     * Records one management write in the account's event history and returns the event only when
+     * a logging trail also selects it.
+     */
     public Optional<ObjectNode> emitManagementEvent(ManagementEventInput in) {
         try {
             String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
+            Instant eventTime = Instant.now();
             ObjectNode record = mapper.createObjectNode();
             record.put("eventVersion", EVENT_VERSION);
-            record.put("eventTime", Instant.now().toString());
+            record.put("eventTime", eventTime.toString());
             record.put("eventSource", in.eventSource());
             record.put("eventName", in.eventName());
             record.put("awsRegion", region);
@@ -507,6 +513,7 @@ public class CloudTrailService implements StoredResourceArns {
             record.set("userIdentity", buildUserIdentity(in.accessKeyId()));
             record.set("requestParameters", in.requestParameters().deepCopy());
             record.set("responseElements", in.responseElements().deepCopy());
+            eventHistory.record(regionResolver.getAccountId(), region, eventTime, record);
             List<MatchedTrail> matched = trailsMatching(region, entry -> matchesManagementEvent(entry, record));
             if (matched.isEmpty()) {
                 return Optional.empty();
@@ -519,6 +526,16 @@ public class CloudTrailService implements StoredResourceArns {
             LOG.warnv(e, "Failed to record CloudTrail management event {0}", in.eventName());
             return Optional.empty();
         }
+    }
+
+    /**
+     * The current account's management events in {@code region}, newest first, as event history
+     * holds them: no trail is needed. A null attribute or bound does not filter.
+     */
+    public List<CloudTrailEventHistory.HistoryEvent> lookupEvents(String region,
+                                                                  CloudTrailEventHistory.LookupAttribute attribute,
+                                                                  Instant startTime, Instant endTime) {
+        return eventHistory.lookup(regionResolver.getAccountId(), region, attribute, startTime, endTime, Instant.now());
     }
 
     /** Whether the current account has a trail, so a caller can skip building an event. */

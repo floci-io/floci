@@ -25,7 +25,7 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `StartLogging` | Starts logging for a trail |
 | `StopLogging` | Stops logging for a trail |
 | `GetTrailStatus` | Returns the logging status of a trail |
-| `LookupEvents` | - |
+| `LookupEvents` | Returns the management events in the account's event history, newest first |
 | `ListTrails` | - |
 | `AddTags` | Adds or overwrites tags on a trail, identified by ARN |
 | `RemoveTags` | Removes the given tag keys from a trail, identified by ARN |
@@ -84,6 +84,19 @@ regions within their own partition.
 These writes also reach EventBridge's default bus in the request's account and region. See
 [Secrets Manager event delivery](secrets-manager.md#secret-write-events) for prerequisites,
 the secret-specific event pattern, and the limits of this coverage.
+
+## Event History
+
+`LookupEvents` reads the event history: every management event Floci records, in the caller's
+account and region, whether or not a trail is logging, as on AWS. Today those are the Secrets Manager
+`PutSecretValue` and `UpdateSecret` writes above. Events come back newest first, at most 50 a page
+with a `NextToken` for the rest, and can be narrowed by `StartTime`, `EndTime` and one
+`LookupAttributes` entry (`EventId`, `EventName`, `EventSource`, `ReadOnly`, `Username` or
+`AccessKeyId`). Each event carries `CloudTrailEvent`, the full record as a trail delivers it.
+
+The history keeps 90 days and at most 10,000 events per account and region, in memory: it does not
+survive a restart. Records name no resources, so `Resources` is empty and a `ResourceType` or
+`ResourceName` attribute matches nothing.
 
 ## Configuration
 
