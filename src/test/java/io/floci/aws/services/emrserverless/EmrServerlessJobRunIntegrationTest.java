@@ -410,6 +410,36 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void aRunBeyondMaxConcurrentRunsWaitsQueuedUntilTheRunningOneIsCancelled() {
+        String applicationId = createApplication(", \"schedulerConfiguration\": {\"maxConcurrentRuns\": 1}");
+        String application = "/applications/" + applicationId;
+        givenReq().when().get(application).then().statusCode(200)
+                .body("application.schedulerConfiguration.maxConcurrentRuns", equalTo(1))
+                .body("application.schedulerConfiguration.queueTimeoutMinutes", equalTo(360));
+        String running = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"mode\": \"STREAMING\""));
+        String queued = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"mode\": \"STREAMING\""));
+
+        givenReq().when().get(application + "/jobruns/" + queued).then().statusCode(200)
+                .body("jobRun.state", equalTo("QUEUED"))
+                .body("jobRun", not(hasKey("startedAt")));
+        givenReq().when().get(application + "/jobruns?states=QUEUED").then().statusCode(200)
+                .body("jobRuns.id", equalTo(List.of(queued)));
+
+        givenReq().when().delete(application + "/jobruns/" + running).then().statusCode(200);
+        givenReq().when().get(application + "/jobruns/" + queued).then().statusCode(200)
+                .body("jobRun.state", equalTo("RUNNING"))
+                .body("jobRun.queuedDurationMilliseconds", instanceOf(Number.class));
+        givenReq().when().delete(application + "/jobruns/" + queued).then().statusCode(200);
+        givenReq().when().post(application + "/stop").then().statusCode(200);
+        givenReq().body("{\"clientToken\": \"%s\", \"schedulerConfiguration\": {}}".formatted(UUID.randomUUID()))
+                .when().patch(application).then().statusCode(200)
+                .body("application.schedulerConfiguration", nullValue())
+                .body("application", not(hasKey("schedulerOff")));
+    }
+
+    @Test
     void anApplicationWithARunStillGoingIsNotStopped() {
         String applicationId = createApplication("");
         String application = "/applications/" + applicationId;
