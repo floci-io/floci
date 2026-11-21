@@ -41,7 +41,7 @@ public class DynamoDbStreamService {
 
     /** The first shard of every stream, which a stream with one shard that never rolls over keeps for good. */
     static final String SHARD_ID = shardId(1, 0);
-    /** The most records a stream keeps across its shards; the oldest goes first. */
+    /** The most records a stream keeps across its shards unless configured otherwise; the oldest goes first. */
     static final int MAX_RECORDS = 1000;
     /** How long a shard iterator can be used when iterator expiry is on, as on AWS. */
     static final Duration ITERATOR_LIFETIME = Duration.ofMinutes(15);
@@ -56,9 +56,11 @@ public class DynamoDbStreamService {
 
     /**
      * How the native engine shapes its streams: the open shards each has, how long a shard stays open before a child
-     * takes its keys (null for good), and whether iterators expire and records age out as on AWS.
+     * takes its keys (null for good), whether iterators expire and records age out as on AWS, and how many records a
+     * stream keeps.
      */
-    record Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention) {
+    record Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention,
+                    int maxRecords) {
 
         static final Settings DEFAULTS = new Settings(1, null, false, false);
 
@@ -69,12 +71,19 @@ public class DynamoDbStreamService {
             if (shardRollover != null && (shardRollover.isZero() || shardRollover.isNegative())) {
                 shardRollover = null;
             }
+            if (maxRecords < 1) {
+                throw new IllegalArgumentException("A DynamoDB stream keeps at least one record, not " + maxRecords);
+            }
+        }
+
+        Settings(int shardCount, Duration shardRollover, boolean iteratorExpiry, boolean retention) {
+            this(shardCount, shardRollover, iteratorExpiry, retention, MAX_RECORDS);
         }
 
         static Settings from(EmulatorConfig.DynamoDbServiceConfig config) {
             long rollover = config.streamShardRolloverSeconds();
             return new Settings(config.streamShardCount(), rollover > 0 ? Duration.ofSeconds(rollover) : null,
-                    config.streamIteratorExpiryEnabled(), config.streamRetentionEnabled());
+                    config.streamIteratorExpiryEnabled(), config.streamRetentionEnabled(), config.streamMaxRecords());
         }
     }
 
@@ -277,7 +286,7 @@ public class DynamoDbStreamService {
             shard.records.addLast(record);
             shard.lastSequence = record.getSequenceNumber();
             state.retained++;
-            while (state.retained > MAX_RECORDS) {
+            while (state.retained > settings.maxRecords()) {
                 state.trimOldest();
             }
         }
@@ -621,7 +630,7 @@ public class DynamoDbStreamService {
     private static final class StreamState {
         final List<Shard> shards = new ArrayList<>();
         final AtomicLong counter;
-        /** Records kept across every shard, held to {@link #MAX_RECORDS}. */
+        /** Records kept across every shard, held to {@link Settings#maxRecords()}. */
         int retained;
 
         StreamState(AtomicLong counter) {
