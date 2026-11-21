@@ -80,6 +80,18 @@ final class IotDeviceIdentity {
         return policy;
     }
 
+    /**
+     * Creates thing {@code thingName} and attaches this device's certificate to it as a principal;
+     * {@code cleanup} detaches and deletes it after the test.
+     */
+    void attachNewThing(String thingName, PartitionCleanup cleanup) {
+        given().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
+        cleanup.register(() -> given().when().delete("/things/" + thingName).then().statusCode(200));
+        given().header("x-amzn-principal", certificateArn).when().put("/things/" + thingName + "/principals").then().statusCode(200);
+        cleanup.register(() -> given().header("x-amzn-principal", certificateArn)
+                .when().delete("/things/" + thingName + "/principals").then().statusCode(200));
+    }
+
     /** IoT Core deletes only an inactive certificate with nothing attached. */
     private void delete() {
         given().queryParam("newStatus", "INACTIVE").when().put("/certificates/" + certificateId).then().statusCode(200);
