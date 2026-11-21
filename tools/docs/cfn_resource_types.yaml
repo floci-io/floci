@@ -45,6 +45,7 @@ order:
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
+  - AWS::CodeDeploy
   - AWS::Batch
   - AWS::Cognito
   - AWS::CertificateManager
@@ -144,6 +145,7 @@ service_labels:
   AWS::CloudTrail: CloudTrail
   AWS::CloudWatch: CloudWatch
   AWS::CodeBuild: CodeBuild
+  AWS::CodeDeploy: CodeDeploy
   AWS::CodePipeline: CodePipeline
   AWS::Cognito: Cognito
   AWS::Config: Config

@@ -60,6 +60,7 @@ AWS::CloudWatch::Alarm	Arn	ActionConfiguration,ActionsEnabled,AlarmActions,Alarm
 AWS::CloudWatch::CompositeAlarm	Arn	ActionConfiguration,ActionsEnabled,ActionsSuppressor,ActionsSuppressorExtensionPeriod,ActionsSuppressorWaitPeriod,AlarmActions,AlarmDescription,AlarmName,AlarmRule,InsufficientDataActions,OKActions,Tags
 AWS::CloudWatch::Dashboard		DashboardBody,DashboardName,Tags
 AWS::CodeBuild::Project	Arn	Artifacts,AutoRetryLimit,BadgeEnabled,BuildBatchConfig,Cache,ConcurrentBuildLimit,Description,EncryptionKey,Environment,FileSystemLocations,LogsConfig,Name,QueuedTimeoutInMinutes,ResourceAccessRole,SecondaryArtifacts,SecondarySourceVersions,SecondarySources,ServiceRole,Source,SourceVersion,Tags,TimeoutInMinutes,Triggers,Visibility,VpcConfig
+AWS::CodeDeploy::Application		ApplicationName,ComputePlatform,Tags
 AWS::CodePipeline::CustomActionType	Id	Category,ConfigurationProperties,InputArtifactDetails,OutputArtifactDetails,Provider,Settings,Tags,Version
 AWS::CodePipeline::Pipeline	Arn,Version	ArtifactStore,ArtifactStores,DisableInboundStageTransitions,ExecutionMode,Name,PipelineType,RestartExecutionOnUpdate,RoleArn,Stages,Tags,Triggers,Variables
 AWS::CodePipeline::Webhook	Id,Url	Authentication,AuthenticationConfiguration,Filters,Name,RegisterWithThirdParty,Tags,TargetAction,TargetPipeline,TargetPipelineVersion
