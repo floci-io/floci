@@ -152,7 +152,7 @@ class DynamoDbFacadeTest {
         RequestContext requestContext = new RequestContext();
         requestContext.setRegion(OTHER_REGION);
         IamConditionContextResolver resolver = new IamConditionContextResolver(dynamoDb,
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), requestContext,
                 new RegionResolver(OTHER_REGION, "000000000000"),

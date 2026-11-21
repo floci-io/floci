@@ -433,6 +433,13 @@ floci:
     # threads, written only while a pool is in use; 0 turns them off. Keep in step with the
     # @WithDefault on EmulatorConfig.DockerConfig.poolGaugeIntervalSeconds: a value set here WINS over the annotation.
     pool-gauge-interval-seconds: 60
+    # FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD: consecutive Docker call attempts (each retry counts)
+    # that fail at the transport before Floci pings the daemon and, if that fails too, fails every Docker call at once until the
+    # daemon answers; 0 turns this off. FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS: seconds between
+    # those pings. Keep both in step with the @WithDefault on EmulatorConfig.DockerConfig: a value set
+    # here WINS over the annotation.
+    breaker-failure-threshold: 3
+    breaker-probe-interval-seconds: 5
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

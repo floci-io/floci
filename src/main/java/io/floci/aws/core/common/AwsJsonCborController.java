@@ -22,10 +22,17 @@ import io.floci.aws.services.stepfunctions.StepFunctionsJsonHandler;
 import io.floci.aws.services.translate.TranslateJsonHandler;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -44,8 +51,8 @@ import java.util.zip.GZIPInputStream;
  * Generic dispatcher for all AWS services that use the application/cbor protocol,
  * via either smithy-rpc-v2-cbor path routing or the legacy X-Amz-Target header.
  * <p>
- * Currently supported services: DynamoDB (incl. Streams), SQS, SNS, Kinesis,
- * Step Functions, CloudWatch Metrics, and EventBridge V2.
+ * RPC v2 requests reuse the target-routed JSON service dispatchers. Existing CBOR-only services
+ * and legacy X-Amz-Target routes retain their format-specific handlers.
  * <p>
  * Requests run on virtual threads, as in {@link AwsJsonController}, so a ReceiveMessage or
  * GetActivityTask long poll does not hold one of the shared request workers while it waits.
@@ -55,7 +62,9 @@ public class AwsJsonCborController {
 
     private static final Logger LOG = Logger.getLogger(AwsJsonCborController.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+    private static final RpcV2CborCodec RPC_CODEC = RpcV2CborCodec.load();
     private static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
+    private static final String EVENT_STREAM_MEDIA_TYPE = "application/vnd.amazon.eventstream";
     private static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
 
     /** The RPC v2 path parameters {@link IamEnforcementFilter} authorizes, as this endpoint dispatches them. */
@@ -65,6 +74,8 @@ public class AwsJsonCborController {
     private final ObjectMapper objectMapper;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
+    private final AwsJsonController jsonController;
+    private final AwsJson11Controller json11Controller;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
@@ -87,10 +98,13 @@ public class AwsJsonCborController {
                                  CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
                                  MarketplaceEntitlementController marketplaceEntitlementController,
                                  EventBridgeV2Handler eventBridgeV2Handler,
-                                 TranslateJsonHandler translateJsonHandler) {
+                                 TranslateJsonHandler translateJsonHandler,
+                                 AwsJsonController jsonController, AwsJson11Controller json11Controller) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
+        this.jsonController = jsonController;
+        this.json11Controller = json11Controller;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.dynamoDbStreamsJsonHandler = dynamoDbStreamsJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
@@ -322,35 +336,50 @@ public class AwsJsonCborController {
     @POST
     @Path("service/{serviceId}/operation/{operation}")
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
-    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE, EVENT_STREAM_MEDIA_TYPE})
     @RunOnVirtualThread
     public Response handleSmithyRpcV2Cbor(
             @PathParam(RPC_V2_SERVICE_PARAMETER) String serviceId,
             @PathParam(RPC_V2_OPERATION_PARAMETER) String operation,
             @Context HttpHeaders httpHeaders,
+            @Context UriInfo uriInfo,
             byte[] body) {
 
         LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
             JsonNode request = bodyToJson(httpHeaders, body);
+            boolean modeled = RPC_CODEC.supports(serviceId);
+            if (modeled) {
+                request = RPC_CODEC.decodeRequest(serviceId, operation, request);
+            }
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            Response delegated = dispatchCbor(serviceId, operation, request, region);
+            Response delegated = dispatchCbor(serviceId, operation, request, region, httpHeaders, uriInfo);
             if (delegated == null) {
-                return Response.status(404).build();
+                return cborUnknownOperationError("Unknown service or operation: " + serviceId + "." + operation,
+                        httpHeaders);
             }
 
-            JsonNode responseNode = delegated.getEntity() instanceof JsonNode
-                    ? (JsonNode) delegated.getEntity()
-                    : objectMapper.valueToTree(delegated.getEntity());
-            byte[] cborBytes = nodeToSmithyCbor(responseNode, timestampMembers(serviceId));
-            String responseContentType = responseContentType(httpHeaders);
-            return Response.status(delegated.getStatus())
-                    .header("smithy-protocol", "rpc-v2-cbor")
-                    .type(responseContentType)
-                    .entity(cborBytes)
-                    .build();
+            boolean successful = delegated.getStatus() >= 200 && delegated.getStatus() < 300;
+            Response.ResponseBuilder response = Response.fromResponse(delegated)
+                    .status(successful ? 200 : delegated.getStatus())
+                    .header(HttpHeaders.CONTENT_LENGTH, null)
+                    .header("X-Amz-Crc32", null)
+                    .header("smithy-protocol", "rpc-v2-cbor");
+            if (delegated.getMediaType() != null
+                    && MediaType.valueOf(EVENT_STREAM_MEDIA_TYPE).isCompatible(delegated.getMediaType())
+                    && delegated.getEntity() instanceof byte[] frames) {
+                return response.type(EVENT_STREAM_MEDIA_TYPE)
+                        .entity(RPC_CODEC.encodeEventStream(serviceId, operation, frames)).build();
+            }
+            if (modeled && successful && !RPC_CODEC.hasOutput(serviceId, operation)) {
+                return response.entity(null).type((String) null).build();
+            }
+            JsonNode responseNode = responseNode(delegated.getEntity());
+            byte[] cborBytes = modeled ? RPC_CODEC.encodeResponse(serviceId, operation, responseNode)
+                    : nodeToSmithyCbor(responseNode, timestampMembers(serviceId));
+            return response.type(responseContentType(httpHeaders)).entity(cborBytes).build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
         } catch (JacksonException e) {
@@ -510,7 +539,8 @@ public class AwsJsonCborController {
     /**
      * Dispatches a CBOR request to the appropriate service handler by SDK service ID.
      */
-    private Response dispatchCbor(String serviceId, String operation, JsonNode request, String region) throws Exception {
+    private Response dispatchCbor(String serviceId, String operation, JsonNode request, String region,
+            HttpHeaders headers, UriInfo uriInfo) throws Exception {
         ServiceDescriptor descriptor = catalog.byCborSdkServiceId(serviceId).orElse(null);
         if (descriptor == null) {
             return null;
@@ -528,11 +558,43 @@ public class AwsJsonCborController {
             case "kinesis" -> kinesisJsonHandler.handle(operation, request, region);
             case "states" -> sfnJsonHandler.handle(operation, request, region);
             case "monitoring" -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
-            case "marketplace" -> marketplaceEntitlementController.handle(operation, request, region);
+            case "marketplace" -> descriptor.cborSdkServiceIds().contains(serviceId)
+                    ? marketplaceEntitlementController.handle(operation, request, region)
+                    : dispatchJson(serviceId, operation, request, region, headers, uriInfo);
             case "eventsv2" -> eventBridgeV2Handler.handle(operation, request, region);
             case "translate" -> translateJsonHandler.handleCbor(operation, request, region);
-            default -> null;
+            default -> dispatchJson(serviceId, operation, request, region, headers, uriInfo);
         };
+    }
+
+    private Response dispatchJson(String serviceId, String operation, JsonNode request, String region,
+            HttpHeaders headers, UriInfo uriInfo) throws Exception {
+        ServiceCatalog.TargetMatch target = catalog.matchTarget(serviceId + "." + operation).orElse(null);
+        if (target == null || target.jsonOnly() || !target.descriptor().supportsProtocol(ServiceProtocol.JSON)) {
+            return null;
+        }
+        if (request == null || !request.isObject()) {
+            throw new AwsException("SerializationException", "Request body must be a structure", 400);
+        }
+        String authorization = headers.getHeaderString("Authorization");
+        if (authorization == null || authorization.isBlank()) {
+            authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+        }
+        Response response = json11Controller.dispatch(target, request, region, authorization, uriInfo.getBaseUri());
+        return response != null ? response : jsonController.dispatch(target, request, region, null);
+    }
+
+    private JsonNode responseNode(Object entity) throws IOException {
+        if (entity instanceof JsonNode node) {
+            return node;
+        }
+        if (entity instanceof String json) {
+            return objectMapper.readTree(json);
+        }
+        if (entity instanceof byte[] json) {
+            return objectMapper.readTree(json);
+        }
+        return objectMapper.valueToTree(entity);
     }
 
     /** The timestamp members a service's responses carry under names {@link #isTimestampField} does not match. */

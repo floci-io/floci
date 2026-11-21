@@ -805,6 +805,76 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "\"}"), "ecs:ListTagsForResource");
     }
 
+    /** An {@code aws:ResourceTag} condition reads the tags attached to the task set a delete names. */
+    @Test
+    void anEcsTaskSetResourceTagConditionReadsTheTagsOfTheTaskSet() {
+        String cluster = "res-tag-task-set-" + suffix();
+        String family = cluster + "-td";
+        String service = cluster + "-svc";
+        adminJson("ecs", ECS_API + "CreateCluster").body("{\"clusterName\":\"" + cluster + "\"}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteCluster")
+                .body("{\"cluster\":\"" + cluster + "\"}").post("/"));
+
+        String taskDefinitionArn = adminJson("ecs", ECS_API + "RegisterTaskDefinition")
+                .body("{\"family\":\"" + family + "\",\"containerDefinitions\":[{\"name\":\"web\","
+                        + "\"image\":\"nginx\",\"memory\":128}]}")
+                .post("/").then().statusCode(200).extract().path("taskDefinition.taskDefinitionArn");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeregisterTaskDefinition")
+                .body("{\"taskDefinition\":\"" + taskDefinitionArn + "\"}").post("/"));
+
+        adminJson("ecs", ECS_API + "CreateService")
+                .body("{\"cluster\":\"" + cluster + "\",\"serviceName\":\"" + service
+                        + "\",\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,"
+                        + "\"deploymentController\":{\"type\":\"EXTERNAL\"}}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteService")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\",\"force\":true}")
+                .post("/"));
+
+        String tagged = adminJson("ecs", ECS_API + "CreateTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\","
+                        + "\"taskDefinition\":\"" + family + "\",\"scale\":{\"value\":0,\"unit\":\"PERCENT\"},"
+                        + "\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .post("/").then().statusCode(200).extract().path("taskSet.id");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service
+                        + "\",\"taskSet\":\"" + tagged + "\",\"force\":true}").post("/"));
+        String other = adminJson("ecs", ECS_API + "CreateTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service + "\","
+                        + "\"taskDefinition\":\"" + family + "\",\"scale\":{\"value\":0,\"unit\":\"PERCENT\"},"
+                        + "\"tags\":[{\"key\":\"team\",\"value\":\"web\"}]}")
+                .post("/").then().statusCode(200).extract().path("taskSet.id");
+        cleanup.register(() -> adminJson("ecs", ECS_API + "DeleteTaskSet")
+                .body("{\"cluster\":\"" + cluster + "\",\"service\":\"" + service
+                        + "\",\"taskSet\":\"" + other + "\",\"force\":true}").post("/"));
+
+        String taggedArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":task-set/" + cluster + "/" + service
+                + "/" + tagged;
+        User deniedUser = user("res-ecs-task-set-full-arn-deny");
+        deniedUser.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(send(deniedUser, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + taggedArn + "\",\"force\":true}"),
+                "ecs:DeleteTaskSet");
+
+        User user = user("res-ecs-task-set-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DeleteTaskSet\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + tagged + "\",\"force\":true}")
+                .statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + other + "\",\"force\":true}"),
+                "ecs:DeleteTaskSet");
+        String otherArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":task-set/" + cluster + "/" + service
+                + "/" + other;
+        send(deniedUser, "ecs", ECS_API + "DeleteTaskSet", "1.1", "{\"cluster\":\"" + cluster + "\","
+                + "\"service\":\"" + service + "\",\"taskSet\":\"" + otherArn + "\",\"force\":true}")
+                .statusCode(200);
+    }
+
     /**
      * An {@code ssm:resourceTag} or {@code aws:ResourceTag} condition reads the tags SSM holds on the parameter or the
      * document a request names, so an allow on one team's tag lets the caller read that team's and not another's.
@@ -1075,6 +1145,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         cleanup.register(() -> adminJson("kinesis", "Kinesis_20131202.DeleteStream").body("{\"StreamName\":\""
                 + name + "\"}").post("/").then().statusCode(200));
         return name;
+    }
+
+    /**
+     * EC2 Instance Connect's SendSSHPublicKey and SendSerialConsoleSSHPublicKey are checked on the instance their
+     * {@code InstanceId} names, under the ARN EC2 gives it, so a grant on one instance does not reach another.
+     */
+    @Test
+    void anInstanceConnectKeyIsCheckedOnTheInstanceItIsSentTo() {
+        String instanceId = admin("ec2").formParam("Action", "RunInstances").formParam("Version", "2016-11-15")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1").formParam("MaxCount", "1").post("/").then().statusCode(200).extract()
+                .path("RunInstancesResponse.instancesSet.item.instanceId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "TerminateInstances").formParam("Version", "2016-11-15")
+                .formParam("InstanceId.1", instanceId).post("/").then().statusCode(200));
+        // Mock mode settles a launch on the first DescribeInstances; a key needs a running instance.
+        admin("ec2").formParam("Action", "DescribeInstances").formParam("Version", "2016-11-15")
+                .formParam("InstanceId.1", instanceId).post("/").then().statusCode(200);
+        String instance = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":instance/";
+
+        User user = user("res-instance-connect");
+        user.policy(allowOn("ec2-instance-connect:SendSSHPublicKey", instance + instanceId) + ","
+                + allowOn("ec2-instance-connect:SendSerialConsoleSSHPublicKey", instance + instanceId));
+        sendSshPublicKey(user, "SendSSHPublicKey", instanceId).statusCode(200);
+        refusedJson(sendSshPublicKey(user, "SendSSHPublicKey", "i-0000000000000000f"),
+                "ec2-instance-connect:SendSSHPublicKey");
+        refusedJson(sendSshPublicKey(user, "SendSerialConsoleSSHPublicKey", "i-0000000000000000f"),
+                "ec2-instance-connect:SendSerialConsoleSSHPublicKey");
+    }
+
+    private static ValidatableResponse sendSshPublicKey(User user, String operation, String instanceId) {
+        return user.json("ec2-instance-connect", "AWSEC2InstanceConnectService." + operation, "1.1")
+                .body("{\"InstanceId\":\"" + instanceId + "\",\"InstanceOSUser\":\"ec2-user\",\"SSHPublicKey\":"
+                        + "\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl "
+                        + "user@host\"}").post("/").then();
     }
 
     @Test
@@ -1686,6 +1790,35 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"identifier\":\"" + id + "\"}").statusCode(200);
         refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
                 "{\"identifier\":\"" + UUID.randomUUID() + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Pricing Calculator holds on the workload estimate a request
+     * names by its id, the ones it was created with, so an allow on one team's tag lets the caller read that team's
+     * estimate and not another's.
+     */
+    @Test
+    void aPricingCalculatorResourceTagConditionReadsTheTagsOfTheWorkloadEstimate() {
+        String tagged = workloadEstimate("data");
+        String other = workloadEstimate("web");
+
+        User user = user("res-estimate-team");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"bcm-pricing-calculator:GetWorkloadEstimate\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + other + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /** A workload estimate an administrator creates, tagged with {@code team}, deleted after the test; its id. */
+    private String workloadEstimate(String team) {
+        String id = adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.CreateWorkloadEstimate", "1.0")
+                .body("{\"name\":\"res-estimate-" + team + "\",\"clientToken\":\"" + suffix() + "\",\"tags\":"
+                        + "{\"team\":\"" + team + "\"}}").post("/").then().statusCode(200).extract().path("id");
+        cleanup.register(() -> adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.DeleteWorkloadEstimate",
+                "1.0").body("{\"identifier\":\"" + id + "\"}").post("/").then().statusCode(200));
+        return id;
     }
 
     /**
