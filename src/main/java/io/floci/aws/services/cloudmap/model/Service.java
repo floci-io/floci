@@ -30,7 +30,7 @@ public class Service {
     private String creatorRequestId;
     private String region;
     private long revision;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public Service() {}
 

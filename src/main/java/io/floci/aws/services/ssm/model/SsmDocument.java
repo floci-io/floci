@@ -47,7 +47,7 @@ public class SsmDocument {
     private Map<String, String> versions = new LinkedHashMap<>();
 
     @JsonProperty("Tags")
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public SsmDocument() {}
 

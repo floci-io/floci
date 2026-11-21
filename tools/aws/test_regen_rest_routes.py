@@ -19,6 +19,21 @@ def model(protocol: str, api_version: str, **operations: tuple[str, str]) -> dic
     }
 
 
+def shaped(model_doc: dict, operation: str, required: dict[str, tuple[str, str]], deprecated: bool = False) -> dict:
+    """The model with the operation's input requiring each member, at its location under its name on the wire."""
+    shape = f"{operation}Request"
+    model_doc.setdefault("shapes", {})[shape] = {
+        "type": "structure", "required": sorted(required),
+        "members": {member: {"shape": "String", "location": location, "locationName": wire}
+                    for member, (location, wire) in required.items()},
+    }
+    model_doc["shapes"]["String"] = {"type": "string"}
+    model_doc["operations"][operation]["input"] = {"shape": shape}
+    if deprecated:
+        model_doc["operations"][operation]["deprecated"] = True
+    return model_doc
+
+
 def test_each_operation_keeps_its_method_and_request_uri_under_its_scope():
     doc = r.build({
         "s3": model("rest-xml", "2006-03-01", GetObject=("GET", "/{Bucket}/{Key+}?x-id=GetObject"),
@@ -70,21 +85,109 @@ def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path, m
     assert r.main(data + ["--check"]) == 1
 
 
-def test_a_route_naming_two_operations_of_a_scope_the_rules_do_not_route_alone_is_refused():
+def test_a_route_naming_two_operations_a_request_cannot_tell_apart_is_refused():
     with pytest.raises(SystemExit):
         r.build({"lambda": model("rest-json", "2015-03-31", GetByName=("GET", "/things/{Name}"),
                                  GetById=("GET", "/things/{Id}/"))}, "botocore test")
-    # One operation in two models of a scope, two routes a query tells apart, and two operations on one route of a
-    # scope the rules route alone, all pass.
+    # A scope the rules route alone is checked too: its routes are what the coverage test builds requests on.
+    with pytest.raises(SystemExit):
+        r.build({"s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
+                             UploadPart=("PUT", "/{Bucket}/{Key+}"))}, "botocore test")
+    # One operation in two models of a scope, two routes a query tells apart, and two operations on one route that
+    # what botocore requires tells apart, all pass.
     doc = r.build({
         "lambda": model("rest-json", "2015-03-31", ListTags=("GET", "/tags/{ARN}"), GetThing=("GET", "/things/{Name}"),
                         ListThingTags=("GET", "/things/{Name}?tagging")),
         "lambda-microvms": model("rest-json", "2025-01-01", ListTags=("GET", "/tags/{Resource}")),
-        "s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
-                    UploadPart=("PUT", "/{Bucket}/{Key+}")),
+        "s3": shaped(model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
+                           UploadPart=("PUT", "/{Bucket}/{Key+}")), "UploadPart",
+                     {"PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")}),
     }, "botocore test")
     assert doc["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
     assert set(doc["handRouted"]) == {"s3"}
+    # Only a route several operations share carries conditions; one operation in two models is one operation.
+    assert "requires" not in doc["models"]["lambda"]["operations"]["ListTags"]
+    assert "requires" not in doc["models"]["lambda"]["operations"]["GetThing"]
+
+
+def test_operations_sharing_a_route_carry_the_query_parameters_and_headers_botocore_requires():
+    s3 = model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"), CopyObject=("PUT", "/{Bucket}/{Key+}"),
+               UploadPart=("PUT", "/{Bucket}/{Key+}"), UploadPartCopy=("PUT", "/{Bucket}/{Key+}"))
+    shaped(s3, "CopyObject", {"CopySource": ("header", "x-amz-copy-source")})
+    shaped(s3, "UploadPart", {"PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")})
+    shaped(s3, "UploadPartCopy", {"CopySource": ("header", "x-amz-copy-source"),
+                                  "PartNumber": ("querystring", "partNumber"), "UploadId": ("querystring", "uploadId")})
+    operations = r.build({"s3": s3}, "botocore test")["models"]["s3"]["operations"]
+    assert "requires" not in operations["PutObject"]
+    assert operations["CopyObject"]["requires"] == {"headers": ["x-amz-copy-source"]}
+    assert operations["UploadPart"]["requires"] == {"query": ["partNumber", "uploadId"]}
+    assert operations["UploadPartCopy"]["requires"] == {"query": ["partNumber", "uploadId"],
+                                                        "headers": ["x-amz-copy-source"]}
+
+
+def test_what_any_two_operations_of_a_route_require_together_must_be_what_one_of_them_requires():
+    # A request carrying both `a` and `b` would satisfy both operations, and none requires all it carries.
+    route = model("rest-xml", "2006-03-01", WithA=("PUT", "/{Bucket}/{Key+}"), WithB=("PUT", "/{Bucket}/{Key+}"))
+    shaped(route, "WithA", {"A": ("querystring", "a")})
+    shaped(route, "WithB", {"B": ("header", "x-b")})
+    with pytest.raises(SystemExit):
+        r.build({"s3": route}, "botocore test")
+    # An operation requiring both settles it, as UploadPartCopy settles CopyObject's header and UploadPart's query.
+    route["operations"]["WithBoth"] = {"http": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"}}
+    shaped(route, "WithBoth", {"A": ("querystring", "a"), "B": ("header", "x-b")})
+    assert set(r.build({"s3": route}, "botocore test")["models"]["s3"]["operations"]) == {"WithA", "WithB", "WithBoth"}
+
+
+def test_a_deprecated_operation_yields_to_the_current_one_of_its_route_and_conditions():
+    s3 = model("rest-xml", "2006-03-01", GetBucketLifecycle=("GET", "/{Bucket}?lifecycle"),
+               GetBucketLifecycleConfiguration=("GET", "/{Bucket}?lifecycle"))
+    operations = r.build({"s3": shaped(s3, "GetBucketLifecycle", {}, deprecated=True)},
+                         "botocore test")["models"]["s3"]["operations"]
+    assert operations["GetBucketLifecycle"]["deprecated"] is True
+    assert "deprecated" not in operations["GetBucketLifecycleConfiguration"]
+    # Two deprecated ones, or two current ones, a request still cannot tell apart.
+    both = model("rest-xml", "2006-03-01", GetBucketLifecycle=("GET", "/{Bucket}?lifecycle"),
+                 GetBucketLifecycleConfiguration=("GET", "/{Bucket}?lifecycle"))
+    shaped(both, "GetBucketLifecycle", {}, deprecated=True)
+    shaped(both, "GetBucketLifecycleConfiguration", {}, deprecated=True)
+    with pytest.raises(SystemExit):
+        r.build({"s3": both}, "botocore test")
+
+
+def test_an_operation_signed_for_another_service_on_every_request_is_left_out_of_the_scope():
+    from botocore.loaders import Loader
+    partitions = Loader().load_data("partitions")
+    ruleset = {
+        "version": "1.0",
+        "parameters": {"Region": {"type": "String", "builtIn": "AWS::Region"},
+                       "UseOtherControl": {"type": "Boolean"}, "Bucket": {"type": "String"}},
+        "rules": [
+            {"type": "endpoint", "conditions": [{"fn": "booleanEquals", "argv": [{"ref": "UseOtherControl"}, True]}],
+             "endpoint": {"url": "https://other-control.example",
+                          "properties": {"authSchemes": [{"name": "sigv4", "signingName": "other"}]}}},
+            {"type": "endpoint", "conditions": [],
+             "endpoint": {"url": "https://s3.example",
+                          "properties": {"authSchemes": [{"name": "sigv4", "signingName": "s3"}]}}},
+        ],
+    }
+    s3 = model("rest-xml", "2006-03-01", ListBuckets=("GET", "/"), ListOtherBuckets=("GET", "/"),
+               CreateBucket=("PUT", "/{Bucket}"))
+    s3["metadata"]["signingName"] = "s3"
+    s3["operations"]["ListOtherBuckets"]["staticContextParams"] = {"UseOtherControl": {"value": True}}
+    # A member of its own bound to an endpoint parameter decides the endpoint per request: not every request's.
+    s3["operations"]["CreateBucket"]["staticContextParams"] = {"UseOtherControl": {"value": True}}
+    shaped(s3, "CreateBucket", {"Bucket": ("uri", "Bucket")})
+    s3["shapes"]["CreateBucketRequest"]["members"]["Bucket"]["contextParam"] = {"name": "Bucket"}
+
+    elsewhere = r.signed_elsewhere({"s3": s3}, {"s3": ruleset}, partitions)
+    assert elsewhere == {"s3": {"ListOtherBuckets": "other"}}
+    doc = r.build({"s3": s3}, "botocore test", elsewhere=elsewhere)
+    assert set(doc["models"]["s3"]["operations"]) == {"ListBuckets", "CreateBucket"}
+    assert doc["models"]["s3"]["signedElsewhere"] == {"ListOtherBuckets": "other"}
+    assert '"signedElsewhere": {"ListOtherBuckets": "other"}' in r.render(doc)
+    # Without it, GET / names two operations a request cannot tell apart.
+    with pytest.raises(SystemExit):
+        r.build({"s3": s3}, "botocore test")
 
 
 def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
@@ -351,3 +454,16 @@ def test_vendored_documented_routes_read_from_another_page_or_malformed_are_refu
     malformed["operations"]["GetCatalog"] = {"method": "FETCH", "requestUri": "/iceberg/v1/config"}
     with pytest.raises(SystemExit, match="malformed"):
         r.carried_documented(r.render(r.build({}, "test", {"glue-iceberg-rest": malformed})))
+
+
+def test_a_hand_routed_scopes_routes_list_all_their_requests_must_carry_for_the_coverage_test():
+    s3 = shaped(model("rest-xml", "2006-03-01", CompleteMultipartUpload=("POST", "/{Bucket}/{Key+}"),
+                      PutObject=("PUT", "/{Bucket}/{Key+}")),
+                "CompleteMultipartUpload", {"UploadId": ("querystring", "uploadId")})
+    lam = shaped(model("rest-json", "2015-03-31", GetThing=("GET", "/things/{Name}")),
+                 "GetThing", {"Qualifier": ("querystring", "Qualifier")})
+    doc = r.build({"s3": s3, "lambda": lam}, "botocore test")
+    assert doc["models"]["s3"]["operations"]["CompleteMultipartUpload"]["required"] == {"query": ["uploadId"]}
+    assert "required" not in doc["models"]["s3"]["operations"]["PutObject"]
+    # A routed scope's requests are matched on its routes, which carry only what tells shared ones apart.
+    assert "required" not in doc["models"]["lambda"]["operations"]["GetThing"]

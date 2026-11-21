@@ -18,6 +18,7 @@ import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -303,6 +304,31 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             migrateLegacyEntries(accountId, legacyKeyFilter, destinationKey,
                     value -> legacyOwner.test(accountId, value));
         }
+    }
+
+    /**
+     * For records stored before they were keyed by Region, which recorded none and which every Region saw: in every
+     * account, copies each legacy entry {@code legacyKeyFilter} accepts onto {@code keyIn}'s key of each Region other
+     * than {@code defaultRegion} that {@code regionsUsing} gives for it (the Regions whose resources name it), where
+     * that key is free, then moves the legacy entries onto {@code defaultRegion}'s key, as
+     * {@link #migrateLegacyEntriesInAllAccounts(Predicate, Function)} moves them. {@code regionsUsing} is handed the
+     * account holding the entry, and {@code keyIn} returning null leaves that entry where it is.
+     */
+    public synchronized void migrateLegacyEntriesToRegions(
+            Predicate<String> legacyKeyFilter,
+            String defaultRegion,
+            BiFunction<String, V, Set<String>> regionsUsing,
+            BiFunction<String, V, String> keyIn,
+            UnaryOperator<V> copy) {
+        for (AccountEntry<V> entry : scanAllAccountEntries(legacyKeyFilter)) {
+            for (String region : regionsUsing.apply(entry.accountId(), entry.value())) {
+                String key = keyIn.apply(region, entry.value());
+                if (!region.equals(defaultRegion) && key != null && getForAccount(entry.accountId(), key).isEmpty()) {
+                    putForAccount(entry.accountId(), key, copy.apply(entry.value()));
+                }
+            }
+        }
+        migrateLegacyEntriesInAllAccounts(legacyKeyFilter, value -> keyIn.apply(defaultRegion, value));
     }
 
     private synchronized void migrateLegacyEntries(
@@ -622,6 +648,24 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> !k.contains("/")).stream()
                 .filter(legacyOwner)
                 .toList();
+    }
+
+    /**
+     * Account-relative keys, including unmigrated keys only for the configured default account.
+     * Filters ownership before collecting keys and never fetches or migrates a stored value.
+     */
+    public Set<String> keysIncludingLegacyForAccount(String accountId, Predicate<String> keyFilter) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            if (!accountId.equals(ownerOf(rawKey))) {
+                continue;
+            }
+            String key = hasAccountPrefix(rawKey) ? rawKey.substring(13) : rawKey;
+            if (keyFilter.test(key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
     }
 
     public Set<String> keysForAccount(String accountId) {

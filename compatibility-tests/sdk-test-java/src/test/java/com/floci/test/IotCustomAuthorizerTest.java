@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -93,6 +94,7 @@ import static org.assertj.core.api.Assertions.fail;
  * ones are imported and the v5 ones are written fully qualified.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@ResourceLock("iot-default-authorizer")
 @DisplayName("IoT custom authorizer invocation and enforcement")
 class IotCustomAuthorizerTest {
 
@@ -786,6 +788,37 @@ class IotCustomAuthorizerTest {
     void mqttNameInUpgradeHeader(Mqtt version) throws Exception {
         assertConnects(version, new Target(mqttUri, clientId, clientId,
                 "allow-me".getBytes(StandardCharsets.UTF_8), Map.of(NAME_HEADER, authorizer)));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("a CONNECT that names no authorizer and carries no SigV4 is refused")
+    void mqttUnsignedWithoutAuthorizerRefused(Mqtt version) {
+        assertRefused(version, target(clientId, "allow-me"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("a CONNECT that names no authorizer and carries no SigV4 goes through the default authorizer")
+    void mqttUnsignedGoesThroughTheDefaultAuthorizer(Mqtt version) throws Exception {
+        iot.setDefaultAuthorizer(r -> r.authorizerName(authorizer));
+        try {
+            assertConnects(version, target(clientId, "allow-me"));
+        } finally {
+            iot.clearDefaultAuthorizer(r -> { });
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("the default authorizer refuses an unsigned CONNECT its function denies")
+    void mqttUnsignedDeniedByTheDefaultAuthorizer(Mqtt version) {
+        iot.setDefaultAuthorizer(r -> r.authorizerName(authorizer));
+        try {
+            assertRefused(version, target(clientId, "deny"));
+        } finally {
+            iot.clearDefaultAuthorizer(r -> { });
+        }
     }
 
     @ParameterizedTest(name = "{0}")

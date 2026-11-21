@@ -40,7 +40,7 @@ class BedrockServiceTest {
     @BeforeEach
     void setUp() {
         kmsService = mock(KmsService.class);
-        service = new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+        service = new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT), mapper, kmsService);
     }
 

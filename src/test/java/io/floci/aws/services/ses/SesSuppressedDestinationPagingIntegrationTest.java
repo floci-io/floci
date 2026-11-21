@@ -22,10 +22,8 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesSuppressedDestinationPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/me-south-1/ses/aws4_request";
-    private static final String OTHER_REGION_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("me-south-1");
+    private static final String OTHER_REGION_AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String PATH = "/v2/email/suppression/addresses";
     private static final String ADDRESSES = "SuppressedDestinationSummaries.EmailAddress";
     private static final String TENANT = "page-tenant";
@@ -102,7 +100,7 @@ class SesSuppressedDestinationPagingIntegrationTest {
     @Test
     @Order(6)
     void aTenantListPagesOnItsOwnTokens() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        SesV2Requests.v2(AUTH)
                 .body("{\"TenantName\":\"" + TENANT + "\"}")
         .when().post("/v2/email/tenants").then().statusCode(200);
         put("tenant-a@example.com", "BOUNCE", TENANT);
@@ -135,7 +133,7 @@ class SesSuppressedDestinationPagingIntegrationTest {
 
     private static void put(String address, String reason, String tenant) {
         String tenantMember = tenant == null ? "" : ",\"TenantName\":\"" + tenant + "\"";
-        given().contentType("application/json").header("Authorization", AUTH)
+        SesV2Requests.v2(AUTH)
                 .body("{\"EmailAddress\":\"" + address + "\",\"Reason\":\"" + reason + "\"" + tenantMember + "}")
         .when().put(PATH).then().statusCode(200);
     }

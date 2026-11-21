@@ -39,7 +39,7 @@ public class EcsTask {
     private String containerInstanceArn;
     private boolean protectionEnabled;
     private Instant protectedUntil;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private NetworkConfiguration networkConfiguration;
     private String networkInterfaceId;
     private String privateIpAddress;

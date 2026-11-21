@@ -87,6 +87,59 @@ public final class BackupWindows {
                 "The backup window and maintenance window must not overlap.", 400);
     }
 
+    /**
+     * The {backup, maintenance} windows in effect after a request, checked against each other. On
+     * create a window given alone is paired with the default, or with one starting where the given
+     * one ends when the default would overlap it, as AWS picks a clear window itself. On modify the
+     * counterpart is the resource's current window ({@code currentBackup}, {@code currentMaintenance},
+     * either may be null for the default).
+     */
+    public static String[] effectiveWindows(boolean create, String backup, String maintenance,
+                                            String currentBackup, String currentMaintenance) {
+        boolean backupGiven = backup != null;
+        boolean maintenanceGiven = maintenance != null;
+        if (backupGiven) {
+            parseBackupWindow(backup);
+        }
+        if (maintenanceGiven) {
+            parseMaintenanceWindow(maintenance);
+        }
+        if (create) {
+            if (!backupGiven) {
+                backup = maintenanceGiven && overlap(DEFAULT_BACKUP_WINDOW, maintenance)
+                        ? backupWindowAfter(maintenance) : DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = backupGiven && overlap(backup, DEFAULT_MAINTENANCE_WINDOW)
+                        ? maintenanceWindowAfter(backup) : DEFAULT_MAINTENANCE_WINDOW;
+            }
+            // a derived window is clear unless the given one leaves no 30-minute gap at all
+            if (overlap(backup, maintenance)) {
+                if (!maintenanceGiven) {
+                    throw new AwsException("InvalidParameterValue", "The specified backup window overlaps all "
+                            + "available default maintenance windows. Shrink the backup window or specify a "
+                            + "non-overlapping maintenance window.", 400);
+                }
+                if (!backupGiven) {
+                    throw new AwsException("InvalidParameterValue", "The specified maintenance window overlaps "
+                            + "all available default backup windows. Shrink the maintenance window or specify "
+                            + "a non-overlapping backup window.", 400);
+                }
+            }
+        } else {
+            if (!backupGiven) {
+                backup = currentBackup != null ? currentBackup : DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = currentMaintenance != null ? currentMaintenance : DEFAULT_MAINTENANCE_WINDOW;
+            }
+        }
+        if (overlap(backup, maintenance)) {
+            throw overlapping();
+        }
+        return new String[] {backup, maintenance};
+    }
+
     /** A 30-minute maintenance window starting the minute the given daily window ends. */
     public static String maintenanceWindowAfter(String backupWindow) {
         int end = parseBackupWindow(backupWindow)[1] % MINUTES_PER_DAY;

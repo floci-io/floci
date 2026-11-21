@@ -553,7 +553,7 @@ public class DelegationRequestService implements DelegationRequestOwnership, Res
     private record Owner(String accountId, String arn) {}
 
     /** Every owner's request ids as one scan found them, with the version that scan read. */
-    private record OwnedRequests(long version, Map<Owner, List<String>> ids) {}
+    private record OwnedRequests(long version, Map<Owner, List<String>> ids, Map<String, Owner> owners) {}
 
     /**
      * The requests an identity owns, for the grant the policy set writes from them. It reads the
@@ -582,29 +582,59 @@ public class DelegationRequestService implements DelegationRequestOwnership, Res
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * <p>Answered from the same scan the owner listing reads, by request id rather than by owner, so an
+     * authorization costs a lookup rather than a pass over the store: this runs on every request for the
+     * actions the condition key is published on, which the listing does not. The owner is answered to the
+     * account that owns the request and to no other, which is the same line {@code visible} draws, and a
+     * request still unclaimed has no owner to answer with.
+     */
+    @Override
+    public Optional<String> ownerArnOf(String accountId, String requestId) {
+        if (accountId == null || requestId == null || requests.isEmptyInAllAccounts()) {
+            return Optional.empty();
+        }
+        Owner owner = scanned().owners().get(requestId);
+        return owner == null || !accountId.equals(owner.accountId())
+                ? Optional.empty() : Optional.of(owner.arn());
+    }
+
+    /**
      * Who owns what, from the last scan still current, or from a fresh one. A scan that a write
      * overtook answers this caller and is not kept, so the next caller reads the store again
      * rather than a view of the moment before that write.
      */
     private Map<Owner, List<String>> ownership() {
+        return scanned().ids();
+    }
+
+    /**
+     * The scan both views are read from: which identity owns what, and which identity owns one request. One
+     * pass fills both, so the second reader costs nothing the first does not already pay, and the whole of it
+     * is dropped by the same version bump a write makes.
+     */
+    private OwnedRequests scanned() {
         long version = ownershipVersion.get();
         OwnedRequests cached = ownedRequests.get();
         if (cached != null && cached.version() == version) {
-            return cached.ids();
+            return cached;
         }
         Map<Owner, List<String>> owned = new HashMap<>();
+        Map<String, Owner> byId = new HashMap<>();
         for (DelegationRequest request : requests.scanAllAccounts()) {
             if (request.getOwnerAccountId() == null || request.getOwnerId() == null
                     || request.getDelegationRequestId() == null) {
                 continue;
             }
-            owned.computeIfAbsent(new Owner(request.getOwnerAccountId(), request.getOwnerId()),
-                    owner -> new ArrayList<>()).add(request.getDelegationRequestId());
+            Owner owner = new Owner(request.getOwnerAccountId(), request.getOwnerId());
+            owned.computeIfAbsent(owner, held -> new ArrayList<>()).add(request.getDelegationRequestId());
+            byId.put(request.getDelegationRequestId(), owner);
         }
         owned.replaceAll((owner, ids) -> List.copyOf(ids));
-        Map<Owner, List<String>> view = Map.copyOf(owned);
+        OwnedRequests view = new OwnedRequests(version, Map.copyOf(owned), Map.copyOf(byId));
         if (ownershipVersion.get() == version) {
-            ownedRequests.compareAndSet(cached, new OwnedRequests(version, view));
+            ownedRequests.compareAndSet(cached, view);
         }
         return view;
     }

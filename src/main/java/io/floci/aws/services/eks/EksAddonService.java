@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.model.Addon;
@@ -21,6 +22,7 @@ import io.floci.aws.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.floci.aws.services.eks.model.PodIdentityAssociation;
 import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateAddonRequest;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpdateParam;
 import io.floci.aws.services.iam.IamService;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -41,6 +43,8 @@ import java.util.function.UnaryOperator;
 
 @ApplicationScoped
 public class EksAddonService {
+
+    static final String TOKEN_REUSED = "clientRequestToken was already used with different parameters";
 
     private static final Logger LOG = Logger.getLogger(EksAddonService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -84,7 +88,11 @@ public class EksAddonService {
     public record StoredAddon(Addon addon, String clientRequestToken) {}
 
     @RegisterForReflection
-    public record StoredUpdate(Update update, String addonName) {}
+    public record StoredUpdate(Update update, String addonName, UpdateClusterConfigRequest request) {
+        public StoredUpdate(Update update, String addonName) {
+            this(update, addonName, null);
+        }
+    }
 
     @RegisterForReflection
     public record AddonNamesPage(List<String> addons, String nextToken) {}
@@ -113,8 +121,7 @@ public class EksAddonService {
                 if (parametersMatch(stored.addon(), request)) {
                     return stored.addon();
                 }
-                throw new AwsException("InvalidParameterException",
-                        "clientRequestToken was already used with different parameters", 400);
+                throw new AwsException("InvalidParameterException", TOKEN_REUSED, 400);
             }
             throw new AwsException("ResourceInUseException", "Addon already exists: " + addonName, 409);
         }
@@ -180,6 +187,19 @@ public class EksAddonService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No addon: " + addonName + " found for cluster: " + cluster.getName(), 404));
         return stored.addon();
+    }
+
+    /**
+     * Whether {@code cluster} has the add-on stored, whatever the cluster's status: what its node
+     * acts on when it starts or is adopted, which can happen while the cluster is not ACTIVE.
+     */
+    public boolean isInstalled(Cluster cluster, String addonName) {
+        if (cluster == null || addonName == null || addonName.isBlank()) {
+            return false;
+        }
+        // Read in the cluster's account, not the request's: restoring a cluster at startup asks with no request.
+        return AccountAwareStorageBackend.getInAccount(storage, AwsArnUtils.parse(cluster.getArn()).accountId(),
+                prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT)).isPresent();
     }
 
     public AddonNamesPage list(Cluster cluster, Integer maxResults, String nextToken) {
@@ -287,16 +307,7 @@ public class EksAddonService {
         storage.put(storageKey, new StoredAddon(updatedAddon, token));
         LOG.infov("Updated EKS addon {0} on cluster {1}", addonName, cluster.getName());
 
-        Update update = new Update(
-                UUID.randomUUID().toString(),
-                "Successful",
-                "AddonUpdate",
-                params,
-                now,
-                List.of()
-        );
-        updatesStorage.put(prefix(cluster) + update.id(), new StoredUpdate(update, addonName));
-        return update;
+        return recordUpdate(cluster, "AddonUpdate", params, addonName);
     }
 
     public synchronized Addon delete(Cluster cluster, String addonName, boolean preserve) {
@@ -363,10 +374,35 @@ public class EksAddonService {
         }
     }
 
+    /** Stores an update that always completes at once; {@code addonName} is null for one made to the cluster. */
+    public Update recordUpdate(Cluster cluster, String type, List<UpdateParam> params, String addonName) {
+        return recordUpdate(cluster, type, params, addonName, null);
+    }
+
+    /**
+     * As above, keeping the UpdateClusterConfig {@code request} that made the update, so a repeat of its
+     * {@code clientRequestToken} finds it again.
+     */
+    public Update recordUpdate(Cluster cluster, String type, List<UpdateParam> params, String addonName,
+                               UpdateClusterConfigRequest request) {
+        Update update = new Update(UUID.randomUUID().toString(), "Successful", type, params,
+                EpochSeconds.fromInstant(Instant.now()), List.of());
+        updatesStorage.put(prefix(cluster) + update.id(), new StoredUpdate(update, addonName, request));
+        return update;
+    }
+
+    /** The update an earlier UpdateClusterConfig with this {@code clientRequestToken} made, with its request. */
+    public Optional<StoredUpdate> findConfigUpdateByToken(Cluster cluster, String token) {
+        String p = prefix(cluster);
+        return updatesStorage.scan(k -> k.startsWith(p)).stream()
+                .filter(stored -> stored.request() != null && token.equals(stored.request().clientRequestToken()))
+                .findFirst();
+    }
+
     public Update describeUpdate(Cluster cluster, String updateId, String addonName) {
         StoredUpdate stored = storedUpdate(cluster, updateId);
         if (addonName != null && !addonName.isBlank()
-                && stored.addonName() != null && !stored.addonName().equalsIgnoreCase(addonName.trim())) {
+                && (stored.addonName() == null || !stored.addonName().equalsIgnoreCase(addonName.trim()))) {
             throw new AwsException("ResourceNotFoundException",
                     "No update: " + updateId + " found for addon: " + addonName, 404);
         }
@@ -505,6 +541,17 @@ public class EksAddonService {
         return Optional.of(tags);
     }
 
+    /**
+     * The tags of the add-on {@code addonName} of {@code cluster} in {@code account}, read in place, if its ARN is
+     * {@code addonArn}.
+     */
+    Optional<Map<String, String>> tagsInAccount(String account, Cluster cluster, String addonName, String addonArn) {
+        return AccountAwareStorageBackend.readInAccount(storage, account,
+                        prefix(cluster) + addonName.toLowerCase(Locale.ROOT))
+                .filter(stored -> addonArn.equals(stored.addon().addonArn()))
+                .map(stored -> stored.addon().tags());
+    }
+
     private static String prefix(Cluster cluster) {
         return cluster.getArn() + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
     }
@@ -520,7 +567,7 @@ public class EksAddonService {
                 .toString();
     }
 
-    private static void requireActiveCluster(Cluster cluster) {
+    static void requireActiveCluster(Cluster cluster) {
         if (cluster == null) {
             throw new AwsException("ResourceNotFoundException", "Cluster not found", 404);
         }

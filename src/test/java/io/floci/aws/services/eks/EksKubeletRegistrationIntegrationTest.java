@@ -6,8 +6,8 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
@@ -17,7 +17,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -33,15 +32,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 @QuarkusTest
-@TestProfile(EksKubeletRegistrationIntegrationTest.ImageCatalogProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 class EksKubeletRegistrationIntegrationTest {
-
-    public static final class ImageCatalogProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ec2.image-catalog-path", "src/test/resources/ec2/kubelet-image-catalog.yaml");
-        }
-    }
 
     @Inject
     EksService eksService;

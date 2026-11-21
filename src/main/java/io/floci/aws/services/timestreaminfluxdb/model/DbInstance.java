@@ -38,7 +38,7 @@ public class DbInstance {
     private String kmsKeyId;
     private String engineType;
     private Instant createdAt;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private String accountId;
     private String region;
     private String containerId;

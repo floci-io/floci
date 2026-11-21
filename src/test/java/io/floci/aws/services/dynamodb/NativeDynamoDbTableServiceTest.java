@@ -106,7 +106,7 @@ class NativeDynamoDbTableServiceTest {
         return new CreateTableRequest(TABLE,
                 new ArrayList<>(List.of(new KeySchemaElement("id", "HASH"))),
                 new ArrayList<>(List.of(new AttributeDefinition("id", "S"))),
-                throughput, List.of(), List.of(), List.of(), Map.of(), settings);
+                throughput, List.of(), List.of(), List.of(), Map.of(), settings, null);
     }
 
     private static CreateTableRequest createRequestWithGsi(TableSettings settings) {
@@ -117,13 +117,13 @@ class NativeDynamoDbTableServiceTest {
         return new CreateTableRequest(TABLE,
                 new ArrayList<>(List.of(new KeySchemaElement("id", "HASH"))),
                 new ArrayList<>(List.of(new AttributeDefinition("id", "S"), new AttributeDefinition("category", "S"))),
-                new Throughput(5L, 5L), new ArrayList<>(List.of(gsi)), List.of(), List.of(), Map.of(), settings);
+                new Throughput(5L, 5L), new ArrayList<>(List.of(gsi)), List.of(), List.of(), Map.of(), settings, null);
     }
 
     private static UpdateTableRequest updateRequest(List<GsiThroughputUpdate> gsiUpdates,
                                                     List<String> replicaUpdates, TableSettings settings) {
         return new UpdateTableRequest(TABLE, null, List.of(), List.of(), List.of(), gsiUpdates,
-                List.of(), List.of(), List.of(), List.of(), replicaUpdates, settings);
+                List.of(), List.of(), List.of(), List.of(), replicaUpdates, settings, null);
     }
 
     private void assertValidationFailure(Executable call, String message) {
@@ -190,7 +190,7 @@ class NativeDynamoDbTableServiceTest {
         CreateTableRequest request = new CreateTableRequest(TABLE,
                 new ArrayList<>(List.of(new KeySchemaElement("id", "HASH"))),
                 new ArrayList<>(List.of(new AttributeDefinition("id", "S"))),
-                null, List.of(), List.of(), List.of(), tags, settings);
+                null, List.of(), List.of(), List.of(), tags, settings, null);
 
         TableDefinition created = tableService.createTable(request, "ACTIVE", REGION);
 
@@ -253,7 +253,7 @@ class NativeDynamoDbTableServiceTest {
         TableSettings update = new TableSettings("PAY_PER_REQUEST", true, "STANDARD_INFREQUENT_ACCESS",
                 new OnDemandThroughput(100, 200), true, "NEW_IMAGE", false, null, null);
         List<GsiThroughputUpdate> gsiUpdates = List.of(
-                new GsiThroughputUpdate(GSI, new Throughput(7L, null), new OnDemandThroughput(30, null)));
+                new GsiThroughputUpdate(GSI, new Throughput(7L, null), new OnDemandThroughput(30, null), null));
 
         tableService.updateTable(updateRequest(gsiUpdates, List.of(), update), REGION);
 
@@ -412,6 +412,12 @@ class NativeDynamoDbTableServiceTest {
         assertEquals("ACTIVE", persisted.getDestinationStatus());
         assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
                 persisted.getApproximateCreationDateTimePrecision());
+        NativeDynamoDbTableService.KinesisDestination unchanged = tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, null, REGION);
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND, unchanged.approximateCreationDateTimePrecision());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN).orElseThrow()
+                        .getApproximateCreationDateTimePrecision());
         verify(forwarder, never()).onDestinationDisabled(ACCOUNT, REGION, TABLE, STREAM_ARN);
     }
 

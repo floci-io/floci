@@ -59,7 +59,7 @@ public class PartitionStartupValidator {
         Optional<AwsPartition> regionPartition = AwsPartitions.forRegion(defaultRegion);
         if (regionPartition.isEmpty()) {
             LOG.warnv("floci.default-region {0} is not a published AWS region in the vendored partition data; "
-                    + "treating it as partition {1}. Run 'make aws-data-sync' if AWS has launched it since.",
+                    + "treating it as partition {1}. Run ''make aws-data-sync'' if AWS has launched it since.",
                     defaultRegion, partition.id());
         } else if (!regionPartition.get().id().equals(partition.id())) {
             throw new IllegalStateException("floci.partitions.id is '" + partition.id()

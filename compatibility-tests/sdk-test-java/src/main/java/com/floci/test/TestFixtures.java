@@ -86,6 +86,7 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesisanalyticsv2.KinesisAnalyticsV2Client;
 import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.lambda.LambdaAsyncClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
@@ -554,10 +555,14 @@ public final class TestFixtures {
     }
 
     public static AccountClient accountClient() {
+        return accountClient("test");
+    }
+
+    public static AccountClient accountClient(String accountId) {
         return AccountClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 
@@ -942,6 +947,16 @@ public final class TestFixtures {
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static LambdaAsyncClient lambdaAsyncClient() {
+        return LambdaAsyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .httpClientBuilder(NettyNioAsyncHttpClient.builder()
+                        .protocol(Protocol.HTTP1_1))
                 .build();
     }
 
@@ -1716,10 +1731,18 @@ public final class TestFixtures {
     }
 
     public static IotClient iotClient() {
+        return iotClient(CREDENTIALS);
+    }
+
+    public static IotClient iotClient(String accountId) {
+        return iotClient(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")));
+    }
+
+    private static IotClient iotClient(StaticCredentialsProvider credentials) {
         return IotClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(credentials)
                 .build();
     }
 

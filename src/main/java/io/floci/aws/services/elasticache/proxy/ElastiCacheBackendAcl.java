@@ -11,23 +11,48 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
-/** Keeps frontend passwords and IAM tokens out of the backend's private ACL credentials. */
-final class ElastiCacheBackendAcl {
+/**
+ * Keeps frontend passwords and IAM tokens out of the backend's private ACL credentials. Each
+ * ElastiCache and MemoryDB proxy owns one, for the one backend server it relays to.
+ */
+public final class ElastiCacheBackendAcl {
     private static final int CONNECT_TIMEOUT_MILLIS = 5000;
     private static final int COMMAND_TIMEOUT_MILLIS = 10000;
+
+    /**
+     * The {@code CLUSTER} subcommands ElastiCache lists among its restricted commands: they change the
+     * cluster's topology, slots or failover state, which only Floci manages.
+     */
+    private static final List<String> RESTRICTED_CLUSTER_SUBCOMMANDS = List.of("addslots", "addslotsrange",
+            "bumpepoch", "delslots", "delslotsrange", "failover", "flushslots", "forget", "links", "meet",
+            "replicate", "reset", "saveconfig", "set-config-epoch", "setslot");
 
     private final String administrator = "floci-admin-" + UUID.randomUUID();
     private final String administratorPassword = UUID.randomUUID().toString();
     private final Map<String, String> passwords = new LinkedHashMap<>();
+    private final BooleanSupplier clusterNode;
     private volatile boolean initialized;
+
+    public ElastiCacheBackendAcl() {
+        this(() -> false);
+    }
+
+    /**
+     * @param clusterNode whether the backend is a node of a cluster-mode cache, read when rules are
+     *                    installed: its sessions also lose the cluster-management subcommands
+     */
+    ElastiCacheBackendAcl(BooleanSupplier clusterNode) {
+        this.clusterNode = clusterNode;
+    }
 
     boolean initialized() {
         return initialized;
     }
 
-    synchronized void authenticate(Socket backend, String username, Supplier<String> accessStringSupplier)
+    public synchronized void authenticate(Socket backend, String username, Supplier<String> accessStringSupplier)
             throws IOException {
         String accessString = accessStringSupplier.get();
         if (accessString == null) {
@@ -46,13 +71,28 @@ final class ElastiCacheBackendAcl {
         }
         String backendName = backendName(username);
         String password = passwords.computeIfAbsent(backendName, ignored -> UUID.randomUUID().toString());
-        command(backend, userRules(backendName, accessRules, password));
+        command(backend, userRules(backendName, accessRules, password, clusterNode.getAsBoolean()));
         command(backend, List.of("AUTH", backendName, password));
         backend.setSoTimeout(0);
     }
 
     void authenticate(Socket backend, String username, String accessString) throws IOException {
         authenticate(backend, username, () -> accessString);
+    }
+
+    /**
+     * Installs the access string of {@code username} over a connection of its own, as a sign-in does, and
+     * returns the backend username and password that a session already relayed sends with {@code AUTH} to
+     * run as that user from then on.
+     */
+    public synchronized List<String> credentials(String backendHost, int backendPort, String username,
+                                                 Supplier<String> accessStringSupplier) throws IOException {
+        try (Socket backend = new Socket()) {
+            backend.connect(new InetSocketAddress(backendHost, backendPort), CONNECT_TIMEOUT_MILLIS);
+            authenticate(backend, username, accessStringSupplier);
+        }
+        String backendName = backendName(username);
+        return List.of(backendName, passwords.get(backendName));
     }
 
     /**
@@ -80,7 +120,7 @@ final class ElastiCacheBackendAcl {
             backend.connect(new InetSocketAddress(backendHost, backendPort), CONNECT_TIMEOUT_MILLIS);
             backend.setSoTimeout(COMMAND_TIMEOUT_MILLIS);
             command(backend, List.of("AUTH", administrator, administratorPassword));
-            command(backend, userRules(backendName, accessRules, password));
+            command(backend, userRules(backendName, accessRules, password, clusterNode.getAsBoolean()));
         }
     }
 
@@ -101,7 +141,8 @@ final class ElastiCacheBackendAcl {
         return accessRules;
     }
 
-    private static List<String> userRules(String backendName, List<String> accessRules, String password) {
+    private static List<String> userRules(String backendName, List<String> accessRules, String password,
+                                          boolean clusterNode) {
         List<String> rules = new ArrayList<>(List.of("ACL", "SETUSER", backendName, "reset"));
         rules.addAll(accessRules);
         // Authentication rules are owned by the proxy. A supplied nopass or password token
@@ -109,6 +150,10 @@ final class ElastiCacheBackendAcl {
         rules.addAll(List.of("resetpass", ">" + password, "-acl", "-config", "-debug", "-module",
                 "-replicaof", "-slaveof", "-shutdown", "-monitor", "-slowlog", "-sync", "-psync",
                 "-save", "-bgsave", "-bgrewriteaof", "-migrate"));
+        if (clusterNode) {
+            // Subcommand rules need Valkey 7+, which cluster mode's 8.1+ requirement already implies.
+            RESTRICTED_CLUSTER_SUBCOMMANDS.forEach(subcommand -> rules.add("-cluster|" + subcommand));
+        }
         return rules;
     }
 

@@ -74,6 +74,7 @@ public class EventBridgeHandler {
                 case "PutTargets" -> handlePutTargets(request, region);
                 case "RemoveTargets" -> handleRemoveTargets(request, region);
                 case "ListTargetsByRule" -> handleListTargetsByRule(request, region);
+                case "ListRuleNamesByTarget" -> handleListRuleNamesByTarget(request, region);
                 case "PutEvents" -> handlePutEvents(request, region);
                 case "TestEventPattern" -> handleTestEventPattern(request);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -341,6 +342,32 @@ public class EventBridgeHandler {
         response.putArray("SuccessfulEntries");
         response.putArray("FailedEntries");
         return Response.ok(response).build();
+    }
+
+    private Response handleListRuleNamesByTarget(JsonNode request, String region) {
+        String targetArn = targetLookupString(request, "TargetArn");
+        String busName = targetLookupString(request, "EventBusName");
+        String nextToken = targetLookupString(request, "NextToken");
+        PaginatedResult<String> page = eventBridgeService.listRuleNamesByTarget(
+                targetArn, busName, readLimit(request.path("Limit")), nextToken, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode names = response.putArray("RuleNames");
+        page.items().forEach(names::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String targetLookupString(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("SerializationException", field + " must be a string.", 400);
+        }
+        return value.textValue();
     }
 
     private Response handleListTargetsByRule(JsonNode request, String region) {

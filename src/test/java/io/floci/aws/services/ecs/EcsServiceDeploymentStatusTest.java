@@ -1,12 +1,5 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.EcsTask;
@@ -16,9 +9,7 @@ import io.floci.aws.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,8 +17,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
@@ -41,7 +30,7 @@ class EcsServiceDeploymentStatusTest {
 
     @Test
     void theCurrentDeploymentIsInProgressUntilTheServicesTasksAreRunning() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dstat-cluster", REGION);
         registerTaskDef(service, "dstat-fam", "app:1");
         service.createService("dstat-cluster", "dstat-svc", "dstat-fam", 1,
@@ -64,7 +53,7 @@ class EcsServiceDeploymentStatusTest {
     /** A service already at its requested count has converged, so its deployment is finished. */
     @Test
     void aServiceAlreadyAtItsRequestedCountHasNothingToWaitFor() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dzero-cluster", REGION);
         registerTaskDef(service, "dzero-fam", "app:1");
         service.createService("dzero-cluster", "dzero-svc", "dzero-fam", 0,
@@ -77,7 +66,7 @@ class EcsServiceDeploymentStatusTest {
 
     @Test
     void everyDeploymentTargetsARevisionNamedByItsOwnTaskSetId() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("drev-cluster", REGION);
         registerTaskDef(service, "drev-fam", "app:1");
         EcsServiceModel created = service.createService("drev-cluster", "drev-svc", "drev-fam", 1,
@@ -107,7 +96,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void aTaskDefinitionChangeIsNotFinishedWhileOnlyTheOldTasksAreRunning() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dupd-cluster", REGION);
         registerTaskDef(service, "dupd-fam", "app:1");
         EcsServiceModel created = service.createService("dupd-cluster", "dupd-svc", "dupd-fam", 1,
@@ -141,7 +130,7 @@ class EcsServiceDeploymentStatusTest {
     /** SUCCESSFUL is terminal: tasks dying afterwards do not un-finish the deployment. */
     @Test
     void aFinishedDeploymentStaysFinishedWhenItsTasksDie() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("ddie-cluster", REGION);
         registerTaskDef(service, "ddie-fam", "app:1");
         String deploymentId = service.createService("ddie-cluster", "ddie-svc", "ddie-fam", 1,
@@ -172,7 +161,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void scalingToZeroIsConvergedBeforeTheTaskHasActuallyStopped() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dscale-cluster", REGION);
         registerTaskDef(service, "dscale-fam", "app:1");
         String id = service.createService("dscale-cluster", "dscale-svc", "dscale-fam", 1,
@@ -195,7 +184,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void twoUpdatesInSuccessionSettleOnlyTheNewestDeployment() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("drapid-cluster", REGION);
         registerTaskDef(service, "drapid-fam", "app:1");
         // createService and updateService return the same live model, so read each id at once.
@@ -235,7 +224,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void theRolloutStateAndTheDeploymentRecordAgreeWhileARolloutIsInFlight() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dboth-cluster", REGION);
         registerTaskDef(service, "dboth-fam", "app:1");
         EcsServiceModel created = service.createService("dboth-cluster", "dboth-svc", "dboth-fam", 1,
@@ -275,7 +264,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void aDaemonServiceFinishesItsDeploymentOnlyOnceItsTaskHasRolled() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("ddmn-cluster", REGION);
         service.registerContainerInstance("ddmn-cluster", null, List.of(), REGION);
         TaskDefinition rev1 = registerTaskDef(service, "ddmn-fam", "app:1");
@@ -321,7 +310,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void supersedingAnUnconvergedDeploymentStopsIt() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dsup-cluster", REGION);
         registerTaskDef(service, "dsup-fam", "app:1");
         String first = service.createService("dsup-cluster", "dsup-svc", "dsup-fam", 1,
@@ -362,7 +351,7 @@ class EcsServiceDeploymentStatusTest {
     /** STOPPED is terminal: the replacement converging does not make the stopped one succeed. */
     @Test
     void aSupersededDeploymentDoesNotSucceedWhenItsReplacementDoes() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dsup2-cluster", REGION);
         registerTaskDef(service, "dsup2-fam", "app:1");
         String first = service.createService("dsup2-cluster", "dsup2-svc", "dsup2-fam", 1,
@@ -389,7 +378,7 @@ class EcsServiceDeploymentStatusTest {
     /** A deployment that finished, and was read, before it was superseded keeps its record. */
     @Test
     void aDeploymentThatFinishedBeforeItWasSupersededStaysSuccessful() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dsup3-cluster", REGION);
         registerTaskDef(service, "dsup3-fam", "app:1");
         String first = service.createService("dsup3-cluster", "dsup3-svc", "dsup3-fam", 1,
@@ -421,7 +410,7 @@ class EcsServiceDeploymentStatusTest {
      */
     @Test
     void aConvergedDeploymentNobodyReadIsSuccessfulWhenSuperseded() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("dunread-cluster", REGION);
         registerTaskDef(service, "dunread-fam", "app:1");
         String first = service.createService("dunread-cluster", "dunread-svc", "dunread-fam", 1,
@@ -489,37 +478,5 @@ class EcsServiceDeploymentStatusTest {
         cd.setImage(image);
         return service.registerTaskDefinition(family, List.of(cd), null, null, null,
                 null, null, List.of(), REGION);
-    }
-
-    private static EcsService newMockModeService() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
-                null);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                        String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
     }
 }

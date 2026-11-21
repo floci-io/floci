@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.rds.RdsService;
@@ -107,16 +108,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * The change is read against this record, as CloudFormation reads the template's change, and not
      * against the instance: one a stack created before Floci applied the property is unencrypted
      * whatever its template said. Such a resource has no record, so its first update reads the
-     * previous template's value instead, resolved as well as it still can be, and replaces the
-     * instance only when that changed. As in {@link Ec2Tags#ownedKeys}, that template resolves on this
-     * update, so a value taken from a parameter, or from anything else the update changes, reads as the
-     * new one, and a change made only that way is not seen.
+     * previous template's value instead, resolved with the previous deployment's parameters (see
+     * {@link ProvisionContext}), and replaces the instance only when that changed, a change made only
+     * through a parameter included.
      */
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
     /**
-     * What an update that kept a DB instance needs for {@link #rollbackUpdate}: the region, the VPC
-     * security groups the instance had when the update changed them, and whether it changed anything
+     * What an update that kept a DB instance or cluster needs for {@link #rollbackUpdate}: the region,
+     * the VPC security groups it had when the update changed them, and whether it changed anything
      * else, which has no rollback here.
      */
     static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
@@ -246,7 +246,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Puts back the VPC security groups an update that kept the instance changed, and answers whether
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
-     * instance gone since the update fails the rollback, and a retried one tries again.
+     * instance gone since the update fails the rollback, and a retried one tries again. A record
+     * carrying the {@code cluster} flag puts back a DB cluster's groups the same way.
      */
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
@@ -264,8 +265,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
-            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(), resource.getPhysicalId(),
-                    groupIds);
+            if (prior.path("cluster").asBoolean(false)) {
+                rdsService.setDbClusterRequestSettings(resource.getPhysicalId(), prior.path("region").asText(),
+                        groupIds, null, null);
+            } else {
+                rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
+                        resource.getPhysicalId(), groupIds);
+            }
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
@@ -422,7 +428,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
         String recordedEncryption = DB_INSTANCE_STORAGE_ENCRYPTED.read(attributesBefore);
         if (recordedEncryption == null && instance != null && ctx.priorProperties() != null) {
-            recordedEncryption = String.valueOf(parseBoolProp(ctx.priorProperties(), "StorageEncrypted", engine));
+            recordedEncryption = String.valueOf(
+                    parseBoolProp(ctx.priorProperties(), "StorageEncrypted", ctx.priorEngine()));
         }
         boolean replacing = instance != null && recordedEncryption != null
                 && !recordedEncryption.equals(encryptionRecord);
@@ -513,8 +520,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * The VPC security groups a kept instance should have, or null to leave them as they are. A
      * declared list is the groups, but a cluster member's groups are its cluster's: a template that
      * changes a member's list fails the update, as on AWS, where the handler sends the change to
-     * ModifyDBInstance and RDS refuses it for a member. The change is read from the template, as
-     * there, so a member a stack created before Floci applied the list still takes it. A list the
+     * ModifyDBInstance and RDS refuses it for a member. The change is read from the templates, each
+     * resolved with its own deployment's parameters and resources (see {@link ProvisionContext}), as
+     * there: a change made only through a parameter, or a group this update replaced, is one, and a
+     * member a stack created before Floci applied the list still takes it. A list the
      * previous template declared and this one drops puts a standalone instance on the default security
      * group of the VPC {@code subnetGroupName} leaves it in, as AWS's handler does, and leaves them
      * when there is no such group, as there; a
@@ -526,7 +535,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         boolean member = clusterMember != null && !clusterMember.isBlank();
         if (!declared.isEmpty()) {
             if (member && ctx.priorProperties() != null && !Set.copyOf(declared).equals(
-                    Set.copyOf(resolveStringList(ctx.priorProperties(), "VPCSecurityGroups", ctx.engine())))) {
+                    Set.copyOf(resolveStringList(ctx.priorProperties(), "VPCSecurityGroups", ctx.priorEngine())))) {
                 throw new AwsException("InvalidParameterCombination", "The specified DB Instance is a member of a"
                         + " cluster. Modify vpc security group for the DB Cluster using the ModifyDbCluster API", 400);
             }
@@ -653,7 +662,23 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             // Refused before a new cluster exists, rather than leaving one behind.
             RdsService.requireDataApiEngine(resolveOptional(props, "Engine", engine));
         }
+        // null when the template drops it: an update then keeps the stored value, as AWS's null does
+        Boolean requestedDeletionProtection = parseOptionalStrictBoolProp(props, "DeletionProtection", engine);
+        boolean deletionProtection = Boolean.TRUE.equals(requestedDeletionProtection);
         boolean created = cluster == null;
+        String backupWindow = resolveOptional(props, "PreferredBackupWindow", engine);
+        String maintenanceWindow = resolveOptional(props, "PreferredMaintenanceWindow", engine);
+        if (created) {
+            // validated before the cluster exists, so a bad window leaves none behind
+            String[] windows = BackupWindows.effectiveWindows(true, backupWindow, maintenanceWindow, null, null);
+            backupWindow = windows[0];
+            maintenanceWindow = windows[1];
+        } else {
+            // validated against the stored windows before the modify, so a bad window changes nothing
+            BackupWindows.effectiveWindows(false, backupWindow, maintenanceWindow,
+                    cluster.getPreferredBackupWindow(), cluster.getPreferredMaintenanceWindow());
+        }
+        List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -678,13 +703,37 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                    false, null, engineMode, storageEncrypted);
+                    false, null, engineMode, storageEncrypted, null, deletionProtection);
         }
+        if (securityGroupIds.isEmpty()) {
+            // A list the previous template declared and this one drops puts the cluster on its VPC's
+            // default group, as AWS's handler does, and leaves them when there is none. Groups the
+            // stack never declared, and the other settings, keep what is stored.
+            List<String> defaultGroup = !created && ctx.previouslyDeclared("VpcSecurityGroupIds")
+                    ? rdsService.defaultClusterVpcSecurityGroupIds(region, cluster.getDbClusterIdentifier())
+                    : List.of();
+            securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
+        }
+        // The groups an in-place update changes are saved, for rollbackUpdate, as an instance's are.
+        r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        if (!created && securityGroupIds != null
+                && !Set.copyOf(securityGroupIds).equals(Set.copyOf(cluster.getVpcSecurityGroupIds()))) {
+            ObjectNode saved = MAPPER.createObjectNode().put("region", region).put("cluster", true)
+                    .put("otherChanges", true);
+            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
+            cluster.getVpcSecurityGroupIds().forEach(priorGroups::add);
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
+        }
+        rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
+                securityGroupIds, backupWindow, maintenanceWindow);
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         // EnableHttpEndpoint updates with no interruption; a template that leaves it out wants it off.
         if (httpEndpoint != cluster.isHttpEndpointEnabled()) {
             cluster = rdsService.setHttpEndpoint(region, cluster.getDbClusterIdentifier(), httpEndpoint);
+        }
+        if (requestedDeletionProtection != null && deletionProtection != cluster.isDeletionProtection()) {
+            cluster = rdsService.setDeletionProtection(region, cluster.getDbClusterIdentifier(), deletionProtection);
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
@@ -756,8 +805,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 try {
                     cluster = rdsService.addRolesToNewDbCluster(region, id, roles);
                 } catch (AwsException e) {
-                    CfnDeletes.safeDelete("DB cluster", id, () -> rdsService.deleteDbCluster(id, region),
-                            "DBClusterNotFoundFault");
+                    rdsService.discardCreatedCluster(region, id, cluster.isDeletionProtection(), e);
                     throw e;
                 }
             }

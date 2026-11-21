@@ -20,7 +20,9 @@
     "CreateRepositoryCreationTemplate": "CreateRepositoryCreationTemplateRequest",
     "UpdateRepositoryCreationTemplate": "UpdateRepositoryCreationTemplateRequest",
     "DescribeRepositoryCreationTemplates": "DescribeRepositoryCreationTemplatesRequest",
-    "DeleteRepositoryCreationTemplate": "DeleteRepositoryCreationTemplateRequest"
+    "DeleteRepositoryCreationTemplate": "DeleteRepositoryCreationTemplateRequest",
+    "ListImages": "ListImagesRequest",
+    "DescribeImages": "DescribeImagesRequest"
   },
   "shapes": {
     "AccountSettingName": {
@@ -85,6 +87,27 @@
         "principalArn": "PrincipalArn"
       }
     },
+    "DescribeImagesFilter": {
+      "type": "structure",
+      "members": {
+        "tagStatus": "TagStatus",
+        "imageStatus": "ImageStatusFilter"
+      }
+    },
+    "DescribeImagesRequest": {
+      "type": "structure",
+      "required": [
+        "repositoryName"
+      ],
+      "members": {
+        "registryId": "RegistryId",
+        "repositoryName": "RepositoryName",
+        "imageIds": "ImageIdentifierList",
+        "nextToken": "NextToken",
+        "maxResults": "MaxResults",
+        "filter": "DescribeImagesFilter"
+      }
+    },
     "DescribeRegistryRequest": {
       "type": "structure",
       "members": {}
@@ -131,6 +154,36 @@
     "GetRegistryScanningConfigurationRequest": {
       "type": "structure",
       "members": {}
+    },
+    "ImageDigest": {
+      "type": "string"
+    },
+    "ImageIdentifier": {
+      "type": "structure",
+      "members": {
+        "imageDigest": "ImageDigest",
+        "imageTag": "ImageTag"
+      }
+    },
+    "ImageIdentifierList": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "ImageIdentifier"
+    },
+    "ImageStatusFilter": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "ARCHIVED",
+        "ACTIVATING",
+        "ANY"
+      ]
+    },
+    "ImageTag": {
+      "type": "string",
+      "min": 1,
+      "max": 300
     },
     "ImageTagMutability": {
       "type": "string",
@@ -180,6 +233,26 @@
       "type": "string",
       "min": 0,
       "max": 30720
+    },
+    "ListImagesFilter": {
+      "type": "structure",
+      "members": {
+        "tagStatus": "TagStatus",
+        "imageStatus": "ImageStatusFilter"
+      }
+    },
+    "ListImagesRequest": {
+      "type": "structure",
+      "required": [
+        "repositoryName"
+      ],
+      "members": {
+        "registryId": "RegistryId",
+        "repositoryName": "RepositoryName",
+        "nextToken": "NextToken",
+        "maxResults": "MaxResults",
+        "filter": "ListImagesFilter"
+      }
     },
     "ListPullTimeUpdateExclusionsRequest": {
       "type": "structure",
@@ -453,6 +526,14 @@
     "TagList": {
       "type": "list",
       "member": "Tag"
+    },
+    "TagStatus": {
+      "type": "string",
+      "enum": [
+        "TAGGED",
+        "UNTAGGED",
+        "ANY"
+      ]
     },
     "TagValue": {
       "type": "string"

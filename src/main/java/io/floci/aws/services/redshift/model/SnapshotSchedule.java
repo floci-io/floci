@@ -17,7 +17,7 @@ public class SnapshotSchedule {
     private String scheduleIdentifier;
     private String scheduleDescription;
     private List<String> scheduleDefinitions = new ArrayList<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private Instant updatedAt;
 
     public Instant getUpdatedAt() { return updatedAt; }

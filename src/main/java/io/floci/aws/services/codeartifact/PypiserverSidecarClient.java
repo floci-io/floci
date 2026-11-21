@@ -56,7 +56,8 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     @Inject
     public PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper) {
-        this(manager, mapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+        this(manager, mapper, HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     PypiserverSidecarClient(PypiserverSidecarManager manager, ObjectMapper mapper, HttpClient httpClient) {

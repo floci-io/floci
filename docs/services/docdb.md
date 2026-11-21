@@ -66,6 +66,10 @@ Mock mode is useful for control-plane tests that do not need a live database; th
 
 DocumentDB needs the Docker socket so it can launch MongoDB containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeDBClusters`.
 
+Container names include the account ID, region, and cluster identifier, so identically named
+clusters in different accounts or regions use independent MongoDB containers. With no Docker
+resource namespace configured, the name is `floci-aws-docdb-<account>-<region>-<cluster>`.
+
 ```yaml
 services:
   floci:

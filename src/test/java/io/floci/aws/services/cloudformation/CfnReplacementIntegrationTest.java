@@ -98,6 +98,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String PROFILE = profileProperties(APP_REF, "");
 
+    /** The two topics the SNS subscription rows point at. */
+    private static final String SNS_TOPICS = json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}");
+
     /** The cluster names a subnet group whose own name comes from a parameter that changes in the update. */
     private static final Row SUBNET_GROUP_REPLACED = createOnlyRow("ElastiCache cluster in a replaced subnet group",
             json(vpcAndSubnet("10.73")
@@ -110,6 +113,11 @@ class CfnReplacementIntegrationTest {
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             "True", true, "repl-sng-b");
 
+    private static final String EKS_CLUSTER = "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\", ";
+    private static final String EKS_NODEGROUP_CLUSTER = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\","
+            + " \"Properties\": {\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\"}}";
+    private static final String EKS_NODEGROUP = "\"ClusterName\": {\"Ref\": \"Cluster\"},"
+            + " \"Subnets\": [\"subnet-aaaa1111\"], ";
     private static final String SQS_TYPE = "AWS::SQS::Queue";
     private static final String S3_TYPE = "AWS::S3::Bucket";
     private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
@@ -222,6 +230,42 @@ class CfnReplacementIntegrationTest {
                         "True", false, null),
                 createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
                         "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
+                createOnlyRow("SNS subscription Endpoint", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription Protocol", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email-json\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription TopicArn", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
+                createOnlyRow("EKS cluster Tags", "", "", "AWS::EKS::Cluster",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS cluster RoleArn", "", "", "AWS::EKS::Cluster",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "True", false, null),
+                createOnlyRow("EKS nodegroup Tags", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS nodegroup NodeRole", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
+                        "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),

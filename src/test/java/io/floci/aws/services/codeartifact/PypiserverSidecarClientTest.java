@@ -29,6 +29,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -61,6 +62,23 @@ class PypiserverSidecarClientTest {
     @AfterEach
     void tearDownBackend() {
         backend.stop(0);
+    }
+
+    @Test
+    void defaultTransportDoesNotRequestAnH2cUpgrade() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        AtomicReference<String> upgrade = new AtomicReference<>("request not received");
+        backend.createContext("/simple/demo-pkg/", exchange -> {
+            upgrade.set(exchange.getRequestHeaders().getFirst("Upgrade"));
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        PypiserverSidecarClient defaultClient = new PypiserverSidecarClient(manager, new ObjectMapper());
+
+        assertTrue(defaultClient.fetchPackageVersionAsset("pypi-repo-1", "dom", "repo", null,
+                "demo-pkg", "1.0.0", "demo_pkg-1.0.0.tar.gz").isEmpty());
+        assertNull(upgrade.get(), "the pinned pypiserver accepts HTTP/1.1 without an h2c upgrade");
     }
 
     @Test
@@ -708,7 +726,8 @@ class PypiserverSidecarClientTest {
     }
 
     private PypiserverSidecarManager manager() {
-        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config);
+        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     private PypiserverSidecarClient client(PypiserverSidecarManager manager) {

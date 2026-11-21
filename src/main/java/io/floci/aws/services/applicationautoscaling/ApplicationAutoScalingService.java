@@ -1,6 +1,7 @@
 package io.floci.aws.services.applicationautoscaling;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -38,6 +39,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1002,6 +1004,42 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
             return Optional.empty();
         }
         return findTarget(region, names.get(0), names.get(1), names.get(2)).map(ScalableTarget::getScalableTargetArn);
+    }
+
+    /**
+     * The tags held on the scalable target whose ARN is {@code arn}, read in place where its handlers find it: among
+     * the targets of the account and Region the ARN names, a pre-multi-account one of the default account included,
+     * matched on the whole ARN. Tagging stores a copy of the target, so the read is of one whole set. Empty for an ARN
+     * naming no target.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "application-autoscaling")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        if (account.isEmpty()) {
+            return Map.of();
+        }
+        String prefix = parsed.region() + "::";
+        List<ScalableTarget> held;
+        if (targets instanceof AccountAwareStorageBackend<ScalableTarget> aware) {
+            String scoped = AccountAwareStorageBackend.rawKey(account, prefix);
+            boolean legacyToo = account.equals(aware.defaultAccountId());
+            held = aware.scanRaw(key -> key.startsWith(scoped)
+                    || (legacyToo && !AccountAwareStorageBackend.hasAccountPrefix(key) && key.startsWith(prefix)));
+        } else {
+            held = targets.scan(key -> key.startsWith(prefix));
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        held.stream().filter(target -> arn.equals(target.getScalableTargetArn())).findFirst()
+                .ifPresent(target -> target.getTags().forEach((key, value) -> {
+                    if (key != null && value != null) {
+                        tags.put(key, value);
+                    }
+                }));
+        return tags;
     }
 
     /**

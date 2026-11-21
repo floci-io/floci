@@ -161,6 +161,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         public String state;
         public String status;
         public Instant createdAt;
+        public Instant updatedAt;
         public final List<MicrovmBuild> builds = new ArrayList<>();
         public BuildSpec buildSpec;
         public RuntimeSettings runtimeSettings;
@@ -231,6 +232,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         version.state = "SUCCESSFUL";
         version.status = "ACTIVE";
         version.createdAt = Instant.now();
+        version.updatedAt = version.createdAt;
         version.buildSpec = BuildSpec.from(image);
         version.runtimeSettings = image.runtimeSettings;
         // A version is built once per Graviton generation the service targets,
@@ -342,6 +344,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         MicrovmImage image = getImage(region, name);
         MicrovmImageVersion version = getVersion(region, name, imageVersion);
         version.status = status;
+        version.updatedAt = Instant.now();
         persist(images, region, image.name, image);
         return version;
     }

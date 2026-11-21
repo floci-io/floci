@@ -82,6 +82,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -4104,6 +4105,61 @@ class RedshiftServiceTest {
         service.deleteTags("arn:aws:redshift:us-east-1:111111111111:cluster:my-cluster", List.of("env"));
 
         assertEquals(Map.of("team", "data"), cluster.getTags());
+    }
+
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheWholeArnNamesInItsAccountAndRegionAndTaggingPutsANewMap() {
+        String account = "111111111111";
+        Cluster cluster = storedCluster("warehouse", "us-east-1");
+        cluster.setTags(new LinkedHashMap<>(Map.of("team", "data")));
+        Snapshot snapshot = snapshotOf("nightly", "warehouse");
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:warehouse/nightly");
+        snapshot.setTags(new LinkedHashMap<>(Map.of("stage", "prod")));
+        when(snapshotBackend.getForAccount(account, "nightly")).thenReturn(Optional.of(snapshot));
+        ClusterParameterGroup ownGroup = new ClusterParameterGroup();
+        ownGroup.setTags(new LinkedHashMap<>(Map.of("owner", "us")));
+        when(parameterGroupBackend.getForAccount(account, regionalKey("tuned"))).thenReturn(Optional.of(ownGroup));
+        ClusterParameterGroup otherGroup = new ClusterParameterGroup();
+        otherGroup.setTags(new LinkedHashMap<>(Map.of("owner", "them")));
+        when(parameterGroupBackend.getForAccount("222222222222", regionalKey("tuned")))
+                .thenReturn(Optional.of(otherGroup));
+        SnapshotSchedule schedule = new SnapshotSchedule();
+        schedule.setTags(new LinkedHashMap<>(Map.of("cadence", "daily")));
+        when(snapshotScheduleBackend.getForAccount(account, regionalKey("daily"))).thenReturn(Optional.of(schedule));
+        Integration integration = new Integration();
+        integration.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:abc");
+        integration.setTags(Map.of("feed", "orders"));
+        when(integrationBackend.getForAccount(account, "abc")).thenReturn(Optional.of(integration));
+        when(events.storedTags(account, "us-east-1", "alerts")).thenReturn(Map.of("route", "ops"));
+
+        assertEquals(Map.of("team", "data"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:cluster:warehouse"));
+        assertEquals(Map.of("stage", "prod"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:snapshot:warehouse/nightly"));
+        assertEquals(Map.of("owner", "us"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:parametergroup:tuned"));
+        assertEquals(Map.of("owner", "them"),
+                service.storedTags("arn:aws:redshift:us-east-1:222222222222:parametergroup:tuned"));
+        assertEquals(Map.of("cadence", "daily"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:snapshotschedule:daily"));
+        assertEquals(Map.of("feed", "orders"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:integration:abc"));
+        assertEquals(Map.of("route", "ops"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:eventsubscription:alerts"));
+        // Another Region's cluster of that name, another cluster's snapshot, an ARN whose partition is not its Region's
+        // and a type Floci keeps no record of hold none.
+        assertEquals(Map.of(), service.storedTags("arn:aws:redshift:eu-west-1:111111111111:cluster:warehouse"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:redshift:us-east-1:111111111111:snapshot:other/nightly"));
+        assertEquals(Map.of(), service.storedTags("arn:aws-cn:redshift:us-east-1:111111111111:cluster:warehouse"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:redshift:us-east-1:111111111111:datashare:ns/share"));
+
+        Map<String, String> held = cluster.getTags();
+        service.createTags("arn:aws:redshift:us-east-1:111111111111:cluster:warehouse", Map.of("env", "prod"));
+
+        assertNotSame(held, cluster.getTags());
+        assertEquals(Map.of("team", "data"), held);
+        assertEquals(Map.of("team", "data", "env", "prod"),
+                service.storedTags("arn:aws:redshift:us-east-1:111111111111:cluster:warehouse"));
     }
 
     @Test

@@ -26,6 +26,7 @@ public class DistributionConfig {
     private Map<String, Object> logging;
     private String continuousDeploymentPolicyId;
     private boolean staging;
+    private String connectionMode;
 
     public DistributionConfig() {}
 
@@ -82,4 +83,7 @@ public class DistributionConfig {
 
     public boolean isStaging() { return staging; }
     public void setStaging(boolean staging) { this.staging = staging; }
+
+    public String getConnectionMode() { return connectionMode; }
+    public void setConnectionMode(String connectionMode) { this.connectionMode = connectionMode; }
 }

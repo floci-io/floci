@@ -240,8 +240,9 @@ final class FirelensConfigGenerator {
 
     static String tcpListen(String networkMode) {
         // AWS binds 127.0.0.1 in awsvpc because every container shares the task's network
-        // namespace. Floci runs each container in its own namespace, so the router must listen
-        // on all interfaces for the injected FLUENT_HOST to be reachable from sibling containers.
+        // namespace. Floci gives each container a namespace of its own unless the task shares one,
+        // so the router listens on all interfaces for the injected FLUENT_HOST to be reachable from
+        // sibling containers either way.
         return "0.0.0.0";
     }
 

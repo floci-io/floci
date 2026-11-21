@@ -177,6 +177,35 @@ class GlueViewDdlBuilderTest {
     }
 
     /**
+     * Reading a Parquet timestamp converts in the session's time zone, so a batch holding such a view pins Athena's,
+     * UTC, whether the table is read whole, through its registered partitions, or is empty; others leave it alone.
+     */
+    @Test
+    void viewsReadingParquetTimestampsRunInAUtcSession() {
+        Table plain = projectingParquetTable("s3://b/data/", Map.of());
+        plain.setPartitionKeys(List.of());
+        plain.getStorageDescriptor().setColumns(List.of(column("id"), column("created_at", "timestamp")));
+        Table registered = projectingParquetTable("s3://b/data/", Map.of());
+        registered.getStorageDescriptor().setColumns(List.of(column("id"), column("created_at", "timestamp")));
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "a", "b")));
+        Table empty = projectingParquetTable("s3://empty/data/", Map.of());
+        empty.setPartitionKeys(List.of());
+        empty.getStorageDescriptor().setColumns(List.of(column("created_at", "timestamp")));
+        holds("empty", "data/");
+
+        Map<Table, String> paths = Map.of(plain, "FROM read_parquet('s3://b/data/**'", registered, "JOIN (VALUES",
+                empty, "LIMIT 0");
+        for (Table table : List.of(plain, registered, empty)) {
+            String ddl = ddlFor(table);
+            assertTrue(ddl.contains(paths.get(table)), ddl);
+            assertTrue(ddl.startsWith("SET TimeZone = 'UTC';\nCREATE SCHEMA"), ddl);
+            assertEquals(1, ddl.split("TimeZone", -1).length - 1, ddl);
+        }
+        assertTrue(ddlFor(plain).contains("ELSE CAST(\"created_at\" AS TIMESTAMP) END) AS \"created_at\""));
+        assertFalse(ddlFor(projectingParquetTable("s3://b/data/", Map.of())).contains("TimeZone"));
+    }
+
+    /**
      * A template of bare values, one folder per key. The files hold no partition columns, so each
      * value comes from the object's path, through the template, as Athena maps it; without this the
      * view selects columns nothing defines and DuckDB rejects it.

@@ -109,10 +109,12 @@ public class IotDataController {
 
     @GET
     @Path("/connections/{clientId: .+}/subscriptions")
-    public Response listSubscriptions(@PathParam("clientId") String clientId,
+    public Response listSubscriptions(@Context HttpHeaders headers,
+                                      @PathParam("clientId") String clientId,
                                       @QueryParam("maxResults") Integer maxResults,
                                       @QueryParam("nextToken") String nextToken) {
-        IotService.Page<String> page = iotService.listSubscriptions(clientId, maxResults, nextToken);
+        IotService.Page<String> page = iotService.listSubscriptions(clientId, maxResults, nextToken,
+                regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode subscriptions = response.putArray("subscriptions");
         for (String topicFilter : page.items()) {

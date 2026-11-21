@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -90,11 +91,6 @@ final class EmrSparkSteps {
     // one, it is the same folder in HDFS, and Hadoop fills in the user.
     private static final String WORKING_DIR = "mapreduce.job.working.dir";
     private static final String USER_HOME = "/user/${user.name}";
-    // A cluster runs no MapReduce JobHistory server, which a job client asks for a job once its application master has
-    // gone, as Pig does for each MapReduce job's task reports and counters: Pig asks for no task reports, and its
-    // client asks the server once rather than three times, each attempt waiting about ten seconds to connect.
-    private static final String PIG_NO_TASK_REPORT = "pig.stats.notaskreport";
-    private static final String CLIENT_RETRIES = "yarn.app.mapreduce.client.max-retries";
     // The AWS CLI's Hive step on a release is command-runner.jar running "hive-script --run-hive-script --args"
     // and the step's arguments, the ones the image's hive-script runs hive with; a step can also run hive itself.
     private static final String HIVE_SCRIPT = "hive-script";
@@ -278,9 +274,12 @@ final class EmrSparkSteps {
     // Apache Spark, which installs neither Hive, HCatalog nor Pig.
     private static boolean installs(String releaseLabel, String applications, ObjectMapper objectMapper,
                                     String... names) {
-        if (releaseLabel != null && EmrServerlessSparkRunner.sparkRuntime(releaseLabel)) {
-            return false;
-        }
+        return (releaseLabel == null || !EmrServerlessSparkRunner.sparkRuntime(releaseLabel))
+                && names(applications, objectMapper, names);
+    }
+
+    /** Whether a cluster's stored {@code Applications} name any of {@code names}, in any case. */
+    static boolean names(String applications, ObjectMapper objectMapper, String... names) {
         for (JsonNode application : stored(applications, objectMapper)) {
             String name = application.path("Name").asText();
             for (String installed : names) {
@@ -295,8 +294,7 @@ final class EmrSparkSteps {
     /**
      * The variables a step's command gets on a cluster with Floci's Pig, which make its {@code pig} read a Pig
      * configuration of its own: {@code pig.properties} lines that run Pig on Tez, as EMR's does, from a working
-     * directory S3A takes, with no wait on a JobHistory server the cluster does not run, then the cluster's
-     * {@code tez-site} and {@code pig-properties}, a later one winning, and,
+     * directory S3A takes, then the cluster's {@code tez-site} and {@code pig-properties}, a later one winning, and,
      * with a {@code pig-log4j}, Pig's setting to read the {@code log4j.properties} that gets its lines;
      * {@code pig-env}'s exports start its {@code pig-env.sh}.
      */
@@ -304,8 +302,6 @@ final class EmrSparkSteps {
         Map<String, String> properties = new LinkedHashMap<>();
         properties.put(PIG_EXECTYPE, PIG_TEZ);
         properties.put(WORKING_DIR, USER_HOME);
-        properties.put(PIG_NO_TASK_REPORT, "true");
-        properties.put(CLIENT_RETRIES, "1");
         Map<String, String> log4j = properties(configurations, objectMapper, PIG_LOG4J);
         if (!log4j.isEmpty()) {
             properties.put(PIG_LOG4J_CONF, EmrServerlessSparkRunner.PIG_CONF + "/log4j.properties");
@@ -335,13 +331,55 @@ final class EmrSparkSteps {
     }
 
     /**
+     * The S3 folder a step's application container logs go to: its own log destination's {@code containers} folder,
+     * as "the application's container logs will also be uploaded to the location specified in the
+     * StepMonitoringConfiguration", where it has one ({@link #logUri}), and else its cluster's.
+     */
+    static String containerLogFolder(EmrCluster cluster, EmrStep step) {
+        return EmrServerlessSparkRunner.logFolder(logUri(cluster, step), cluster.getId() + "/containers/");
+    }
+
+    /**
+     * Where a node removed from the cluster puts its containers' logs: the running steps' own destination when they
+     * share one, as those logs are their applications', and else the cluster's. A node removed between steps, or while
+     * steps with other destinations run, uses the cluster's.
+     */
+    static String nodeLogFolder(EmrCluster cluster) {
+        Set<String> folders = new HashSet<>();
+        String folder = containerLogFolder(cluster);
+        for (EmrStep step : cluster.getSteps()) {
+            if (EmrClusterLifecycle.RUNNING.equals(step.getState())
+                    || EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState())) {
+                folder = containerLogFolder(cluster, step);
+                folders.add(String.valueOf(folder));
+            }
+        }
+        return folders.size() == 1 ? folder : containerLogFolder(cluster);
+    }
+
+    /**
      * The S3 folder a step's logs go to, or null when its cluster has no {@code LogUri}: "If a value is not
      * provided, logs are not created". The Management Guide's "Log locations" puts step logs at
-     * {@code <LogUri>/<cluster-id>/steps/<step-id>/}.
+     * {@code <LogUri>/<cluster-id>/steps/<step-id>/}, under the step's own destination where it has one.
      */
     static String logFolder(EmrCluster cluster, EmrStep step) {
-        return EmrServerlessSparkRunner.logFolder(cluster.getLogUri(),
+        return EmrServerlessSparkRunner.logFolder(logUri(cluster, step),
                 cluster.getId() + "/steps/" + step.getId() + "/");
+    }
+
+    /**
+     * Where a step's logs are published: the {@code LogUri} of its StepMonitoringConfiguration, which "Beginning in
+     * Amazon EMR version 7.11" "take[s] precedence over any cluster-wide logging settings", and else its cluster's.
+     * None without the cluster's: "If your cluster does not enable cluster logging, step logs will not be uploaded to
+     * S3 even if you provide a StepMonitoringConfiguration" (Management Guide, "Customizing the log location for step
+     * log files"). The guide gives no folder layout under the step's own destination; it is the cluster's.
+     */
+    static String logUri(EmrCluster cluster, EmrStep step) {
+        if (cluster.getLogUri() == null || step.getLogUri() == null
+                || !EmrService.releaseAtLeast(cluster.getReleaseLabel(), 7, 11, 0)) {
+            return cluster.getLogUri();
+        }
+        return step.getLogUri();
     }
 
     /**

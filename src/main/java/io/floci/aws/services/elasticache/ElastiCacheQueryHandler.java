@@ -3,6 +3,7 @@ package io.floci.aws.services.elasticache;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.BackupWindows;
@@ -18,6 +19,7 @@ import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.LogDeliveryConfiguration;
 import io.floci.aws.services.elasticache.model.ReplicationGroup;
 import io.floci.aws.services.elasticache.model.ReplicationGroupSettings;
 import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
@@ -153,7 +155,8 @@ public class ElastiCacheQueryHandler {
                             replicationGroupSettings(params),
                             parseTags(params),
                             extractMemberList(params, "UserGroupIds.member."),
-                            parseSecurityGroupIds(params));
+                            parseSecurityGroupIds(params),
+                            parseLogDeliveryConfigurations(params));
             ReplicationGroup group = snapshotName != null && !snapshotName.isBlank()
                     ? service.createReplicationGroupFromSnapshot(request, snapshotName)
                     : service.createReplicationGroup(request);
@@ -174,6 +177,40 @@ public class ElastiCacheQueryHandler {
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
                 params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"),
                 boolParam(params, "TransitEncryptionEnabled"));
+    }
+
+    private static final List<String> LOG_TYPES = List.of("slow-log", "engine-log");
+    private static final List<String> LOG_DESTINATION_TYPES = List.of("cloudwatch-logs", "kinesis-firehose");
+    private static final List<String> LOG_FORMATS = List.of("text", "json");
+
+    private static List<LogDeliveryConfiguration> parseLogDeliveryConfigurations(
+            MultivaluedMap<String, String> params) {
+        List<LogDeliveryConfiguration> configurations = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember entry
+                : AwsQueryLists.members(params, "LogDeliveryConfigurations", "LogDeliveryConfigurationRequest")) {
+            String member = entry.prefix() + ".";
+            if ("false".equalsIgnoreCase(params.getFirst(member + "Enabled"))) {
+                continue;
+            }
+            configurations.add(new LogDeliveryConfiguration(
+                    oneOf(params, member + "LogType", "LogType", LOG_TYPES),
+                    oneOf(params, member + "DestinationType", "DestinationType", LOG_DESTINATION_TYPES),
+                    params.getFirst(member + "DestinationDetails.CloudWatchLogsDetails.LogGroup"),
+                    params.getFirst(member + "DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
+                    oneOf(params, member + "LogFormat", "LogFormat", LOG_FORMATS),
+                    "active", null));
+        }
+        return configurations;
+    }
+
+    private static String oneOf(MultivaluedMap<String, String> params, String param, String field,
+                                List<String> allowed) {
+        String value = params.getFirst(param);
+        if (value == null || !allowed.contains(value)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid " + field + " " + value + ". Valid values are " + String.join(", ", allowed) + ".", 400);
+        }
+        return value;
     }
 
     private static Integer optionalInt(String value) {
@@ -522,12 +559,12 @@ public class ElastiCacheQueryHandler {
             // Cache clusters are stored per account; like AWS, only the request's Region's are listed.
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
             List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId).stream()
-                    .filter(c -> service.inRequestRegion(c.getArn())).toList());
+                    .filter(c -> regionResolver.inRequestRegion(c.getArn())).toList());
             // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
             // which is the right answer only once no other source has answered.
             if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
                 memcachedService.listCacheClusters(filterId).stream()
-                        .filter(c -> service.inRequestRegion(c.getArn()))
+                        .filter(c -> regionResolver.inRequestRegion(c.getArn()))
                         .forEach(clusterList::add);
                 if (filtered && clusterList.isEmpty()) {
                     throw new AwsException("CacheClusterNotFound", "Cache cluster " + filterId + " not found.", 404);
@@ -1272,6 +1309,29 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         return g.getAuthMode() == AuthMode.PASSWORD && g.getUserGroupIds().isEmpty();
     }
 
+    private static String logDeliveryConfigurationsXml(List<LogDeliveryConfiguration> configurations) {
+        XmlBuilder xml = new XmlBuilder().start("LogDeliveryConfigurations");
+        for (LogDeliveryConfiguration c : configurations) {
+            xml.start("LogDeliveryConfiguration")
+                    .elem("LogType", c.logType())
+                    .elem("DestinationType", c.destinationType())
+                    .start("DestinationDetails");
+            if (c.logGroup() != null) {
+                xml.start("CloudWatchLogsDetails").elem("LogGroup", c.logGroup()).end("CloudWatchLogsDetails");
+            }
+            if (c.deliveryStream() != null) {
+                xml.start("KinesisFirehoseDetails").elem("DeliveryStream", c.deliveryStream())
+                        .end("KinesisFirehoseDetails");
+            }
+            xml.end("DestinationDetails")
+                    .elem("LogFormat", c.logFormat())
+                    .elem("Status", c.status())
+                    .elem("Message", c.message())
+                    .end("LogDeliveryConfiguration");
+        }
+        return xml.end("LogDeliveryConfigurations").build();
+    }
+
     private String replicationGroupXml(ReplicationGroup g) {
         Endpoint ep = g.getConfigurationEndpoint();
         boolean authTokenEnabled = authTokenEnabled(g);
@@ -1305,6 +1365,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         }
         if (g.getArn() != null) {
             xml.elem("ARN", g.getArn());
+        }
+        if (!g.getLogDeliveryConfigurations().isEmpty()) {
+            xml.raw(logDeliveryConfigurationsXml(g.getLogDeliveryConfigurations()));
         }
         if (!g.getUserGroupIds().isEmpty()) {
             xml.raw(memberListXml("UserGroupIds", g.getUserGroupIds()));

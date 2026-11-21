@@ -18,6 +18,11 @@ public class SessionCredential {
     private String roleSessionName;
     private String assumedRoleId;
     private Instant expiration;
+    /**
+     * When the credentials were issued, the request's {@code aws:TokenIssueTime}. Null for a
+     * session stored before Floci recorded it.
+     */
+    private Instant issuedAt;
     /** Inline session policy passed to AssumeRole/GetFederationToken — further restricts role policies. */
     private String sessionPolicyDocument;
     /**
@@ -31,7 +36,11 @@ public class SessionCredential {
     private boolean lambdaExecutionRole;
     private String ec2InstanceId;
     private String ec2RoleId;
-    /** Exact ECS task ARN this session was minted for, when this is a task-role session. */
+    /**
+     * Exact ARN of the workload this session was minted for and is served to at the container
+     * credentials endpoint: an ECS task's, for a task-role session, or a CodeBuild build's, for a
+     * build's service-role session.
+     */
     private String ecsTaskArn;
     /** Exact object action and ARN for an internally generated S3 presigned URL. */
     private String presignedAction;
@@ -136,6 +145,9 @@ public class SessionCredential {
 
     public Instant getExpiration() { return expiration; }
     public void setExpiration(Instant expiration) { this.expiration = expiration; }
+
+    public Instant getIssuedAt() { return issuedAt; }
+    public void setIssuedAt(Instant issuedAt) { this.issuedAt = issuedAt; }
 
     public String getSessionPolicyDocument() { return sessionPolicyDocument; }
     public void setSessionPolicyDocument(String sessionPolicyDocument) { this.sessionPolicyDocument = sessionPolicyDocument; }

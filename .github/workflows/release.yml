@@ -49,8 +49,24 @@ jobs:
         with:
           java-version: '25'
           distribution: 'mandrel'
-          cache: maven
+          # no `cache: maven`: a cache saved on a tag can only be read by that tag, so every release
+          # wrote one no later run could use. Main's copy is restored below instead.
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Restore-only: ci.yml saves main's ~/.m2, which a tag run may read. The tag's pom carries the
+      # release version, so the exact key misses and the newest main copy comes back by prefix.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Build native executable
         # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
@@ -58,7 +74,7 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
 
       - name: Check the x86-64 ISA level of the binary
         # The image and the release asset must run on x86-64-v2 CPUs. The runner's CPU has v3, so
@@ -101,8 +117,24 @@ jobs:
         with:
           java-version: '25'
           distribution: 'mandrel'
-          cache: maven
+          # no `cache: maven`: a cache saved on a tag can only be read by that tag, so every release
+          # wrote one no later run could use. Main's copy is restored below instead.
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Restore-only: ci.yml saves main's ~/.m2, which a tag run may read. The tag's pom carries the
+      # release version, so the exact key misses and the newest main copy comes back by prefix.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Build native executable
         # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
@@ -110,7 +142,7 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-H:-AOTSingleCallsiteInline"
 
       - name: Smoke-test the standalone binary
         # The same binary is published as a release asset (publish-binaries), so it is checked
@@ -144,14 +176,30 @@ jobs:
         with:
           java-version: '25'
           distribution: 'mandrel'
-          cache: maven
+          # no `cache: maven`: a cache saved on a tag can only be read by that tag, so every release
+          # wrote one no later run could use. Main's copy is restored below instead.
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Restore-only: ci.yml saves main's ~/.m2, which a tag run may read. The tag's pom carries the
+      # release version, so the exact key misses and the newest main copy comes back by prefix.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Build ARMv8.0 baseline native executable
         # Keep the normal arm64 artifact optimized as before. This additional release-only build
         # targets ARMv8.0 explicitly so older cores such as Raspberry Pi 4's Cortex-A72 do not
         # inherit optional AArch64 features (notably LSE) from the GitHub-hosted build runner.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=armv8-a,-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=armv8-a,-H:-AOTSingleCallsiteInline"
 
       - name: Smoke-test the standalone binary
         # The same binary is published as a release asset (publish-binaries), so it is checked
@@ -176,10 +224,13 @@ jobs:
   # The Linux release binaries are the native-amd64, native-arm64 and native-arm64-baseline
   # artifacts above, which also go into the images. macOS and Windows are built only for the
   # release assets, by standalone-binaries.yml, which can also be run by hand to try a change.
+  # darwin-arm64 is left out: it cannot build on a free runner, and Apple Silicon Macs run the
+  # darwin-amd64 binary under Rosetta 2 instead.
   standalone-binaries:
     name: Standalone binaries
     uses: ./.github/workflows/standalone-binaries.yml
     with:
+      platforms: darwin-amd64,windows-amd64
       version: ${{ github.ref_name }}
 
   # ── Publish standalone binaries to the GitHub Release ────────────────────
@@ -237,7 +288,6 @@ jobs:
           stage native-amd64 floci-aws-linux-amd64
           stage native-arm64 floci-aws-linux-arm64
           stage native-arm64-baseline floci-aws-linux-arm64-baseline
-          optional binary-darwin-arm64 floci-aws-darwin-arm64
           optional binary-darwin-amd64 floci-aws-darwin-amd64
           optional binary-windows-amd64 floci-aws-windows-amd64.exe
           (cd dist && sha256sum floci-aws-* > sha256sums.txt)
@@ -369,8 +419,6 @@ jobs:
             version=${{ steps.version.outputs.version }}
             build-date=${{ steps.created.outputs.created }}
             vcs-ref=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # Ordering matters: this step wipes native/ and replaces it with the arm64-only
       # baseline binary. It is safe only because it runs AFTER the multi-arch image
@@ -408,8 +456,6 @@ jobs:
             version=${{ steps.version.outputs.version }}
             build-date=${{ steps.created.outputs.created }}
             vcs-ref=${{ github.sha }}
-          cache-from: type=gha,scope=floci-arm64-baseline
-          cache-to: type=gha,scope=floci-arm64-baseline,mode=max
 
       - name: Build and push compat multi-arch image
         id: compat
@@ -434,8 +480,6 @@ jobs:
             version=${{ steps.version.outputs.version }}
             build-date=${{ steps.created.outputs.created }}
             vcs-ref=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   # ── Sign the published images ────────────────────────────────────────────
   # Kept out of push-native on purpose: a Fulcio or Rekor outage mid-push would

@@ -1,13 +1,13 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.IotMqttTlsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.nio.file.Path;
 
 @QuarkusTest
-@TestProfile(EcrTlsPathUriIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class EcrTlsPathUriIntegrationTest extends EcrTlsUriIntegrationTest {
 
     @Override
@@ -15,13 +15,8 @@ class EcrTlsPathUriIntegrationTest extends EcrTlsUriIntegrationTest {
         return "localhost.floci.io:" + ADVERTISED_PORT + "/" + ACCOUNT + "/" + REGION + "/" + repository;
     }
 
-    public static final class Profile extends EcrTlsUriIntegrationTest.Profile {
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> overrides = new LinkedHashMap<>(super.getConfigOverrides());
-            overrides.put("floci.services.ecr.uri-style", "path");
-            return overrides;
-        }
+    @Override
+    Path tlsDir() {
+        return Path.of(IotMqttTlsProfile.TLS_DIR);
     }
 }

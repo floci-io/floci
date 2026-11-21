@@ -20,9 +20,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.PrimitiveIterator;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
@@ -55,6 +57,23 @@ class EmrServiceTest {
      * A tag call's {@code ResourceId} is the cluster the tag handlers find by it: one in the request's Region, or one
      * stored with no Region, which they find in any.
      */
+    /** A MERGE keeps the classifications it does not name, and merges the ones it does, nested ones included. */
+    @Test
+    void aMergeReconfigurationMergesNestedConfigurationsByClassification() {
+        String merged = EmrService.mergedConfigurations("""
+                [{"Classification":"hadoop-env","Configurations":[{"Classification":"export",
+                  "Properties":{"JAVA_HOME":"/usr/lib/jvm/java-17"}}]},
+                 {"Classification":"spark","Properties":{"maximizeResourceAllocation":"true"}}]""", """
+                [{"Classification":"hadoop-env","Configurations":[{"Classification":"export",
+                  "Properties":{"HADOOP_HEAPSIZE":"2048"}}]}]""");
+
+        assertEquals("[{\"Classification\":\"hadoop-env\",\"Configurations\":[{\"Classification\":\"export\","
+                + "\"Properties\":{\"JAVA_HOME\":\"/usr/lib/jvm/java-17\",\"HADOOP_HEAPSIZE\":\"2048\"}}]},"
+                + "{\"Classification\":\"spark\",\"Properties\":{\"maximizeResourceAllocation\":\"true\"}}]", merged);
+        assertEquals("[{\"Classification\":\"spark\"}]", EmrService.mergedConfigurations(null,
+                "[{\"Classification\":\"spark\"}]"));
+    }
+
     @Test
     void aTagCallsResourceIdIsTheClusterTheTagHandlersFind() {
         EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
@@ -71,6 +90,36 @@ class EmrServiceTest {
         regionless.setRegion(null);
         clusters.put(cluster.getId(), regionless);
         assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), "eu-west-1"));
+    }
+
+    /**
+     * A resource-tag condition reads the tags of the cluster the ARN names, in its account and Region, or of one stored
+     * with no Region, as the tag handlers find it; tagging puts a new map in place of the held one.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheClusterTheArnNamesAndTaggingPutsANewMap() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster cluster = service.runJobFlow(cluster("tagged", true), REGION);
+        String arn = cluster.getClusterArn();
+        String elsewhere = arn.replace(":" + REGION + ":", ":eu-west-1:");
+        service.addTags(cluster.getId(), Map.of("team", "data"));
+        AccountAwareStorageBackend<EmrCluster> clusters = fixture.storage.create("emr", "emr-clusters.json",
+                new TypeReference<Map<String, EmrCluster>>() {});
+        Map<String, String> held = clusters.get(cluster.getId()).orElseThrow().getTags();
+
+        service.addTags(cluster.getId(), Map.of("env", "prod"));
+
+        assertEquals(Map.of("team", "data"), held);
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(elsewhere));
+        assertEquals(Map.of(), service.storedTags(arn + "/session/s-1"));
+        assertEquals(Map.of(), service.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")));
+
+        EmrCluster regionless = clusters.get(cluster.getId()).orElseThrow();
+        regionless.setRegion(null);
+        clusters.put(cluster.getId(), regionless);
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(elsewhere));
     }
 
     @Test
@@ -254,11 +303,34 @@ class EmrServiceTest {
                 + " and cluster " + oldId + " runs emr-4.7.2.", older.getMessage());
         assertThrows(AwsException.class, () -> service.cancelSteps(firstId, List.of("s-1")));
         assertEquals(1, service.cancelSteps(patchedId, List.of("s-1")).size());
-        // "A maximum of 256 steps are allowed in each CancelSteps request."
+        // "With earlier releases, the maximum is 256 steps per request."
         List<String> ids = Collections.nCopies(257, "s-1");
         AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(patchedId, ids));
-        assertEquals("A CancelSteps request can cancel at most 256 steps, and this one names 257.",
+        assertEquals("A CancelSteps request can cancel at most 256 steps on release emr-5.0.3, and this one names 257.",
                 tooMany.getMessage());
+    }
+
+    /** "With Amazon EMR releases 7.14.0 and later, the maximum number of steps you can cancel per request is 100." */
+    @Test
+    void cancelStepsTakesAtMost100StepsFromRelease714AndOnlyTheTwoOptions() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster current = cluster("current", true);
+        current.setReleaseLabel("emr-7.14.0");
+        String currentId = service.runJobFlow(current, REGION).getId();
+        EmrCluster earlier = cluster("earlier", true);
+        earlier.setReleaseLabel("emr-7.13.0");
+        String earlierId = service.runJobFlow(earlier, REGION).getId();
+        List<String> ids = Collections.nCopies(101, "s-1");
+
+        AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(currentId, ids));
+        assertEquals("A CancelSteps request can cancel at most 100 steps on release emr-7.14.0, and this one names"
+                + " 101.", tooMany.getMessage());
+        assertEquals(101, service.cancelSteps(earlierId, ids).size());
+        assertEquals(1, service.cancelSteps(currentId, List.of("s-1"), "TERMINATE_PROCESS").size());
+        AwsException option = assertThrows(AwsException.class,
+                () -> service.cancelSteps(currentId, List.of("s-1"), "SIGKILL"));
+        assertEquals("ValidationException", option.getErrorCode());
+        assertTrue(option.getMessage().contains("'stepCancellationOption'"), option.getMessage());
     }
 
     @Test
@@ -770,6 +842,93 @@ class EmrServiceTest {
         assertEquals(Map.of("ErrorCode", "INVALID_JOB_SHUT_DOWN"), refused.getExtendedData());
     }
 
+    /**
+     * No more core and task nodes are built than {@code yarn-max-worker-nodes}, 4 in the fixture, however many a
+     * cluster asks for: core nodes first, and none past the setting, so a cluster asking for billions costs no more
+     * than one asking for 4.
+     */
+    @Test
+    void noMoreWorkerNodesAreBuiltThanTheSettingAllowsHoweverManyAClusterAsksFor() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrCluster requested = cluster("huge", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", Integer.MAX_VALUE),
+                group("TASK", Integer.MAX_VALUE)));
+        EmrCluster cluster = fixture.service.runJobFlow(requested, REGION);
+
+        List<ClusterStorage.Node> nodes = fixture.service.workerNodes(cluster);
+
+        assertEquals(4, nodes.size());
+        assertTrue(nodes.stream().allMatch(ClusterStorage.Node::core), nodes.toString());
+    }
+
+    /**
+     * EC2InstanceIdsToTerminate ends the instances it names: their nodes go, the group's other instances keep their ids
+     * and nodes, and one the group gets later takes a new ordinal, not an ended one's.
+     */
+    @Test
+    void terminatingANamedInstanceTakesItsNodeAndLeavesTheOthersTheirs() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("named", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 3)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String core = cluster.getInstanceGroups().get(1).getId();
+        // The primary node is i-...1, and the core group's instances i-...2 to i-...4, ordinals 1 to 3.
+        String second = EmrService.ec2InstanceId(3);
+
+        service.modifyInstanceGroups(cluster.getId(), REGION, List.of(
+                new EmrService.InstanceGroupModification(core, null, null, null, List.of(second))));
+
+        EmrCluster shrunk = service.describeCluster(cluster.getId());
+        assertEquals(List.of("1-1", "1-3"), service.workerNodes(shrunk).stream().map(ClusterStorage.Node::id).toList());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRequestedInstanceCount());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRunningInstanceCount());
+        AwsException again = assertThrows(AwsException.class, () -> service.modifyInstanceGroups(cluster.getId(),
+                REGION, List.of(new EmrService.InstanceGroupModification(core, null, null, null, List.of(second)))));
+        assertEquals("ValidationException", again.getErrorCode());
+        AwsException master = assertThrows(AwsException.class, () -> service.modifyInstanceGroups(cluster.getId(),
+                REGION, List.of(new EmrService.InstanceGroupModification(cluster.getInstanceGroups().get(0).getId(),
+                        null, null, null, List.of(EmrService.ec2InstanceId(1))))));
+        assertEquals("InvalidRequestException", master.getErrorCode());
+
+        service.modifyInstanceGroups(cluster.getId(), REGION,
+                List.of(new EmrService.InstanceGroupModification(core, 3, null)));
+        assertEquals(List.of("1-1", "1-3", "1-4"), service.workerNodes(service.describeCluster(cluster.getId()))
+                .stream().map(ClusterStorage.Node::id).toList());
+    }
+
+    @Test
+    void anInstancesOrdinalSkipsThoseItsGroupEnded() {
+        assertEquals(List.of(1L, 4L, 5L, 7L), LongStream.rangeClosed(1, 4)
+                .map(k -> EmrService.ordinalAt(List.of(2, 3, 6), k)).boxed().toList());
+        // The walk from any instance gives the same ordinals.
+        for (long k = 1; k <= 4; k++) {
+            PrimitiveIterator.OfLong walk = EmrService.ordinalsFrom(List.of(2, 3, 6), k);
+            for (long next = k; next <= 6; next++) {
+                assertEquals(EmrService.ordinalAt(List.of(2, 3, 6), next), walk.nextLong(), "from " + k);
+            }
+        }
+    }
+
+    /** One group named twice with the same instance ends it once. */
+    @Test
+    void anInstanceNamedTwiceInOneRequestIsEndedOnce() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("twice", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 3)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String core = cluster.getInstanceGroups().get(1).getId();
+        EmrService.InstanceGroupModification end =
+                new EmrService.InstanceGroupModification(core, null, null, null, List.of(EmrService.ec2InstanceId(3)));
+
+        service.modifyInstanceGroups(cluster.getId(), REGION, List.of(end, end));
+
+        EmrCluster shrunk = service.describeCluster(cluster.getId());
+        assertEquals(2, shrunk.getInstanceGroups().get(1).getRequestedInstanceCount());
+        assertEquals(List.of("1-1", "1-3"), service.workerNodes(shrunk).stream().map(ClusterStorage.Node::id).toList());
+    }
+
     /** ModifyInstanceFleet's answer for a cluster that is starting or bootstrapping. */
     private static void assertNotRunningOrWaiting(AwsException refused) {
         assertEquals("InvalidRequestException", refused.getErrorCode());
@@ -802,6 +961,17 @@ class EmrServiceTest {
     }
 
     /** ListSteps' states, newest step first, as it lists them. */
+
+    @Test
+    void aBlankDefaultReleaseLabelIsNoReleaseAndAnEmptyLabelIsRefused() {
+        EmrService blank = new EmrServiceFixture().withDefaultReleaseLabel("");
+        List<String> catalogue = EmrReleaseCatalog.RELEASES.stream().map(EmrReleaseCatalog.Release::label).toList();
+        assertEquals(catalogue, blank.listReleaseLabels(null, null, null, null).items());
+        AwsException refused = assertThrows(AwsException.class, () -> blank.listSupportedInstanceTypes("", null));
+        assertEquals("InvalidRequestException", refused.getErrorCode());
+        assertEquals("The supplied release label is invalid: .", refused.getMessage());
+        assertEquals(Map.of("ErrorCode", "INVALID_RELEASE_LABEL"), refused.getExtendedData());
+    }
 
     private static List<String> ids(List<EmrStep> steps) {
         return steps.stream().map(EmrStep::getId).toList();

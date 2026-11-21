@@ -8,20 +8,24 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.KeyPair;
+import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -84,6 +88,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
+    private final StorageBackend<String, PaymentCryptographyMpaTeamAssociation> mpaTeamStore;
 
     /** The key exchange: the forms a key may leave in, and the certificates that carry them. */
     private final PaymentCryptographyKeyExchange exchange;
@@ -91,6 +96,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final PaymentCryptographyRequestContext requestContext;
+    /** The service's notion of time, the one every moment it records is taken from. */
+    private final Clock clock;
 
     @Inject
     public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -102,6 +109,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-settings.json",
                         new TypeReference<Map<String, List<String>>>() {}),
+                storageFactory.create(STORAGE_KEY, "payment-cryptography-mpa-teams.json",
+                        new TypeReference<>() {}),
                 regionResolver,
                 new SecureRandom(),
                 requestContext,
@@ -113,8 +122,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
                                 PaymentCryptographyRequestContext requestContext) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
-                requestContext, new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                new SecureRandom(), requestContext, new CertificateGenerator(), Clock.systemUTC());
     }
 
     /**
@@ -126,8 +135,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
-                new PaymentCryptographyRequestContext(), new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                new SecureRandom(), new PaymentCryptographyRequestContext(),
+                new CertificateGenerator(), Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -135,8 +145,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, secureRandom,
-                requestContext, new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                secureRandom, requestContext, new CertificateGenerator(), Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -146,13 +156,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 PaymentCryptographyRequestContext requestContext,
                                 CertificateGenerator certificates,
                                 Clock clock) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, secureRandom,
-                requestContext, certificates, clock);
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                secureRandom, requestContext, certificates, clock);
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 StorageBackend<String, List<String>> settingsStore,
+                                StorageBackend<String, PaymentCryptographyMpaTeamAssociation> mpaTeamStore,
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext,
@@ -161,10 +172,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.settingsStore = settingsStore;
+        this.mpaTeamStore = mpaTeamStore;
         this.regionResolver = regionResolver;
         this.exchange = new PaymentCryptographyKeyExchange(this, certificates, clock);
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
+        this.clock = clock;
     }
 
     // ---- keys ---------------------------------------------------------------
@@ -291,7 +304,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 }
             }
         }
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         key.setCreateTimestamp(now);
         key.setUsageStartTimestamp(now);
         keyStore.put(storageKey(region, key.getKeyId()), key);
@@ -355,40 +368,171 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
-     * Removes a key and answers the key as the service does when a deletion is
-     * scheduled: the key's own metadata, its state {@code DELETE_PENDING} and
-     * the pending timestamp of that deletion.
-     *
-     * <p>The service deletes a key the moment it is asked to, so the waiting
-     * period the service offers is not one: the key is gone when the answer
-     * goes out. The answer carries only the pending timestamp of that
-     * deletion; the delete timestamp stays unset, because the key is already
-     * gone when the answer goes out.
-     *
-     * <p>The lock is the same one the tagging operations take, so a key that
-     * is being tagged cannot be written back after it was deleted.
+     * Schedules a key for deletion after the reference's default waiting period, seven days.
      */
     public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key) {
+        return deleteKey(key, 7);
+    }
+
+    /**
+     * Schedules a key for deletion and answers with the key as it now stands.
+     *
+     * <p>The key is disabled and stays in the store, in the state {@code DELETE_PENDING},
+     * until the waiting period ends. The key is therefore still readable and still named by
+     * its aliases, and {@link #restoreKey(PaymentCryptographyKey)} can cancel the deletion.
+     * The waiting period is a promise to the caller, not a sweep this service runs: a key
+     * stays pending rather than disappearing on a timer the emulator does not have.
+     *
+     * <p>The pending timestamp is the moment the deletion takes effect, and the deletion
+     * timestamp is unset while the key has not been deleted.
+     *
+     * <p>A key that is already pending deletion is refused with {@code ConflictException},
+     * as the reference refuses it: the deletion is already under way.
+     */
+    public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key, int days) {
+        PaymentCryptographyKey current = liveKey(key);
         // A replica is read-only: only the primary may be deleted.
-        requireNotReplica(key, "only the primary may be deleted");
-        long now = Instant.now().getEpochSecond();
-        key.setKeyState("DELETE_PENDING");
-        key.setEnabled(false);
-        key.setDeletePendingTimestamp(now);
-        // The replicas of a key go when the key goes. A replica left behind would be a
-        // record of a key that is gone, and it could not be deleted on its own.
-        for (String target : key.getReplicationRegions()) {
-            keyStore.delete(storageKey(target, key.getKeyId()));
+        requireNotReplica(current, "only the primary may be deleted");
+        requireNotPendingDeletion(current, "it cannot be deleted again");
+        long now = clock.instant().getEpochSecond();
+        current.setKeyState("DELETE_PENDING");
+        current.setEnabled(false);
+        current.setDeletePendingTimestamp(now + days * 86_400L);
+        current.setDeleteTimestamp(0);
+        storeKey(current);
+        // The replicas of a key carry the state of their primary, so a key that is pending
+        // deletion is pending deletion in every region it replicates into.
+        refreshReplicas(current, current.getReplicationRegions());
+        return current;
+    }
+
+    /**
+     * Cancels the scheduled deletion of a key and answers with the key as it now stands.
+     *
+     * <p>Only a key in the state {@code DELETE_PENDING} can be restored; one that is not
+     * pending deletion is refused with {@code ConflictException}, as the reference refuses
+     * it.
+     *
+     * <p>The reference's own example of the restore says that two members change: the state
+     * goes back to {@code CREATE_COMPLETE} and the pending timestamp is removed. The key
+     * stays disabled, because the deletion disabled it and it is {@code StartKeyUsage} that
+     * enables a key again, and the moments of its use are the ones it had.
+     *
+     * <p>A replica is read-only, so the deletion is cancelled on the primary: a replica
+     * that was restored on its own would be usable while the key it is a copy of is still
+     * pending deletion.
+     */
+    public synchronized PaymentCryptographyKey restoreKey(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "only the primary may be restored");
+        requirePendingDeletion(current, "it cannot be restored");
+        current.setKeyState("CREATE_COMPLETE");
+        current.setDeletePendingTimestamp(0);
+        current.setDeleteTimestamp(0);
+        storeKey(current);
+        // The replicas of a key carry the state of their primary, so a key that is restored
+        // is restored in every region it replicates into.
+        refreshReplicas(current, current.getReplicationRegions());
+        return current;
+    }
+
+    // ---- key usage -----------------------------------------------------------
+
+    /**
+     * Starts the use of a key, and answers with the key as it now stands.
+     *
+     * <p>The moment the use starts is the moment the key became active, so a key that is
+     * already in use keeps the moment it became active and a request that names it changes
+     * nothing. A key that had been stopped is usable again: the stop moment is cleared,
+     * because a key that is in use has no such moment.
+     *
+     * <p>A replica is read-only, so the change is made on the primary, and it reaches the
+     * replicas, as the reference says it does.
+     */
+    public synchronized PaymentCryptographyKey startKeyUsage(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "a replica is read-only");
+        requireNotPendingDeletion(current, "its use cannot be started");
+        if (!current.isEnabled()) {
+            current.setEnabled(true);
+            current.setUsageStartTimestamp(clock.instant().getEpochSecond());
+            current.setUsageStopTimestamp(0);
+            storeKey(current);
+            refreshReplicas(current, current.getReplicationRegions());
         }
-        keyStore.delete(storageKey(key.getRegion(), key.getKeyId()));
-        // A key saved before the region became part of its name is under that name too,
-        // and it goes with the key: a record left behind would be a key that was deleted
-        // and still there.
-        keyStore.delete(key.getKeyId());
-        // The aliases that name the key go with it, in every region: a replica shares the
-        // identifier of its primary, so these are the aliases of the replicas too.
-        deleteAliasesOf(null, key.getKeyId());
-        return key;
+        return current;
+    }
+
+    /**
+     * Stops the use of a key, and answers with the key as it now stands.
+     *
+     * <p>A stopped key stays readable, and its material stays where it is: only the use of
+     * it stops, so a key may be started again.
+     *
+     * <p>The moment the use stops is the moment the key became inactive, so a key that is
+     * already stopped keeps the moment it stopped and a request that names it changes
+     * nothing.
+     *
+     * <p>A replica is read-only, so the change is made on the primary, and it reaches the
+     * replicas, as the reference says it does.
+     */
+    public synchronized PaymentCryptographyKey stopKeyUsage(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "a replica is read-only");
+        requireNotPendingDeletion(current, "its use cannot be stopped");
+        if (current.isEnabled()) {
+            current.setEnabled(false);
+            current.setUsageStopTimestamp(clock.instant().getEpochSecond());
+            storeKey(current);
+            refreshReplicas(current, current.getReplicationRegions());
+        }
+        return current;
+    }
+
+    // ---- certificate signing requests ----------------------------------------
+
+    /**
+     * The certificate signing request a key pair signs.
+     *
+     * <p>The request carries the subject and the public half of the key, and it is signed by
+     * the private half, so the key has to be a key pair the service holds the private half
+     * of: a key that is not a key pair has no public half to certify, and a key pair the
+     * service holds no private half of has nothing to sign with. A key that is disabled does
+     * no work.
+     *
+     * <p>The usage and the mode of use of the key are not narrowed. The reference publishes
+     * no table of the keys this operation takes, and its own flows are two: one signs with a
+     * key pair of the digital signature usage whose mode of use is {@code Sign}, the other
+     * with a key pair of the TR-34 usage whose modes of use are {@code Unwrap} and
+     * {@code Decrypt}. Both are served here.
+     *
+     * <p>The answer is the PEM of the request, base64 encoded, which is what the reference's
+     * own answer carries, so a caller that decodes it holds the file the markers are in.
+     *
+     * @param key the key pair that signs
+     * @param digest the digest the request names
+     * @param subject the subject's members
+     * @return the request, base64 encoded
+     */
+    public synchronized String certificateSigningRequest(PaymentCryptographyKey key, String digest,
+                                                         Map<String, String> subject) {
+        PaymentCryptographyKey current = liveKey(key);
+        PaymentCryptographyKeyRules.requireEnabled(current);
+        if (!ASYMMETRIC_CLASS.equals(current.getKeyClass())) {
+            throw new AwsException("ValidationException",
+                    "the key " + current.getArn() + " is not a key pair, and a key pair is what "
+                            + "signs a certificate signing request", 400);
+        }
+        PublicKey publicKey = PaymentCryptographyKeyExchange.publicKeyOf(current);
+        PrivateKey privateKey = PaymentCryptographyKeyExchange.privateKeyOf(current);
+        if (publicKey == null || privateKey == null) {
+            throw new AwsException("ValidationException",
+                    "the key " + current.getArn() + " has no key pair to sign a certificate "
+                            + "signing request with", 400);
+        }
+        return Certificates.pemBase64(PaymentCryptographyCertificateRequest.pem(
+                PaymentCryptographyCertificateRequest.subject(subject), publicKey, privateKey,
+                digest, isRsa(current)));
     }
 
     // ---- aliases ------------------------------------------------------------
@@ -516,7 +660,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        current.getTags().putAll(tags);
+        Map<String, String> updated = new LinkedHashMap<>(current.getTags());
+        updated.putAll(tags);
+        current.setTags(updated);
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
     }
@@ -564,9 +710,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void untag(PaymentCryptographyKey key, List<String> tagKeys) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        for (String tagKey : tagKeys) {
-            current.getTags().remove(tagKey);
-        }
+        Map<String, String> updated = new LinkedHashMap<>(current.getTags());
+        tagKeys.forEach(updated::remove);
+        current.setTags(updated);
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
     }
@@ -590,6 +736,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             replica.setTags(new LinkedHashMap<>(primary.getTags()));
             replica.setKeyState(primary.getKeyState());
             replica.setEnabled(primary.isEnabled());
+            replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
+            replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
+            replica.setDeletePendingTimestamp(primary.getDeletePendingTimestamp());
+            replica.setDeleteTimestamp(primary.getDeleteTimestamp());
             replica.setUsingDefaultReplicationRegions(primary.isUsingDefaultReplicationRegions());
             replica.setPrimaryRegion(primary.getPrimaryRegion());
             replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
@@ -616,10 +766,46 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The refusal of a request that names a key whose deletion is under way.
+     *
+     * <p>A key that is pending deletion is disabled and on its way out, so the use of it is
+     * not the caller's to change: the deletion is cancelled with
+     * {@link #restoreKey(PaymentCryptographyKey)} instead. The reference does not publish
+     * the answer for this case, so the service refuses the request with
+     * {@code ConflictException}, which is the code it uses for a request that conflicts with
+     * the state of a key.
+     *
+     * @param key the key the request names
+     * @param what what the request wanted to do with the key, for the message
+     */
+    private static void requireNotPendingDeletion(PaymentCryptographyKey key, String what) {
+        if ("DELETE_PENDING".equals(key.getKeyState())) {
+            throw new AwsException("ConflictException",
+                    "the key " + key.getArn() + " is pending deletion, and " + what, 400);
+        }
+    }
+
+    /**
+     * The refusal of a request that names a key whose deletion is not under way.
+     *
+     * <p>A scheduled deletion is cancelled while it is under way, so a key that is not
+     * pending deletion has nothing to cancel.
+     *
+     * @param key the key the request names
+     * @param what what the request wanted to do with the key, for the message
+     */
+    private static void requirePendingDeletion(PaymentCryptographyKey key, String what) {
+        if (!"DELETE_PENDING".equals(key.getKeyState())) {
+            throw new AwsException("ConflictException",
+                    "the key " + key.getArn() + " is not pending deletion, and " + what, 400);
+        }
+    }
+
+    /**
      * The tags of a key.
      *
-     * <p>The copy takes the lock the tagging operations take, so it cannot read the map while
-     * another request is writing to it.
+     * <p>The tagging operations put a new map in place of the held one, so the copy is of one
+     * whole set; it still takes their lock, so it reads the set the last of them left.
      */
     public synchronized Map<String, String> listTags(PaymentCryptographyKey key) {
         return new LinkedHashMap<>(key.getTags());
@@ -635,6 +821,148 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                                                 Integer maxResults, String nextToken) {
         return Pagination.paginate(new ArrayList<>(listTags(key).entrySet()), Map.Entry::getKey,
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
+    }
+
+    // ---- resource policies ----------------------------------------------------
+
+    /**
+     * A key's resource-based policy as it is at one moment.
+     *
+     * <p>The store holds the key itself, and a key is mutable, so a read takes the two
+     * values the answer carries while it holds the lock. A policy taken away after the
+     * read cannot change the answer.
+     *
+     * @param arn the ARN of the key the policy is on
+     * @param policy the policy document
+     */
+    public record ResourcePolicy(String arn, String policy) {
+    }
+
+    /**
+     * Attaches or replaces the resource-based policy of a key.
+     *
+     * <p>The policy belongs to the key, so it is written with the key and goes when the key
+     * goes. A policy the service has not seen is replaced, as the reference replaces one.
+     */
+    public synchronized ResourcePolicy putResourcePolicy(PaymentCryptographyKey key, String policy) {
+        PaymentCryptographyKey current = liveKey(key);
+        // A replica is read-only, and the reference attaches a policy to the primary alone.
+        requireNotReplica(current, "a policy may only be attached to the primary");
+        current.setResourcePolicy(policy);
+        storeKey(current);
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
+    }
+
+    /**
+     * The resource-based policy attached to a key.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     */
+    public synchronized ResourcePolicy resourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyWithPolicy(key);
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
+    }
+
+    /**
+     * Removes the resource-based policy of a key.
+     *
+     * <p>A key without a policy is refused, as it is by the read.
+     */
+    public synchronized void deleteResourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyWithPolicy(key);
+        current.setResourcePolicy(null);
+        storeKey(current);
+    }
+
+    /**
+     * The key as it is in the store now, with the policy it carries.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     *
+     * @param key the key the request named
+     * @return the key, with its policy
+     */
+    private PaymentCryptographyKey keyWithPolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        if (current.getResourcePolicy() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource policy for key " + key.getArn() + " is not found", 400);
+        }
+        return current;
+    }
+
+    // ---- multi-party approval ------------------------------------------------
+
+    /**
+     * Associates a Multi-Party Approval team with a protected operation.
+     *
+     * <p>An operation has one association, so a second one replaces the first. The team's
+     * ARN is stored as the request names it: there is no MPA service here to check it
+     * against, and an ARN the model accepts names a team the emulator cannot see.
+     *
+     * <p>The store holds the association, and the caller gets a copy of it, so what the
+     * caller holds is a snapshot that a later change of the stored association does not
+     * reach.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation associateMpaTeam(
+            String region, String action, String mpaTeamArn) {
+        PaymentCryptographyMpaTeamAssociation association =
+                new PaymentCryptographyMpaTeamAssociation(action, region, mpaTeamArn, "ACTIVE");
+        mpaTeamStore.put(storageKey(region, action), association);
+        return copyOf(association);
+    }
+
+    /**
+     * The MPA team associated with a protected operation.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so the read
+     * takes a copy of it while it holds the lock: what the caller holds is a snapshot, and
+     * a removal that runs after the read does not change it.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation mpaTeamAssociation(
+            String region, String action) {
+        PaymentCryptographyMpaTeamAssociation association =
+                mpaTeamStore.get(storageKey(region, action)).orElse(null);
+        if (association == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "No MPA team is associated with " + action, 400);
+        }
+        return copyOf(association);
+    }
+
+    /**
+     * Removes the association between an MPA team and a protected operation.
+     *
+     * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING},
+     * and the association is gone from the store. The state belongs to that answer alone:
+     * the stored association is not changed, so a lookup that overlaps the removal answers
+     * with the association that is there or with the resource the reference cannot find.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation disassociateMpaTeam(
+            String region, String action) {
+        PaymentCryptographyMpaTeamAssociation association = mpaTeamAssociation(region, action);
+        mpaTeamStore.delete(storageKey(region, action));
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(), "DELETE_PENDING");
+    }
+
+    /**
+     * A copy of an association.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so what a
+     * caller gets is a copy: what the caller holds is a snapshot, and a change of the
+     * stored association does not reach it.
+     *
+     * @param association the association to copy
+     * @return the copy
+     */
+    private static PaymentCryptographyMpaTeamAssociation copyOf(
+            PaymentCryptographyMpaTeamAssociation association) {
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(),
+                association.getAssociationState());
     }
 
     // ---- the key exchange ----------------------------------------------------
@@ -905,6 +1233,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * Whether a key is an RSA key rather than an elliptic curve one.
+     *
+     * <p>The key record knows its algorithm, so the family is read from there and not guessed
+     * from the length of the material, because the two key pairs are of different lengths and
+     * the algorithm is what a certificate names.
+     */
+    static boolean isRsa(PaymentCryptographyKey key) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        return algorithm != null && algorithm.rsa;
+    }
+
+    /**
      * Whether a key is an AES key rather than a TDES one.
      *
      * <p>The key record knows its algorithm, so the family is read from there and not guessed
@@ -1107,6 +1448,36 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The tags held on the key stored under {@code arn}, in the account and Region it names, read in place without the
+     * service's lock: the tagging operations put a new map in place of the held one, so the read is of one whole set.
+     * A key saved before the Region became part of its storage name is found as {@link #findKeyRecord} finds it, and
+     * either is matched on its whole stored ARN. Empty for an ARN naming no key.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        if (account.isEmpty() || !parsed.resource().startsWith("key/")) {
+            return Map.of();
+        }
+        String keyId = parsed.resource().substring("key/".length());
+        Map<String, String> held = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(keyStore, account, storageKey(parsed.region(), keyId))
+                .or(() -> AccountAwareStorageBackend.readInAccount(keyStore, account, keyId))
+                .filter(key -> arn.equals(key.getArn()))
+                .map(PaymentCryptographyKey::getTags)
+                .ifPresent(tags -> tags.forEach((tagKey, value) -> {
+                    if (tagKey != null && value != null) {
+                        held.put(tagKey, value);
+                    }
+                }));
+        return held;
+    }
+
+    /**
      * The storage key of a key.
      *
      * <p>The region is part of it, because a multi-region key has one identifier in several
@@ -1186,6 +1557,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         keyStore.clear();
         settingsStore.clear();
         aliasStore.clear();
+        mpaTeamStore.clear();
     }
 
     /** The key store, for the tests. */
@@ -1196,6 +1568,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The certificate of a public key. */
     public Map<String, Object> publicKeyCertificate(PaymentCryptographyKey key) {
         return exchange.publicKeyCertificate(key);
+    }
+
+    /**
+     * The material of a key that came under a key the two parties agreed with, and goes out
+     * under another key.
+     *
+     * @param region the region the request is in
+     * @param material the request's members
+     * @return the wrapped key, its check value and the format it is in
+     */
+    public Map<String, Object> translateKeyMaterial(String region, Map<String, Object> material) {
+        return exchange.translateKeyMaterial(region, material);
     }
 
     /** The parameters a counterparty needs to import a key into this service. */
@@ -1511,6 +1895,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         replica.setTags(new LinkedHashMap<>(primary.getTags()));
         replica.setCreateTimestamp(primary.getCreateTimestamp());
         replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
+        replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
+        replica.setDeletePendingTimestamp(primary.getDeletePendingTimestamp());
+        replica.setDeleteTimestamp(primary.getDeleteTimestamp());
         replica.setPrimaryRegion(primary.getPrimaryRegion());
         replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
         replica.setMultiRegionKeyType("REPLICA");

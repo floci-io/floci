@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.services.appsync.AppSyncService;
 import io.floci.aws.services.appsync.GraphqlSidecarClient;
@@ -105,11 +106,30 @@ public class AppSyncExecutionController {
         this.reachableEndpoint = reachableEndpoint;
     }
 
+    /**
+     * An API's endpoint names no Region, so a request reaches the API whatever Region it is signed for, or none with
+     * an API key, and runs in the API's Region, where its data sources, resolvers and functions are. A request for an
+     * API that doesn't exist is answered as before.
+     */
     @POST
     @Path("/v1/apis/{apiId}/graphql")
     public Response execute(@PathParam("apiId") String apiId,
                             @Context HttpHeaders headers,
                             String body) {
+        Optional<String> apiRegion;
+        try {
+            apiRegion = appSyncService.graphqlApiRegion(apiId);
+        } catch (RuntimeException e) {
+            // Stay on the data-plane errors envelope, as a failed lookup of the API itself does.
+            LOG.errorv(e, "Unexpected failure looking up API {0}", apiId);
+            return graphqlError(500, "InternalFailure", "InternalFailure");
+        }
+        return apiRegion
+                .map(region -> RequestScopes.callAs(null, region, () -> executeInItsRegion(apiId, headers, body)))
+                .orElseGet(() -> executeInItsRegion(apiId, headers, body));
+    }
+
+    private Response executeInItsRegion(String apiId, HttpHeaders headers, String body) {
         try {
             if (!isAcceptedContentType(headers)) {
                 return graphqlError(400, "MalformedHttpRequestException",

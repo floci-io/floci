@@ -126,6 +126,22 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    /** The opt-in log of every request and response, one JSON object per line, for debugging. */
+    RequestLogConfig requestLog();
+
+    interface RequestLogConfig {
+        /** Write each request and its response to {@link #file()}. Env: FLOCI_REQUEST_LOG_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where the log is written, one JSON object per line (JSONL); {@code ./floci-requests.jsonl} when unset. It
+         * holds request and response bodies as plain text, which can include secrets: known secret headers and query
+         * parameters are redacted, but a secret inside a body is not. Env: FLOCI_REQUEST_LOG_FILE
+         */
+        Optional<String> file();
+    }
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -1370,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {
@@ -1669,6 +1693,45 @@ public interface EmulatorConfig {
         @WithDefault("300")
         int latestRestorableLagSeconds();
 
+        /**
+         * Open shards in each DynamoDB stream of the native engine. An item's changes always go to the shard its
+         * partition key picks, so they stay in order. AWS gives each table partition a shard of its own.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT
+         */
+        @WithDefault("1")
+        int streamShardCount();
+
+        /**
+         * Seconds a stream shard of the native engine stays open before it closes and a child shard, which names it
+         * as its parent, takes its keys. 0 keeps shards open until the stream is disabled.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS
+         */
+        @WithDefault("0")
+        long streamShardRolloverSeconds();
+
+        /**
+         * Expire a stream shard iterator 15 minutes after it is returned, as AWS does.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamIteratorExpiryEnabled();
+
+        /**
+         * Keep stream records, and shards after they close, for 24 hours as AWS does, and refuse a shard iterator
+         * for a sequence number the shard no longer holds or never held.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamRetentionEnabled();
+
+        /**
+         * The most records a DynamoDB stream of the native engine keeps across its shards; the oldest goes first.
+         * AWS limits a stream by age rather than by count, so raise this when a consumer can fall far behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS
+         */
+        @WithDefault("1000")
+        int streamMaxRecords();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
@@ -1719,6 +1782,15 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean seedDeployerPrincipal();
+
+        /**
+         * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
+         * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
+         * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         * Seeding refuses to start with any other value outside that format.
+         */
+        @WithDefault("floci")
+        String seedDeployerAccessKeyId();
 
         /**
          * Alias to seed for the default account at startup, so callers that read the account
@@ -1841,6 +1913,27 @@ public interface EmulatorConfig {
 
         @WithDefault("memcached:1.6")
         String defaultMemcachedImage();
+
+        /**
+         * Start and snapshot the backend of a Redis or Valkey replication group the way an image
+         * with no shell and no CLI needs: server flags go to the container as arguments instead of
+         * the {@code VALKEY_EXTRA_FLAGS} hook, and a snapshot is taken with {@code SAVE} over the
+         * RESP connection and read out of the container through the Docker archive API. Off by
+         * default and never inferred from the image name: the default image keeps the
+         * {@code VALKEY_EXTRA_FLAGS} and CLI path. Either way a snapshot is restored by placing its
+         * file in the data directory before the server starts, so no {@code DEBUG} command is involved.
+         */
+        @WithDefault("false")
+        boolean shellLessBackend();
+
+        /**
+         * Name of the snapshot file the server loads from its data directory at startup. A restore
+         * places the snapshot under this name on either path, and with {@link #shellLessBackend()} a
+         * snapshot export falls back to it when the server does not report {@code dbfilename}.
+         * Set it to the name the image's server uses ({@code dump.rdb} for Redis and Valkey).
+         */
+        @WithDefault("dump.rdb")
+        String shellLessBackendDbfilename();
 
         /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
@@ -1970,6 +2063,11 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
+        /** When true, Describe* reports the Port a client requested instead of the proxy port.
+         *  The proxy still listens in the proxy port range; connect there. */
+        @WithDefault("false")
+        boolean advertiseRequestedPort();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
@@ -2057,6 +2155,45 @@ public interface EmulatorConfig {
 
         /** Docker network for the database containers. Defaults to Floci's own network. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Where cluster databases live: {@code docker} runs a PostgreSQL container per cluster,
+         * {@code external} uses one PostgreSQL server that already runs, see {@link External}. Any
+         * other value fails Floci's start.
+         */
+        @WithDefault("docker")
+        Backend backend();
+
+        /** The PostgreSQL server of the {@code external} backend. */
+        External external();
+
+        /** Kinds of backend {@link #backend()} accepts. */
+        enum Backend { DOCKER, EXTERNAL }
+
+        interface External {
+            /** Host of the PostgreSQL server. Required with the {@code external} backend. */
+            Optional<String> host();
+
+            @WithDefault("5432")
+            int port();
+
+            /**
+             * Maintenance database Floci connects to in order to create, and later drop, each
+             * cluster's own database and roles.
+             */
+            @WithDefault("postgres")
+            String database();
+
+            /**
+             * Role Floci connects as. It must be a superuser: Floci installs event triggers and
+             * creates each cluster's database and roles.
+             */
+            @WithDefault("postgres")
+            String username();
+
+            /** Password of {@link #username()}; none when the server trusts the connection. */
+            Optional<String> password();
+        }
     }
 
     interface RdsDataServiceConfig {
@@ -2584,6 +2721,20 @@ public interface EmulatorConfig {
         /** How long a crawl keeps the crawler RUNNING before it succeeds; 0 = a crawl finishes as soon as it starts. */
         @WithDefault("0")
         int crawlerRunDurationSeconds();
+
+        /**
+         * How a Spark ({@code glueetl}) job run executes: {@code immediate} follows Glue's state machine and runs no
+         * script; {@code docker} runs the job's script in a container of {@link #image()}, which needs a Docker daemon
+         * and about 7 GB of disk for the image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /** The image a {@code docker} job run uses: AWS's image for running Glue 5.0 jobs locally. */
+        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5") // partition-literal: configurable; ECR Public exists only in the commercial partition
+        String image();
+
+        Optional<String> dockerNetwork();
     }
 
     interface SesServiceConfig {
@@ -2683,6 +2834,15 @@ public interface EmulatorConfig {
         /** Host interface for published awsvpc task ports, including firewall namespaces. */
         @WithDefault("127.0.0.1")
         String hostPortBindAddress();
+
+        /**
+         * Opt-in: the containers of an {@code awsvpc} task share one network namespace, held by a helper
+         * container as the ECS agent's pause container holds it, so they reach each other on {@code localhost}
+         * as on Fargate. Applies while security-group enforcement is off, which already gives a task one
+         * namespace. Off by default: each container keeps a namespace and address of its own.
+         */
+        @WithDefault("false")
+        boolean sharedTaskNetwork();
 
         Optional<String> dockerNetwork();
 
@@ -3541,7 +3701,9 @@ public interface EmulatorConfig {
         /**
          * Execution backend for Lambda environments: {@code docker} (default) runs each
          * environment as a Docker container, {@code kubernetes} runs it as a pod in the
-         * cluster Floci is configured against (in-cluster config or local kubeconfig).
+         * cluster Floci is configured against (in-cluster config or local kubeconfig), and
+         * {@code process} runs a {@code provided.*} function's bootstrap as a process on the
+         * machine Floci runs on, for local development without Docker.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_EXECUTOR
          */
@@ -3566,6 +3728,25 @@ public interface EmulatorConfig {
              * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS (comma-separated)
              */
             Optional<List<String>> labels();
+
+            /**
+             * Node selector of Lambda pods, as {@code key=value} entries with label syntax.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR (comma-separated)
+             */
+            Optional<List<String>> nodeSelector();
+
+            /**
+             * Tolerations of Lambda pods, each written as the taint it tolerates in
+             * {@code kubectl taint} syntax: {@code key=value:Effect} tolerates that taint
+             * (operator {@code Equal}), {@code key:Effect} tolerates every value of the key
+             * (operator {@code Exists}), and an entry without {@code :Effect} tolerates every
+             * effect. Effects are {@code NoSchedule}, {@code PreferNoSchedule} and
+             * {@code NoExecute}.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS (comma-separated)
+             */
+            Optional<List<String>> tolerations();
 
             /**
              * Host or IP that Lambda pods use to reach Floci (the Runtime API port range
@@ -4254,11 +4435,10 @@ public interface EmulatorConfig {
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
-         * leases a connection from it, and a few streams hold one for as long as they run:
-         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
-         * container holds for its whole lifetime live in the separate streaming pool. Once
-         * long-lived connections fill this pool, create, start, stop and remove wait for a free
-         * connection, including the calls that would release one, so the emulator stalls.
+         * leases a connection from it; streams that stay open while a container or a command runs
+         * live in the separate streaming pool. Once this pool is full, create, start, stop and
+         * remove wait for a free connection, including the calls that would release one, so the
+         * emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
          * small stack never approaches the limit.
@@ -4268,18 +4448,22 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's entire lifetime: container log
-         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * long-lived streams that occupy a slot for a container's entire lifetime or a long
+         * command's run: container log follow, for each Lambda container its exit watcher and one
+         * exec per extension, and the output of each CodeBuild phase, SSM command, ECS Exec
+         * session, EKS audit follower, ECR garbage collection, user data script and EMR bootstrap
+         * action.
          * Total live containers is unbounded across distinct functions (each {@code WarmPool}
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.
          *
-         * <p>2048 covers the 500 containers the runtime API port range
+         * <p>3072 covers the 500 containers the runtime API port range
          * ({@link LambdaServiceConfig#runtimeApiBasePort}) allows, each with its log follow, its
-         * exit watcher and two extensions. Connections are opened on demand, so a small stack
-         * never approaches the limit.
+         * exit watcher and two extensions (2000), and leaves about 1000 for the other containers'
+         * log follows and the long-running commands above. Connections are opened on demand, so a
+         * small stack never approaches the limit.
          */
-        @WithDefault("2048")
+        @WithDefault("3072")
         int streamingMaxConnections();
 
         /**
@@ -4293,8 +4477,9 @@ public interface EmulatorConfig {
 
         /**
          * How long a Docker call waits for the daemon's response before it fails, in seconds, for
-         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
-         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * both pools. It bounds the whole call: a request that is safe to repeat is retried after a
+         * transient connection error only while no retry would start past the limit, counted from
+         * the first attempt. Requests that hold a stream open for as long as a container runs (container
          * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
          * builds) are exempt, since they can stay silent while healthy.
          */
@@ -4309,6 +4494,37 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int imagePullTimeoutSeconds();
+
+        /**
+         * Seconds between the log lines that report how busy the Docker connection pools are: each
+         * pool's leased, available and pending connections against its limit, its open long-lived
+         * streams by kind, and the docker-java stream threads. A line is written only while a pool is in
+         * use, so an idle emulator logs nothing. 0 turns the lines off.
+         */
+        @WithDefault("60")
+        int poolGaugeIntervalSeconds();
+
+        /**
+         * Consecutive Docker call attempts that must fail at the transport (an I/O error or an
+         * unusable socket, never an HTTP response) before Floci pings the daemon and, when the ping
+         * fails too, fails every Docker call at once until the daemon answers again. Each retry of a
+         * call is an attempt, so one call the retry layer replays can reach the threshold alone; the
+         * ping keeps that from opening the breaker over a daemon that answers. 0 turns this off.
+         */
+        @WithDefault("3")
+        int breakerFailureThreshold();
+
+        /** Seconds between the pings that check whether an unreachable Docker daemon is back. */
+        @WithDefault("5")
+        int breakerProbeIntervalSeconds();
+
+        /**
+         * Most container creates and starts sent to the Docker daemon at once; more wait, up to
+         * {@link #connectionRequestTimeoutSeconds}, for one to finish. 0 means twice the CPUs Floci
+         * sees, and at least 4. Image pulls, stops, removes and every other call are not limited here.
+         */
+        @WithDefault("0")
+        int maxConcurrentLaunches();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

@@ -176,7 +176,7 @@ class ReposiliteSidecarManagerTest {
     @Test
     void failedStopRetainsTheManagedEndpointForCleanupRetry() throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager lifecycle = new ContainerLifecycleManager(docker, null, null, null);
+        ContainerLifecycleManager lifecycle = new ContainerLifecycleManager(docker, docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd("retained-reposilite")).thenReturn(stop);
         when(stop.withTimeout(5)).thenReturn(stop);

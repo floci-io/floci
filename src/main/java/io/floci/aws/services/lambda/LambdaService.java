@@ -80,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -1457,6 +1458,36 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type, String clientContext, String durableExecutionName,
                                String traceHeader) {
+        return invoke(region, functionName, queryQualifier, payload, type, clientContext, durableExecutionName,
+                traceHeader, false);
+    }
+
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type, String clientContext, String durableExecutionName,
+                               String traceHeader, boolean logTail) {
+        InvokeTarget target = resolveInvokeTarget(region, functionName, queryQualifier);
+        LambdaFunction fn = target.function();
+        String qualifier = target.qualifier();
+        reportCustomResourceLiveness(payload);
+        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
+                traceHeader, logTail);
+        if (durable != null) {
+            return durable;
+        }
+        InvokeResult result = logTail
+                ? executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext, true)
+                : executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        result.setExecutedVersion(fn.getVersion());
+        return result;
+    }
+
+    /** The function an Invoke runs, and the qualifier it was invoked through. */
+    record InvokeTarget(LambdaFunction function, String qualifier) {
+    }
+
+    InvokeTarget resolveInvokeTarget(String region, String functionName, String queryQualifier) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1469,14 +1500,24 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         } else {
             fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
+        return new InvokeTarget(fn, qualifier);
+    }
+
+    /**
+     * Runs a resolved target synchronously, handing a response the runtime streams to {@code listener}
+     * as it arrives. Every invocation type runs, as on {@code InvokeWithResponseStream}.
+     */
+    InvokeResult invokeStreaming(InvokeTarget target, String region, byte[] payload, String clientContext,
+                                 String traceHeader, boolean logTail, ResponseStreamListener listener) {
+        LambdaFunction fn = target.function();
         reportCustomResourceLiveness(payload);
-        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
-                traceHeader);
+        InvokeResult durable = invokeIfDurable(fn, region, target.qualifier(), null, payload,
+                InvocationType.RequestResponse, traceHeader, logTail);
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        InvokeResult result = executorService.invokeStreaming(fn, payload, LambdaInvocationChain.currentDepth(),
+                target.qualifier(), clientContext, logTail, listener);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1484,7 +1525,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     /** Null for a plain function, and for a DryRun, which only checks the qualifier. */
     private InvokeResult invokeIfDurable(LambdaFunction fn, String region, String qualifier,
                                          String durableExecutionName, byte[] payload, InvocationType type,
-                                         String traceHeader) {
+                                         String traceHeader, boolean logTail) {
         if (!fn.isDurable()) {
             return null;
         }
@@ -1495,7 +1536,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         if (type == InvocationType.DryRun) {
             return null;
         }
-        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type, traceHeader);
+        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type, traceHeader, logTail);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1505,7 +1546,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
      * limit. Event answers 202 as soon as the execution exists.
      */
     private InvokeResult invokeDurable(LambdaFunction fn, String region, String executionName, byte[] payload,
-                                       InvocationType type, String traceHeader) {
+                                       InvocationType type, String traceHeader, boolean logTail) {
         boolean synchronous = type == InvocationType.RequestResponse;
         if (synchronous && fn.getDurableExecutionTimeout() > MAX_FUNCTION_TIMEOUT_SECONDS) {
             throw new AwsException("InvalidParameterValueException",
@@ -1520,23 +1561,35 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         String input = payload == null || payload.length == 0 ? "{}" : new String(payload, StandardCharsets.UTF_8);
         DurableExecution execution = durableExecutionService.start(new DurableExecutionService.StartRequest(
                 fn.getAccountId(), region, fn.getFunctionName(), fn.getVersion(), executionName, input, synchronous,
-                traceHeader));
+                traceHeader, logTail));
         String requestId = UUID.randomUUID().toString();
         InvokeResult result;
         if (!synchronous) {
             result = new InvokeResult(202, null, new byte[0], null, requestId);
         } else {
-            result = awaitDurableResult(execution.getExecutionArn(), requestId);
+            try {
+                result = awaitDurableResult(execution.getExecutionArn(), requestId, logTail);
+            } finally {
+                if (logTail) {
+                    durableExecutionService.releaseInvocationLogs(execution.getExecutionArn());
+                }
+            }
         }
         result.setDurableExecutionArn(execution.getExecutionArn());
         return result;
     }
 
-    private InvokeResult awaitDurableResult(String executionArn, String requestId) {
-        DurableExecution finished;
+    private InvokeResult awaitDurableResult(String executionArn, String requestId, boolean logTail) {
         try {
             // A little past the limit, so an execution that times out at 900 s reports its own error.
-            finished = durableExecutionService.awaitCompletion(executionArn)
+            return durableExecutionService.awaitCompletion(executionArn)
+                    .thenCompose(finished -> {
+                        InvokeResult result = durableResult(finished, requestId);
+                        return logTail ? durableExecutionService.invocationLogs(executionArn).thenApply(logs -> {
+                            result.setLogResult(logs);
+                            return result;
+                        }) : CompletableFuture.completedFuture(result);
+                    })
                     .get(MAX_FUNCTION_TIMEOUT_SECONDS + SYNC_DURABLE_GRACE_SECONDS, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             return unhandledDurableResult(DurableErrorObject.of(
@@ -1549,6 +1602,9 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             return unhandledDurableResult(DurableErrorObject.of(
                     e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), "InvocationError"), requestId);
         }
+    }
+
+    private InvokeResult durableResult(DurableExecution finished, String requestId) {
         if (finished.getStatus() == DurableExecutionStatus.SUCCEEDED) {
             byte[] body = finished.getResult() == null ? new byte[0]
                     : finished.getResult().getBytes(StandardCharsets.UTF_8);
@@ -1605,7 +1661,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type, null);
+        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type, null, false);
         if (durable != null) {
             return durable;
         }
@@ -3483,9 +3539,26 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
 
     /** Invoke's Qualifier, when supplied: 1-128 characters matching {@link #QUALIFIER}. */
     private static void validateInvokeQualifier(String qualifier) {
-        validateNonEmpty(qualifier, "qualifier", false);
-        validateMaxLength(qualifier, "qualifier", 128);
-        validatePattern(qualifier, "qualifier", QUALIFIER);
+        List<String> violations = invokeQualifierViolations(qualifier);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    /** The violations of Invoke's Qualifier as AWS lists them, the pattern before the length. */
+    static List<String> invokeQualifierViolations(String qualifier) {
+        List<String> violations = new ArrayList<>();
+        if (qualifier == null) {
+            return violations;
+        }
+        if (!QUALIFIER.matcher(qualifier).matches()) {
+            violations.add(SmithyValidationErrors.pattern("qualifier", qualifier, QUALIFIER.pattern()));
+        }
+        String length = SmithyValidationErrors.lengthOutOfRange("qualifier", qualifier, 1, 128);
+        if (length != null) {
+            violations.add(length);
+        }
+        return violations;
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {
@@ -3883,13 +3956,28 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         return encoded.toString();
     }
 
+    // An upload over the limit is refused from its Base64 length, before it is decoded, so it takes no more memory
+    // than it came in.
     private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
+        if (decodedLength(zipFileBase64) > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+            throw tooLargeUpload();
+        }
         byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
         if (zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
-            throw new AwsException("RequestEntityTooLargeException",
-                    "Request must be smaller than 52428800 bytes.", 413);
+            throw tooLargeUpload();
         }
         extractZipCodePackage(fn, DeploymentPackage.of(zipBytes), region);
+    }
+
+    // The bytes Base64 text decodes to: three for every four characters, its padding, which may be left out, aside.
+    static long decodedLength(String base64) {
+        int padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+        return (long) (base64.length() - padding) * 3 / 4;
+    }
+
+    private static AwsException tooLargeUpload() {
+        return new AwsException("RequestEntityTooLargeException", "Request must be smaller than 52428800 bytes.",
+                413);
     }
 
     private void extractZipCodePackage(LambdaFunction fn, DeploymentPackage zip, String region) {
@@ -3966,7 +4054,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         String bucket = tasksBucketName(region);
         try {
             try {
-                s3Service.createInternalBucket(bucket, region);
+                s3Service.createServiceOwnedBucket(bucket, region);
             } catch (AwsException e) {
                 if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())) {
                     throw e;

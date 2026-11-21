@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -252,7 +253,7 @@ class PartitionRegionGatesIntegrationTest {
     /**
      * The AWS-managed prefix lists belong to the S3 and DynamoDB gateway endpoints, which keep
      * {@code com.amazonaws} in every partition; only interface endpoint names take the reversed
-     * suffix China lists.
+     * suffix China lists. The CloudFront origin-facing list is commercial-only.
      */
     @Test
     void gatewayPrefixListsKeepComAmazonawsWhileChinaInterfaceNamesReverseTheSuffix() {
@@ -264,6 +265,7 @@ class PartitionRegionGatesIntegrationTest {
             .extract().xmlPath().getList("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName");
         assertTrue(names.contains("com.amazonaws.cn-north-1.s3"), names.toString());
         assertTrue(names.contains("com.amazonaws.cn-north-1.dynamodb"), names.toString());
+        assertFalse(names.contains("com.amazonaws.global.cloudfront.origin-facing"), names.toString());
 
         XmlPath endpointServices = given()
             .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))

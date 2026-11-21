@@ -756,7 +756,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
 
         boolean nameTaken = integrations.scan(k -> true).stream()
-                .filter(existing -> region.equals(integrationRegion(existing)))
+                .filter(existing -> region.equals(regionResolver.regionOf(existing.getIntegrationArn())))
                 .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
         if (nameTaken) {
             throw new AwsException("IntegrationAlreadyExistsFault",
@@ -2361,12 +2361,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private boolean isInRequestRegion(Integration integration) {
-        return integrationRegion(integration).equals(regionResolver.getRegion());
-    }
-
-    /** The Region an integration was created in, which its ARN names. */
-    private String integrationRegion(Integration integration) {
-        return AwsArnUtils.regionOrDefault(integration.getIntegrationArn(), regionResolver.getDefaultRegion());
+        return regionResolver.inRequestRegion(integration.getIntegrationArn());
     }
 
     /**
@@ -4071,6 +4066,73 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagHandle(resourceName).tags());
+    }
+
+    /**
+     * The tags held on the cluster, snapshot, parameter group, subnet group, snapshot copy grant, snapshot schedule,
+     * event subscription or integration stored under {@code arn}, in the account and Region it names, read in place
+     * and matched on the whole ARN; empty for an ARN naming nothing stored.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "redshift")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        int sep = resource.indexOf(':');
+        if (sep < 0 || !arn.equals(AwsArnUtils.Arn.of("redshift", parsed.region(), parsed.accountId(), resource)
+                .toString())) {
+            return Map.of();
+        }
+        String account = parsed.accountId();
+        String region = parsed.region();
+        String id = resource.substring(sep + 1);
+        Map<String, String> tags = switch (resource.substring(0, sep)) {
+            case "cluster" -> AccountAwareStorageBackend.readInAccount(clusters, account, id)
+                    .filter(cluster -> clusterRegion(cluster).equals(region)).map(Cluster::getTags).orElse(null);
+            case "snapshot" -> storedSnapshot(arn, account, region, id).map(Snapshot::getTags).orElse(null);
+            case "parametergroup" -> AccountAwareStorageBackend.readInAccount(parameterGroups, account,
+                    regionalKey(region, id)).map(ClusterParameterGroup::getTags).orElse(null);
+            case "subnetgroup" -> AccountAwareStorageBackend.readInAccount(subnetGroups, account,
+                    regionalKey(region, id)).map(ClusterSubnetGroup::getTags).orElse(null);
+            case "snapshotcopygrant" -> AccountAwareStorageBackend.readInAccount(snapshotCopyGrants, account,
+                    regionalKey(region, id)).map(SnapshotCopyGrant::getTags).orElse(null);
+            case "snapshotschedule" -> AccountAwareStorageBackend.readInAccount(snapshotSchedules, account,
+                    regionalKey(region, id)).map(SnapshotSchedule::getTags).orElse(null);
+            case "eventsubscription" -> events == null ? null : events.storedTags(account, region, id);
+            case "integration" -> AccountAwareStorageBackend.readInAccount(integrations, account, id)
+                    .filter(integration -> arn.equals(integration.getIntegrationArn()))
+                    .map(Integration::getTags).orElse(null);
+            default -> null;
+        };
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
+        return held;
+    }
+
+    /**
+     * The snapshot {@code <cluster>/<name>} names in {@code account}, read in place: the copy kept in {@code region}
+     * before the snapshot itself, as tagging finds it, each only when its ARN is {@code arn} (one recording none, from
+     * before snapshots did, when it is of that cluster).
+     */
+    private Optional<Snapshot> storedSnapshot(String arn, String account, String region, String id) {
+        int slash = id.indexOf('/');
+        if (slash < 0) {
+            return Optional.empty();
+        }
+        String cluster = id.substring(0, slash);
+        String name = id.substring(slash + 1);
+        Predicate<Snapshot> named = snapshot -> snapshot.getSnapshotArn() == null
+                ? cluster.equals(snapshot.getClusterIdentifier()) : arn.equals(snapshot.getSnapshotArn());
+        return AccountAwareStorageBackend.readInAccount(snapshotCopies, account, regionalKey(region, name))
+                .filter(named)
+                .or(() -> AccountAwareStorageBackend.readInAccount(snapshots, account, name).filter(named));
     }
 
     public synchronized void createTags(String resourceName, Map<String, String> tags) {

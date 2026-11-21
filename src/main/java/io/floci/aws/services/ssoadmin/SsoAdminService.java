@@ -1963,6 +1963,31 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         return Optional.empty();
     }
 
+    /**
+     * The tags held on the instance, permission set, application or trusted token issuer {@code arn} names, as
+     * ListTagsForResource reads them: the tags a tagging call left on it, else the resource's own; read in place where
+     * the handlers find these resources, by their whole ARN. Empty for an ARN naming nothing stored.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        Map<String, String> tags;
+        try {
+            TaggableResource resource = resolveTaggableResource(arn);
+            tags = resourceTagOverrides.get(arn).orElseGet(resource::tags);
+        } catch (AwsException notStored) {
+            return Map.of();
+        }
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
+        return held;
+    }
+
     private void ensurePermissionSetProvisioned(String permissionSetArn, String accountId) {
         String key = permissionSetArn + "::" + accountId;
         PermissionSet permissionSet = permissionSetForPortal(permissionSetArn);

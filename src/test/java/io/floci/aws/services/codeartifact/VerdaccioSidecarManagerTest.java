@@ -141,8 +141,9 @@ class VerdaccioSidecarManagerTest {
         when(docker.removeContainerCmd("tracked-verdaccio-1")).thenReturn(remove);
         when(remove.withForce(true)).thenReturn(remove);
         doThrow(new IllegalStateException("Docker removal failed")).doNothing().when(remove).exec();
-        ContainerLifecycleManager realLifecycle = new ContainerLifecycleManager(docker, null, null, null);
-        VerdaccioSidecarManager manager = new VerdaccioSidecarManager(containerBuilder, realLifecycle, config);
+        ContainerLifecycleManager realLifecycle = new ContainerLifecycleManager(docker, docker, null, null, null);
+        VerdaccioSidecarManager manager = new VerdaccioSidecarManager(containerBuilder, realLifecycle, config,
+                new CodeArtifactContainerRuns(realLifecycle, config).containers());
         seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", "http://127.0.0.1:1");
 
         assertThrows(IllegalStateException.class, () -> manager.release("npm-repo-1"));
@@ -237,7 +238,8 @@ class VerdaccioSidecarManagerTest {
     }
 
     private VerdaccioSidecarManager manager() {
-        return new VerdaccioSidecarManager(containerBuilder, lifecycleManager, config);
+        return new VerdaccioSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     @SuppressWarnings("unchecked")

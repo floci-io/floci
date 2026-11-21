@@ -219,7 +219,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). RDS metadata operations "
-                        + "keep working and DB instances still reach 'available', but they have no "
+                        + "keep working and DB instances still reach ''available'', but they have no "
                         + "backing database container until a daemon becomes reachable.",
                         e.getMessage());
             }
@@ -240,13 +240,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     /**
@@ -935,6 +929,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
                         CREATE ROLE rds_iam;
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') THEN
+                        CREATE ROLE rds_replication;
+                    END IF;
                 END
                 $$;
                 """;
@@ -1106,9 +1103,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
-     * Waits for a MySQL or MariaDB server started with a parameter group's options to accept TCP
-     * connections. The image checks the options before it starts anything, and the server reads
-     * them again as it starts, so a container that stops here refused one of them. A server still
+     * Waits for a server started with a parameter group's options to accept TCP connections. The
+     * MySQL and MariaDB images check the options before they start anything, and every server reads
+     * them as it starts, so a container that stops here refused one of them. A server still
      * starting when the wait ends is left to finish, as one started without a group is.
      */
     private void awaitServerWithParameterGroup(String containerName, String containerId, int enginePort) {
@@ -1554,7 +1551,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
                 # Replay the dump connected to postgres
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
-                """;
+
+                # A dump taken before Floci created a predefined role does not recreate it
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres <<'SQL'
+                """ + postgresIamRoleInitSql() + "SQL\n";
     }
 
     private static void addTarEntry(
@@ -1691,18 +1691,24 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
-     * A parameter group's overrides as MySQL or MariaDB server options. Each takes the
-     * {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one an older server
-     * does not have) is skipped with a warning instead of stopping the server. A value that is a
-     * formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS from the
-     * instance class and is left to the server's default, as are the parameters that decide
-     * where the server listens and keeps its data, which Floci controls, and the ones that would
-     * lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
+     * A parameter group's overrides as server options. PostgreSQL takes only
+     * {@code rds.logical_replication}, whose value of 1 becomes {@code wal_level=logical}; its
+     * other values, and SQL Server's, give no options. For MySQL or MariaDB each
+     * override takes the {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one
+     * an older server does not have) is skipped with a warning instead of stopping the server. A
+     * value that is a formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS
+     * from the instance class and is left to the server's default, as are the parameters that
+     * decide where the server listens and keeps its data, which Floci controls, and the ones that
+     * would lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
      * Aurora's {@code binlog_format=OFF}, which turns binary logging off, through
      * {@code --skip-log-bin}.
      */
     public static List<String> engineParameterOptions(
             DatabaseEngine engine, Map<String, String> engineParameters) {
+        if (engine == DatabaseEngine.POSTGRES && engineParameters != null
+                && "1".equals(engineParameters.get("rds.logical_replication"))) {
+            return List.of("-c", "wal_level=logical");
+        }
         if (engineParameters == null || engineParameters.isEmpty()
                 || (engine != DatabaseEngine.MYSQL && engine != DatabaseEngine.MARIADB)) {
             return List.of();

@@ -3,9 +3,9 @@ package io.floci.aws.services.appsync.graphql.datasource;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.appsync.model.DataSource;
 import io.floci.aws.services.appsync.model.DataSourceType;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,15 +27,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
-@TestProfile(HttpDataSourceInvokerIntegrationTest.Enforced.class)
+@TestProfile(IamEnforcementProfile.class)
 class HttpDataSourceInvokerIntegrationTest {
-
-    public static class Enforced implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     @Inject
     AppSyncDataSourceInvokers invokers;

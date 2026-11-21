@@ -31,7 +31,6 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
-import java.util.regex.Pattern;
 
 /**
  * SES v2 tenants (multi-tenancy), owning the {@code tenantStore}. The domain owns id/ARN generation,
@@ -52,9 +51,6 @@ import java.util.regex.Pattern;
 public class SesTenantService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesTenantService.class);
-
-    private static final int TENANT_NAME_MAX = 64;
-    private static final Pattern TENANT_NAME_CHARS = Pattern.compile("[A-Za-z0-9_-]+");
 
     // The wire values for ResourceType — the ARN segment, not the SDK enum spelling. Real AWS both
     // returns these and requires them as Filter values; the SDK's EMAIL_IDENTITY-style enum constants
@@ -692,15 +688,8 @@ public class SesTenantService implements SesTaggable {
         if (name.isBlank()) {
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
-        if (name.length() > TENANT_NAME_MAX) {
-            throw new AwsException("BadRequestException",
-                    "TenantName cannot exceed " + TENANT_NAME_MAX + " characters.", 400);
-        }
-        if (!TENANT_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("BadRequestException",
-                    "Invalid tenant name <" + name + ">: only alphanumeric ASCII characters, '_', and "
-                            + "'-' are allowed.", 400);
-        }
+        SesNames.requireMaxLength(name, "BadRequestException", "TenantName");
+        SesNames.requireAllowedCharacters(name, "BadRequestException", "Invalid tenant name");
     }
 
     private static AwsException tenantNotFound(String tenantName) {

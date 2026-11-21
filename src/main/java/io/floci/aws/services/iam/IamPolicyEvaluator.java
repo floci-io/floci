@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsServiceNamespaces;
 import io.floci.aws.core.common.CidrCanonicalizer;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.services.iam.model.CallerContext;
+import io.floci.aws.services.iam.model.PolicySource;
 import io.floci.aws.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -140,6 +141,30 @@ public class IamPolicyEvaluator {
         public String awsValue() {
             return awsValue;
         }
+    }
+
+    /**
+     * A statement a simulation reports, by the policy it came from and the place it sits in that
+     * policy's text. The source names nothing for a document nothing names, and the span is null
+     * for one whose text was not read.
+     */
+    public record MatchedStatement(PolicySource source, PolicyStatementPositions.Span span) {
+    }
+
+    /**
+     * What a simulation answers for one action on one resource.
+     *
+     * @param decision                     the simulated decision
+     * @param matchedStatements            the statements that decided it, in document order
+     * @param missingContextValues         the context keys it wanted and had no value for
+     * @param allowedByOrganizations       whether the organization levels allowed it, or null when
+     *                                     the simulation was handed none
+     * @param allowedByPermissionsBoundary whether the permissions boundary allowed it, or null when
+     *                                     there is no boundary in the simulation
+     */
+    public record SimulationReport(SimulationDecision decision, List<MatchedStatement> matchedStatements,
+                                   List<String> missingContextValues, Boolean allowedByOrganizations,
+                                   Boolean allowedByPermissionsBoundary) {
     }
 
     private static final Logger LOG = Logger.getLogger(IamPolicyEvaluator.class);
@@ -429,38 +454,259 @@ public class IamPolicyEvaluator {
                                                       Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
-        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
-        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
-                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
-        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
-                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        return simulationDecision(simulatedPolicies(caller, loweredAction, resource, ctx),
+                loweredAction, resource, ctx);
+    }
 
+    /**
+     * The whole of what a simulation answers for one action on one resource: the decision, the
+     * statements that decided it, the context keys it wanted and had no value for, and the effect
+     * of the two policy types a result reports on their own.
+     *
+     * <p>The decision is the walk a live request takes, in its order: an explicit deny anywhere
+     * decides, then the organization levels gate, then the identity policies have to allow, and
+     * the session policy and the permissions boundary have to allow beside them.
+     */
+    public SimulationReport simulate(CallerContext caller,
+                                     String action,
+                                     String resource,
+                                     Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
+        String loweredAction = lowercase(action);
+        SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
+        SimulationDecision decision = simulationDecision(policies, loweredAction, resource, ctx);
+        List<CachedDocument> boundary = policies.boundary();
+        return new SimulationReport(decision,
+                matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
+                missingContextValues(policies, loweredAction, resource, ctx),
+                caller.scpLevels() == null
+                        ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
+                boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)
+                        && anyMatch(boundary, false, loweredAction, resource, ctx));
+    }
+
+    /**
+     * The documents a simulation reads, parsed and kept per document so a statement can be
+     * located, with what the organization levels said about the request beside them.
+     */
+    private record SimulatedPolicies(List<CachedDocument> identity, List<CachedDocument> session,
+                                     List<CachedDocument> boundary, ScpWalk scp) {
+    }
+
+    private SimulatedPolicies simulatedPolicies(CallerContext caller, String action, String resource,
+                                                Map<String, List<String>> ctx) {
         // Organization levels gate a simulation the way they gate the call it stands for: the
         // action must be allowed at every level and explicitly denied at none, before the input
         // policies are consulted. This is the live path's own walk, so a simulation cannot answer
         // differently from the request it models.
-        ScpWalk scp = scpWalk(caller.scpLevels(), loweredAction, resource, ctx);
-        if (scp.firstDeny() != null) {
+        return new SimulatedPolicies(
+                parseEach(caller.identityPolicies()),
+                caller.sessionPolicyDocument() == null
+                        ? null : parseEach(List.of(caller.sessionPolicyDocument())),
+                caller.boundaryPolicyDocument() == null
+                        ? null : parseEach(List.of(caller.boundaryPolicyDocument())),
+                scpWalk(caller.scpLevels(), action, resource, ctx));
+    }
+
+    private SimulationDecision simulationDecision(SimulatedPolicies policies, String action,
+                                                  String resource, Map<String, List<String>> ctx) {
+        List<CachedDocument> session = policies.session();
+        List<CachedDocument> boundary = policies.boundary();
+        if (policies.scp().firstDeny() != null) {
             return SimulationDecision.EXPLICIT_DENY;
         }
-        if (anyExplicitDeny(identityStmts, loweredAction, resource, ctx)
-                || (sessionStmts != null && anyExplicitDeny(sessionStmts, loweredAction, resource, ctx))
-                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, loweredAction, resource, ctx))) {
+        if (anyMatch(policies.identity(), true, action, resource, ctx)
+                || (session != null && anyMatch(session, true, action, resource, ctx))
+                || (boundary != null && anyMatch(boundary, true, action, resource, ctx))) {
             return SimulationDecision.EXPLICIT_DENY;
         }
-        if (!scp.allows()) {
+        if (!policies.scp().allows()) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (!anyExplicitAllow(identityStmts, loweredAction, resource, ctx)) {
+        if (!anyMatch(policies.identity(), false, action, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, loweredAction, resource, ctx)) {
+        if (session != null && !anyMatch(session, false, action, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, loweredAction, resource, ctx)) {
+        if (boundary != null && !anyMatch(boundary, false, action, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /** Whether any statement of these documents denies (or allows) the request. */
+    private boolean anyMatch(List<CachedDocument> documents, boolean deny, String action, String resource,
+                             Map<String, List<String>> ctx) {
+        for (CachedDocument document : documents) {
+            if (indexOfMatch(document.statements(), deny, action, resource, ctx) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The statements a result reports as having decided this scenario: "a list of the statements in
+     * the input policies that determine the result", where "even if multiple statements allow the
+     * operation on the resource, if only one statement denies that operation, then the explicit
+     * deny overrides any allow. In addition, the deny statement is the only entry included in the
+     * result". So an allow reports every statement that allowed, an explicit deny reports the one
+     * that denied, and an implicit deny reports none, nothing having matched.
+     *
+     * <p>Only the identity policies are read here. AWS says of this member that it "doesn't include
+     * statements from service control policies (SCPs)" and that "only statements from
+     * identity-based and resource-based policies appear here", so a deny that came from an SCP,
+     * from a session policy or from the permissions boundary leaves the member empty, and the
+     * boundary's own effect is reported by {@code PermissionsBoundaryDecisionDetail} instead, which
+     * is what AWS's own same-account example shows for a boundary that allowed the action.
+     */
+    private List<MatchedStatement> matchedStatements(SimulationDecision decision, CallerContext caller,
+                                                     List<CachedDocument> identityDocs, String action,
+                                                     String resource, Map<String, List<String>> ctx) {
+        if (decision == SimulationDecision.IMPLICIT_DENY) {
+            return List.of();
+        }
+        boolean deny = decision == SimulationDecision.EXPLICIT_DENY;
+        List<MatchedStatement> matched = new ArrayList<>();
+        for (int document = 0; document < identityDocs.size(); document++) {
+            CachedDocument parsed = identityDocs.get(document);
+            List<PolicyStatement> statements = parsed.statements();
+            for (int statement = 0; statement < statements.size(); statement++) {
+                PolicyStatement stmt = statements.get(statement);
+                if ((deny ? stmt.isDeny() : stmt.isAllow())
+                        && matchesStatement(stmt, action, resource, ctx)) {
+                    matched.add(new MatchedStatement(caller.identityPolicySource(document),
+                            parsed.positionOf(statement)));
+                    if (deny) {
+                        return List.copyOf(matched);
+                    }
+                }
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    /**
+     * The context keys this scenario wanted and the request had no value for: "a list of context
+     * keys that are required by the included input policies but that were not provided by one of
+     * the input parameters".
+     *
+     * <p>A key is wanted when a statement the evaluation reaches for this action names it: the
+     * variables its resources are written with, which a value has to resolve before the resource
+     * can be compared at all, and, for a statement whose resources do match, the keys its
+     * conditions compare. A statement the action does not match is reached by nothing and wants
+     * nothing, which is what gives the per-resource lists a meaning of their own.
+     *
+     * <p>Whichever element the statement writes its resources with is read, {@code Resource} or
+     * {@code NotResource}: {@link #matchesResource} takes its patterns from either and resolves
+     * their variables either way, so a value supplied for one of them can change the answer, which
+     * is what the member is for. An excluding pattern whose variable has no value excludes nothing
+     * and one carrying a value excludes what it names, which the enforcement cases pin.
+     *
+     * <p>The organization levels are left out: AWS says the member "doesn't include context keys
+     * referenced by service control policies (SCPs)" and that a key "referenced only by an SCP" is
+     * not returned, the decision still being answered. A key the context carries with no values at
+     * all counts as provided, an empty set being a value and not an absence.
+     *
+     * <p>A variable only counts under a document version that gives {@code ${...}} meaning. Under
+     * the older version the text is literal and names no key, so nothing is missing for it.
+     *
+     * <p>A key an operator answers for without a value is not one the policy requires, so it is
+     * not reported. An {@code ...IfExists} operator publishes exactly that: "if the key is not
+     * present, evaluate the condition element as true", and {@code Null} asking for absence,
+     * {@code "key": "true"}, is satisfied by the absence itself. The two the evaluation already
+     * reads the same way follow: {@code ForAllValues} holds vacuously over no values, and a
+     * negated operator holds against a key that matches nothing. {@code Null} asking for presence,
+     * {@code "key": "false"}, does require the key, and reports it.
+     */
+    private List<String> missingContextValues(SimulatedPolicies policies, String action,
+                                              String resource, Map<String, List<String>> ctx) {
+        Map<String, String> missing = new LinkedHashMap<>();
+        for (List<CachedDocument> layer : List.of(policies.identity(),
+                policies.session() == null ? List.<CachedDocument>of() : policies.session(),
+                policies.boundary() == null ? List.<CachedDocument>of() : policies.boundary())) {
+            for (CachedDocument document : layer) {
+                for (PolicyStatement statement : document.statements()) {
+                    collectMissingContextValues(statement, action, resource, ctx, missing);
+                }
+            }
+        }
+        return List.copyOf(missing.values());
+    }
+
+    private void collectMissingContextValues(PolicyStatement statement, String action, String resource,
+                                             Map<String, List<String>> ctx, Map<String, String> missing) {
+        if (!matchesAction(statement, action)) {
+            return;
+        }
+        boolean variables = policyVariables(statement);
+        List<String> resourceKeys = new ArrayList<>();
+        if (variables) {
+            collectPolicyVariableKeys(statement.getResources() != null
+                    ? statement.getResources() : statement.getNotResources(), resourceKeys);
+        }
+        boolean resourceUnresolved = addMissing(resourceKeys, ctx, missing);
+        if (!resourceUnresolved && !matchesResource(statement, action, resource, ctx)) {
+            return;
+        }
+        List<String> conditionKeys = new ArrayList<>();
+        collectRequiredConditionKeys(statement, variables, conditionKeys);
+        addMissing(conditionKeys, ctx, missing);
+    }
+
+    /**
+     * The keys a statement's conditions require a value for, which is every key its operators
+     * would fail on rather than answer for when the request carries none. Same walk as
+     * {@link #collectConditionKeys}, which keeps reporting every key referenced, that being what
+     * the two context-key operations answer with.
+     */
+    private void collectRequiredConditionKeys(PolicyStatement stmt, boolean variables, List<String> keys) {
+        Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
+        if (conditions == null) {
+            return;
+        }
+        for (Map.Entry<String, Map<String, List<String>>> block : conditions.entrySet()) {
+            ParsedOperator parsed = parseOperator(block.getKey());
+            for (Map.Entry<String, List<String>> entry : block.getValue().entrySet()) {
+                if (absenceAnswered(parsed, entry.getValue())) {
+                    continue;
+                }
+                keys.add(entry.getKey());
+                if (variables) {
+                    collectPolicyVariableKeys(entry.getValue(), keys);
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether this operator answers for a key the request carries no value for, which is the same
+     * reading {@link #evaluateConditionBlock} applies when it meets one: an {@code ...IfExists}
+     * suffix, a {@code Null} asking for absence, a {@code ForAllValues} quantifier, and a negated
+     * operator a missing key cannot match.
+     */
+    private static boolean absenceAnswered(ParsedOperator parsed, List<String> condValues) {
+        if ("Null".equalsIgnoreCase(parsed.baseOp())) {
+            return condValues.stream().anyMatch("true"::equalsIgnoreCase);
+        }
+        return parsed.ifExists()
+                || parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES
+                || parsed.quantifier() == SetQuantifier.NONE && isNegatedOperator(parsed.baseOp());
+    }
+
+    /** Records every key the context has no entry for, keeping the spelling the policy used. */
+    private static boolean addMissing(List<String> referenced, Map<String, List<String>> ctx,
+                                      Map<String, String> missing) {
+        boolean any = false;
+        for (String key : referenced) {
+            String lowered = lowercase(key);
+            if (!ctx.containsKey(lowered)) {
+                missing.putIfAbsent(lowered, key);
+                any = true;
+            }
+        }
+        return any;
     }
 
     /**
@@ -486,18 +732,31 @@ public class IamPolicyEvaluator {
     public List<String> contextKeysReferencedIn(List<String> policyDocuments) {
         List<String> keys = new ArrayList<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
-            Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
-            if (conditions != null) {
-                for (Map<String, List<String>> byContextKey : conditions.values()) {
-                    for (Map.Entry<String, List<String>> entry : byContextKey.entrySet()) {
-                        keys.add(entry.getKey());
-                        collectPolicyVariableKeys(entry.getValue(), keys);
-                    }
-                }
-            }
+            collectConditionKeys(stmt, true, keys);
             collectPolicyVariableKeys(stmt.getResources(), keys);
         }
         return keys;
+    }
+
+    /**
+     * Every context key a statement's conditions name: each operator's key, and the
+     * {@code ${...}} variables named in its values when {@code variables} says the document's
+     * version gives them meaning. In the order the document writes them, not de-duplicated, which
+     * is what the two context-key operations answer with.
+     */
+    private void collectConditionKeys(PolicyStatement stmt, boolean variables, List<String> keys) {
+        Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
+        if (conditions == null) {
+            return;
+        }
+        for (Map<String, List<String>> byContextKey : conditions.values()) {
+            for (Map.Entry<String, List<String>> entry : byContextKey.entrySet()) {
+                keys.add(entry.getKey());
+                if (variables) {
+                    collectPolicyVariableKeys(entry.getValue(), keys);
+                }
+            }
+        }
     }
 
     /**
@@ -1871,14 +2130,25 @@ public class IamPolicyEvaluator {
 
     private CachedDocument parseUncached(String document) {
         try {
-            return new CachedDocument(List.copyOf(parseStatements(document)), false);
+            return new CachedDocument(List.copyOf(parseStatements(document)),
+                    PolicyStatementPositions.of(document), false);
         } catch (Exception e) {
             LOG.warnv("Failed to parse policy document: {0}", e.getMessage());
-            return new CachedDocument(List.of(), true);
+            return new CachedDocument(List.of(), List.of(), true);
         }
     }
 
-    private record CachedDocument(List<PolicyStatement> statements, boolean failed) {
+    /**
+     * One parsed document: its statements, and where each of them sits in the document's text,
+     * position for position, so a result can report the statement that decided it.
+     */
+    private record CachedDocument(List<PolicyStatement> statements,
+                                  List<PolicyStatementPositions.Span> positions, boolean failed) {
+
+        /** Where statement {@code index} sits, or null for a document whose text was not read. */
+        PolicyStatementPositions.Span positionOf(int index) {
+            return index >= 0 && index < positions.size() ? positions.get(index) : null;
+        }
     }
 
     private List<PolicyStatement> parseStatements(String document) throws Exception {

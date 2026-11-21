@@ -16,7 +16,7 @@ public class DbParameterGroup {
     private JsonNode parameters;
     private String engineType;
     private Instant createdAt;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public DbParameterGroup() {
     }

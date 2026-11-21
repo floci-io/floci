@@ -1,6 +1,7 @@
 package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,8 +28,7 @@ class EmrSparkStepsTest {
     private static final String HIVE_AND_SPARK = "[{\"Name\": \"Spark\"}, {\"Name\": \"hive\"}]";
     private static final String RELEASE = "emr-7.5.0";
     // The pig.properties lines Floci gives every Pig after its exectype, ahead of the cluster's.
-    private static final String FLOCIS_PIG_LINES = "mapreduce.job.working.dir = /user/${user.name}\n"
-            + "pig.stats.notaskreport = true\nyarn.app.mapreduce.client.max-retries = 1";
+    private static final String FLOCIS_PIG_LINES = "mapreduce.job.working.dir = /user/${user.name}";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -40,6 +41,52 @@ class EmrSparkStepsTest {
         // Options come before the application, so --master after it is the application's own argument.
         assertEquals(List.of("--verbose", "--conf", "spark.executor.cores=2", "--class", "com.example.Report",
                 "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step, false));
+    }
+
+    /** From 7.11 a step's own LogUri "take[s] precedence", but only on a cluster that logs. */
+    @Test
+    void aStepsLogsGoToItsOwnLogUriFromRelease711OnAClusterThatLogs() {
+        EmrStep step = step("command-runner.jar", null, "true");
+        step.setId("s-1");
+        step.setLogUri("s3://step-logs/");
+        EmrCluster cluster = new EmrCluster();
+        cluster.setId("j-1");
+        cluster.setLogUri("s3://cluster-logs/");
+
+        cluster.setReleaseLabel("emr-7.11.0");
+        assertEquals("s3://step-logs/j-1/steps/s-1/", EmrSparkSteps.logFolder(cluster, step));
+        assertEquals("s3://step-logs/j-1/containers/", EmrSparkSteps.containerLogFolder(cluster, step));
+        cluster.setReleaseLabel("emr-spark-8.0.0");
+        assertEquals("s3://step-logs/j-1/steps/s-1/", EmrSparkSteps.logFolder(cluster, step));
+        cluster.setReleaseLabel("emr-7.10.0");
+        assertEquals("s3://cluster-logs/j-1/steps/s-1/", EmrSparkSteps.logFolder(cluster, step));
+        cluster.setReleaseLabel("emr-7.11.0");
+        cluster.setLogUri(null);
+        assertNull(EmrSparkSteps.logFolder(cluster, step));
+    }
+
+    /** A node removed while steps run puts its containers' logs where those steps' container logs go. */
+    @Test
+    void aRemovedNodesLogsGoWhereTheRunningStepsContainerLogsGoWhenTheyShareOne() {
+        EmrCluster cluster = new EmrCluster();
+        cluster.setId("j-1");
+        cluster.setLogUri("s3://cluster-logs/");
+        cluster.setReleaseLabel("emr-7.11.0");
+        EmrStep own = step("command-runner.jar", null, "true");
+        own.setId("s-1");
+        own.setLogUri("s3://step-logs/");
+        own.setState("RUNNING");
+        EmrStep plain = step("command-runner.jar", null, "true");
+        plain.setId("s-2");
+        plain.setState("PENDING");
+        cluster.setSteps(new ArrayList<>(List.of(own, plain)));
+
+        assertEquals("s3://step-logs/j-1/containers/", EmrSparkSteps.nodeLogFolder(cluster));
+        plain.setState("RUNNING");
+        assertEquals("s3://cluster-logs/j-1/containers/", EmrSparkSteps.nodeLogFolder(cluster));
+        own.setState("COMPLETED");
+        plain.setState("COMPLETED");
+        assertEquals("s3://cluster-logs/j-1/containers/", EmrSparkSteps.nodeLogFolder(cluster));
     }
 
     @Test
@@ -199,7 +246,6 @@ class EmrSparkStepsTest {
         // Tez, as EMR's Pig 0.16.0 and later, from a working directory S3A takes as HDFS does, then tez-site's, then
         // pig-properties', a later line winning.
         assertEquals(String.join("\n", "exectype = tez", "mapreduce.job.working.dir = /user/${user.name}",
-                "pig.stats.notaskreport = true", "yarn.app.mapreduce.client.max-retries = 1",
                 "tez.grouping.max-size = 268435456",
                 "tez.am.resource.memory.mb = 1536", "pig.exec.reducers.max = 8"),
                 variables.get("FLOCI_PIG_PROPERTIES"));

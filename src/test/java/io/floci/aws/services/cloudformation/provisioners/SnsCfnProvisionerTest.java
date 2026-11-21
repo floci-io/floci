@@ -509,6 +509,58 @@ class SnsCfnProvisionerTest {
                 anyString(), anyString());
     }
 
+    @Test
+    void displayNameIsForwardedOnlyWhenSet() {
+        ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), attrs.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "DisplayName": "Expected Name"}
+                """);
+        assertEquals("Expected Name", attrs.getValue().get("DisplayName"));
+
+        setUp();
+        ArgumentCaptor<Map<String, String>> plain = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), plain.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events"}
+                """);
+        assertFalse(plain.getValue().containsKey("DisplayName"));
+    }
+
+    @Test
+    void anUpdateThatDropsDisplayNameClearsItButContinuedOmissionDoesNot() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+
+        provisionUpdate("""
+                {"TopicName": "events", "DisplayName": "Expected Name"}
+                """, """
+                {"TopicName": "events"}
+                """);
+        verify(sns).setTopicAttributes(TOPIC_ARN, "DisplayName", "", REGION);
+
+        setUp();
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """, """
+                {"TopicName": "events"}
+                """);
+        verify(sns, never()).setTopicAttributes(anyString(), eq("DisplayName"), anyString(), anyString());
+    }
+
+    @Test
+    void displayNameOverOneHundredCharactersIsRejectedBeforeAnythingIsCreated() {
+        String atLimit = "x".repeat(100);
+        when(sns.createTopic(anyString(), anyMap(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+        provision("AWS::SNS::Topic", "{\"TopicName\": \"events\", \"DisplayName\": \"" + atLimit + "\"}");
+
+        setUp();
+        assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic",
+                "{\"TopicName\": \"events\", \"DisplayName\": \"" + atLimit + "x\"}"));
+        verify(sns, never()).createTopic(anyString(), anyMap(), anyMap(), anyString());
+    }
+
     /** Real SNS rejects both attributes on a standard topic, so an update must not invent them. */
     @Test
     void aStandardTopicUpdateWritesNoFifoDefaults() {
@@ -523,6 +575,10 @@ class SnsCfnProvisionerTest {
 
     /** Provisions an existing topic again, the way UpdateStack re-invokes the provisioner. */
     private void provisionUpdate(String json) {
+        provisionUpdate(null, json);
+    }
+
+    private void provisionUpdate(String priorJson, String json) {
         StackResource r = new StackResource();
         r.setLogicalId("Topic");
         r.setResourceType("AWS::SNS::Topic");
@@ -530,8 +586,9 @@ class SnsCfnProvisionerTest {
         String priorName = resolved.path("TopicName").asText(null);
         r.setAttributes(new HashMap<>(Map.of("TopicName", priorName)));
         r.setPhysicalId(TOPIC_ARN);
+        JsonNode prior = priorJson == null ? null : props(priorJson);
         provisioner.provision(r, resolved,
-                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN));
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN, null, prior));
     }
 
     @Test
@@ -693,7 +750,8 @@ class SnsCfnProvisionerTest {
         provisioner.provision(existingSubscription(), props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
                 """), subscriptionUpdate(props("""
-                {"FilterPolicy":{"kind":["created"]},"RawMessageDelivery":true,
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e",
+                 "FilterPolicy":{"kind":["created"]},"RawMessageDelivery":true,
                  "FilterPolicyScope":"MessageBody","RedrivePolicy":{"deadLetterTargetArn":"arn:dlq"}}
                 """)));
 
@@ -712,7 +770,9 @@ class SnsCfnProvisionerTest {
 
         provisioner.provision(existingSubscription(), props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
-                """), subscriptionUpdate(props("{}")));
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
 
         verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
         verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
@@ -728,11 +788,28 @@ class SnsCfnProvisionerTest {
 
         provisioner.provision(resource, props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"replacement","RawMessageDelivery":true}
-                """), subscriptionUpdate(null));
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
 
         assertEquals("arn:replacement", resource.getPhysicalId());
         verify(sns).subscribe("t", "sqs", "replacement", REGION, Map.of("RawMessageDelivery", "true"));
         verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+
+        // A replacement that only adopted a subscription somebody else made is not unsubscribed on rollback.
+        doReturn(new SnsService.SubscriptionCreation(subscription("arn:adopted"), false))
+                .when(sns).subscribeWithStatus("t", "sqs", "adopted", REGION, Map.of());
+        StackResource adopting = existingSubscription();
+        provisioner.provision(adopting, props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"adopted"}
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
+        assertEquals("arn:adopted", adopting.getPhysicalId());
+        assertTrue(provisioner.rollbackUpdate(adopting));
+
+        assertEquals("arn:prior", adopting.getPhysicalId());
+        verify(sns, never()).unsubscribe(anyString(), anyString());
     }
 
     @Test
@@ -762,7 +839,8 @@ class SnsCfnProvisionerTest {
         AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, props("""
                 {"TopicArn":"t","Protocol":"firehose","Endpoint":"e","RawMessageDelivery":true}
                 """), subscriptionUpdate(props("""
-                {"SubscriptionRoleArn":"arn:aws:iam::000000000000:role/previous"}
+                {"TopicArn":"t","Protocol":"firehose","Endpoint":"e",
+                 "SubscriptionRoleArn":"arn:aws:iam::000000000000:role/previous"}
                 """))));
 
         assertEquals("InvalidParameter", error.getErrorCode());

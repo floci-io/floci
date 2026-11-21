@@ -57,6 +57,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -91,8 +92,12 @@ class PipesPollerTest {
     }
 
     private PipesPoller pollerOver(DynamoDbStreamReader streamReader) {
+        return pollerOver(streamReader, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private PipesPoller pollerOver(DynamoDbStreamReader streamReader, RegionResolver regionResolver) {
         return new PipesPoller(vertx, sqsService, kinesisService, streamReader,
-                kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config);
+                kafkaConsumerManager, targetInvoker, new PipesFilterMatcher(MAPPER), MAPPER, config, regionResolver);
     }
 
     /**
@@ -136,12 +141,21 @@ class PipesPollerTest {
     }
 
     @Test
-    void aSourceWithoutAnArnRegionPollsInTheDeploymentDefaultRegion() {
-        when(config.defaultRegion()).thenReturn("cn-north-1");
-        PipesPoller chinaPoller = pollerOver(streams);
+    void aSourceWithoutAnArnRegionPollsInTheDeploymentDefaultRegion() throws Exception {
+        PipesPoller chinaPoller = pollerOver(streams, new RegionResolver("cn-north-1", "000000000000"));
+        Pipe pipe = selfManagedKafkaPipe();
+        pipe.setDesiredState(DesiredState.RUNNING);
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(kafkaRecord("orders", 0, 42L,
+                "customer-123".getBytes(StandardCharsets.UTF_8),
+                "{\"status\":\"active\"}".getBytes(StandardCharsets.UTF_8))));
+        chinaPoller.startPolling(pipe);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Handler<Long>> tick = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(eq(1000L), tick.capture());
 
-        assertEquals("cn-north-1", chinaPoller.extractRegionFromArn("smk://broker.internal:9092"));
-        assertEquals("eu-west-1", chinaPoller.extractRegionFromArn("arn:aws:sqs:eu-west-1:000000000000:orders"));
+        tick.getValue().handle(1L);
+
+        verify(targetInvoker, timeout(5000)).invoke(eq(pipe), anyString(), eq("cn-north-1"));
     }
 
     @Test

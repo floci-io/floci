@@ -4,6 +4,9 @@ import io.floci.aws.services.lambda.model.ContainerState;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 
 import java.io.Closeable;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Wraps a running Lambda Docker container and its associated Runtime API server.
@@ -20,6 +23,8 @@ public class ContainerHandle {
     private volatile ContainerState state;
     private volatile long lastUsedMs;
     private Closeable logStream;
+    private Function<Boolean, Supplier<String>> logTailReader = initialization -> () -> "";
+    private final AtomicBoolean invoked = new AtomicBoolean();
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state) {
@@ -59,6 +64,14 @@ public class ContainerHandle {
 
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+
+    public void setLogTailReader(Function<Boolean, Supplier<String>> reader) { this.logTailReader = reader; }
+
+    /** The first invocation also owns the environment's initialization logs. */
+    public Supplier<String> beginInvocation(boolean captureLogs) {
+        boolean initialization = !invoked.getAndSet(true);
+        return captureLogs ? logTailReader.apply(initialization) : null;
+    }
 
     /**
      * True once an extension in this container reported an init or exit error. Real AWS treats

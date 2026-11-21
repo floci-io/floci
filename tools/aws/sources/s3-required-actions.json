@@ -1,0 +1,1172 @@
+{
+  "_source": {
+    "page": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-policy-actions.html",
+    "fetcher": "tools/aws/fetch_s3_required_actions.py",
+    "retrieved": "2026-11-21",
+    "note": "Each heading's '(Required)' rows of the page, under the heading as it stands (one naming several operations kept whole): its single required actions, and an Either row's two actions with the sentence it gives each, copied as they stand."
+  },
+  "operations": {
+    "AbortMultipartUpload": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:AbortMultipartUpload"
+      ]
+    },
+    "AssociateAccessGrantsIdentityCenter": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:AssociateAccessGrantsIdentityCenter"
+      ]
+    },
+    "CompleteMultipartUpload": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObject"
+      ]
+    },
+    "CopyObject": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ],
+        "sentences": {
+          "s3:GetObject": "Required if you want to copy an object from the source bucket without specifying versionId in the request.",
+          "s3:GetObjectVersion": "Required if you want to copy a specific version of an object from the source bucket by specifying versionId in the request."
+        }
+      },
+      "required": [
+        "s3:PutObject"
+      ]
+    },
+    "CreateAccessGrant": {
+      "section": "S3 Access Grants grant operations and permissions",
+      "required": [
+        "s3:CreateAccessGrant"
+      ]
+    },
+    "CreateAccessGrantsInstance": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:CreateAccessGrantsInstance"
+      ]
+    },
+    "CreateAccessGrantsLocation": {
+      "section": "S3 Access Grants location operations and permissions",
+      "required": [
+        "s3:CreateAccessGrantsLocation"
+      ]
+    },
+    "CreateAccessPoint": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:CreateAccessPoint"
+      ]
+    },
+    "CreateAccessPointForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:CreateAccessPointForObjectLambda"
+      ]
+    },
+    "CreateBucket": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:CreateBucket"
+      ]
+    },
+    "CreateBucketMetadataConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:CreateBucketMetadataTableConfiguration",
+        "s3tables:CreateTableBucket",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:GetTable",
+        "s3tables:PutTablePolicy",
+        "s3tables:PutTableEncryption",
+        "kms:DescribeKey"
+      ]
+    },
+    "CreateBucketMetadataTableConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:CreateBucketMetadataTableConfiguration",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:GetTable",
+        "s3tables:PutTablePolicy"
+      ]
+    },
+    "CreateJob": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:CreateJob"
+      ]
+    },
+    "CreateMultiRegionAccessPoint": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:CreateMultiRegionAccessPoint"
+      ]
+    },
+    "CreateMultipartUpload": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObject"
+      ]
+    },
+    "CreateStorageLensGroup": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:CreateStorageLensGroup"
+      ]
+    },
+    "CreateStorageLensGroup, TagResource": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:CreateStorageLensGroup",
+        "s3:TagResource"
+      ]
+    },
+    "DeleteAccessGrant": {
+      "section": "S3 Access Grants grant operations and permissions",
+      "required": [
+        "s3:DeleteAccessGrant"
+      ]
+    },
+    "DeleteAccessGrantsInstance": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:DeleteAccessGrantsInstance"
+      ]
+    },
+    "DeleteAccessGrantsInstanceResourcePolicy": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:DeleteAccessGrantsInstanceResourcePolicy"
+      ]
+    },
+    "DeleteAccessGrantsLocation": {
+      "section": "S3 Access Grants location operations and permissions",
+      "required": [
+        "s3:DeleteAccessGrantsLocation"
+      ]
+    },
+    "DeleteAccessPoint": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:DeleteAccessPoint"
+      ]
+    },
+    "DeleteAccessPointForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:DeleteAccessPointForObjectLambda"
+      ]
+    },
+    "DeleteAccessPointPolicy": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:DeleteAccessPointPolicy"
+      ]
+    },
+    "DeleteAccessPointPolicyForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:DeleteAccessPointPolicyForObjectLambda"
+      ]
+    },
+    "DeleteBucket": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:DeleteBucket"
+      ]
+    },
+    "DeleteBucketAnalyticsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutAnalyticsConfiguration"
+      ]
+    },
+    "DeleteBucketCors": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketCORS"
+      ]
+    },
+    "DeleteBucketEncryption": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutEncryptionConfiguration"
+      ]
+    },
+    "DeleteBucketIntelligentTieringConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutIntelligentTieringConfiguration"
+      ]
+    },
+    "DeleteBucketInventoryConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutInventoryConfiguration"
+      ]
+    },
+    "DeleteBucketLifecycle": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutLifecycleConfiguration"
+      ]
+    },
+    "DeleteBucketMetadataConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:DeleteBucketMetadataTableConfiguration"
+      ]
+    },
+    "DeleteBucketMetadataTableConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:DeleteBucketMetadataTableConfiguration"
+      ]
+    },
+    "DeleteBucketMetricsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutMetricsConfiguration"
+      ]
+    },
+    "DeleteBucketOwnershipControls": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketOwnershipControls"
+      ]
+    },
+    "DeleteBucketPolicy": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:DeleteBucketPolicy"
+      ]
+    },
+    "DeleteBucketReplication": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutReplicationConfiguration"
+      ]
+    },
+    "DeleteBucketTagging": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketTagging"
+      ]
+    },
+    "DeleteBucketWebsite": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:DeleteBucketWebsite"
+      ]
+    },
+    "DeleteJobTagging": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:DeleteJobTagging"
+      ]
+    },
+    "DeleteMultiRegionAccessPoint": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:DeleteMultiRegionAccessPoint"
+      ]
+    },
+    "DeleteObject": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ],
+        "sentences": {
+          "s3:DeleteObject": "Required if you want to remove an object without specifying versionId in the request.",
+          "s3:DeleteObjectVersion": "Required if you want to remove a specific version of an object by specifying versionId in the request."
+        }
+      }
+    },
+    "DeleteObjectTagging": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:DeleteObjectTagging",
+          "s3:DeleteObjectVersionTagging"
+        ],
+        "sentences": {
+          "s3:DeleteObjectTagging": "Required if you want to remove the entire tag set of an object without specifying versionId in the request.",
+          "s3:DeleteObjectVersionTagging": "Required if you want to delete tags of a specific object version by specifying versionId in the request."
+        }
+      }
+    },
+    "DeleteObjects": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ],
+        "sentences": {
+          "s3:DeleteObject": "Required if you want to remove an object without specifying versionId in the request.",
+          "s3:DeleteObjectVersion": "Required if you want to remove a specific version of an object by specifying versionId in the request."
+        }
+      }
+    },
+    "DeletePublicAccessBlock (Account-level)": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:PutAccountPublicAccessBlock"
+      ]
+    },
+    "DeletePublicAccessBlock (Bucket-level)": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketPublicAccessBlock"
+      ]
+    },
+    "DeleteStorageLensConfiguration": {
+      "section": "S3 Storage Lens configuration operations and permissions",
+      "required": [
+        "s3:DeleteStorageLensConfiguration"
+      ]
+    },
+    "DeleteStorageLensConfigurationTagging": {
+      "section": "S3 Storage Lens configuration operations and permissions",
+      "required": [
+        "s3:DeleteStorageLensConfigurationTagging"
+      ]
+    },
+    "DeleteStorageLensGroup": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:DeleteStorageLensGroup"
+      ]
+    },
+    "DescribeJob": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:DescribeJob"
+      ]
+    },
+    "DescribeMultiRegionAccessPointOperation": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:DescribeMultiRegionAccessPointOperation"
+      ]
+    },
+    "DissociateAccessGrantsIdentityCenter": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:DissociateAccessGrantsIdentityCenter"
+      ]
+    },
+    "GetAccessGrant": {
+      "section": "S3 Access Grants grant operations and permissions",
+      "required": [
+        "s3:GetAccessGrant"
+      ]
+    },
+    "GetAccessGrantsInstance": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:GetAccessGrantsInstance"
+      ]
+    },
+    "GetAccessGrantsInstanceForPrefix": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:GetAccessGrantsInstanceForPrefix"
+      ]
+    },
+    "GetAccessGrantsInstanceResourcePolicy": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:GetAccessGrantsInstanceResourcePolicy"
+      ]
+    },
+    "GetAccessGrantsLocation": {
+      "section": "S3 Access Grants location operations and permissions",
+      "required": [
+        "s3:GetAccessGrantsLocation"
+      ]
+    },
+    "GetAccessPoint": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:GetAccessPoint"
+      ]
+    },
+    "GetAccessPointConfigurationForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:GetAccessPointConfigurationForObjectLambda"
+      ]
+    },
+    "GetAccessPointForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:GetAccessPointForObjectLambda"
+      ]
+    },
+    "GetAccessPointPolicy": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:GetAccessPointPolicy"
+      ]
+    },
+    "GetAccessPointPolicy (Account-level)": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:GetAccountPublicAccessBlock"
+      ]
+    },
+    "GetAccessPointPolicyForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:GetAccessPointPolicyForObjectLambda"
+      ]
+    },
+    "GetAccessPointPolicyStatus": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:GetAccessPointPolicyStatus"
+      ]
+    },
+    "GetAccessPointPolicyStatusForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:GetAccessPointPolicyStatusForObjectLambda"
+      ]
+    },
+    "GetBucketAccelerateConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetAccelerateConfiguration"
+      ]
+    },
+    "GetBucketAcl": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketAcl"
+      ]
+    },
+    "GetBucketAnalyticsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetAnalyticsConfiguration"
+      ]
+    },
+    "GetBucketCors": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketCORS"
+      ]
+    },
+    "GetBucketEncryption": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetEncryptionConfiguration"
+      ]
+    },
+    "GetBucketIntelligentTieringConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetIntelligentTieringConfiguration"
+      ]
+    },
+    "GetBucketInventoryConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetInventoryConfiguration"
+      ]
+    },
+    "GetBucketLifecycle": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetLifecycleConfiguration"
+      ]
+    },
+    "GetBucketLocation": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketLocation"
+      ]
+    },
+    "GetBucketLogging": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketLogging"
+      ]
+    },
+    "GetBucketMetadataConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketMetadataTableConfiguration"
+      ]
+    },
+    "GetBucketMetadataTableConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketMetadataTableConfiguration"
+      ]
+    },
+    "GetBucketMetricsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetMetricsConfiguration"
+      ]
+    },
+    "GetBucketNotificationConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketNotification"
+      ]
+    },
+    "GetBucketOwnershipControls": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketOwnershipControls"
+      ]
+    },
+    "GetBucketPolicy": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketPolicy"
+      ]
+    },
+    "GetBucketPolicyStatus": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketPolicyStatus"
+      ]
+    },
+    "GetBucketReplication": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetReplicationConfiguration"
+      ]
+    },
+    "GetBucketRequestPayment": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketRequestPayment"
+      ]
+    },
+    "GetBucketTagging": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketTagging"
+      ]
+    },
+    "GetBucketVersioning": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketVersioning"
+      ]
+    },
+    "GetBucketWebsite": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketWebsite"
+      ]
+    },
+    "GetJobTagging": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:GetJobTagging"
+      ]
+    },
+    "GetMultiRegionAccessPoint": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:GetMultiRegionAccessPoint"
+      ]
+    },
+    "GetMultiRegionAccessPointPolicy": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:GetMultiRegionAccessPointPolicy"
+      ]
+    },
+    "GetMultiRegionAccessPointPolicyStatus": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:GetMultiRegionAccessPointPolicyStatus"
+      ]
+    },
+    "GetMultiRegionAccessPointRoutes": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:GetMultiRegionAccessPointRoutes"
+      ]
+    },
+    "GetObject": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ],
+        "sentences": {
+          "s3:GetObject": "Required if you want to get an object without specifying versionId in the request.",
+          "s3:GetObjectVersion": "Required if you want to get a specific version of an object by specifying versionId in the request."
+        }
+      }
+    },
+    "GetObjectAcl": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObjectAcl",
+          "s3:GetObjectVersionAcl"
+        ],
+        "sentences": {
+          "s3:GetObjectAcl": "Required if you want to get the access control list (ACL) of an object without specifying versionId in the request.",
+          "s3:GetObjectVersionAcl": "Required if you want to get the access control list (ACL) of an object by specifying versionId in the request."
+        }
+      }
+    },
+    "GetObjectAttributes": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ],
+        "sentences": {
+          "s3:GetObject": "Required if you want to retrieve attributes related to an object without specifying versionId in the request.",
+          "s3:GetObjectVersion": "Required if you want to retrieve attributes related to a specific object version by specifying versionId in the request."
+        }
+      }
+    },
+    "GetObjectLegalHold": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:GetObjectLegalHold"
+      ]
+    },
+    "GetObjectLockConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketObjectLockConfiguration"
+      ]
+    },
+    "GetObjectRetention": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:GetObjectRetention"
+      ]
+    },
+    "GetObjectTagging": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObjectTagging",
+          "s3:GetObjectVersionTagging"
+        ],
+        "sentences": {
+          "s3:GetObjectTagging": "Required if you want to get the tag set of an object without specifying versionId in the request.",
+          "s3:GetObjectVersionTagging": "Required if you want to get the tags of a specific object version by specifying versionId in the request."
+        }
+      }
+    },
+    "GetObjectTorrent": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:GetObject"
+      ]
+    },
+    "GetPublicAccessBlock (Bucket-level)": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetBucketPublicAccessBlock"
+      ]
+    },
+    "GetStorageLensConfiguration": {
+      "section": "S3 Storage Lens configuration operations and permissions",
+      "required": [
+        "s3:GetStorageLensConfiguration"
+      ]
+    },
+    "GetStorageLensConfigurationTagging": {
+      "section": "S3 Storage Lens configuration operations and permissions",
+      "required": [
+        "s3:GetStorageLensConfigurationTagging"
+      ]
+    },
+    "GetStorageLensGroup": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:GetStorageLensGroup"
+      ]
+    },
+    "HeadBucket": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:ListBucket"
+      ]
+    },
+    "HeadObject": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:GetObject"
+      ]
+    },
+    "ListAccessGrants": {
+      "section": "S3 Access Grants grant operations and permissions",
+      "required": [
+        "s3:ListAccessGrants"
+      ]
+    },
+    "ListAccessGrantsInstances": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:ListAccessGrantsInstances"
+      ]
+    },
+    "ListAccessGrantsLocations": {
+      "section": "S3 Access Grants location operations and permissions",
+      "required": [
+        "s3:ListAccessGrantsLocations"
+      ]
+    },
+    "ListAccessPoints": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListAccessPoints"
+      ]
+    },
+    "ListAccessPointsForObjectLambda": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListAccessPointsForObjectLambda"
+      ]
+    },
+    "ListBucketAnalyticsConfigurations": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetAnalyticsConfiguration"
+      ]
+    },
+    "ListBucketIntelligentTieringConfigurations": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetIntelligentTieringConfiguration"
+      ]
+    },
+    "ListBucketInventoryConfigurations": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetInventoryConfiguration"
+      ]
+    },
+    "ListBucketMetricsConfigurations": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:GetMetricsConfiguration"
+      ]
+    },
+    "ListBuckets": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListAllMyBuckets"
+      ]
+    },
+    "ListCallerAccessGrants": {
+      "section": "S3 Access Grants grant operations and permissions",
+      "required": [
+        "s3:ListCallerAccessGrants"
+      ]
+    },
+    "ListJobs": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListJobs"
+      ]
+    },
+    "ListMultiRegionAccessPoints": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListMultiRegionAccessPoints"
+      ]
+    },
+    "ListMultipartUploads": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:ListBucketMultipartUploads"
+      ]
+    },
+    "ListObjectVersions": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:ListBucketVersions"
+      ]
+    },
+    "ListObjects": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:ListBucket"
+      ]
+    },
+    "ListObjectsV2": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:ListBucket"
+      ]
+    },
+    "ListParts": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:ListMultipartUploadParts"
+      ]
+    },
+    "ListStorageLensConfigurations": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:ListStorageLensConfigurations"
+      ]
+    },
+    "ListStorageLensGroups": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:ListStorageLensGroups"
+      ]
+    },
+    "ListTagsForResource": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:ListTagsForResource"
+      ]
+    },
+    "PutAccessGrantsInstanceResourcePolicy": {
+      "section": "S3 Access Grants instance operations and permissions",
+      "required": [
+        "s3:PutAccessGrantsInstanceResourcePolicy"
+      ]
+    },
+    "PutAccessPointConfigurationForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:PutAccessPointConfigurationForObjectLambda"
+      ]
+    },
+    "PutAccessPointPolicy": {
+      "section": "Access point for general purpose buckets operations and permissions",
+      "required": [
+        "s3:PutAccessPointPolicy"
+      ]
+    },
+    "PutAccessPointPolicyForObjectLambda": {
+      "section": "Object Lambda Access Point operations and permissions",
+      "required": [
+        "s3:PutAccessPointPolicyForObjectLambda"
+      ]
+    },
+    "PutBucketAccelerateConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutAccelerateConfiguration"
+      ]
+    },
+    "PutBucketAcl": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketAcl"
+      ]
+    },
+    "PutBucketAnalyticsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutAnalyticsConfiguration"
+      ]
+    },
+    "PutBucketCors": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketCORS"
+      ]
+    },
+    "PutBucketEncryption": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutEncryptionConfiguration"
+      ]
+    },
+    "PutBucketIntelligentTieringConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutIntelligentTieringConfiguration"
+      ]
+    },
+    "PutBucketInventoryConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutInventoryConfiguration"
+      ]
+    },
+    "PutBucketLifecycle": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutLifecycleConfiguration"
+      ]
+    },
+    "PutBucketLogging": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketLogging"
+      ]
+    },
+    "PutBucketMetricsConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutMetricsConfiguration"
+      ]
+    },
+    "PutBucketNotificationConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketNotification"
+      ]
+    },
+    "PutBucketOwnershipControls": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketOwnershipControls"
+      ]
+    },
+    "PutBucketPolicy": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketPolicy"
+      ]
+    },
+    "PutBucketReplication": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutReplicationConfiguration"
+      ]
+    },
+    "PutBucketRequestPayment": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketRequestPayment"
+      ]
+    },
+    "PutBucketTagging": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketTagging"
+      ]
+    },
+    "PutBucketVersioning": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketVersioning"
+      ]
+    },
+    "PutBucketWebsite": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketWebsite"
+      ]
+    },
+    "PutJobTagging": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:PutJobTagging"
+      ]
+    },
+    "PutMultiRegionAccessPointPolicy": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:PutMultiRegionAccessPointPolicy"
+      ]
+    },
+    "PutObject": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObject"
+      ]
+    },
+    "PutObjectAcl": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:PutObjectAcl",
+          "s3:PutObjectVersionAcl"
+        ],
+        "sentences": {
+          "s3:PutObjectAcl": "Required if you want to set the access control list (ACL) permissions for a new or existing object without specifying versionId in the request.",
+          "s3:PutObjectVersionAcl": "Required if you want to set the access control list (ACL) permissions for a new or existing object by specifying versionId in the request."
+        }
+      }
+    },
+    "PutObjectLegalHold": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObjectLegalHold"
+      ]
+    },
+    "PutObjectLockConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketObjectLockConfiguration"
+      ]
+    },
+    "PutObjectRetention": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObjectRetention"
+      ]
+    },
+    "PutObjectTagging": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:PutObjectTagging",
+          "s3:PutObjectVersionTagging"
+        ],
+        "sentences": {
+          "s3:PutObjectTagging": "Required if you want to set the supplied tag set to an object that already exists in a bucket without specifying versionId in the request.",
+          "s3:PutObjectVersionTagging": "Required if you want to set the supplied tag set to an object that already exists in a bucket by specifying versionId in the request."
+        }
+      }
+    },
+    "PutPublicAccessBlock (Account-level)": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:PutAccountPublicAccessBlock"
+      ]
+    },
+    "PutPublicAccessBlock (Bucket-level)": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:PutBucketPublicAccessBlock"
+      ]
+    },
+    "PutStorageLensConfiguration": {
+      "section": "Account operations and permissions",
+      "required": [
+        "s3:PutStorageLensConfiguration"
+      ]
+    },
+    "PutStorageLensConfigurationTagging": {
+      "section": "S3 Storage Lens configuration operations and permissions",
+      "required": [
+        "s3:PutStorageLensConfigurationTagging"
+      ]
+    },
+    "RestoreObject": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:RestoreObject"
+      ]
+    },
+    "SelectObjectContent": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:GetObject"
+      ]
+    },
+    "SubmitMultiRegionAccessPointRoutes": {
+      "section": "Multi-Region Access Point operations and permissions",
+      "required": [
+        "s3:SubmitMultiRegionAccessPointRoutes"
+      ]
+    },
+    "TagResource": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:TagResource"
+      ]
+    },
+    "UntagResource": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:UntagResource"
+      ]
+    },
+    "UpdateAccessGrantsLocation": {
+      "section": "S3 Access Grants location operations and permissions",
+      "required": [
+        "s3:UpdateAccessGrantsLocation"
+      ]
+    },
+    "UpdateBucketMetadataInventoryTableConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:UpdateBucketMetadataInventoryTableConfiguration",
+        "s3tables:CreateTableBucket",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:GetTable",
+        "s3tables:PutTablePolicy",
+        "s3tables:PutTableEncryption",
+        "kms:DescribeKey"
+      ]
+    },
+    "UpdateBucketMetadataJournalTableConfiguration": {
+      "section": "Bucket operations and permissions",
+      "required": [
+        "s3:UpdateBucketMetadataJournalTableConfiguration"
+      ]
+    },
+    "UpdateJobPriority": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:UpdateJobPriority"
+      ]
+    },
+    "UpdateJobStatus": {
+      "section": "Batch job operations and permissions",
+      "required": [
+        "s3:UpdateJobStatus"
+      ]
+    },
+    "UpdateObjectEncryption": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:UpdateObjectEncryption",
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:ReEncrypt*"
+      ]
+    },
+    "UpdateStorageLensGroup": {
+      "section": "S3 Storage Lens groups operations and permissions",
+      "required": [
+        "s3:UpdateStorageLensGroup"
+      ]
+    },
+    "UploadPart": {
+      "section": "Object operations and permissions",
+      "required": [
+        "s3:PutObject"
+      ]
+    },
+    "UploadPartCopy": {
+      "section": "Object operations and permissions",
+      "either": {
+        "actions": [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ],
+        "sentences": {
+          "s3:GetObject": "Required if you want to copy an object from the source bucket without specifying versionId in the request.",
+          "s3:GetObjectVersion": "Required if you want to copy a specific version of an object from the source bucket by specifying versionId in the request."
+        }
+      },
+      "required": [
+        "s3:PutObject"
+      ]
+    }
+  }
+}

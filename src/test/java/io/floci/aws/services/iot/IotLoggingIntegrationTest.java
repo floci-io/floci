@@ -1,0 +1,174 @@
+package io.floci.aws.services.iot;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
+import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.aMapWithSize;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyString;
+import static org.hamcrest.Matchers.equalTo;
+
+@QuarkusTest
+class IotLoggingIntegrationTest {
+
+    @Test
+    void getBeforeAnySetIsNotConfigured() {
+        given()
+            .header("Authorization", auth("111100000101", "iot"))
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404)
+            .header("x-amzn-ErrorType", equalTo("NotConfiguredException"));
+    }
+
+    @Test
+    void setThenGetRoundTripsTheOptions() {
+        String auth = auth("111100000102", "iot");
+        String roleArn = "arn:aws:iam::111100000102:role/iot-logging";
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "%s", "defaultLogLevel": "INFO", "disableAllLogs": true}
+                """.formatted(roleArn))
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200)
+            .body(emptyString());
+
+        given()
+            .header("Authorization", auth)
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(200)
+            .body("$", aMapWithSize(3))
+            .body("roleArn", equalTo(roleArn))
+            .body("defaultLogLevel", equalTo("INFO"))
+            .body("disableAllLogs", equalTo(true));
+    }
+
+    @Test
+    void initialSetupWithoutARoleIsRejected() {
+        String auth = auth("111100000103", "iot");
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"defaultLogLevel": "ERROR"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("InvalidRequestException"));
+
+        given()
+            .header("Authorization", auth)
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    void anUnknownLogLevelIsRejected() {
+        given()
+            .header("Authorization", auth("111100000107", "iot"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000107:role/iot-logging", "defaultLogLevel": "TRACE"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("InvalidRequestException"))
+            .body("message", containsString("defaultLogLevel"));
+    }
+
+    @Test
+    void aMemberOfTheWrongTypeIsASerializationError() {
+        given()
+            .header("Authorization", auth("111100000108", "iot"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000108:role/iot-logging", "defaultLogLevel": "INFO",
+                 "disableAllLogs": "true"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("SerializationException"));
+    }
+
+    @Test
+    void laterSetsKeepTheOptionsTheyOmit() {
+        String auth = auth("111100000104", "iot");
+        String roleArn = "arn:aws:iam::111100000104:role/iot-logging";
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "%s", "defaultLogLevel": "DEBUG"}
+                """.formatted(roleArn))
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"disableAllLogs": true}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth)
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(200)
+            .body("roleArn", equalTo(roleArn))
+            .body("defaultLogLevel", equalTo("DEBUG"))
+            .body("disableAllLogs", equalTo(true));
+    }
+
+    @Test
+    void eachAccountAndRegionKeepsItsOwnOptions() {
+        given()
+            .header("Authorization", auth("111100000105", "iot"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000105:role/iot-logging", "defaultLogLevel": "INFO"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth("111100000106", "iot"))
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("Authorization", auth("111100000105", "eu-west-1", "iot"))
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
+    }
+}

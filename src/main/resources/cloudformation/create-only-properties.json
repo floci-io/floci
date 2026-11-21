@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"
@@ -184,7 +189,9 @@
     "KeyAlgorithm",
     "DomainName",
     "CertificateAuthorityArn",
-    "CertificateExport"
+    "CertificateExport",
+    "RootHierarchyType",
+    "CertificateUsage"
   ],
   "AWS::CloudFormation::CustomResource": [
     "ServiceToken"
@@ -217,6 +224,10 @@
   ],
   "AWS::CodeBuild::Project": [
     "Name"
+  ],
+  "AWS::CodeDeploy::Application": [
+    "ApplicationName",
+    "ComputePlatform"
   ],
   "AWS::CodePipeline::CustomActionType": [
     "Category",
@@ -516,6 +527,10 @@
     "DiskSize",
     "AmiType",
     "Subnets"
+  ],
+  "AWS::EMRServerless::Application": [
+    "Name",
+    "Type"
   ],
   "AWS::ElastiCache::CacheCluster": [
     "Port",
@@ -869,7 +884,8 @@
   "AWS::Route53::HealthCheck": [
     "HealthCheckConfig/Type",
     "HealthCheckConfig/MeasureLatency",
-    "HealthCheckConfig/RequestInterval"
+    "HealthCheckConfig/RequestInterval",
+    "HealthCheckConfig/EndpointType"
   ],
   "AWS::Route53::HostedZone": [
     "Name",
@@ -897,7 +913,7 @@
     "DistanceMetric",
     "EncryptionConfiguration",
     "IndexName",
-    "MetadataConfiguration",
+    "MetadataConfiguration/NonFilterableMetadataKeys",
     "VectorBucketArn",
     "VectorBucketName"
   ],
@@ -907,6 +923,9 @@
   ],
   "AWS::SES::ConfigurationSet": [
     "Name"
+  ],
+  "AWS::SES::ConfigurationSetEventDestination": [
+    "ConfigurationSetName"
   ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"

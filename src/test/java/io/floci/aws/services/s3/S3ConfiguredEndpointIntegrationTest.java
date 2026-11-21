@@ -1,9 +1,9 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.testing.ConfiguredHostnameProfile;
 import io.floci.aws.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -18,7 +18,6 @@ import software.amazon.awssdk.services.s3.model.MultipartUpload;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.is;
@@ -27,9 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(S3ConfiguredEndpointIntegrationTest.Profile.class)
+@TestProfile(ConfiguredHostnameProfile.class)
 class S3ConfiguredEndpointIntegrationTest {
-    private static final String ENDPOINT = "configured-endpoint.localhost.floci.io";
+    private static final String ENDPOINT = ConfiguredHostnameProfile.HOSTNAME;
 
     @TestHTTPResource("/")
     URI baseUri;
@@ -139,14 +138,5 @@ class S3ConfiguredEndpointIntegrationTest {
                 .region(Region.US_EAST_1)
                 .forcePathStyle(true)
                 .build();
-    }
-
-    public static class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.hostname", ENDPOINT,
-                    "floci.dns.extra-suffixes", "alias." + ENDPOINT,
-                    "floci.services.s3.enforce-auth", "true");
-        }
     }
 }

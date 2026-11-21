@@ -59,6 +59,7 @@ public class ReplicationGroup {
     private boolean automaticFailoverEnabled;
     private boolean multiAzEnabled;
     private List<ClusterNode> clusterNodes = new ArrayList<>();
+    private List<LogDeliveryConfiguration> logDeliveryConfigurations = new ArrayList<>();
 
     // Transient fields — not persisted, restored on container restart
     private transient String containerId;
@@ -209,6 +210,12 @@ public class ReplicationGroup {
     public List<ClusterNode> getClusterNodes() { return clusterNodes; }
     public void setClusterNodes(List<ClusterNode> clusterNodes) {
         this.clusterNodes = clusterNodes != null ? clusterNodes : new ArrayList<>();
+    }
+
+    public List<LogDeliveryConfiguration> getLogDeliveryConfigurations() { return logDeliveryConfigurations; }
+    public void setLogDeliveryConfigurations(List<LogDeliveryConfiguration> logDeliveryConfigurations) {
+        this.logDeliveryConfigurations = logDeliveryConfigurations == null
+                ? new ArrayList<>() : new ArrayList<>(logDeliveryConfigurations);
     }
 
     public List<String> getSecurityGroupIds() { return securityGroupIds; }

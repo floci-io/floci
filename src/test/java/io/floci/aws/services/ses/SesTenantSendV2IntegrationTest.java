@@ -1,7 +1,6 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,7 +10,8 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -29,18 +29,12 @@ import static org.hamcrest.Matchers.notNullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTenantSendV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String TENANT = "floci-send-tenant";
     private static final String DOMAIN = "floci-send.example.com";
     private static final String FROM = "no-reply@" + DOMAIN;
     private static final String CONFIG_SET = "floci-send-cs";
     private static final String TEMPLATE = "floci-send-tpl";
     private static final String ARN_PREFIX = "arn:aws:ses:us-east-1:000000000000:";
-
-    private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
-    }
 
     private static String simpleSend(String tenantName, String configSetLine) {
         return "{\"FromEmailAddress\":\"" + FROM + "\","
@@ -252,7 +246,7 @@ class SesTenantSendV2IntegrationTest {
                         + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
                         + "\"TemplateData\":\"{}\"}},\"BulkEmailEntries\":[]}")
                 .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400);
-        // An all-blank inline template is a shape error too — 400 before the ghost tenant's 404.
+        // An incomplete inline template is a shape error too: 400 before the ghost tenant's 404.
         v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"ghost-tenant\","
                         + "\"DefaultContent\":{\"Template\":{\"TemplateContent\":{},"
                         + "\"TemplateData\":\"{}\"}},"

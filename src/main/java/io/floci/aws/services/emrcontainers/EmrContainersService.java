@@ -16,6 +16,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.EksService;
@@ -27,16 +28,24 @@ import jakarta.inject.Inject;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
@@ -48,13 +57,14 @@ import java.util.regex.Pattern;
  * and security configurations, as control-plane records. A job run follows the job run states
  * without running Spark on Kubernetes: it completes as soon as it is submitted, or after
  * {@code floci.services.emrcontainers.job-run-duration-seconds}, and fails as AWS documents when
- * Floci's EKS has no cluster of the virtual cluster's name.
+ * Floci's EKS has no cluster of the virtual cluster's name. A virtual cluster's concurrent job
+ * limits hold a run beyond its running limit in a queue, and refuse one beyond its queue depth.
  *
  * <p>Every resource is stored as the JSON AWS answers for it, under its ARN. Members whose name
  * starts with {@code _} are Floci's own and never leave the service.
  */
 @ApplicationScoped
-public class EmrContainersService implements Resettable {
+public class EmrContainersService implements Resettable, StoredResourceArns {
 
     static final String SERVICE = "emr-containers";
     static final String VIRTUAL_CLUSTERS = "/virtualclusters/";
@@ -69,16 +79,23 @@ public class EmrContainersService implements Resettable {
 
     private static final String CLIENT_TOKEN = "_clientToken";
     private static final String DUE_AT = "_dueAt";
+    // Where a job run held in its virtual cluster's queue stands in it, the first to start lowest.
+    private static final String QUEUE_POSITION = "_queuePosition";
     private static final String ACCESS_ENTRY_INTEGRATED = "_eksAccessEntryIntegrated";
     private static final Set<String> ACCESS_ENTRY_MODES = Set.of("API", "API_AND_CONFIG_MAP");
     private static final String RUNNING = "RUNNING";
+    private static final String PENDING = "PENDING";
     private static final String TERMINATED = "TERMINATED";
     private static final String COMPLETED = "COMPLETED";
     private static final String CANCELLED = "CANCELLED";
     private static final String FAILED = "FAILED";
     private static final String ACTIVE = "ACTIVE";
     private static final Set<String> FINISHED_JOB_RUN_STATES = Set.of(COMPLETED, CANCELLED, FAILED);
-    private static final Set<String> QUEUED_JOB_RUN_STATES = Set.of("PENDING", "SUBMITTED");
+    private static final Set<String> QUEUED_JOB_RUN_STATES = Set.of(PENDING, "SUBMITTED");
+    // The development guide's concurrent job limits: "By default, the per-virtual-cluster concurrency limit is set
+    // to 1000 concurrent job runs", and "buffered jobs fail after 30 minutes if no slot frees up".
+    private static final int DEFAULT_MAX_CONCURRENT_JOB_RUNS = 1000;
+    private static final Duration QUEUE_TIMEOUT = Duration.ofMinutes(30);
     private static final Set<String> FINISHED_ENDPOINT_STATES = Set.of(TERMINATED, "TERMINATED_WITH_ERRORS");
     private static final String TOKEN_CREDENTIAL = "TOKEN";
     private static final int DEFAULT_SESSION_SECONDS = 15 * 60;
@@ -223,6 +240,8 @@ public class EmrContainersService implements Resettable {
         EmrContainersRequestShapes.check("UpdateVirtualCluster", request);
         ObjectNode cluster = virtualCluster(id).orElseThrow(() -> notFound(virtualClusterMissing(id)));
         requireState(cluster, RUNNING, "VirtualCluster", "update");
+        // The runs stand as the limits they had until now left them; the new ones hold from now on.
+        settledRuns(cluster);
         ObjectNode updated = cluster.deepCopy();
         JsonNode scheduler = request.get("schedulerConfiguration");
         if (scheduler != null && !scheduler.isNull()) {
@@ -234,6 +253,8 @@ public class EmrContainersService implements Resettable {
             }
         }
         virtualClusters.put(updated.get("arn").textValue(), updated);
+        // A higher running limit, or none, starts queued runs now.
+        settledRuns(updated);
         return wrap("virtualCluster", withSchedulerStatus(updated));
     }
 
@@ -312,6 +333,17 @@ public class EmrContainersService implements Resettable {
             run.set("retryPolicyExecution", object("currentAttemptCount", 1));
         }
 
+        // Concurrent job limits are "enforced at StartJobRun, before any pods are created": a run beyond the
+        // running limit waits in the queue, and "once the queue is full, StartJobRun rejects further submissions".
+        List<ObjectNode> runs = settledRuns(cluster);
+        boolean slotFree = count(runs, RUNNING::equals) < maxConcurrentJobRuns(cluster);
+        long queued = count(runs, QUEUED_JOB_RUN_STATES::contains);
+        JsonNode maxInQueue = cluster.path("schedulerConfiguration").path("maxInQueueJobRuns");
+        if (!slotFree && maxInQueue.isIntegralNumber() && queued >= maxInQueue.longValue()) {
+            // The guide gives ValidationException, not its message; the wording is Floci's.
+            throw invalid("Virtual cluster " + virtualClusterId + " has " + queued + " job runs in its queue, its "
+                    + "maxInQueueJobRuns, and accepts no more until one of them starts.");
+        }
         String eksCluster = cluster.path("containerProvider").path("id").textValue();
         if (eksService.findAuthenticationCluster(regionResolver.getAccountId(), regionResolver.getRegion(), eksCluster)
                 .isEmpty()) {
@@ -319,11 +351,13 @@ public class EmrContainersService implements Resettable {
             finish(run, FAILED, now);
             run.put("stateDetails", "Cluster " + eksCluster + " does not exist.");
             run.put("failureReason", "CLUSTER_UNAVAILABLE");
-        } else if (jobRunDurationSeconds <= 0) {
-            finish(run, COMPLETED, now);
+        } else if (!slotFree) {
+            // Held before it is submitted to the virtual cluster: "waiting to be submitted to the virtual cluster".
+            run.put("state", PENDING);
+            run.put(QUEUE_POSITION, runs.stream().mapToLong(held -> held.path(QUEUE_POSITION).asLong()).max()
+                    .orElse(0) + 1);
         } else {
-            run.put("state", RUNNING);
-            run.put(DUE_AT, now.plusSeconds(jobRunDurationSeconds).toEpochMilli());
+            start(run, now);
         }
         jobRuns.put(arn, run);
         return pick(run, "id", "name", "arn", "virtualClusterId");
@@ -339,9 +373,7 @@ public class EmrContainersService implements Resettable {
         ObjectNode shape = query.shape().put("virtualClusterId", virtualClusterId);
         putText(shape, "name", name);
         EmrContainersRequestShapes.check("ListJobRuns", shape);
-        String prefix = arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS);
-        List<ObjectNode> matching = jobRuns.scan(key -> key.startsWith(prefix)).stream()
-                .map(this::advance)
+        List<ObjectNode> matching = settledRuns(virtualClusterId).stream()
                 .filter(query::matches)
                 .filter(run -> name == null || name.equals(run.path("name").textValue()))
                 .toList();
@@ -358,6 +390,8 @@ public class EmrContainersService implements Resettable {
         ObjectNode cancelled = run.deepCopy();
         finish(cancelled, CANCELLED, now());
         jobRuns.put(cancelled.get("arn").textValue(), cancelled);
+        // A running slot it frees goes to the queue's first run now.
+        settledRuns(virtualClusterId);
         return object("id", id).put("virtualClusterId", virtualClusterId);
     }
 
@@ -593,6 +627,55 @@ public class EmrContainersService implements Resettable {
     }
 
     @Override
+    public String namespace() {
+        return "emr-containers";
+    }
+
+    /** A request names each resource by the id its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the virtual cluster, job run, managed endpoint, job template or security configuration whose ARN is
+     * {@code arn}, in the request's account, where the handlers read: an ARN of another account names none. Each is
+     * stored under its ARN, so it is read in place under the ARN itself, a resource stored before storage was
+     * account-aware included, and matched on the ARN it records. Every write stores a new copy of the resource, so
+     * the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "emr-containers")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        AccountAwareStorageBackend<ObjectNode> store = storeOf(parsed.resource());
+        if (store == null || !parsed.accountId().equals(regionResolver.getAccountId())) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(store, parsed.accountId(), arn)
+                .filter(resource -> arn.equals(resource.path("arn").textValue()))
+                .map(EmrContainersService::tagMap)
+                .orElse(Map.of());
+    }
+
+    /** The store holding the kind of resource an ARN's resource part names, or null for none of them. */
+    private AccountAwareStorageBackend<ObjectNode> storeOf(String resource) {
+        Matcher nested = NESTED_ARN.matcher(resource);
+        if (nested.matches()) {
+            return "jobruns".equals(nested.group(2)) ? jobRuns : endpoints;
+        }
+        if (VIRTUAL_CLUSTER_ARN.matcher(resource).matches()) {
+            return virtualClusters;
+        }
+        if (resource.startsWith(JOB_TEMPLATES)) {
+            return jobTemplates;
+        }
+        return resource.startsWith(SECURITY_CONFIGURATIONS) ? securityConfigurations : null;
+    }
+
+    @Override
     public synchronized void clear() {
         virtualClusters.clear();
         jobRuns.clear();
@@ -675,7 +758,8 @@ public class EmrContainersService implements Resettable {
     }
 
     private Optional<ObjectNode> jobRun(String virtualClusterId, String id) {
-        return jobRuns.get(arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS + id)).map(this::advance);
+        settledRuns(virtualClusterId);
+        return jobRuns.get(arn(VIRTUAL_CLUSTERS + virtualClusterId + JOB_RUNS + id));
     }
 
     private Optional<ObjectNode> endpoint(String virtualClusterId, String id) {
@@ -713,8 +797,8 @@ public class EmrContainersService implements Resettable {
         }
         Matcher nested = NESTED_ARN.matcher(resource);
         if (nested.matches() && "jobruns".equals(nested.group(2))) {
-            ObjectNode run = jobRuns.get(resourceArn).map(this::advance)
-                    .orElseThrow(() -> resourceMissing(resourceArn));
+            settledRuns(nested.group(1));
+            ObjectNode run = jobRuns.get(resourceArn).orElseThrow(() -> resourceMissing(resourceArn));
             return new Taggable(jobRuns, run, !FINISHED_JOB_RUN_STATES.contains(run.path("state").textValue()));
         }
         if (nested.matches()) {
@@ -797,25 +881,106 @@ public class EmrContainersService implements Resettable {
 
     // ── States ───────────────────────────────────────────────────────────────────
 
-    /** Completes a RUNNING job run whose duration has passed, and stores the change. */
-    private ObjectNode advance(ObjectNode run) {
-        if (!RUNNING.equals(run.path("state").textValue()) || !run.has(DUE_AT)) {
-            return run;
+    private List<ObjectNode> settledRuns(String virtualClusterId) {
+        return virtualCluster(virtualClusterId).map(this::settledRuns).orElseGet(List::of);
+    }
+
+    /**
+     * The virtual cluster's job runs as they stand now, each change stored. They are replayed in the order things
+     * happened: a RUNNING run completes once its duration has passed, and the running slot it frees goes at that
+     * moment to the run first in the queue, "As running slots free up, queued job runs start automatically"; a run
+     * still queued 30 minutes after it was submitted fails. A slot free now, once the limit is raised or a run is
+     * cancelled, goes to the queue now.
+     */
+    private List<ObjectNode> settledRuns(ObjectNode cluster) {
+        String prefix = cluster.get("arn").textValue() + JOB_RUNS;
+        List<ObjectNode> runs = jobRuns.scan(key -> key.startsWith(prefix)).stream()
+                .map(ObjectNode::deepCopy)
+                .toList();
+        // The running runs by when they complete, and the queue in order: a run's DUE_AT never changes in there.
+        PriorityQueue<ObjectNode> running = new PriorityQueue<>(Comparator.comparing(EmrContainersService::dueAt));
+        runs.stream()
+                .filter(run -> RUNNING.equals(run.path("state").textValue()) && run.has(DUE_AT))
+                .forEach(running::add);
+        Deque<ObjectNode> queue = new ArrayDeque<>(runs.stream()
+                .filter(run -> PENDING.equals(run.path("state").textValue()) && run.has(QUEUE_POSITION))
+                .sorted(Comparator.comparingLong(run -> run.get(QUEUE_POSITION).longValue()))
+                .toList());
+        int limit = maxConcurrentJobRuns(cluster);
+        Instant now = now();
+        // By identity: a node's equality is its content, which changes here.
+        Set<ObjectNode> changed = Collections.newSetFromMap(new IdentityHashMap<>());
+        while (true) {
+            ObjectNode ending = running.peek();
+            Instant endsAt = ending != null && !dueAt(ending).isAfter(now) ? dueAt(ending) : null;
+            ObjectNode first = queue.peekFirst();
+            Instant timesOutAt = first != null ? Instant.parse(first.get("createdAt").textValue()).plus(QUEUE_TIMEOUT)
+                    : null;
+            if (timesOutAt != null && !timesOutAt.isAfter(now) && (endsAt == null || timesOutAt.isBefore(endsAt))) {
+                queue.pollFirst();
+                finish(first, FAILED, timesOutAt);
+                // No source gives AWS's stateDetails for it; the wording is Floci's.
+                first.put("stateDetails", "Job run waited " + QUEUE_TIMEOUT.toMinutes() + " minutes in the queue "
+                        + "of virtual cluster " + cluster.get("id").textValue() + " without starting.");
+                changed.add(first);
+            } else if (endsAt != null) {
+                running.poll();
+                finish(ending, COMPLETED, endsAt);
+                changed.add(ending);
+                startQueued(running, queue, limit, endsAt, changed);
+            } else {
+                break;
+            }
         }
-        Instant dueAt = Instant.ofEpochMilli(run.get(DUE_AT).longValue());
-        if (now().isBefore(dueAt)) {
-            return run;
+        startQueued(running, queue, limit, now, changed);
+        // In one write: a persistent store rewrites its file on each.
+        if (!changed.isEmpty()) {
+            Map<String, ObjectNode> writes = new LinkedHashMap<>();
+            changed.forEach(run -> writes.put(run.get("arn").textValue(), run));
+            jobRuns.putAll(writes);
         }
-        ObjectNode completed = run.deepCopy();
-        finish(completed, COMPLETED, dueAt);
-        jobRuns.put(completed.get("arn").textValue(), completed);
-        return completed;
+        return runs;
+    }
+
+    // Starts the queue's first runs at the moment {@code at} while the running limit leaves a slot.
+    private void startQueued(PriorityQueue<ObjectNode> running, Deque<ObjectNode> queue, int limit, Instant at,
+                             Set<ObjectNode> changed) {
+        while (running.size() < limit && !queue.isEmpty()) {
+            ObjectNode run = queue.pollFirst();
+            start(run, at);
+            changed.add(run);
+            if (run.has(DUE_AT)) {
+                running.add(run);
+            }
+        }
+    }
+
+    // A run starts: RUNNING for the configured duration, or completed at once without one.
+    private void start(ObjectNode run, Instant at) {
+        run.remove(QUEUE_POSITION);
+        if (jobRunDurationSeconds <= 0) {
+            finish(run, COMPLETED, at);
+        } else {
+            run.put("state", RUNNING);
+            run.put(DUE_AT, at.plusSeconds(jobRunDurationSeconds).toEpochMilli());
+        }
+    }
+
+    private static Instant dueAt(ObjectNode run) {
+        return Instant.ofEpochMilli(run.get(DUE_AT).longValue());
+    }
+
+    // How many of the virtual cluster's runs may be RUNNING at once: its maxConcurrentJobRuns, or AWS's default.
+    private static int maxConcurrentJobRuns(ObjectNode cluster) {
+        JsonNode limit = cluster.path("schedulerConfiguration").path("maxConcurrentJobRuns");
+        return limit.isIntegralNumber() ? limit.intValue() : DEFAULT_MAX_CONCURRENT_JOB_RUNS;
     }
 
     private void finish(ObjectNode run, String state, Instant at) {
         run.put("state", state);
         run.put("finishedAt", timestamp(at));
         run.remove(DUE_AT);
+        run.remove(QUEUE_POSITION);
     }
 
     /**
@@ -835,8 +1000,7 @@ public class EmrContainersService implements Resettable {
         if (scheduler == null || scheduler.isEmpty()) {
             return cluster;
         }
-        String prefix = cluster.get("arn").textValue() + JOB_RUNS;
-        List<ObjectNode> runs = jobRuns.scan(key -> key.startsWith(prefix)).stream().map(this::advance).toList();
+        List<ObjectNode> runs = settledRuns(cluster);
         ObjectNode status = mapper.createObjectNode();
         status.put("currentInQueueJobRuns", count(runs, QUEUED_JOB_RUN_STATES::contains));
         status.put("currentConcurrentJobRuns", count(runs, RUNNING::equals));

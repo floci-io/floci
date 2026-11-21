@@ -12,6 +12,7 @@ import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
 import io.floci.aws.services.dynamodb.DynamoDbRequestShapes;
 import io.floci.aws.services.dynamodb.DynamoDbResponses;
 import io.floci.aws.services.dynamodb.DynamoDbStreamsJsonHandler;
+import io.floci.aws.services.kms.KmsJsonHandler;
 import io.floci.aws.services.marketplace.MarketplaceJsonHandler;
 import io.floci.aws.services.networkfirewall.NetworkFirewallJsonHandler;
 import io.floci.aws.services.paymentcryptography.PaymentCryptographyJsonHandler;
@@ -23,7 +24,11 @@ import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbJsonHandler;
 import io.floci.aws.services.verifiedpermissions.VerifiedPermissionsJsonHandler;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
@@ -68,6 +73,7 @@ public class AwsJsonController {
     private final VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler;
     private final BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler;
     private final TimestreamInfluxDbJsonHandler timestreamInfluxDbJsonHandler;
+    private final KmsJsonHandler kmsJsonHandler;
 
     @Inject
     public AwsJsonController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -84,7 +90,8 @@ public class AwsJsonController {
                              MarketplaceJsonHandler marketplaceJsonHandler,
                              VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler,
                              BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler,
-                             TimestreamInfluxDbJsonHandler timestreamInfluxDbJsonHandler) {
+                             TimestreamInfluxDbJsonHandler timestreamInfluxDbJsonHandler,
+                             KmsJsonHandler kmsJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -103,6 +110,7 @@ public class AwsJsonController {
         this.verifiedPermissionsJsonHandler = verifiedPermissionsJsonHandler;
         this.bcmPricingCalculatorJsonHandler = bcmPricingCalculatorJsonHandler;
         this.timestreamInfluxDbJsonHandler = timestreamInfluxDbJsonHandler;
+        this.kmsJsonHandler = kmsJsonHandler;
     }
 
     /**
@@ -169,38 +177,7 @@ public class AwsJsonController {
         try {
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            response = switch (serviceKey) {
-                case "dynamodb" -> {
-                    if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
-                        yield dynamoDbStreamsJsonHandler.handle(action, request, region);
-                    }
-                    if (targetMatch.jsonOnly()) {
-                        yield dynamoDbJsonHandler.handleLegacy(action, request, region);
-                    }
-                    DynamoDbRequestShapes.check(action, request, body);
-                    yield dynamoDbJsonHandler.handle(action, request, region);
-                }
-                case "sqs" -> sqsJsonHandler.handle(action, request, region);
-                case "sns" -> snsJsonHandler.handle(action, request, region);
-                case "states" -> sfnJsonHandler.handle(action, request, region);
-                case "swf" -> swfJsonHandler.handle(action, request, region);
-                case "monitoring" -> targetMatch.jsonOnly()
-                        ? cloudWatchMetricsJsonHandler.handleLegacy(action, request, region)
-                        : cloudWatchMetricsJsonHandler.handle(action, request, region);
-                case "cloudcontrol" -> cloudControlJsonHandler.handle(
-                                        action, request, region, regionResolver.getAccountId());
-                case "network-firewall" -> networkFirewallJsonHandler.handle(
-                        action, request, region, regionResolver.getAccountId());
-                // The control plane of Payment Cryptography is an awsJson 1.0 service: the
-                // AWS SDK sends application/x-amz-json-1.0 and targets
-                // PaymentCryptographyControlPlane.<Operation>.
-                case "paymentcryptography" -> paymentCryptographyJsonHandler.handle(action, request, region);
-                case "marketplace" -> marketplaceJsonHandler.handle(action, request, region);
-                case "verifiedpermissions" -> verifiedPermissionsJsonHandler.handle(action, request, region);
-                case "bcm-pricing-calculator" -> bcmPricingCalculatorJsonHandler.handle(action, request, region);
-                case "timestream-influxdb" -> timestreamInfluxDbJsonHandler.handle(action, request, region);
-                default -> null;
-            };
+            response = dispatch(targetMatch, request, region, body);
             // catalog.matchTarget is protocol-agnostic: a JSON 1.1 target
             // (e.g. AmazonSSM.*) can match here under @Consumes json-1.0.
             // Return the AWS-style unknown-operation error rather than null.
@@ -239,4 +216,43 @@ public class AwsJsonController {
         }
         return response;
     }
+    /** Dispatches an already-decoded request before HTTP-specific response encoding. */
+    Response dispatch(ServiceCatalog.TargetMatch targetMatch, JsonNode request, String region, String body) throws Exception {
+        String serviceKey = targetMatch.descriptor().externalKey();
+        String action = targetMatch.action();
+        return switch (serviceKey) {
+            case "dynamodb" -> {
+                if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
+                    yield dynamoDbStreamsJsonHandler.handle(action, request, region);
+                }
+                if (targetMatch.jsonOnly()) {
+                    yield dynamoDbJsonHandler.handleLegacy(action, request, region);
+                }
+                DynamoDbRequestShapes.check(action, request, body);
+                yield dynamoDbJsonHandler.handle(action, request, region);
+            }
+            case "sqs" -> sqsJsonHandler.handle(action, request, region);
+            case "sns" -> snsJsonHandler.handle(action, request, region);
+            case "states" -> sfnJsonHandler.handle(action, request, region);
+            case "swf" -> swfJsonHandler.handle(action, request, region);
+            case "monitoring" -> targetMatch.jsonOnly()
+                    ? cloudWatchMetricsJsonHandler.handleLegacy(action, request, region)
+                    : cloudWatchMetricsJsonHandler.handle(action, request, region);
+            case "cloudcontrol" -> cloudControlJsonHandler.handle(
+                                    action, request, region, regionResolver.getAccountId());
+            case "network-firewall" -> networkFirewallJsonHandler.handle(
+                    action, request, region, regionResolver.getAccountId());
+            // The control plane of Payment Cryptography is an awsJson 1.0 service: the
+            // AWS SDK sends application/x-amz-json-1.0 and targets
+            // PaymentCryptographyControlPlane.<Operation>.
+            case "paymentcryptography" -> paymentCryptographyJsonHandler.handle(action, request, region);
+            case "marketplace" -> marketplaceJsonHandler.handle(action, request, region);
+            case "verifiedpermissions" -> verifiedPermissionsJsonHandler.handle(action, request, region);
+            case "bcm-pricing-calculator" -> bcmPricingCalculatorJsonHandler.handle(action, request, region);
+            case "timestream-influxdb" -> timestreamInfluxDbJsonHandler.handle(action, request, region);
+            case "kms" -> kmsJsonHandler.handle(action, request, region);
+            default -> null;
+        };
+    }
+
 }

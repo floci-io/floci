@@ -26,6 +26,7 @@ import java.util.Map;
  *   <li>{@code $context.<name>}: any other context variable the request carries</li>
  *   <li>{@code $request.header.<name>}: case-insensitive header lookup</li>
  *   <li>{@code $request.querystring.<name>}: query parameter</li>
+ *   <li>{@code $request.path}: the request path without the stage name</li>
  *   <li>{@code $request.path.<name>}: captured path parameter</li>
  *   <li>{@code $request.body}: the request body as text, null when it is empty</li>
  *   <li>{@code $request.body.<JSONPath>}: a value selected from a JSON request body</li>
@@ -92,6 +93,9 @@ public class ContextValueResolver {
             String name = expression.substring("$request.querystring.".length());
             return ctx.queryParams() == null ? null : ctx.queryParams().get(name);
         }
+        if (expression.equals("$request.path")) {
+            return ctx.path();
+        }
         if (expression.startsWith("$request.path.")) {
             String name = expression.substring("$request.path.".length());
             return ctx.pathParams() == null ? null : ctx.pathParams().get(name);
@@ -104,7 +108,15 @@ public class ContextValueResolver {
     }
 
     private String bodyPath(RequestContext ctx, String path) {
-        String body = bodyText(ctx);
+        return jsonPath(bodyText(ctx), path);
+    }
+
+    /**
+     * The value a JSONPath selects from a JSON document, relative to its root: a scalar as its text
+     * and an object or array as its JSON. Null when the document is empty, is not JSON, or has
+     * nothing at the path.
+     */
+    public String jsonPath(String body, String path) {
         if (body == null || body.isBlank()) {
             return null;
         }

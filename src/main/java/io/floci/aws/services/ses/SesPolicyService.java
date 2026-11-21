@@ -14,7 +14,6 @@ import org.jboss.logging.Logger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
  * Identity sending-authorization policies (the {@code policyStore}), extracted from
@@ -33,7 +32,6 @@ public class SesPolicyService {
     private static final Logger LOG = Logger.getLogger(SesPolicyService.class);
 
     static final int MAX_POLICIES_PER_IDENTITY = 20;
-    private static final Pattern POLICY_NAME_CHARS = Pattern.compile("[A-Za-z0-9_-]+");
 
     private final StorageBackend<String, String> policyStore;
     // Serializes the per-identity policy count check-then-put so concurrent creates can't both pass.
@@ -178,7 +176,7 @@ public class SesPolicyService {
                     "Value at 'policyName' failed to satisfy constraint: "
                             + "Member must have length less than or equal to 64");
         }
-        if (!POLICY_NAME_CHARS.matcher(policyName).matches()) {
+        if (!SesNames.hasOnlyAllowedCharacters(policyName)) {
             throw new AwsException("InvalidParameterValue",
                     "PolicyName is invalid. Policy names must only include alpha-numeric characters, "
                             + "dashes, and underscores.", 400);

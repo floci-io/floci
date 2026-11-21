@@ -16,6 +16,9 @@ import java.util.Set;
 /** Builds only rules for an endpoint's private nftables table. Docker's tables are untouched. */
 public final class SecurityGroupNftCompiler {
 
+    /** The ECS task metadata and credentials endpoint, which security groups do not filter on AWS. */
+    static final String ECS_TASK_METADATA_ADDRESS = "169.254.170.2";
+
     private SecurityGroupNftCompiler() {}
 
     /**
@@ -116,8 +119,10 @@ public final class SecurityGroupNftCompiler {
 
         // Docker's embedded DNS listens on loopback but forwards from this namespace. Security
         // groups never filter the VPC resolver on AWS. Only DNS is exempt, because the resolver
-        // address also serves Floci's API. DHCP and the link-local metadata endpoint are the
-        // other local infrastructure exceptions.
+        // address also serves Floci's API. DHCP, the link-local metadata endpoint and the ECS
+        // task metadata endpoint, where a task reads its role credentials, are the other local
+        // infrastructure exceptions. The ECS endpoint is opened for its one listener only, so a
+        // workload cannot use it to reach anything else on the Docker network.
         for (String server : vpcResolvers) {
             String family = server.contains(":") ? "ip6" : "ip";
             rules.append("add rule inet floci_sg egress ").append(family).append(" daddr ").append(server)
@@ -128,7 +133,9 @@ public final class SecurityGroupNftCompiler {
         rules.append("add rule inet floci_sg egress udp sport 68 udp dport 67 accept\n")
                 .append("add rule inet floci_sg ingress udp sport 67 udp dport 68 accept\n")
                 .append("add rule inet floci_sg egress ip daddr 169.254.169.254 accept\n")
-                .append("add rule inet floci_sg ingress ip saddr 169.254.169.254 accept\n");
+                .append("add rule inet floci_sg ingress ip saddr 169.254.169.254 accept\n")
+                .append("add rule inet floci_sg egress ip daddr ").append(ECS_TASK_METADATA_ADDRESS)
+                .append(" tcp dport 80 accept\n");
 
         List<Endpoint> managed = peers == null ? List.of() : peers.stream()
                 .filter(peer -> !target.eniId().equals(peer.eniId()))

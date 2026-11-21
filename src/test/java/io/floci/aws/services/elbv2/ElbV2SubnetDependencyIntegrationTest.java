@@ -161,7 +161,7 @@ class ElbV2SubnetDependencyIntegrationTest {
         doAnswer(invocation -> {
             deleting.countDown();
             return invocation.callRealMethod();
-        }).when(ec2Service).deleteSubnet(REGION, replacement);
+        }).when(ec2Service).deleteSubnet(REGION, replacement, false);
         String arn = existing;
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<String> attach = executor.submit(() -> {

@@ -6,8 +6,8 @@ import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.RestAssured;
@@ -51,20 +51,13 @@ import static org.mockito.Mockito.doReturn;
 /**
  * Tunnels WebSocket connections through a distribution whose custom origin is an ALB listener, as
  * CloudFront does on every distribution: viewer, distribution, load balancer and an echo target.
+ *
+ * <p>The class runs on {@link RdsMockProfile}, which runs the real ELBv2 data plane and lets a
+ * distribution use an origin at 127.0.0.1, which CloudFront would otherwise refuse.
  */
 @QuarkusTest
-@TestProfile(CloudFrontWebSocketIntegrationTest.AlbOriginProfile.class)
+@TestProfile(RdsMockProfile.class)
 class CloudFrontWebSocketIntegrationTest {
-
-    /** The real ELBv2 data plane, and an origin at 127.0.0.1 that CloudFront would otherwise refuse. */
-    public static class AlbOriginProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.elbv2.mock", "false",
-                    "floci.services.cloudfront.allowed-private-origin-hosts", "127.0.0.1");
-        }
-    }
 
     private static final int LISTENER_PORT = 7797;
     private static final String CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";

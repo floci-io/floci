@@ -2,8 +2,8 @@ package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import jakarta.inject.Inject;
@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -28,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 @QuarkusTest
-@TestProfile(S3RestoreStateIntegrationTest.DelayedRestoreProfile.class)
+@TestProfile(ServicesOffSettingsProfile.class)
 class S3RestoreStateIntegrationTest {
     private static final String RESTORE_REQUEST = "<RestoreRequest><Days>1</Days></RestoreRequest>";
     private static final String ARCHIVED_OBJECT_ERROR_MESSAGE =
@@ -38,13 +37,6 @@ class S3RestoreStateIntegrationTest {
 
     @Inject
     MutableClock clock;
-
-    public static final class DelayedRestoreProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.s3.restore-completion-delay-seconds", "60");
-        }
-    }
 
     @BeforeEach
     void resetClockBeforeTest() {

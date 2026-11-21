@@ -2,11 +2,13 @@ package io.floci.aws.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.paymentcryptography.crypto.BlockMode;
 import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.bouncycastle.crypto.Digest;
 
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -22,6 +24,7 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRu
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireFamily;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireMode;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireUsage;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyMembers.members;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isAes;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isTdes;
 
@@ -93,9 +96,10 @@ public class PaymentCryptographyCryptoHandler {
         requireCipherFamily(key, "encrypt");
         requireUsage(key, DATA_ENCRYPTION_USAGES, "encrypt data");
         byte[] plaintext = blob(request, "PlainText");
+        requireModeOfCipher(encryption, key, "encrypting");
         requireBlockAligned(plaintext, key, "PlainText");
         byte[] ciphertext = encrypt(material(key), plaintext,
-                initializationVector(encryption, key, "encrypting"), key);
+                initializationVector(encryption, key, "encrypting"), encryption.mode(), key);
         return answer(key, Map.of("CipherText", encode(ciphertext)));
     }
 
@@ -112,9 +116,10 @@ public class PaymentCryptographyCryptoHandler {
         requireCipherFamily(key, "decrypt");
         requireUsage(key, DATA_ENCRYPTION_USAGES, "decrypt data");
         byte[] ciphertext = blob(request, "CipherText");
+        requireModeOfCipher(encryption, key, "decrypting");
         requireBlockAligned(ciphertext, key, "CipherText");
         byte[] plaintext = decrypt(material(key), ciphertext,
-                initializationVector(encryption, key, "decrypting"), key);
+                initializationVector(encryption, key, "decrypting"), encryption.mode(), key);
         return answer(key, Map.of("PlainText", encode(plaintext)));
     }
 
@@ -139,12 +144,16 @@ public class PaymentCryptographyCryptoHandler {
         requireUsage(incoming, DATA_ENCRYPTION_USAGES, "decrypt data");
         requireUsage(outgoing, DATA_ENCRYPTION_USAGES, "encrypt data");
         byte[] ciphertext = blob(request, "CipherText");
+        requireModeOfCipher(incomingEncryption, incoming, "decrypting");
+        requireModeOfCipher(outgoingEncryption, outgoing, "encrypting");
         requireBlockAligned(ciphertext, incoming, "CipherText");
         byte[] plaintext = decrypt(material(incoming), ciphertext,
-                initializationVector(incomingEncryption, incoming, "decrypting"), incoming);
+                initializationVector(incomingEncryption, incoming, "decrypting"),
+                incomingEncryption.mode(), incoming);
         requireBlockAligned(plaintext, outgoing, "the plaintext");
         byte[] reEncrypted = encrypt(material(outgoing), plaintext,
-                initializationVector(outgoingEncryption, outgoing, "encrypting"), outgoing);
+                initializationVector(outgoingEncryption, outgoing, "encrypting"),
+                outgoingEncryption.mode(), outgoing);
         return answer(outgoing, Map.of("CipherText", encode(reEncrypted)));
     }
 
@@ -156,7 +165,7 @@ public class PaymentCryptographyCryptoHandler {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("GenerateMac", request);
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, region, "Generate",
+        MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, "Generate",
                 "generating a MAC with");
         byte[] message = blob(request, "MessageData");
         int length = macLength(request, leg, leg.longest);
@@ -173,7 +182,7 @@ public class PaymentCryptographyCryptoHandler {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("VerifyMac", request);
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, region, "Verify",
+        MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, "Verify",
                 "verifying a MAC with");
         byte[] message = blob(request, "MessageData");
         byte[] mac = blob(request, "Mac");
@@ -207,10 +216,17 @@ public class PaymentCryptographyCryptoHandler {
 
     /** The cryptogram of an authorization request, generated. */
 
-    /** The material of a key translated into another form. */
+    /**
+     * The material of a key translated into another form.
+     *
+     * <p>The key material never leaves the service: the block comes in under the key the two
+     * parties agreed with ECDH, it is opened there, and it is wrapped again under the key the
+     * request names.
+     */
     public Map<String, Object> translateKeyMaterial(JsonNode request, String region) {
-        refused("TranslateKeyMaterial");
-        return Map.of();
+        // The request is checked against the constraints the model states for it.
+        PaymentCryptographyDataRequestShapes.check("TranslateKeyMaterial", request);
+        return service.translateKeyMaterial(region, members(request));
     }
 
     /**
@@ -234,8 +250,7 @@ public class PaymentCryptographyCryptoHandler {
      * The cipher the request asks for.
      *
      * <p>The attributes name the mode and, for a symmetric cipher, the initialization vector.
-     * The service encrypts in CBC mode, so a request that names another mode is refused
-     * rather than answered with a cipher it did not ask for.
+     * The reference names eight modes, and this service makes them all.
      *
      * @param attributes the attributes of the request, which may be absent
      * @return the cipher the request asks for
@@ -256,11 +271,13 @@ public class PaymentCryptographyCryptoHandler {
                             + "(Symmetric)", 400);
         }
         JsonNode symmetric = attributes.get(variant);
-        String mode = symmetric == null ? "" : symmetric.path("Mode").asText();
-        if (!"CBC".equals(mode)) {
+        String modeName = symmetric == null ? "" : symmetric.path("Mode").asText();
+        BlockMode mode = BlockMode.from(modeName);
+        if (mode == null) {
             throw new AwsException("ValidationException",
-                    "the encryption mode '" + (mode.isEmpty() ? "(missing)" : mode)
-                            + "' is not supported by this service (CBC)", 400);
+                    "the encryption mode '" + (modeName.isEmpty() ? "(missing)" : modeName)
+                            + "' is not supported by this service (" + BlockMode.supported() + ")",
+                    400);
         }
         if (symmetric != null && symmetric.hasNonNull("PaddingType")) {
             throw new AwsException("ValidationException",
@@ -274,7 +291,7 @@ public class PaymentCryptographyCryptoHandler {
                 iv = HexFormat.of().parseHex(hex);
             }
         }
-        return new Encryption(iv);
+        return new Encryption(mode, iv);
     }
 
     /**
@@ -292,6 +309,10 @@ public class PaymentCryptographyCryptoHandler {
      */
     private static byte[] initializationVector(Encryption encryption, PaymentCryptographyKey key,
                                                String what) {
+        if (!encryption.mode().takesVector()) {
+            // The mode enciphers every block on its own, so it has no vector to start from.
+            return null;
+        }
         byte[] iv = encryption.initializationVector();
         if (iv == null) {
             return null;
@@ -303,6 +324,30 @@ public class PaymentCryptographyCryptoHandler {
                             + (isAes(key) ? "AES" : "Triple DES") + " key takes " + length, 400);
         }
         return iv;
+    }
+
+    /**
+     * The mode the request names, when the cipher the key's algorithm gives it can take it.
+     *
+     * <p>The feedback of the feedback modes is as wide as the cipher's own block at the
+     * widest, so a request that asks a Triple DES key for the mode whose feedback is a
+     * hundred and twenty-eight bits is refused here, where the caller can act on it, and
+     * not by the cipher, where it would be a server error.
+     *
+     * @param encryption the attributes of the request
+     * @param key the key the cipher runs under
+     * @param what the operation that is refused, for the message
+     */
+    private static void requireModeOfCipher(Encryption encryption, PaymentCryptographyKey key,
+                                            String what) {
+        int block = isAes(key) ? 16 : 8;
+        int feedback = encryption.mode().feedbackBits(block * 8);
+        if (feedback > block * 8) {
+            throw new AwsException("ValidationException",
+                    "the encryption mode " + encryption.mode() + " is not a mode " + what
+                            + " under a " + (isAes(key) ? "AES" : "Triple DES") + " key takes",
+                    400);
+        }
     }
 
     /**
@@ -334,10 +379,10 @@ public class PaymentCryptographyCryptoHandler {
      * @return the encrypted bytes
      */
     private byte[] encrypt(byte[] key, byte[] plaintext, byte[] initializationVector,
-                           PaymentCryptographyKey record) {
+                           BlockMode mode, PaymentCryptographyKey record) {
         return isAes(record)
-                ? PaymentCryptographyCrypto.encryptCbc(key, plaintext, initializationVector)
-                : PaymentCryptographyCrypto.tdesCbcEncrypt(key, plaintext, initializationVector);
+                ? PaymentCryptographyCrypto.encrypt(key, plaintext, initializationVector, mode)
+                : PaymentCryptographyCrypto.tdesEncrypt(key, plaintext, initializationVector, mode);
     }
 
     /**
@@ -350,14 +395,14 @@ public class PaymentCryptographyCryptoHandler {
      * @return the plaintext
      */
     private static byte[] decrypt(byte[] key, byte[] ciphertext, byte[] initializationVector,
-                                  PaymentCryptographyKey record) {
+                                  BlockMode mode, PaymentCryptographyKey record) {
         return isAes(record)
-                ? PaymentCryptographyCrypto.decryptCbc(key, ciphertext, initializationVector)
-                : PaymentCryptographyCrypto.tdesCbcDecrypt(key, ciphertext, initializationVector);
+                ? PaymentCryptographyCrypto.decrypt(key, ciphertext, initializationVector, mode)
+                : PaymentCryptographyCrypto.tdesDecrypt(key, ciphertext, initializationVector, mode);
     }
 
     /** The cipher a request asks for. */
-    private record Encryption(byte[] initializationVector) {
+    private record Encryption(BlockMode mode, byte[] initializationVector) {
     }
 
     /** The key the request names, in the member the operation names it in. */
@@ -407,6 +452,57 @@ public class PaymentCryptographyCryptoHandler {
     }
 
     /**
+     * The keyed hash leg of a MAC request.
+     *
+     * <p>The reference's guide settles the two forms the request takes: "Because the key
+     * algorithm is an HMAC algorithm, set {@code Algorithm} to {@code HMAC}, and the key
+     * sets the hash", and "Use {@code HMAC_SHA224}, {@code HMAC_SHA256},
+     * {@code HMAC_SHA384}, or {@code HMAC_SHA512} only with a TDES or AES key that has
+     * KeyUsage set to {@code TR31_M7_HMAC_KEY}". So a key that carries a hash is asked for
+     * by name, and a key of the hash usage that does not carry one is asked for by the hash
+     * the request names.
+     *
+     * @param algorithm the algorithm the request names
+     * @param key the key the mac is computed under
+     * @param mode the mode of use the operation needs
+     * @param what the operation, for the message
+     * @return the leg of the request
+     */
+    private MacLeg hmacLeg(String algorithm, PaymentCryptographyKey key, String mode, String what) {
+        requireMode(key, mode, what);
+        requireUsage(key, MAC_USAGES, what);
+        PaymentCryptographyKeyAlgorithm keyAlgorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        if (keyAlgorithm == null) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is of the algorithm " + key.getKeyAlgorithm()
+                            + ", which this service does not make", 400);
+        }
+        // The hash the mac is computed with: the one the key carries, or the one the
+        // request names.
+        String hash = keyAlgorithm.hmac() ? keyAlgorithm.hash : null;
+        if ("HMAC".equals(algorithm)) {
+            if (hash == null) {
+                throw new AwsException("ValidationException",
+                        "the key " + key.getArn() + " does not carry a hash, so the request has "
+                                + "to name one (HMAC_SHA224, HMAC_SHA256, HMAC_SHA384 or "
+                                + "HMAC_SHA512)", 400);
+            }
+        } else {
+            hash = algorithm.substring("HMAC_".length());
+            if (keyAlgorithm.hmac() && !keyAlgorithm.hash.equals(hash)) {
+                throw new AwsException("ValidationException",
+                        "the key " + key.getArn() + " carries the hash " + keyAlgorithm.hash
+                                + ", and the request asks for the " + hash, 400);
+            }
+        }
+        Digest digest = Ciphers.digestOf(hash);
+        int size = digest.getDigestSize();
+        return new MacLeg((keyBytes, message) -> Ciphers.hmac(keyBytes, message, digest),
+                material(key), size, true);
+    }
+
+    /**
      * The MAC a request asks for, and the key it is computed under.
      *
      * <p>The attributes name the algorithm: the ISO 9797-1 algorithms 1 and 3 for the
@@ -414,8 +510,8 @@ public class PaymentCryptographyCryptoHandler {
      * variants. A DUKPT MAC key is derived from the base derivation key, so that is what the
      * key has to allow.
      */
-    private MacLeg resolveMacLeg(JsonNode attributes, PaymentCryptographyKey key, String region,
-                                 String mode, String what) {
+    private MacLeg resolveMacLeg(JsonNode attributes, PaymentCryptographyKey key, String mode,
+                                 String what) {
         String variant = soleVariant(attributes);
         if (variant == null) {
             throw new AwsException("ValidationException",
@@ -437,6 +533,9 @@ public class PaymentCryptographyCryptoHandler {
                 requireFamily(key, false, what);
                 return new MacLeg(Ciphers::iso9797Alg3, material(key), LONGEST_MAC);
             }
+            if (algorithm.startsWith("HMAC")) {
+                return hmacLeg(algorithm, key, mode, what);
+            }
             if ("CMAC".equals(algorithm)) {
                 // The CMAC is the AES-CMAC of RFC 4493, which is a whole block
                 // wide, so it is cut to a length the caller asks for.
@@ -448,7 +547,8 @@ public class PaymentCryptographyCryptoHandler {
             }
             throw new AwsException("ValidationException",
                     "Algorithm '" + algorithm + "' not supported by this service "
-                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3, CMAC)", 400);
+                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3, CMAC, HMAC, "
+                            + "HMAC_SHA224, HMAC_SHA256, HMAC_SHA384, HMAC_SHA512)", 400);
         }
         if ("DukptIso9797Algorithm1".equals(variant) || "DukptIso9797Algorithm3".equals(variant)) {
             // A DUKPT MAC key is derived from the base derivation key, so that is what the key
@@ -494,11 +594,18 @@ public class PaymentCryptographyCryptoHandler {
         final byte[] keyBytes;
         /** The longest MAC this algorithm gives, in bytes. */
         final int longest;
+        /** Whether the length the request asks for is ignored, as it is for the keyed hash. */
+        final boolean ignoresLength;
 
         MacLeg(MacFunction mac, byte[] keyBytes, int longest) {
+            this(mac, keyBytes, longest, false);
+        }
+
+        MacLeg(MacFunction mac, byte[] keyBytes, int longest, boolean ignoresLength) {
             this.mac = mac;
             this.keyBytes = keyBytes;
             this.longest = longest;
+            this.ignoresLength = ignoresLength;
         }
     }
 
@@ -519,19 +626,49 @@ public class PaymentCryptographyCryptoHandler {
     }
 
     /**
-     * The length of the MAC the caller asks for, which the service computes.
+     * The length of the MAC the caller asks for, which the service computes, in bytes.
      *
-     * <p>The model says the length is a whole number of at least four bytes, and the
-     * request has been checked against it. What the algorithm gives is shorter than the
-     * model allows, so a length above it is refused here.
+     * <p>The reference counts the length in hexadecimal characters: "The unit of mac-length
+     * depends on the MAC algorithm: ISO 9797-1, CMAC, AS2805, and DUKPT – number of hex
+     * characters. For example, a length of 8 refers to 8 hex characters (4 bytes)". The
+     * reference names the lengths that hold for each algorithm: eight or sixteen characters
+     * for the Triple DES macs, and eight, sixteen or thirty-two for the cmac of an aes key,
+     * so the length is a whole number of four, eight or sixteen bytes and no longer than
+     * what the algorithm gives.
+     *
+     * <p>The keyed hash ignores the length: "The mac-length parameter has no effect for
+     * HMAC. The output MAC is always the full hash output".
+     *
+     * @param request the request, whose MacLength member may be absent
+     * @param leg the algorithm the mac is computed with
+     * @param fallback the length to use when the request names none
+     * @return the length of the mac, in bytes
      */
     private static int macLength(JsonNode request, MacLeg leg, int fallback) {
-        int length = request.path("MacLength").asInt(fallback);
-        if (length < SHORTEST_MAC || length > leg.longest) {
-            throw new AwsException("ValidationException",
-                    "MacLength must be between " + SHORTEST_MAC + " and " + leg.longest, 400);
+        JsonNode declared = request.get("MacLength");
+        if (declared == null || declared.isNull() || leg.ignoresLength) {
+            return fallback;
         }
-        return length;
+        int characters = declared.asInt(-1);
+        if (characters < 0) {
+            throw new AwsException("ValidationException", "MacLength must be a number", 400);
+        }
+        if (characters % 2 != 0) {
+            throw new AwsException("ValidationException",
+                    "MacLength is a number of hexadecimal characters, so it is a whole number "
+                            + "of bytes", 400);
+        }
+        int bytes = characters / 2;
+        if (bytes < SHORTEST_MAC || bytes > leg.longest) {
+            throw new AwsException("ValidationException",
+                    "MacLength must be between " + (SHORTEST_MAC * 2) + " and "
+                            + (leg.longest * 2) + " hexadecimal characters", 400);
+        }
+        if (bytes != 4 && bytes != 8 && bytes != 16) {
+            throw new AwsException("ValidationException",
+                    "MacLength must be 8, 16 or 32 hexadecimal characters", 400);
+        }
+        return bytes;
     }
 
     /** A blob as the protocol carries it: hexadecimal. */

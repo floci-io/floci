@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -204,6 +205,96 @@ class GlueTableResolverTest {
             assertThat(GlueTableResolver.pathFilter(table), is(nullValue()));
         }
         assertThat(GlueTableResolver.buildProjection(iceberg), equalTo("\"id\" AS \"id\", \"region\" AS \"region\""));
+    }
+
+    private static final String PARQUET_FORMAT = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat";
+
+    /**
+     * How the view reads Parquet column {@code name} declared {@code timestamp}, through {@code column}: by the file's
+     * physical type, as Athena does, a timestamp truncated to milliseconds, an INT64 as epoch milliseconds, and a
+     * string or a date failing with Athena's error.
+     */
+    private static String parquetTimestamp(String column, String name) {
+        String nanos = "epoch_ns(TRY_CAST(" + column + " AS TIMESTAMP_NS))";
+        return "date_trunc('millisecond', CASE WHEN typeof(" + column + ") = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column
+                + " AS BIGINT)) WHEN typeof(" + column + ") = 'TIMESTAMP_NS' THEN epoch_ms(" + nanos + " // 1000000 -"
+                + " CASE WHEN " + nanos + " % 1000000 < 0 THEN 1 ELSE 0 END)"
+                + " WHEN typeof(" + column + ") IN ('VARCHAR', 'BLOB') THEN error('HIVE_BAD_DATA: Malformed"
+                + " Parquet file."
+                + " Field " + name + "''s type BINARY in parquet file is incompatible with type timestamp(3) defined in"
+                + " table schema') WHEN typeof(" + column + ") = 'DATE' THEN error('SERIALIZATION_ERROR: Could not"
+                + " serialize column ''" + name + "'' of type ''timestamp(3)''') ELSE CAST(" + column + " AS TIMESTAMP)"
+                + " END)";
+    }
+
+    /**
+     * Athena reads a column declared {@code timestamp} as {@code timestamp(3)}, the UTC wall-clock time truncated to
+     * milliseconds, where DuckDB types a Parquet column by what the file stores (a UTC-adjusted one as
+     * {@code TIMESTAMP WITH TIME ZONE}, a NANOS one as {@code TIMESTAMP_NS}).
+     */
+    @Test
+    void parquetColumnsDeclaredTimestampReadAsAthenasTimestamp() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/",
+                List.of(column("id", "string"), column("created_at", "TIMESTAMP"), column("day", "date")));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"id\" AS \"id\", "
+                + parquetTimestamp("\"created_at\"", "created_at") + " AS \"created_at\", \"day\" AS \"day\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(true));
+    }
+
+    /** A name declared twice, in two cases, resolves to its first declaration, which is the column projected. */
+    @Test
+    void aNameDeclaredTwiceIsTypedByItsFirstDeclaration() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/",
+                List.of(column("ts", "string"), column("TS", "timestamp")));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"ts\" AS \"ts\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+    }
+
+    /** A table read through its registered partitions types its data columns the same way; its keys come from Glue. */
+    @Test
+    void registeredPartitionReadsTypeParquetTimestampsTheSameWay() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("created_at", "timestamp")));
+        table.setPartitionKeys(List.of(column("dt", "string")));
+
+        String select = GlueTableResolver.registeredPartitionsSelect(table,
+                List.of(new GlueTableResolver.RegisteredPartition("s3://bucket/events/dt=a", List.of("a"))));
+
+        assertThat(select, containsString(
+                "SELECT " + parquetTimestamp("r.\"created_at\"", "created_at") + " AS \"created_at\", "
+                        + "p.\"dt\" AS \"dt\" FROM read_parquet("));
+    }
+
+    /** Delimited text, which is read as text and cast to the declared types, has the same precision on Athena. */
+    @Test
+    void delimitedTextTimestampsReadAtMillisecondPrecision() {
+        Table table = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int"), column("created_at", "timestamp")));
+        table.getStorageDescriptor().setSerdeInfo(new StorageDescriptor.SerDeInfo());
+        table.getStorageDescriptor().getSerdeInfo().setParameters(Map.of("field.delim", "\t"));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("TRY_CAST(\"id\" AS INTEGER) AS \"id\", "
+                + "date_trunc('millisecond', TRY_CAST(\"created_at\" AS TIMESTAMP)) AS \"created_at\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+    }
+
+    /** JSON, Iceberg tables and partition keys keep their projection. */
+    @Test
+    void timestampsOutsideParquetAndTextDataColumnsKeepTheirProjection() {
+        Table json = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("created_at", "timestamp")));
+        json.getStorageDescriptor().setSerdeInfo(new StorageDescriptor.SerDeInfo());
+        json.getStorageDescriptor().getSerdeInfo().setSerializationLibrary("org.openx.data.jsonserde.JsonSerDe");
+        Table iceberg = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("created_at", "timestamp")));
+        iceberg.setParameters(Map.of("table_type", "ICEBERG"));
+        Table partitioned = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("id", "string")));
+        partitioned.setPartitionKeys(List.of(column("hour", "timestamp")));
+
+        for (Table table : List.of(json, iceberg, partitioned)) {
+            assertThat(GlueTableResolver.buildProjection(table), not(containsString("date_trunc")));
+            assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+        }
     }
 
     @Test

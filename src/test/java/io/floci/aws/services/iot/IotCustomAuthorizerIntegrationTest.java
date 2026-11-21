@@ -6,6 +6,7 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -331,7 +332,68 @@ class IotCustomAuthorizerIntegrationTest {
         }
     }
 
+    @Test
+    void mqtt3UnsignedConnectNamingNoAuthorizerWithoutADefaultIsRefused() {
+        String clientId = "cauth-v3-none-" + System.nanoTime();
+
+        MqttException refused = assertThrows(MqttException.class,
+                () -> connectV3(ws(""), clientId, clientId, "allow", Map.of()));
+
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+        verify(lambdaService, never()).invokeArn(anyString(), any(byte[].class), any(InvocationType.class));
+    }
+
+    @Test
+    void mqtt5UnsignedConnectNamingNoAuthorizerWithoutADefaultGetsReasonCode135() {
+        String clientId = "cauth-v5-none-" + System.nanoTime();
+
+        org.eclipse.paho.mqttv5.common.MqttException refused = assertThrows(org.eclipse.paho.mqttv5.common.MqttException.class,
+                () -> connectV5(ws(""), clientId, clientId, "allow"));
+
+        assertEquals(135, refused.getReasonCode());
+    }
+
+    @Test
+    void anUnsignedConnectNamingNoAuthorizerGoesThroughTheDefaultAuthorizer() throws Exception {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-" + System.nanoTime();
+
+        connectV3(ws(""), clientId, clientId, "allow", Map.of()).disconnect();
+
+        JsonNode event = takeEvent();
+        assertEquals(clientId, event.path("protocolData").path("mqtt").path("username").asText());
+        assertEquals(base64("allow"), event.path("protocolData").path("mqtt").path("password").asText());
+    }
+
+    @Test
+    void theDefaultAuthorizerRefusesAConnectItDenies() {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-deny-" + System.nanoTime();
+
+        MqttException refused = assertThrows(MqttException.class,
+                () -> connectV3(ws(""), clientId, clientId, "deny", Map.of()));
+
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+    }
+
+    @Test
+    void aSigV4SignedConnectNamingNoAuthorizerSkipsTheDefaultAuthorizer() throws Exception {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-sigv4-" + System.nanoTime();
+
+        connectV3(ws(IotWebSocketSigV4.QUERY), clientId, clientId, "deny", Map.of()).disconnect();
+
+        verify(lambdaService, never()).invokeArn(anyString(), any(byte[].class), any(InvocationType.class));
+    }
+
     // Helpers
+
+    private void setDefaultAuthorizer() {
+        given().contentType("application/json").body("{\"authorizerName\": \"" + authorizer + "\"}")
+        .when().post("/default-authorizer")
+        .then().statusCode(200);
+        cleanup.register(() -> given().when().delete("/default-authorizer").then().statusCode(200));
+    }
 
     private MqttClient connectV3(String url, String clientId, String username, String password, Map<String, String> headers)
             throws Exception {

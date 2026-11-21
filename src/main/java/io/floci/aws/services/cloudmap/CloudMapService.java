@@ -14,6 +14,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.dns.DnsRecord;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -56,9 +57,12 @@ import java.util.function.Function;
  * whose status reaches SUCCESS immediately (or after a configurable delay).
  */
 @ApplicationScoped
-public class CloudMapService {
+public class CloudMapService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(CloudMapService.class);
+    private static final String SERVICE = "servicediscovery";
+    private static final String NAMESPACE_RESOURCE = "namespace/";
+    private static final String SERVICE_RESOURCE = "service/";
     private static final String ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
     /** Route 53 answers a service discovery query with at most eight records. */
     private static final int MAX_DNS_ANSWERS = 8;
@@ -161,12 +165,17 @@ public class CloudMapService {
         if (tags != null) {
             ns.setTags(tags);
         }
-        ns.setArn(regionResolver.buildArn("servicediscovery", region, "namespace/" + ns.getId()));
+        ns.setArn(regionResolver.buildArn(SERVICE, region, NAMESPACE_RESOURCE + ns.getId()));
         return ns;
     }
 
     public Namespace getNamespace(String id) {
         return requireNamespace(id);
+    }
+
+    /** Whether a namespace is a DNS one, public or private, whose service names are DNS labels. */
+    public static boolean isDnsNamespace(Namespace namespace) {
+        return "DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType());
     }
 
     public List<Namespace> listNamespaces(String region) {
@@ -231,14 +240,11 @@ public class CloudMapService {
             // DnsConfig may carry the namespace id when the top-level field is absent.
             resolvedNamespaceId = dnsConfigNode.path("NamespaceId").textValue();
         }
-        Namespace namespace = resolvedNamespaceId == null ? null : requireNamespace(resolvedNamespaceId);
-        boolean dnsNamespace = namespace != null && ("DNS_PRIVATE".equals(namespace.getType())
-                || "DNS_PUBLIC".equals(namespace.getType()));
+        if (resolvedNamespaceId != null) {
+            requireNamespace(resolvedNamespaceId);
+        }
         final String nsId = resolvedNamespaceId;
-        boolean exists = scan(serviceStore).stream()
-                .anyMatch(s -> region.equals(s.getRegion()) && Objects.equals(nsId, s.getNamespaceId())
-                        && (dnsNamespace ? name.equalsIgnoreCase(s.getName()) : name.equals(s.getName())));
-        if (exists) {
+        if (findServiceByName(name, nsId, region).isPresent()) {
             throw new AwsException("ServiceAlreadyExists",
                     "A service named \"" + name + "\" already exists.", 400);
         }
@@ -259,7 +265,7 @@ public class CloudMapService {
         if (tags != null) {
             service.setTags(tags);
         }
-        service.setArn(regionResolver.buildArn("servicediscovery", region, "service/" + service.getId()));
+        service.setArn(regionResolver.buildArn(SERVICE, region, SERVICE_RESOURCE + service.getId()));
         serviceStore.put(service.getId(), service);
         if (nsId != null) {
             namespaceStore.get(nsId).ifPresent(n -> {
@@ -272,6 +278,19 @@ public class CloudMapService {
 
     public Service getService(String id) {
         return requireService(id);
+    }
+
+    /**
+     * The service named {@code name} in the namespace {@code namespaceId} of {@code region}, of
+     * which there is at most one. A DNS namespace compares names without case, as DNS labels are.
+     */
+    public Optional<Service> findServiceByName(String name, String namespaceId, String region) {
+        Namespace namespace = namespaceId == null ? null : namespaceStore.get(namespaceId).orElse(null);
+        boolean dnsNamespace = namespace != null && isDnsNamespace(namespace);
+        return scan(serviceStore).stream()
+                .filter(s -> region.equals(s.getRegion()) && Objects.equals(namespaceId, s.getNamespaceId())
+                        && (dnsNamespace ? name.equalsIgnoreCase(s.getName()) : name.equals(s.getName())))
+                .findFirst();
     }
 
     public List<Service> listServices(String region, String namespaceIdFilter) {
@@ -347,7 +366,7 @@ public class CloudMapService {
         }
         if (dnsRecordTtl(service, "SRV") >= 0 && service.getNamespaceId() != null) {
             Namespace namespace = requireNamespace(service.getNamespaceId());
-            if ("DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType())) {
+            if (isDnsNamespace(namespace)) {
                 try {
                     DnsRecord.encodeName(instanceId + "." + service.getName() + "." + namespace.getName());
                 } catch (IllegalArgumentException e) {
@@ -741,7 +760,7 @@ public class CloudMapService {
     private List<Namespace> dnsNamespacesByLongestName() {
         return scan(namespaceStore).stream()
                 .filter(n -> n.getName() != null && !n.getName().isBlank())
-                .filter(n -> "DNS_PRIVATE".equals(n.getType()) || "DNS_PUBLIC".equals(n.getType()))
+                .filter(CloudMapService::isDnsNamespace)
                 .sorted(Comparator.comparingInt((Namespace n) -> n.getName().length()).reversed())
                 .toList();
     }
@@ -860,26 +879,81 @@ public class CloudMapService {
         return taggable(resourceArn).getTags();
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    /**
+     * Gives the namespace or the service a new map holding its tags and {@code tags}. Tag calls run one at a time, so
+     * two of them never lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = taggableRaw(resourceArn);
         if (resource instanceof Namespace ns) {
-            ns.getTags().putAll(tags);
+            Map<String, String> merged = new LinkedHashMap<>(ns.getTags());
+            merged.putAll(tags);
+            ns.setTags(merged);
             namespaceStore.put(ns.getId(), ns);
         } else if (resource instanceof Service s) {
-            s.getTags().putAll(tags);
+            Map<String, String> merged = new LinkedHashMap<>(s.getTags());
+            merged.putAll(tags);
+            s.setTags(merged);
             serviceStore.put(s.getId(), s);
         }
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    /** Gives the namespace or the service a new map without {@code tagKeys}, one tag call at a time. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         Object resource = taggableRaw(resourceArn);
         if (resource instanceof Namespace ns) {
-            tagKeys.forEach(ns.getTags()::remove);
+            Map<String, String> remaining = new LinkedHashMap<>(ns.getTags());
+            tagKeys.forEach(remaining::remove);
+            ns.setTags(remaining);
             namespaceStore.put(ns.getId(), ns);
         } else if (resource instanceof Service s) {
-            tagKeys.forEach(s.getTags()::remove);
+            Map<String, String> remaining = new LinkedHashMap<>(s.getTags());
+            tagKeys.forEach(remaining::remove);
+            s.setTags(remaining);
             serviceStore.put(s.getId(), s);
         }
+    }
+
+    @Override
+    public String namespace() {
+        return SERVICE;
+    }
+
+    /** A request names a namespace or a service by the id its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the namespace or the service whose ARN is {@code arn}, in the request's account, where the tag
+     * handlers read: an ARN of another account names none. Each is read in place by the id its ARN ends in, one stored
+     * before storage was account-aware included. That is the id the handlers find it by, in every Region, so an ARN
+     * naming another Region than the resource's reads its tags too, as a request sent there acts on it. A tag without
+     * a value reads as an empty one. Tag calls give the resource a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = regionResolver.getAccountId();
+        if (!parsed.accountId().equals(account)) {
+            return Map.of();
+        }
+        String resource = parsed.resource();
+        Optional<Map<String, String>> tags = Optional.empty();
+        if (resource.startsWith(NAMESPACE_RESOURCE)) {
+            tags = AccountAwareStorageBackend.readInAccount(namespaceStore, account,
+                    resource.substring(NAMESPACE_RESOURCE.length())).map(Namespace::getTags);
+        } else if (resource.startsWith(SERVICE_RESOURCE)) {
+            tags = AccountAwareStorageBackend.readInAccount(serviceStore, account,
+                    resource.substring(SERVICE_RESOURCE.length())).map(Service::getTags);
+        }
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.orElse(Map.of()).forEach((key, value) -> copy.put(key, value == null ? "" : value));
+        return copy;
     }
 
     private interface Taggable { Map<String, String> getTags(); }
@@ -896,7 +970,7 @@ public class CloudMapService {
         if (resourceArn == null) {
             throw new AwsException("InvalidInput", "ResourceARN is required.", 400);
         }
-        String id = AwsArnUtils.resourceIfArnFor(resourceArn, "servicediscovery")
+        String id = AwsArnUtils.resourceIfArnFor(resourceArn, SERVICE)
                 .map(resource -> resource.substring(resource.lastIndexOf('/') + 1))
                 .orElse(resourceArn);
         Optional<Namespace> ns = namespaceStore.get(id);

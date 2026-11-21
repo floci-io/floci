@@ -9,9 +9,11 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -47,15 +50,21 @@ class CloudWatchMetricsQueryHandlerTest {
             metricsService, mock(CloudWatchDashboardsService.class),
             mock(CloudWatchMetricStreamsService.class));
 
-    @Test
-    void aLargeMixedBatchDoesNotRescanEveryFormFieldForEachDatum() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aLargeMixedBatchDoesNotRescanEveryFormFieldForEachDatum(boolean weighted) {
         MultivaluedMap<String, String> params = spy(new MultivaluedHashMap<String, String>());
         params.putSingle("Namespace", "LargeBatch");
         for (String list : List.of("MetricData", "EntityMetricData.member.2.MetricData")) {
             for (int index = 1; index <= 500; index++) {
                 String prefix = list + ".member." + index + ".";
                 params.putSingle(prefix + "MetricName", "Metric" + index);
-                params.putSingle(prefix + "Value", Integer.toString(index));
+                if (weighted) {
+                    params.putSingle(prefix + "Values.member.1", Integer.toString(index));
+                    params.putSingle(prefix + "Counts.member.1", "2");
+                } else {
+                    params.putSingle(prefix + "Value", Integer.toString(index));
+                }
             }
         }
 
@@ -65,8 +74,13 @@ class CloudWatchMetricsQueryHandlerTest {
         verify(metricsService).putMetricData(eq("LargeBatch"), datums.capture(), eq(REGION));
         assertEquals(1000, datums.getValue().size());
         assertEquals(500.0, datums.getValue().getLast().getValue());
+        if (weighted) {
+            assertEquals(2.0, datums.getValue().getLast().getSampleCount());
+            assertEquals(1000.0, datums.getValue().getLast().getSum());
+        }
         // Bound whole-map scans independently of the number of datums; no timing assertion.
         verify(params, atMost(3)).keySet();
+        verify(params, atMost(3)).entrySet();
     }
 
     @ParameterizedTest
@@ -226,7 +240,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertTrue(captor.getValue().isActionsEnabled());
     }
 
@@ -241,7 +255,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertFalse(captor.getValue().isActionsEnabled());
     }
 
@@ -259,7 +273,7 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertEquals(3, captor.getValue().getEvaluationPeriods());
         assertNull(captor.getValue().getDatapointsToAlarm());
     }
@@ -276,8 +290,44 @@ class CloudWatchMetricsQueryHandlerTest {
         handler.handle("PutMetricAlarm", params, REGION);
 
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
-        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString(), isNull());
         assertEquals(2, captor.getValue().getDatapointsToAlarm());
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {"abc, TestAlarm", "60.0, TestAlarm", "' ', TestAlarm", "abc, -"})
+    void aValueThatIsNoIntegerIsAnInvalidParameterValue(String interval, String name) {
+        MultivaluedMap<String, String> params = alarmParams(name, interval);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", params, REGION));
+
+        assertEquals("InvalidParameterValue", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        verify(metricsService, never()).putMetricAlarm(any(), anyString(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {"-, -", "'', -", "60, 60", "' 60 ', 60",
+            "99999999999999999999, 99999999999999999999"})
+    void anIntegerReachesTheServiceAndAnEmptyValueIsNone(String interval, String expected) {
+        handler.handle("PutMetricAlarm", alarmParams("TestAlarm", interval), REGION);
+
+        verify(metricsService).putMetricAlarm(any(MetricAlarm.class), eq(REGION),
+                expected == null ? isNull() : eq(new BigInteger(expected)));
+    }
+
+    private static MultivaluedMap<String, String> alarmParams(String name, String interval) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        if (name != null) {
+            params.putSingle("AlarmName", name);
+        }
+        params.putSingle("MetricName", "M");
+        params.putSingle("Namespace", "NS");
+        if (interval != null) {
+            params.putSingle("EvaluationInterval", interval);
+        }
+        return params;
     }
 
     // The JSON handler forwards the Unit filter now; this pins the Query path to the same

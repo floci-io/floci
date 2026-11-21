@@ -30,7 +30,7 @@ class ContainerLifecycleManagerEphemeralTest {
         images = mock(ImageCacheService.class);
         when(images.ensureImageExists(spec.image())).thenReturn("image-id");
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        manager = spy(new ContainerLifecycleManager(docker, images, mock(ContainerDetector.class), config));
+        manager = spy(new ContainerLifecycleManager(docker, docker, images, mock(ContainerDetector.class), config));
         create = mock(CreateContainerCmd.class, RETURNS_SELF);
         CreateContainerResponse response = new CreateContainerResponse();
         response.setId("owned-id");

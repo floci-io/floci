@@ -80,6 +80,11 @@ public final class PinnedHttpClient {
         }
     }
 
+    /** Whether {@code name} is an RFC 9110 field name. */
+    public static boolean isValidHeaderName(String name) {
+        return name != null && HEADER_NAME.matcher(name).matches();
+    }
+
     /**
      * Rejects a header that would not survive as one HTTP/1.1 header line: a name that is not a
      * token, or a value carrying NUL, CR, LF or any other control character besides horizontal tab.
@@ -92,7 +97,7 @@ public final class PinnedHttpClient {
      * @throws InvalidRequestHeaderException when the name or value cannot be sent
      */
     public static void requireValidHeader(String name, String value) throws InvalidRequestHeaderException {
-        if (name == null || !HEADER_NAME.matcher(name).matches()) {
+        if (!isValidHeaderName(name)) {
             throw new InvalidRequestHeaderException("invalid request header name");
         }
         if (value == null) {

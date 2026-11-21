@@ -14,7 +14,7 @@ public class BudgetActionRecord {
     private String budgetName;
     private String actionId;
     private JsonNode action;
-    private JsonNode resourceTags;
+    private volatile JsonNode resourceTags;
     private List<JsonNode> histories = new ArrayList<>();
 
     public BudgetActionRecord() {}
