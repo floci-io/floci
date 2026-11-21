@@ -14,11 +14,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
 class PipesServiceTest {
@@ -30,7 +34,7 @@ class PipesServiceTest {
 
     @BeforeEach
     void setUp() {
-        storage = AccountAwareStorageBackend.inMemory("000000000000");
+        storage = Mockito.spy(AccountAwareStorageBackend.inMemory("000000000000"));
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         Mockito.doReturn(storage).when(storageFactory)
                 .create(Mockito.anyString(), Mockito.anyString(), Mockito.any());
@@ -159,6 +163,28 @@ class PipesServiceTest {
                 pipesService.describePipe("nonexistent", "us-east-1"));
         assertEquals("NotFoundException", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void failedUpdateDoesNotMutateThePreviouslyStoredPipe() {
+        pipesService.createPipe("durable-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:source",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                "original description", DesiredState.STOPPED, null,
+                null, null, null, null, "us-east-1");
+        Pipe originalStored = storage.get("us-east-1::durable-pipe").orElseThrow();
+        doThrow(new UncheckedIOException(new IOException("disk full")))
+                .when(storage).put(eq("us-east-1::durable-pipe"), any(Pipe.class));
+
+        assertThrows(UncheckedIOException.class, () -> pipesService.updatePipe("durable-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:new-target", null, "new description",
+                null, null, null, null, null, "us-east-1"));
+
+        Pipe retained = storage.get("us-east-1::durable-pipe").orElseThrow();
+        assertSame(originalStored, retained);
+        assertEquals("original description", retained.getDescription());
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:target", retained.getTarget());
     }
 
     @Test

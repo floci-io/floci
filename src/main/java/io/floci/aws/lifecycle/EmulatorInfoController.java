@@ -256,16 +256,33 @@ public class EmulatorInfoController {
                 service.beforeReset();
             }
             // Storage still precedes clear(): services recreate their bootstrap state there.
-            storageFactory.clearAll();
+            // A failed backend must not prevent the remaining backends or service hooks from
+            // being cleared; StorageFactory reports the aggregate failure after its full pass.
+            try {
+                storageFactory.clearAll();
+            } catch (RuntimeException e) {
+                failure = e;
+            }
             for (Resettable service : services) {
-                service.clear();
+                try {
+                    service.clear();
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
             }
         } catch (RuntimeException e) {
-            failure = e;
+            if (failure == null) {
+                failure = e;
+            } else {
+                failure.addSuppressed(e);
+            }
         } finally {
-            // Every service, not only those whose beforeReset() ran: the teardowns above already
-            // shut down the pools that afterReset() restores, and a beforeReset() that throws
-            // would otherwise leave every later service with its pool terminated for good.
+            // afterReset is a lifecycle guarantee: every service is resumed even if a prior
+            // drain, durable wipe, or service clear failed. The reset still reports the failure.
             for (Resettable service : services.reversed()) {
                 try {
                     service.afterReset();

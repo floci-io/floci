@@ -5,6 +5,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +43,17 @@ class PersistentStorageTest {
         store2.load();
         assertEquals("value1", store2.get("key1").orElseThrow());
         assertEquals("value2", store2.get("key2").orElseThrow());
+    }
+
+    @Test
+    void failedDiskWriteDoesNotPublishAnInMemoryMutation() throws Exception {
+        Path occupiedPath = tempDir.resolve("occupied.json");
+        Files.createDirectory(occupiedPath);
+        PersistentStorage<String, String> failing = new PersistentStorage<>(
+                occupiedPath, new TypeReference<Map<String, String>>() {});
+
+        assertThrows(UncheckedIOException.class, () -> failing.put("key", "value"));
+        assertTrue(failing.get("key").isEmpty());
     }
 
     @Test

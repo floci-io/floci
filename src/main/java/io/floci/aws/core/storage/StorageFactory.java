@@ -291,12 +291,19 @@ public class StorageFactory {
         throwFirst(failures);
     }
 
-    /** Clear all storage backends. */
+    /**
+     * Clear every storage backend and flush every backend even when one clear fails. A failed
+     * persistent clear leaves that backend's previous in-memory snapshot intact; continuing
+     * prevents an unrelated backend from being skipped, while the aggregated failure keeps the
+     * caller from treating a partial reset as successful.
+     */
     public synchronized void clearAll() {
+        List<RuntimeException> failures = new ArrayList<>();
         for (StorageBackend<?, ?> backend : allBackends) {
-            backend.clear();
+            runCollecting(backend::clear, failures);
         }
-        flushAll();
+        runCollecting(this::flushAll, failures);
+        throwFirst(failures);
     }
 
     /**

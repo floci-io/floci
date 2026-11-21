@@ -6,6 +6,7 @@ import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import org.jboss.logging.Logger;
 
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -149,7 +150,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             }
             result = delegate.get(key);
             if (result.isPresent()) {
-                delegate.put(prefixedKey, result.get());
+                try {
+                    delegate.put(prefixedKey, result.get());
+                } catch (UncheckedIOException exception) {
+                    // A legacy hit remains readable even when its best-effort migration cannot
+                    // be committed. Keep the original key so a later read can retry the move.
+                    LOG.warnv(exception, "Could not migrate legacy storage key {0}; keeping the original entry", key);
+                    return result;
+                }
                 trackOwner(prefix());
                 delegate.delete(key);
             }
