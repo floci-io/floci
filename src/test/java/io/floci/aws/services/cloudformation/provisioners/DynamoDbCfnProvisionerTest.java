@@ -11,6 +11,7 @@ import io.floci.aws.services.dynamodb.DynamoDbService;
 import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
+import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -50,7 +51,8 @@ class DynamoDbCfnProvisionerTest {
     private static final String TABLE_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/" + TABLE_NAME;
     private static final String TABLE_ID = "2d4c5c3a-1b6e-4a1d-9f0a-7b1c2d3e4f50";
     private static final String STREAM_ARN = TABLE_ARN + "/stream/2026-01-01T00:00:00.000";
-    private static final String TTL_PROPS = "{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+    private static final String TTL_PROPS = "{\"TableName\":\"orders\","
+            + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":"
             + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}";
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
@@ -108,6 +110,20 @@ class DynamoDbCfnProvisionerTest {
         return mapper.readTree(json);
     }
 
+    private OngoingStubbing<TableDefinition> stubOnDemandCreate() {
+        return stubOnDemandCreate(null);
+    }
+
+    private OngoingStubbing<TableDefinition> stubOnDemandCreate(String name) {
+        return when(dynamoDb.createTable(name == null ? anyString() : eq(name), anyList(), anyList(), any(), any(),
+                anyList(), anyList(), anyList(), eq("PAY_PER_REQUEST"), anyString()));
+    }
+
+    private void verifyOnDemandCreate(String name) {
+        verify(dynamoDb).createTable(eq(name), anyList(), anyList(), any(), any(), anyList(), anyList(), anyList(),
+                eq("PAY_PER_REQUEST"), eq("us-east-1"));
+    }
+
     @Test
     void ownsExactlyTheThreeDynamoDbTypes() {
         assertEquals(Set.of("AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable", "Custom::DynamoDBReplica"),
@@ -117,11 +133,11 @@ class DynamoDbCfnProvisionerTest {
     /** The registry schema declares only Arn and StreamArn read-only on a plain table; TableId belongs to the global table. */
     @Test
     void tablePublishesOnlyArnWithoutAStream() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), ctx());
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}"), ctx());
 
         assertEquals(TABLE_NAME, r.getPhysicalId());
         assertEquals(Set.of("Arn"), r.getAttributes().keySet());
@@ -194,12 +210,13 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void streamedTablePublishesStreamArn() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1")).thenReturn(table(true));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"StreamSpecification\":"
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"StreamSpecification\":"
                 + "{\"StreamViewType\":\"NEW_AND_OLD_IMAGES\"}}"), ctx());
 
         assertEquals(Set.of("Arn", "StreamArn"), r.getAttributes().keySet());
@@ -315,28 +332,28 @@ class DynamoDbCfnProvisionerTest {
         String priorName = "my-stack-Orders-0123456789ab";
         TableDefinition existing = table(false);
         existing.setTableName(priorName);
-        when(dynamoDb.createTable(eq(priorName), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate(priorName)
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(priorName, "us-east-1")).thenReturn(existing);
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(priorName);
 
-        provisioner.provision(r, props("{}"), updateCtx(priorName));
+        provisioner.provision(r, props("{\"BillingMode\":\"PAY_PER_REQUEST\"}"), updateCtx(priorName));
 
         assertEquals(priorName, r.getPhysicalId());
-        verify(dynamoDb).createTable(eq(priorName), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                eq("us-east-1"));
+        verifyOnDemandCreate(priorName);
         verify(dynamoDb, atLeastOnce()).describeTable(priorName, "us-east-1");
     }
 
     @Test
     void tagsAreAppliedAndStaleOnesRemoved() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("old", "1", "env", "dev"));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
                 ctx());
 
         verify(dynamoDb).untagResource(TABLE_ARN, List.of("old"), "us-east-1");
@@ -351,19 +368,20 @@ class DynamoDbCfnProvisionerTest {
 
     /** The update path: the table already exists and reports {@code current}. */
     private void existingTable(TableDefinition current) {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(current);
     }
 
     @Test
     void createWithTimeToLiveEnablesItOnce() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":"
                 + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"), ctx());
 
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
@@ -371,7 +389,7 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void enabledGivenAsAStringIsResolvedThroughTheEngine() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         ProvisionContext ctx = ctx();
@@ -384,7 +402,8 @@ class DynamoDbCfnProvisionerTest {
         });
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":"
                 + "{\"AttributeName\":\"expiresAt\",\"Enabled\":{\"Ref\":\"TtlOn\"}}}"), ctx);
 
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
@@ -396,7 +415,8 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":"
                 + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"), updateCtx(TABLE_NAME));
 
         verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
@@ -408,7 +428,8 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"Enabled\":false}}"),
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":{\"Enabled\":false}}"),
                 updateCtx(TABLE_NAME));
 
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
@@ -420,7 +441,8 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME, TTL_PROPS));
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\"}"), updateCtx(TABLE_NAME, TTL_PROPS));
 
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
     }
@@ -432,8 +454,9 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
-                updateCtx(TABLE_NAME, "{\"TableName\":\"orders\"}"));
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+                updateCtx(TABLE_NAME, "{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}"));
 
         verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
     }
@@ -441,7 +464,8 @@ class DynamoDbCfnProvisionerTest {
     @Test
     void timeToLiveWithoutEnabledFailsModelValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"AttributeName\":\"exp\"}}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":{\"AttributeName\":\"exp\"}}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -455,7 +479,8 @@ class DynamoDbCfnProvisionerTest {
     @Test
     void timeToLiveWithANonBooleanEnabledFailsModelValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":"
                 + "{\"AttributeName\":\"exp\",\"Enabled\":\"tru\"}}");
         ProvisionContext ctx = ctx();
 
@@ -470,7 +495,8 @@ class DynamoDbCfnProvisionerTest {
     @Test
     void aBooleanTimeToLiveFailsTemplateValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":false}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":false}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -483,7 +509,8 @@ class DynamoDbCfnProvisionerTest {
     @Test
     void aListTimeToLiveFailsTemplateValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":[]}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":[]}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -498,7 +525,8 @@ class DynamoDbCfnProvisionerTest {
         existingTable(withTimeToLive(table(false), "expiresAt"));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":\"off\"}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":\"off\"}");
         ProvisionContext ctx = updateCtx(TABLE_NAME, TTL_PROPS);
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -514,7 +542,8 @@ class DynamoDbCfnProvisionerTest {
         r.setPhysicalId(TABLE_NAME);
         // Left by an earlier successful update; it must not make the engine skip its own restore.
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, "{}");
-        JsonNode props = props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
                 + "\"TimeToLiveSpecification\":{\"AttributeName\":\"deleteAfter\",\"Enabled\":true}}");
         ProvisionContext ctx = updateCtx(TABLE_NAME);
 
@@ -546,7 +575,8 @@ class DynamoDbCfnProvisionerTest {
         r.setPhysicalId(TABLE_NAME);
         r.getAttributes().put("Arn", TABLE_ARN);
         r.getAttributes().put("StreamArn", STREAM_ARN);
-        JsonNode props = props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
                 + "\"TimeToLiveSpecification\":{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}");
         ProvisionContext ctx = updateCtx(TABLE_NAME);
 
@@ -569,7 +599,7 @@ class DynamoDbCfnProvisionerTest {
     }
 
     private void createdTableWhoseTimeToLiveCallFails() {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         doThrow(new AwsException("LimitExceededException", "boom", 400))
@@ -684,7 +714,7 @@ class DynamoDbCfnProvisionerTest {
 
     @Test
     void successfulCreateLeavesNoOwnershipMarker() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -698,7 +728,8 @@ class DynamoDbCfnProvisionerTest {
     @Test
     void enabledTimeToLiveWithoutAnAttributeNameFailsBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"Enabled\":true}}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"TimeToLiveSpecification\":{\"Enabled\":true}}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -718,7 +749,8 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
         r.getAttributes().put("StreamArn", STREAM_ARN);
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
                 + "\"TimeToLiveSpecification\":{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"),
                 updateCtx(TABLE_NAME));
         // The table as the update left it: retagged, streamless and expiring.
@@ -741,7 +773,8 @@ class DynamoDbCfnProvisionerTest {
         existingTable(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
-        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
                 updateCtx(TABLE_NAME));
         when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "prod"));
         doThrow(new AwsException("InternalServerError", "boom", 500))
@@ -758,14 +791,15 @@ class DynamoDbCfnProvisionerTest {
      */
     @Test
     void replacingUpdateDropsAStaleSnapshotAndReportsNoRollback() throws Exception {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table(false));
         when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId("orders-v1");
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, "{}");
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx("orders-v1"));
+        provisioner.provision(r, props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\"}"), updateCtx("orders-v1"));
 
         assertFalse(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
         assertFalse(provisioner.rollbackUpdate(r));

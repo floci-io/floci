@@ -65,7 +65,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
     /** Make provisioning take the update path: the table already exists, with a live stream. */
     private void existingStreamedTable() {
         when(dynamoDbService.createTable(anyString(), anyList(), anyList(), any(), any(),
-                anyList(), anyList(), anyString()))
+                anyList(), anyList(), anyList(), anyString(), anyString()))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDbService.describeTable(TABLE, "us-east-1"))
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
@@ -113,7 +113,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
 
         StackResource resource = provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "BillingMode":"PAY_PER_REQUEST",
@@ -134,7 +134,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("KEYS_ONLY"));
 
         provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "StreamSpecification":{"StreamViewType":"KEYS_ONLY"}}
@@ -154,7 +154,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
 
         provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "StreamSpecification":{}}
@@ -168,7 +168,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
     @Test
     void tableWithoutStreamSpecificationGetsNoStreamAndNoStreamArnAttribute() throws Exception {
         StackResource resource = provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}]}
                 """);
@@ -188,7 +188,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
         when(dynamoDbService.disableStream(TABLE, "us-east-1")).thenReturn(streamDisabled());
 
         StackResource resource = reprovisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}]}
                 """, Map.of("Arn", TABLE_ARN, "StreamArn", STREAM_ARN));
@@ -208,7 +208,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("NEW_AND_OLD_IMAGES"));
 
         StackResource resource = provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "StreamSpecification":{"StreamViewType":"NEW_AND_OLD_IMAGES"}}
@@ -222,7 +222,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
     @Test
     void streamlessTableIsNotDisabledAgain() throws Exception {
         provisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}]}
                 """);
@@ -241,7 +241,7 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
                 .thenReturn(streamed("KEYS_ONLY"));
 
         StackResource resource = reprovisionTable("""
-                {"TableName":"stream-repro",
+                {"TableName":"stream-repro","BillingMode":"PAY_PER_REQUEST",
                  "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
                  "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
                  "StreamSpecification":{"StreamViewType":"KEYS_ONLY"}}

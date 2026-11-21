@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.HashMap;
 import java.util.List;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -49,13 +51,16 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     private static final String OTHER_STREAM_ARN = "arn:aws:kinesis:us-east-1:000000000000:stream/orders-audit";
     private static final String MILLISECOND = KinesisStreamingDestination.PRECISION_MILLISECOND;
     private static final String MICROSECOND = KinesisStreamingDestination.PRECISION_MICROSECOND;
-    private static final String DECLARED = "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+    private static final String DECLARED = "{\"TableName\":\"orders\","
+            + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
             + "{\"StreamArn\":\"" + STREAM_ARN + "\"}}";
-    private static final String DECLARED_MICROSECOND = "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+    private static final String DECLARED_MICROSECOND = "{\"TableName\":\"orders\","
+            + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
             + "{\"StreamArn\":\"" + STREAM_ARN + "\",\"ApproximateCreationDateTimePrecision\":\"MICROSECOND\"}}";
-    private static final String DECLARED_OTHER = "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+    private static final String DECLARED_OTHER = "{\"TableName\":\"orders\","
+            + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
             + "{\"StreamArn\":\"" + OTHER_STREAM_ARN + "\"}}";
-    private static final String UNDECLARED = "{\"TableName\":\"orders\"}";
+    private static final String UNDECLARED = "{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}";
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final NativeDynamoDbTableService tableService = mock(NativeDynamoDbTableService.class);
@@ -112,14 +117,24 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
         return new KinesisStreamingDestination(streamArn, precision);
     }
 
+    private OngoingStubbing<TableDefinition> stubOnDemandCreate() {
+        return when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
+                anyList(), eq("PAY_PER_REQUEST"), anyString()));
+    }
+
+    private void verifyNoCreate() {
+        verify(dynamoDb, never()).createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
+                anyList(), anyString(), anyString());
+    }
+
     private void newTable() {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenReturn(table());
         when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(table());
     }
 
     private void existingTable(TableDefinition current) {
-        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+        stubOnDemandCreate()
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
         when(dynamoDb.describeTable(TABLE_NAME, REGION)).thenReturn(current);
     }
@@ -154,28 +169,28 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     @Test
     void blockWithoutAStreamArnFailsModelValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{}}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":{}}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
         assertEquals("InvalidRequest", e.getErrorCode());
-        verify(dynamoDb, never()).createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                anyString());
+        verifyNoCreate();
     }
 
     @Test
     void unknownPrecisionFailsModelValidationBeforeTheTableIsCreated() throws Exception {
         StackResource r = resource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
                 + "{\"StreamArn\":\"" + STREAM_ARN + "\",\"ApproximateCreationDateTimePrecision\":\"SECOND\"}}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
         assertEquals("InvalidRequest", e.getErrorCode());
-        verify(dynamoDb, never()).createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(),
-                anyString());
+        verifyNoCreate();
     }
 
     @ParameterizedTest
@@ -183,7 +198,8 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     void blockThatIsNotAnObjectFailsTemplateValidationBeforeTheTableIsCreated(String value, String found)
             throws Exception {
         StackResource r = resource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":" + value + "}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":" + value + "}");
         ProvisionContext ctx = ctx();
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -198,7 +214,8 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     void updateWithABlockThatIsNotAnObjectLeavesTheDeclaredDestinationActive() throws Exception {
         existingTable(table(active(STREAM_ARN, MILLISECOND)));
         StackResource r = existingResource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":\"off\"}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":\"off\"}");
         ProvisionContext ctx = updateCtx(DECLARED);
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
@@ -232,7 +249,8 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     void createWithAStreamNameInsteadOfItsArnFailsAsNotStabilizedAndDeletesTheTable() throws Exception {
         newTable();
         StackResource r = resource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
                 + "{\"StreamArn\":\"orders-events-stream-name-long-enough-1\"}}");
         ProvisionContext ctx = ctx();
 
@@ -253,7 +271,8 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
             throws Exception {
         newTable();
         StackResource r = resource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":"
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":"
                 + "{\"StreamArn\":\"" + streamArn + "\"}}");
         ProvisionContext ctx = ctx();
 
@@ -280,7 +299,8 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
     void updateDeclaringAStreamArnTheTableAlreadyForwardsToStillChecksIt() throws Exception {
         existingTable(table(active("events", MILLISECOND)));
         StackResource r = existingResource();
-        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{\"StreamArn\":\"events\"}}");
+        JsonNode props = props("{\"TableName\":\"orders\","
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"KinesisStreamSpecification\":{\"StreamArn\":\"events\"}}");
         ProvisionContext ctx = updateCtx(UNDECLARED);
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));

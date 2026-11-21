@@ -282,6 +282,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("InvalidRequest",
                     "Property ProvisionedThroughput can't be used with PAY_PER_REQUEST BillingMode.", 400);
         }
+        if (plainTable && !onDemand && (tableThroughput.capacity() == null
+                || indexThroughput.values().stream().anyMatch(spec -> spec.capacity() == null))) {
+            throw new AwsException("InvalidRequest", "Property ProvisionedThroughput cannot be empty", 400);
+        }
         boolean throughputDeclared = isDeclared(tableThroughput) || indexThroughput.values().stream()
                 .anyMatch(DynamoDbCfnProvisioner::isDeclared);
         TableDefinition table;

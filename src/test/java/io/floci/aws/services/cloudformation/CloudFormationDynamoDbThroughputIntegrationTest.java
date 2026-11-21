@@ -286,6 +286,42 @@ class CloudFormationDynamoDbThroughputIntegrationTest {
         CfnStackWaits.deleteStack(stack, CFN_AUTH);
     }
 
+    @Test
+    void aCreateWithoutBillingModeAndCapacityFailsTheCreate() {
+        String stack = "cfn-ddb-tp-nocap-" + suffix();
+        String table = "tp-nocap-" + suffix();
+
+        cloudFormation(stack, "CreateStack", template(table, "", ""));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        assertTrue(CfnStackWaits.failedResourceReason(stack, CFN_AUTH)
+                .contains("Property ProvisionedThroughput cannot be empty"));
+
+        describe(table).statusCode(400).body("__type", containsString("ResourceNotFoundException"));
+
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
+    }
+
+    @Test
+    void anUpdateThatRemovesTheCapacityFailsAndKeepsTheOldCapacity() {
+        String stack = "cfn-ddb-tp-remove-" + suffix();
+        String table = "tp-remove-" + suffix();
+
+        cloudFormation(stack, "CreateStack", template(table, capacity(2, 2), capacity(1, 1)));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        cloudFormation(stack, "UpdateStack", template(table, capacity(2, 2), ""));
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        assertTrue(CfnStackWaits.failedResourceReason(stack, CFN_AUTH)
+                .contains("Property ProvisionedThroughput cannot be empty"));
+
+        describe(table)
+            .body("Table.ProvisionedThroughput.ReadCapacityUnits", equalTo(1))
+            .body("Table.ProvisionedThroughput.WriteCapacityUnits", equalTo(1))
+            .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(2));
+
+        CfnStackWaits.deleteStack(stack, CFN_AUTH);
+    }
+
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
     }
