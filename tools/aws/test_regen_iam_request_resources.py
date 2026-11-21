@@ -222,7 +222,7 @@ def test_a_rest_xml_request_is_read_for_its_path_and_query_members_alone():
                           "shapes": shapes}}
         assert r.request_members(models, "GetThing") == read, protocol
         assert set(r.string_patterns(models, "GetThing")) == set(read), protocol
-        assert r.located_members(models, "GetThing") == {"Id": "{Id}", "Marker": "?Marker"}, protocol
+        assert r.located_members(models, "GetThing") == ({"Id": "{Id}", "Marker": "?Marker"}, {}), protocol
 
 
 def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
@@ -1362,11 +1362,86 @@ def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_o
     assert r.derive(document, tmp_path) == []
 
 
-def test_a_member_two_clients_locate_apart_is_an_error():
+def test_a_member_two_clients_locate_apart_is_read_under_each_client(monkeypatch):
+    # S3's CreateBucket carries its Bucket as {Bucket}, S3 Control's as {name}: a request's route tells which it is.
+    one = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:ThingName", "Marker": "querystring:marker"}})
+    two = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:name", "Marker": "querystring:marker"}})
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc", "two": "svc"})
+    assert r.located_members({"one": one, "two": two}, "GetThing") == (
+        {"Marker": "?marker"}, {"one": {"ThingName": "{ThingName}"}, "two": {"ThingName": "{name}"}})
+
+
+def test_a_member_one_client_locates_and_another_carries_in_a_body_it_reads_is_located_for_the_first_alone(monkeypatch):
+    # A request of the client carrying it in its body is read from its body, not from a path it has no label in.
+    one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
+    two = model({"GetThing": {"ThingName": "String"}})
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    assert r.located_members({"one": one, "two": two}, "GetThing") == ({}, {"one": {"ThingName": "{ThingName}"}})
+    # A REST-XML body is not read, so a client carrying the member there leaves it shared.
+    xml = {**two, "metadata": {**two.get("metadata", {}), "protocol": "rest-xml"}}
+    assert r.located_members({"one": one, "two": xml}, "GetThing") == ({"ThingName": "{ThingName}"}, {})
+    monkeypatch.setattr(r, "REST_MODELS", {})
+    with pytest.raises(ValueError, match="one has no vendored routes"):
+        r.located_members({"one": one, "two": two}, "GetThing")
+
+
+def test_a_member_located_apart_by_a_client_whose_routes_are_not_vendored_is_an_error(monkeypatch):
     one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
     two = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "querystring:thing"}})
-    with pytest.raises(ValueError, match="GetThing's ThingName is"):
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    with pytest.raises(ValueError, match="GetThing's ThingName is located apart by one, two, and two has no vendored"):
         r.located_members({"one": one, "two": two}, "GetThing")
+
+
+# S3's object types: an access point's object and a bucket's.
+OBJECTS = {"accesspointobject": "arn:${Partition}:s3:${Region}:${Account}:accesspoint/${AccessPointName}/object/"
+                                "${ObjectName}",
+           "object": "arn:${Partition}:s3:::${BucketName}/${ObjectName}"}
+OBJECT_MEMBERS = {"Bucket": "Bucket", "Key": "Key", "ContentType": "ContentType"}
+OBJECT_SHAPES = {"Bucket": "BucketName", "Key": "ObjectKey", "ContentType": "ContentType"}
+
+
+def test_a_member_whose_shape_is_named_as_the_type_and_key_fills_the_types_name():
+    assert r._filling("ObjectName", "object", 2, {"Key": "Key", "Bucket": "Bucket"}, bare=set(),
+                      shapes={"Key": "ObjectKey", "Bucket": "BucketName"}) == "Key"
+    assert r.resources_for("s3:GetObject", ["accesspointobject", "object"], OBJECTS, OBJECT_MEMBERS,
+                           shapes=OBJECT_SHAPES) == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    # A shape named as another type and Key names that one.
+    assert r._filling("ObjectName", "object", 2, {"Key": "Key"}, bare=set(), shapes={"Key": "BucketKey"}) is None
+
+
+def test_a_type_named_exactly_as_what_the_operation_makes_rules_out_one_only_ending_with_it():
+    # PutObject makes an `object`, not an `accesspointobject`, whose access point the request does not name.
+    assert r.resources_for("s3:PutObject", ["accesspointobject", "object"], OBJECTS, OBJECT_MEMBERS,
+                           shapes=OBJECT_SHAPES) == [
+        {"type": "object", "fill": {"BucketName": "Bucket", "ObjectName": "Key"}}]
+    # With no type named exactly so, one ending with the name is still what it makes.
+    assert r.resources_for("s3:PutObject", ["accesspointobject"], OBJECTS, OBJECT_MEMBERS, shapes=OBJECT_SHAPES) == [
+        {"type": "accesspointobject", "fill": {}}]
+
+
+def test_a_type_a_body_the_reader_does_not_read_names_by_a_key_shape_is_left_unread():
+    # S3's DeleteObjects names each object it deletes in Delete.Objects[].Key, an ObjectKey, in a REST-XML body.
+    shapes = {"String": {"type": "string"}, "ObjectKey": {"type": "string"},
+              "Identifier": {"type": "structure", "members": {"Key": {"shape": "ObjectKey"}}},
+              "Identifiers": {"type": "list", "member": {"shape": "Identifier"}},
+              "Delete": {"type": "structure", "members": {"Objects": {"shape": "Identifiers"}}},
+              "In": {"type": "structure", "members": {
+                  "Bucket": {"shape": "String", "location": "uri", "locationName": "Bucket"},
+                  "Delete": {"shape": "Delete"}}}}
+    models = {"s3": {"metadata": {"protocol": "rest-xml"}, "operations": {"DeleteObjects": {"input": {"shape": "In"}}},
+                     "shapes": shapes}}
+    bucket_only = [{"type": "object", "fill": {"BucketName": "Bucket"}}]
+    assert r.body_only_identifiers(["object"], OBJECTS, bucket_only, models, "DeleteObjects") == ["Delete.Objects[].Key"]
+    # The type's own variable filled by what the reader reads, nothing is left.
+    assert r.body_only_identifiers(["object"], OBJECTS, [{"type": "object", "fill": {
+        "BucketName": "Bucket", "ObjectName": "Key"}}], models, "DeleteObjects") == []
+    # A body the reader reads leaves nothing unread.
+    rest_json = {"s3": {**models["s3"], "metadata": {"protocol": "rest-json"}}}
+    assert r.body_only_identifiers(["object"], OBJECTS, bucket_only, rest_json, "DeleteObjects") == []
 
 
 def test_a_located_member_must_be_a_path_label_or_a_query_parameter(isolated, tmp_path):
@@ -1375,6 +1450,24 @@ def test_a_located_member_must_be_a_path_label_or_a_query_parameter(isolated, tm
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     document["operations"]["svc:GetThing"]["located"] = {"ThingName": "header:x"}
     assert any("does not give each member it locates" in problem for problem in r.validate(document))
+
+
+def test_a_member_located_apart_names_a_client_whose_routes_are_vendored_and_an_unread_one_a_body_path(
+        isolated, tmp_path, monkeypatch):
+    write_models(tmp_path, {"svc": rest_model({"GetThing": {"ThingName": "String"}, "ListThings": {}},
+                                              {"GetThing": {"ThingName": "uri:ThingName"}})})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    monkeypatch.setattr(r, "REST_MODELS", {"one": "svc"})
+    entry = document["operations"]["svc:GetThing"]
+    entry.update(locatedApart={"one": {"ThingName": "{name}"}}, unread=["Delete.Objects[].Key"])
+    assert r.validate(document) == []
+    for broken in ({"locatedApart": {"two": {"ThingName": "{name}"}}}, {"locatedApart": {"one": {"ThingName": "x"}}},
+                   {"locatedApart": {}}):
+        assert any("locates apart" in problem for problem in r.validate(
+            {**document, "operations": {**document["operations"], "svc:GetThing": {**entry, **broken}}}))
+    for broken in (["Delete..Key"], [], "Delete.Objects[].Key"):
+        assert any("leaves unread" in problem for problem in r.validate(
+            {**document, "operations": {**document["operations"], "svc:GetThing": {**entry, "unread": broken}}}))
 
 
 SPLIT = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),

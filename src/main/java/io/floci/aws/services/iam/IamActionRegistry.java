@@ -792,18 +792,27 @@ public class IamActionRegistry {
                 .orElse(action);
     }
 
-    /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */
-    public static Map<String, String> routeMemberLocations(String operation, ContainerRequestContext ctx) {
+    /**
+     * The vendored route a request of an operation matched: the member locations of a generated alternative route
+     * ({@code located}; absent entries keep the operation's model locations) and the botocore model whose route it is
+     * ({@code model}), which tells apart the clients of an operation several serve.
+     */
+    public record RouteMembers(Map<String, String> located, String model) {
+        static final RouteMembers NONE = new RouteMembers(Map.of(), null);
+    }
+
+    /** The route a request of the operation matches, {@link RouteMembers#NONE} for one it matches none of. */
+    public static RouteMembers routeMembers(String operation, ContainerRequestContext ctx) {
         int separator = operation.indexOf(':');
         if (separator < 0 || ctx.getMethod() == null || ctx.getUriInfo() == null
                 || ctx.getUriInfo().getRequestUri() == null) {
-            return Map.of();
+            return RouteMembers.NONE;
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
                         movedUnderPrefix(ctx), ctx.getHeaders())
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
-                .map(IamRestRoutes.Match::located).orElse(Map.of());
+                .map(match -> new RouteMembers(match.located(), match.model())).orElse(RouteMembers.NONE);
     }
 
     /**

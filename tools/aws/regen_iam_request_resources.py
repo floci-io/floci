@@ -90,7 +90,12 @@ names none, is checked on `*`, as AWS checks it.
 A REST request (`rest-json`) carries members in its path and its query as well as its body: a label of its path,
 `{DomainName}`, and a parameter of its query, `?arn`, are members as its body's are, under their botocore names, and
 the file records where each is (`located`), which the reader lays over the body from the path the request was routed
-by and its query. A namespace read this way also takes the operations of each botocore model Floci reads REST routes
+by and its query. A member the clients of an operation carry in different places is recorded under each client
+(`locatedApart`: S3's CreateBucket carries its `Bucket` as `{Bucket}`, S3 Control's as `{name}`), the request's
+vendored route telling its client. A REST-XML request's body is not read, so an operation naming what it acts on there
+by a shape named as the type and `Key` (S3's DeleteObjects, `Delete.Objects[].Key`) is recorded `unread`, and the
+reader leaves it to its service, as checked on the rest of its request it would be checked on none of what it names.
+A namespace read this way also takes the operations of each botocore model Floci reads REST routes
 for under it (`regen_rest_routes.MODELS`) that the reference lists for none of its clients, each checked as the action
 of its own name with that action's resource types when the reference has that action, and left out when it does not:
 the reference lists one client's operations per namespace, and
@@ -1450,23 +1455,48 @@ def only_arn(pattern: str | None) -> bool:
     return True
 
 
-def located_members(models: dict[str, dict], operation: str) -> dict[str, str]:
+def located_members(models: dict[str, dict], operation: str) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     """The members of a REST request that its path or its query carries, holding a string, by name, with where:
     `{Label}` for a label of its path, `?name` for a parameter of its query. The reader lays them over the request's
-    body under their names, so a resource reads them as it reads a member of the body."""
-    found: dict[str, str] = {}
+    body under their names, so a resource reads them as it reads a member of the body.
+
+    A member every client of the operation locates alike is in the first map; one its clients locate apart, or some
+    locate and another's read body carries, is in the second, under each client locating it, whose vendored route tells
+    a request's client (`locatedApart`: S3's CreateBucket carries its `Bucket` as `{Bucket}`, S3 Control's as
+    `{name}`); a request of another client is read from its body. One located apart by a client whose routes are not
+    vendored is refused, as no request would say where it is."""
+    per_client: dict[str, dict[str, str]] = {}
+    in_body: dict[str, set[str]] = {}
     for client, model in sorted(models.items()):
         spec = model["operations"].get(operation)
-        if spec is None or "input" not in spec or not ({"rest-json"} | LOCATED_ONLY_PROTOCOLS) & _protocols(model):
+        if spec is None or "input" not in spec:
             continue
+        locating = bool(({"rest-json"} | LOCATED_ONLY_PROTOCOLS) & _protocols(model))
+        found: dict[str, str] = {}
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             where = _located(member)
+            if where is None and _reading(model) == "all" and member.get("location") in BODY_LOCATIONS:
+                in_body.setdefault(name, set()).add(client)
             shape = model["shapes"][member["shape"]]
-            if where is None or (_strings(model, shape) != "" and shape["type"] not in ("integer", "long")):
+            if not locating or where is None or (_strings(model, shape) != "" and shape["type"] not in ("integer", "long")):
                 continue
-            if found.setdefault(name, where) != where:
-                raise ValueError(f"{operation}'s {name} is {found[name]} in one client and {where} in {client}")
-    return dict(sorted(found.items()))
+            found[name] = where
+        if locating:
+            per_client[client] = found
+    shared: dict[str, str] = {}
+    apart: dict[str, dict[str, str]] = {}
+    for name in sorted({name for found in per_client.values() for name in found}):
+        places = {client: found[name] for client, found in per_client.items() if name in found}
+        if len(set(places.values())) == 1 and not in_body.get(name):
+            shared[name] = next(iter(places.values()))
+            continue
+        unrouted = sorted(client for client in places if client not in REST_MODELS)
+        if unrouted:
+            raise ValueError(f"{operation}'s {name} is located apart by {', '.join(sorted(places))}, and "
+                             f"{', '.join(unrouted)} has no vendored routes to tell its requests apart")
+        for client, where in places.items():
+            apart.setdefault(client, {})[name] = where
+    return shared, {client: dict(sorted(found.items())) for client, found in sorted(apart.items())}
 
 
 def _located(member: dict) -> str | None:
@@ -1783,6 +1813,11 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
     filled: dict[str, dict[str, str]] = {}
     used: dict[str, str] = {}
     complete: dict[str, bool] = {}
+    # A type named exactly as what the operation makes is the one it makes, so another only ending with that name is
+    # not: PutObject makes an `object`, not an `accesspointobject`.
+    exactly_created = created is not None and any(
+        created in (stem(kind), stem(word.group(1)) if (word := RESOURCE_PART_RE.match(formats[kind])) else stem(kind))
+        for kind in types if kind in formats)
     for kind in types:
         if kind not in formats:
             continue
@@ -1800,7 +1835,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
         # A create makes its own type, so a member holding whatever the action acts on does not hold that one:
         # `CreateResourceShare`'s `resourceArns` are what the share it makes holds.
-        creates_it = created is not None and (related(created, kind_stem) or related(created, word_stem))
+        creates_it = created is not None and (created in (kind_stem, word_stem) if exactly_created
+                                              else related(created, kind_stem) or related(created, word_stem))
         holding = [member for member in held if not (creates_it and stem(member) in ("", "resource"))]
         # Its bare name then names what it makes, when the type's variables say they are a name or an id: a share's
         # `${ResourcePath}`, which RAM mints, takes no name.
@@ -2019,7 +2055,8 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
     or, for the variable named after the type or a type's only one, a member named after the type, or a
     bare `Name` or `Id` among those `bare` gives, of a compatible kind, or else a string or list member whose
     botocore shape is named after the type, of a compatible kind (Parameter Store's `Path` and
-    `GetParameterHistory`'s `Name` hold a `PSParameterName`, Glue's `TablesToDelete` a `BatchDeleteTableNameList`);
+    `GetParameterHistory`'s `Name` hold a `PSParameterName`, Glue's `TablesToDelete` a `BatchDeleteTableNameList`, S3's
+    `Key` an `ObjectKey`, a shape named as the type and `Key`);
     the closest of them, one qualified by the type's own name first (a snapshot's `SnapshotClusterIdentifier` before `ClusterIdentifier`), and a string before a list. A variable the
     reference names `ResourceId` is the type's own id (`ingestion/${ResourceId}`)."""
     # A `ResourceId` variable is filled by a member named so (CreateOpsMetadata's, `opsmetadata/${ResourceId}`) before
@@ -2045,7 +2082,8 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
         # not when it holds a name's shape.
         candidates = [member for member in names if member in (shapes or {})
                       and (not names[member].endswith("[]") or shapes[member].endswith("List"))
-                      and "." not in member and stem(shapes[member]) and related(stem(shapes[member]), kind_stem)
+                      and "." not in member and stem(shapes[member])
+                      and (related(stem(shapes[member]), kind_stem) or stem(shapes[member]) == kind_stem + "key")
                       and compatible(shapes[member], variable) and compatible(member, variable)]
     if not candidates:
         return None
@@ -2297,6 +2335,9 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if uses is not None and not (uses and all("action" in use for use in uses)):
         resources = measured_resources(operation, types, formats, resources)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
+    unread = body_only_identifiers(types, formats, resources, models, operation.split(":", 1)[1])
+    if unread:
+        entry["unread"] = unread
     creates = creates_for(operation, types, formats, members)
     if creates:
         entry["creates"] = creates
@@ -2309,13 +2350,58 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     query_members = ec2_query_members(operation, models, named)
     if query_members:
         entry["ec2Query"] = query_members
-    located = {member: where for member, where in located_members(models, operation.split(":", 1)[1]).items()
-               if member in named}
+    shared, apart = located_members(models, operation.split(":", 1)[1])
+    located = {member: where for member, where in shared.items() if member in named}
     if located:
         entry["located"] = located
+    located_apart = {client: kept for client, found in apart.items()
+                     if (kept := {member: where for member, where in found.items() if member in named})}
+    if located_apart:
+        entry["locatedApart"] = located_apart
     if operation in measured_actions():
         entry["forwarded"] = forwarded_for(operation, types, models, forwarded or {})
     return entry
+
+
+def body_only_identifiers(types: list[str], formats: dict[str, str], resources: list[dict], models: dict[str, dict],
+                          name: str) -> list[str]:
+    """The members of a request whose body the reader does not read (`LOCATED_ONLY_PROTOCOLS`) that name what a type
+    of the action acts on, by a shape named as the type and `Key`, where the members it does read leave the type's own
+    variable open: S3's DeleteObjects names each object it deletes in `Delete.Objects[].Key`, an `ObjectKey`. Read on
+    the rest of its request, such an operation would be checked on what it names in none of its body (`unread`)."""
+    found: list[str] = []
+    for model in (model for _, model in sorted(models.items())):
+        spec = model["operations"].get(name)
+        if spec is None or "input" not in spec or _reading(model) != "located":
+            continue
+        for kind in types:
+            variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
+                         if variable not in KNOWN_VARIABLES and stem(variable) == stem(kind)]
+            if not variables or any(set(variables) <= set(resource.get("fill", {})) for resource in resources
+                                    if kind in _kinds(resource)):
+                continue
+            for path, shape in _body_members(model, spec["input"]["shape"]):
+                if stem(shape) == stem(kind) + "key" and path not in found:
+                    found.append(path)
+    return found
+
+
+def _body_members(model: dict, shape_name: str, prefix: str = "", depth: int = 0) -> list[tuple[str, str]]:
+    """The members of a request's body, at any depth up to five, as `Outer.List[].Member` paths, with the shape each
+    holds."""
+    shape = model["shapes"][shape_name]
+    found: list[tuple[str, str]] = []
+    if depth > 4:
+        return found
+    if shape["type"] == "structure":
+        for member, ref in shape.get("members", {}).items():
+            if ref.get("location") in ("uri", "querystring", "header", "headers"):
+                continue
+            found.append((prefix + member, ref["shape"]))
+            found += _body_members(model, ref["shape"], prefix + member + ".", depth + 1)
+    elif shape["type"] == "list":
+        found += _body_members(model, shape["member"]["shape"], prefix.removesuffix(".") + "[].", depth + 1)
+    return found
 
 
 def measured_resources(operation: str, types: list[str], formats: dict[str, str], derived: list[dict]) -> list[dict]:
@@ -3511,6 +3597,8 @@ def render(document: dict) -> str:
 # Gates
 # --------------------------------------------------------------------------- #
 PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
+# A member of a request's body at any depth, as `body_only_identifiers` writes it: `Delete.Objects[].Key`.
+BODY_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)*$")
 # A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
 # value for each.
 FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\{}\.[A-Za-z][A-Za-z0-9_]*"
@@ -3620,7 +3708,8 @@ def validate(document: dict) -> list[str]:
             problems.append(f"{operation!r} is not an operation of a namespace the file reads")
             continue
         if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {
-                "action", "types", "resources", "creates", "makes", "located", "targets", "forwarded", "ec2Query"}:
+                "action", "types", "resources", "creates", "makes", "located", "locatedApart", "targets", "forwarded",
+                "ec2Query", "unread"}:
             problems.append(f"{operation} is not an action, its types and its resources")
             continue
         if not isinstance(entry["action"], str) or not OPERATION_RE.match(entry["action"]) \
@@ -3674,6 +3763,18 @@ def validate(document: dict) -> list[str]:
                 for member, where in located.items()):
             problems.append(f"{operation} does not give each member it locates a label of its path or a parameter of "
                             f"its query")
+        apart = entry.get("locatedApart", {})
+        if not isinstance(apart, dict) or not apart and "locatedApart" in entry or not all(
+                client in REST_MODELS and isinstance(found, dict) and found and all(
+                    isinstance(member, str) and PATH_RE.match(member) and isinstance(where, str)
+                    and LOCATED_RE.match(where) for member, where in found.items())
+                for client, found in apart.items()):
+            problems.append(f"{operation} does not give each member it locates apart, under a client whose routes are "
+                            f"vendored, a label of its path or a parameter of its query")
+        unread = entry.get("unread", [])
+        if not isinstance(unread, list) or not unread and "unread" in entry or not all(
+                isinstance(member, str) and BODY_PATH_RE.match(member) for member in unread):
+            problems.append(f"{operation} does not give each body member it leaves unread as a path")
         forwarded = entry.get("forwarded", [])
         if not isinstance(forwarded, list) or not forwarded and "forwarded" in entry or not all(
                 isinstance(use, dict) and set(use) == {"action", "of", "member", "endpoint"}
