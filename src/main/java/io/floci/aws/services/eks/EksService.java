@@ -1477,14 +1477,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         nodeGroup.setModifiedAt(now);
         String resolvedVersion = request.getVersion() != null ? request.getVersion() : cluster.getVersion();
         nodeGroup.setVersion(resolvedVersion);
-        nodeGroup.setReleaseVersion(request.getReleaseVersion() != null
-                ? request.getReleaseVersion() : resolvedVersion + "-eks-1");
+        String amiType = request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64";
+        nodeGroup.setReleaseVersion(request.getReleaseVersion() != null ? request.getReleaseVersion()
+                : EksAmiReleaseVersions.recommended(clusterManager == null ? null : clusterManager.imageCatalog(),
+                        resolvedVersion, amiType).orElse(resolvedVersion + "-eks-1"));
         nodeGroup.setStatus(NodegroupStatus.ACTIVE);
         nodeGroup.setCapacityType(request.getCapacityType() != null ? request.getCapacityType() : "ON_DEMAND");
         nodeGroup.setScalingConfig(request.getScalingConfig() != null ? request.getScalingConfig() : defaultScalingConfig());
         nodeGroup.setInstanceTypes(request.getInstanceTypes() != null ? request.getInstanceTypes() : List.of("t3.medium"));
         nodeGroup.setSubnets(request.getSubnets() != null ? request.getSubnets() : List.of());
-        nodeGroup.setAmiType(request.getAmiType() != null ? request.getAmiType() : "AL2_x86_64");
+        nodeGroup.setAmiType(amiType);
         nodeGroup.setNodeRole(request.getNodeRole());
         nodeGroup.setDiskSize(request.getDiskSize() != null ? request.getDiskSize() : 20);
         nodeGroup.setResources(defaultNodeGroupResources(nodegroupName));

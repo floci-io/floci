@@ -3394,6 +3394,10 @@ public class EksClusterManager
         return "ami-eks-k3s";
     }
 
+    Ec2ImageCatalog imageCatalog() {
+        return imageCatalog;
+    }
+
     String buildRegisterWithTaints(Nodegroup nodegroup) {
         if (nodegroup == null || nodegroup.getTaints() == null || nodegroup.getTaints().isEmpty()) {
             return null;

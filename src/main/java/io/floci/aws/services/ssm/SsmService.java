@@ -24,7 +24,7 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
-import io.floci.aws.services.eks.EksClusterManager;
+import io.floci.aws.services.eks.EksAmiReleaseVersions;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
@@ -66,10 +66,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
     private static final String ECS_AL2023_ARM64_RECOMMENDED =
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended";
-    private static final String EKS_OPTIMIZED_AMI_PREFIX = "/aws/service/eks/optimized-ami/";
     private static final String EKS_RECOMMENDED_RELEASE_VERSION = "/recommended/release_version";
-    private static final DateTimeFormatter EKS_AMI_BUILD_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd", Locale.US).withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter SOURCE_RESULT_DATE =
             DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.US).withZone(ZoneOffset.UTC);
     static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
@@ -656,10 +653,10 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         if (imageCatalog == null || name == null || !name.startsWith(PUBLIC_PARAMETER_PREFIX)) {
             return Optional.empty();
         }
-        boolean eksReleaseVersion = name.startsWith(EKS_OPTIMIZED_AMI_PREFIX)
+        boolean eksReleaseVersion = name.startsWith(EksAmiReleaseVersions.OPTIMIZED_AMI_PARAMETER_PREFIX)
                 && name.endsWith(EKS_RECOMMENDED_RELEASE_VERSION);
         // A custom catalog may name a Kubernetes version Floci has no node image for, and so no patch version.
-        if (eksReleaseVersion && eksNodeImage(name) == null) {
+        if (eksReleaseVersion && !EksAmiReleaseVersions.supports(eksKubernetesVersion(name))) {
             return Optional.empty();
         }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
@@ -680,7 +677,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                         : metadata.required(name.substring(recommendedName.length() + 1)).asText();
             }
             if (eksReleaseVersion) {
-                value = eksReleaseVersion(name, image.creationDate);
+                value = EksAmiReleaseVersions.of(eksKubernetesVersion(name), image.creationDate);
             }
             Parameter parameter = new Parameter(name, value, "String");
             parameter.setArn(AwsArnUtils.Arn.of("ssm", region, "", parameterResource(name)).toString());
@@ -689,21 +686,8 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         });
     }
 
-    /**
-     * The EKS AMI release version, {@code <Kubernetes patch version>-<build date>} as AWS writes
-     * it: the patch version Floci runs for the path's Kubernetes version and the image's
-     * creation date.
-     */
-    private static String eksReleaseVersion(String name, String creationDate) {
-        String nodeImage = eksNodeImage(name);
-        String tag = nodeImage.substring(nodeImage.indexOf(":v") + 2);
-        String patchVersion = tag.substring(0, tag.indexOf('-'));
-        return patchVersion + "-" + EKS_AMI_BUILD_DATE.format(Instant.parse(creationDate));
-    }
-
-    private static String eksNodeImage(String name) {
-        String minorVersion = name.substring(EKS_OPTIMIZED_AMI_PREFIX.length()).split("/")[0];
-        return EksClusterManager.SUPPORTED_K8S_VERSIONS.get(minorVersion);
+    private static String eksKubernetesVersion(String name) {
+        return name.substring(EksAmiReleaseVersions.OPTIMIZED_AMI_PARAMETER_PREFIX.length()).split("/")[0];
     }
 
     public List<Parameter> getParametersByPath(String path, boolean recursive,

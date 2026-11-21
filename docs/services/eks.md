@@ -397,7 +397,7 @@ entry, install the built-in node pools, serve the EBS provisioner or create load
 
 ### Scalar and collection inputs
 
-`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes `<version>-eks-1`.
+`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes the release of the recommended EKS optimized AMI for that version and AMI type, the `<patch version>-<build date>` value SSM publishes under its `recommended/release_version` (see [SSM](ssm.md#public-ami-parameters)). An AMI type the image catalog has no recommended AMI for, such as Bottlerocket or Windows, keeps `<version>-eks-1`.
 
 ### Structured inputs
 
