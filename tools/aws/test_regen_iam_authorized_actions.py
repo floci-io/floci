@@ -322,7 +322,7 @@ def test_generating_from_saved_files_writes_a_file_check_accepts(tmp_path):
 def no_routes(tmp_path) -> str:
     """A routes file reading no scope's routes."""
     routes = tmp_path / "rest-routes.json"
-    routes.write_text(json.dumps({"handRouted": {}, "models": {}}), encoding="utf-8")
+    routes.write_text(json.dumps({"models": {}}), encoding="utf-8")
     return str(routes)
 
 
@@ -367,12 +367,11 @@ def typed(namespace: str, actions: dict[str, list[str]]) -> dict:
                         for name, kinds in actions.items()]}
 
 
-ROUTES = {"handRouted": {"hand": "the rules route it alone"},
-          "models": {"svc": {"credentialScope": "svc"}, "svc-v2": {"credentialScope": "svc"},
-                     "other": {"credentialScope": "other"}, "hand": {"credentialScope": "hand"}}}
+ROUTES = {"models": {"svc": {"credentialScope": "svc"}, "svc-v2": {"credentialScope": "svc"},
+                     "other": {"credentialScope": "other"}}}
 
 
-def test_the_routed_scopes_are_every_models_but_the_hand_routed_ones():
+def test_the_routed_scopes_are_every_models():
     assert r.routed_namespaces(ROUTES) == ["other", "svc"]
 
 
@@ -435,7 +434,7 @@ def by_method_service(operations: dict[str, list[str]], sdks: dict[str, list[str
     return document
 
 
-METHOD_ROUTES = {"handRouted": {"hand": "the rules route it alone"}, "models": {
+METHOD_ROUTES = {"models": {
     "api": {"credentialScope": "api", "operations": {
         "TagResource": {"method": "PUT", "requestUri": "/tags/{arn+}",
                         "alternatives": [{"method": "POST", "requestUri": "/tags", "located": {"arn": "body"}}]},
@@ -444,8 +443,7 @@ METHOD_ROUTES = {"handRouted": {"hand": "the rules route it alone"}, "models": {
         "CreatePortal": {"method": "POST", "requestUri": "/portals"}}},
     "api-v2": {"credentialScope": "api", "operations": {
         "TagResource": {"method": "POST", "requestUri": "/v2/tags/{arn+}"},
-        "GetStage": {"method": "GET", "requestUri": "/v2/apis/{id}/stages/{name}"}}},
-    "hand": {"credentialScope": "hand", "operations": {"GetThing": {"method": "GET", "requestUri": "/things"}}}}}
+        "GetStage": {"method": "GET", "requestUri": "/v2/apis/{id}/stages/{name}"}}}}}
 
 
 def test_the_route_methods_are_each_routed_operations_alternatives_included():

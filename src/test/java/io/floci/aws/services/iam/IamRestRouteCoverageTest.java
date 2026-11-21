@@ -201,17 +201,9 @@ class IamRestRouteCoverageTest {
         return tests.stream();
     }
 
-    /** The models of every credential scope the vendored routes do not list as hand-routed. */
+    /** The models of every credential scope the vendored routes read. */
     private static List<String> routedModels(JsonNode document) {
-        List<String> models = new ArrayList<>();
-        Iterator<Map.Entry<String, JsonNode>> all = document.path("models").fields();
-        while (all.hasNext()) {
-            Map.Entry<String, JsonNode> model = all.next();
-            if (!document.path("handRouted").has(model.getValue().path("credentialScope").asText())) {
-                models.add(model.getKey());
-            }
-        }
-        return models;
+        return document.path("models").propertyStream().map(Map.Entry::getKey).toList();
     }
 
     /** Every model route of {@code operation} among the models Floci authorizes under {@code scope}. */
@@ -222,10 +214,8 @@ class IamRestRouteCoverageTest {
             Map.Entry<String, JsonNode> model = all.next();
             JsonNode route = model.getValue().path("operations").path(operation);
             if (scope.equals(model.getValue().path("credentialScope").asText()) && !route.isMissingNode()) {
-                // A hand-routed scope's route lists all its request must carry; another's what tells it apart.
-                JsonNode carries = route.has("required") ? route.path("required") : route.path("requires");
                 routes.add(new Route(scope, model.getKey(), operation, route.path("method").asText(),
-                        route.path("requestUri").asText(), carries));
+                        route.path("requestUri").asText(), route.path("requires")));
             }
         }
         return routes;
@@ -241,11 +231,9 @@ class IamRestRouteCoverageTest {
         }
     }
 
-    /** An operation's route: its method, and its request URI with each label filled in. */
     /**
-     * A route of a model's operation, and what botocore requires its request to carry ({@code required} for a
-     * hand-routed scope's, {@code requires} where several operations share it), which the request built on it carries
-     * as an SDK sends it.
+     * A route of a model's operation, and what botocore requires its request to carry where several operations share
+     * it ({@code requires}), which the request built on it carries as an SDK sends it.
      */
     private record Route(String scope, String model, String operation, String method, String requestUri,
                          JsonNode requires) {

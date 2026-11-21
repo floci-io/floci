@@ -25,8 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IamRestRoutesTest {
 
     private static final String ROUTES = """
-            {"handRouted": {"hand": "the rules route it alone"},
-             "models": {
+            {"models": {
                "svc": {"credentialScope": "svc", "operations": {
                  "ListThings": {"method": "GET", "requestUri": "/things/"},
                  "GetThing": {"method": "GET", "requestUri": "/things/{ThingName}"},
@@ -40,9 +39,6 @@ class IamRestRoutesTest {
                  "ListVersionsV2": {"method": "GET", "requestUri": "/versions?list-type=2"},
                  "ValidateThing": {"method": "GET", "requestUri": "/from.data/validation"},
                  "GetRoot": {"method": "GET", "requestUri": "/"}
-               }},
-               "hand": {"credentialScope": "hand", "operations": {
-                 "Ping": {"method": "GET", "requestUri": "/ping"}
                }}
              }}""";
 
@@ -143,7 +139,7 @@ class IamRestRoutesTest {
     void denialStatusComesFromTheModelAndFallsBackWhenMissing() {
         IamRestRoutes modelled = routes(ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 402"));
         assertEquals(402, modelled.accessDeniedStatus("svc", 403));
-        assertEquals(403, modelled.accessDeniedStatus("hand", 403));
+        assertEquals(403, modelled.accessDeniedStatus("other", 403));
         assertEquals(400, modelled.accessDeniedStatus("unknown", 400));
         assertEquals(403, modelled.accessDeniedStatus(null, 403));
     }
@@ -157,8 +153,13 @@ class IamRestRoutesTest {
 
     @Test
     void modelsSharingAScopeMustAgreeOnTheDenialStatus() {
-        String document = ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 401")
-                .replace("\"credentialScope\": \"hand\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 403");
+        String document = """
+                {"models": {
+                   "one": {"credentialScope": "svc", "accessDeniedStatus": 401,
+                           "operations": {"GetOne": {"method": "GET", "requestUri": "/one"}}},
+                   "two": {"credentialScope": "svc", "accessDeniedStatus": 403,
+                           "operations": {"GetTwo": {"method": "GET", "requestUri": "/two"}}}
+                 }}""";
         assertThrows(IllegalStateException.class, () -> routes(document));
     }
 
@@ -219,7 +220,7 @@ class IamRestRoutesTest {
     @Test
     void operationsSharingARouteAreToldApartByWhatTheirRequestMustCarry() {
         IamRestRoutes table = routes("""
-                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                {"models": {"objects": {"credentialScope": "obj", "operations": {
                   "PutObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}"},
                   "CopyObject": {"method": "PUT", "requestUri": "/{Bucket}/{Key+}",
                                  "requires": {"headers": ["x-amz-copy-source"]}},
@@ -248,7 +249,7 @@ class IamRestRoutesTest {
     @Test
     void aDeprecatedOperationYieldsToTheCurrentOneOfItsRoute() {
         IamRestRoutes table = routes("""
-                {"handRouted": {}, "models": {"objects": {"credentialScope": "obj", "operations": {
+                {"models": {"objects": {"credentialScope": "obj", "operations": {
                   "GetBucketLifecycle": {"method": "GET", "requestUri": "/{Bucket}?lifecycle", "deprecated": true},
                   "GetBucketLifecycleConfiguration": {"method": "GET", "requestUri": "/{Bucket}?lifecycle"}
                 }}}}""");
@@ -299,10 +300,9 @@ class IamRestRoutesTest {
     }
 
     @Test
-    void aRequestOfAnotherMethodOrScopeOrOfAHandRoutedScopeMatchesNothing() {
+    void aRequestOfAnotherMethodOrScopeMatchesNothing() {
         assertEquals(Optional.empty(), routes.operation("svc", "DELETE", "/things/web", null));
         assertEquals(Optional.empty(), routes.operation("other", "GET", "/things/web", null));
-        assertEquals(Optional.empty(), routes.operation("hand", "GET", "/ping", null));
         assertEquals(Optional.empty(), get("/nothing"));
     }
 
@@ -349,7 +349,7 @@ class IamRestRoutesTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", "{}", "{\"models\":[]}", "{\"handRouted\": {}, \"models\":{}}"})
+    @ValueSource(strings = {"", "{}", "{\"models\":[]}", "{\"models\":{}}"})
     void missingRouteDataFailsRatherThanProvidingAnEmptyAuthorizationTable(String document) {
         assertThrows(IllegalStateException.class, () -> routes(document));
     }
@@ -357,14 +357,13 @@ class IamRestRoutesTest {
     @Test
     void aMalformedFileFailsToLoad() {
         for (String bad : List.of("{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"operations\": {}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\"}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"operations\": {}}}}",
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\"}}}",
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"requestUri\": \"/op\"}}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"method\": \"INVALID\", \"requestUri\": \"/op\"}}}}}",
-                "{\"handRouted\": {}, \"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
+                "{\"models\": {\"svc\": {\"credentialScope\": \"svc\", \"operations\": "
                         + "{\"Op\": {\"method\": \"GET\", \"requestUri\": \"op\"}}}}}")) {
             assertThrows(IllegalStateException.class, () -> routes(bad), bad);
         }

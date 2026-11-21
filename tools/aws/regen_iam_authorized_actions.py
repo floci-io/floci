@@ -66,15 +66,14 @@ is the namesake client's (`namesake_by_model`: S3's GetBucketLifecycleConfigurat
 `MEASURED_VERSIONED` give what the Service Authorization Reference's actions table does, quoted
 with its link.
 
-The file also lists, for each credential scope whose REST routes `rest-routes.json` reads (the
-scopes it leaves to the registry's rules, `handRouted`, aside), the actions of that namespace the
-reference gives no resource type, from its `Actions`. A REST request no rule of `IamActionRegistry`
-maps is checked as the operation whose route it matches only when that operation's action is one of
-them. Floci checks a REST request on `*` until it reads the resources in its path, and AWS authorizes
-such an action on `*` too, so the check is the one AWS makes. An action AWS authorizes on a resource
-stays unchecked instead: checked on `*`, a grant scoped to its resource would be refused. These are
-read from `Actions`, not `Operations`, because the reference lists the operations of one SDK client
-per namespace: OpenSearch's are the `es` client's alone, none of the `opensearch` client's, whose
+The file also lists, for each credential scope whose REST routes `rest-routes.json` reads, the actions
+of that namespace the reference gives no resource type, from its `Actions`. A REST request no rule of
+`IamActionRegistry` maps is checked as the operation whose route it matches only when that operation's
+action is one of them. Floci checks a REST request on `*` until it reads the resources in its path, and
+AWS authorizes such an action on `*` too, so the check is the one AWS makes. An action AWS authorizes on
+a resource stays unchecked instead: checked on `*`, a grant scoped to its resource would be refused.
+These are read from `Actions`, not `Operations`, because the reference lists the operations of one SDK
+client per namespace: OpenSearch's are the `es` client's alone, none of the `opensearch` client's, whose
 operations are named after `es` actions all the same.
 
 It lists too, for those scopes, the operations a request on whose route is checked as the action its HTTP
@@ -487,11 +486,8 @@ def _sdk_clients(namespace: str, operation: dict) -> set[str]:
 
 
 def routed_namespaces(routes: dict) -> list[str]:
-    """The credential scopes whose REST routes the vendored routes read: every model's but those the registry's
-    rules authorize alone."""
-    hand_routed = routes.get("handRouted") or {}
-    return sorted({model["credentialScope"] for model in (routes.get("models") or {}).values()
-                   if model["credentialScope"] not in hand_routed})
+    """The credential scopes whose REST routes the vendored routes read: every model's."""
+    return sorted({model["credentialScope"] for model in (routes.get("models") or {}).values()})
 
 
 def actions_without_resource_types(documents: list[dict], namespaces: list[str]) -> dict[str, list[str]]:
@@ -513,12 +509,9 @@ def actions_without_resource_types(documents: list[dict], namespaces: list[str])
 def route_methods(routes: dict) -> dict[str, dict[str, list[str]]]:
     """Each routed scope's operations, with the HTTP methods of every route the vendored routes give them, an
     alternative's own method included."""
-    routed = set(routed_namespaces(routes))
     methods: dict[str, dict[str, set[str]]] = {}
     for model in (routes.get("models") or {}).values():
         scope = model["credentialScope"]
-        if scope not in routed:
-            continue
         for operation, route in (model.get("operations") or {}).items():
             found = methods.setdefault(scope, {}).setdefault(operation, set())
             found.add(route["method"])
