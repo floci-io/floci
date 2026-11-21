@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_action_resources.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json",
-    "retrieved": "2026-10-10",
+    "retrieved": "2026-11-21",
     "note": "make iam-action-resources-verify checks every entry against AWS."
   },
   "actionResources": {
@@ -223,6 +223,8 @@
     "GetPolicyVersion": [
       "policy"
     ],
+    "GetRequestAuthorizationDetails": [],
+    "GetRequestAuthorizationPolicy": [],
     "GetRole": [
       "role"
     ],
@@ -454,6 +456,9 @@
     ],
     "UpdateLoginProfile": [
       "user"
+    ],
+    "UpdateOpenIDConnectProvider": [
+      "oidc-provider"
     ],
     "UpdateOpenIDConnectProviderThumbprint": [
       "oidc-provider"
