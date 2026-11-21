@@ -7399,9 +7399,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
         if (config.isEventBridgeEnabled() && eventBridgeService != null) {
             try {
-                String detailType = eventName.startsWith("ObjectCreated") ? "Object Created"
-                        : eventName.startsWith("ObjectAnnotation") ? "Object Annotation"
-                        : "Object Deleted";
+                String detailType = switch (eventName) {
+                    case "ObjectAnnotation:Put" -> "Object Annotation Created";
+                    case "ObjectAnnotation:Delete" -> "Object Annotation Removed";
+                    default -> eventName.startsWith("ObjectCreated") ? "Object Created" : "Object Deleted";
+                };
                 Map<String, Object> entry = EventBridgeService.serviceEventEntry("aws.s3", detailType,
                         buildS3EventBridgeDetail(bucketName, key, eventName, obj, region),
                         S3ResourceArns.bucket(bucketPartition(bucketName), bucketName));
@@ -7449,13 +7451,16 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    /** EventBridge names the creating API rather than the classic notification event. */
+    /** EventBridge names the API rather than the classic notification event. */
     private static String eventBridgeReason(String eventName) {
         return switch (eventName) {
             case "ObjectCreated:Put" -> "PutObject";
             case "ObjectCreated:Post" -> "POST Object";
             case "ObjectCreated:Copy" -> "CopyObject";
             case "ObjectCreated:CompleteMultipartUpload" -> "CompleteMultipartUpload";
+            case "ObjectRemoved:Delete", "ObjectRemoved:DeleteMarkerCreated" -> "DeleteObject";
+            case "ObjectAnnotation:Put" -> "PutObjectAnnotation";
+            case "ObjectAnnotation:Delete" -> "DeleteObjectAnnotation";
             default -> isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
         };
     }
