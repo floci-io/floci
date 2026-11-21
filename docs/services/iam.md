@@ -512,6 +512,48 @@ that exists keeps `Policy version <id> does not exist.`, which is about the vers
 ARN. A recording for any of those moves that operation alone, the sentences being sited per
 operation in `IamService.PolicyNotFound`.
 
+### Three rules a policy document is held to
+
+Three rules AWS applies before it stores a document, all 400 `MalformedPolicyDocument`, all
+recorded against a real account on 2026-10-29, and none of them read here until now.
+
+An identity policy may not name a principal: `Policy document should not specify a principal.`, on
+`CreatePolicy` and on the three inline writes. An identity policy says who it is for by being
+attached, so a principal inside it describes nothing AWS can apply.
+
+A trust policy has to name one: `Missing required field Principal`, which AWS writes without a full
+stop, on `CreateRole` and `UpdateAssumeRolePolicy` alike. A trust policy naming no principal can be
+assumed by nobody, and leaving one stored makes a role unassumable with no signal to the caller.
+
+And a trust policy may only grant STS's actions: `AssumeRole policy may only specify STS AssumeRole
+actions.`, on the same two operations.
+
+Neither rule about principals reads `NotPrincipal` as one. The IAM reference puts both policies in
+one sentence: "You cannot use the `NotPrincipal` element in an IAM identity-based policy nor in an
+IAM role trust policy." So a trust statement carrying it and no `Principal` names no principal and
+is answered by the sentence recorded for a missing one, and an identity statement carrying it is
+answered by the sentence recorded for a principal. Which sentence AWS gives for the exclusion
+itself is not recorded, and these are the sentences AWS gives for the element each rule was
+recorded on; nothing here invents a third.
+
+The trust rule asks that a principal is named, not that the element is present. A `Principal` that
+is null or an empty list names nobody, which is what the evaluator makes of such a value as well,
+so the role it would create could be assumed by nobody and the document is refused as one naming
+no principal at all.
+
+The action rule is deliberately narrower here than AWS's may be, so that it cannot refuse a
+document AWS accepts. It is read on the namespace, which is what the recording tested, a document
+granting an action of another service: every `sts:` action passes, including the session actions
+AWS's own guides tell callers to grant in a trust policy, `sts:TagSession` and
+`sts:SetSourceIdentity`, and `*` passes as the wildcard that includes the assume actions. The
+namespace is read whatever case the document spells it in, since AWS reads an action that way at
+all: "The prefix and the action name are case insensitive", so `STS:AssumeRole` is the action
+`sts:AssumeRole` is. And the rule is read on `Action` alone: a statement naming `NotAction` grants
+every action but the ones it names, the assume actions among them, and nothing recorded says what
+AWS makes of that. Which actions AWS refuses inside the namespace is not recorded either, so
+refusing either would be this emulator's invention, and the cost of staying narrow is only that a
+document AWS would refuse is stored.
+
 ### Permission Boundaries
 
 | Action | Description |
