@@ -2561,30 +2561,16 @@ class SqsServiceTest {
         assertTrue(sqsService.receiveMessage(queueUrl, 1, 30, 0, region).isEmpty(),
                 "The next message must remain blocked while the head is in flight");
 
-        FutureTask<List<Message>> receive = new FutureTask<>(
-                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
-        Thread poller = new Thread(receive, "sqs-fifo-delete-wakeup");
-        poller.start();
-        try {
-            // Observe the actual wait rather than sleeping and assuming the receive has parked.
-            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
-                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+        List<Message> received = receiveAfterAction(queueUrl, region, () -> {
             if (inBatch) {
                 sqsService.deleteMessageInBatch(queueUrl, head.getReceiptHandle(), region);
             } else {
                 sqsService.deleteMessage(queueUrl, head.getReceiptHandle(), region);
             }
-
-            // Require a wakeup before the one-second polling retry.
-            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
-            assertEquals(1, received.size());
-            assertEquals(next.getMessageId(), received.getFirst().getMessageId());
-            assertEquals(1, received.getFirst().getReceiveCount());
-        } finally {
-            poller.interrupt();
-            poller.join(5000);
-        }
-        assertFalse(poller.isAlive());
+        });
+        assertEquals(1, received.size());
+        assertEquals(next.getMessageId(), received.getFirst().getMessageId());
+        assertEquals(1, received.getFirst().getReceiveCount());
     }
 
     @ParameterizedTest
@@ -2598,13 +2584,7 @@ class SqsServiceTest {
         Message head = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
         assertTrue(sqsService.receiveMessage(queueUrl, 1, 30, 0, region).isEmpty());
 
-        FutureTask<List<Message>> receive = new FutureTask<>(
-                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
-        Thread poller = new Thread(receive, "sqs-visibility-wakeup");
-        poller.start();
-        try {
-            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
-                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+        List<Message> received = receiveAfterAction(queueUrl, region, () -> {
             switch (operation) {
                 case "single" -> sqsService.changeMessageVisibility(queueUrl, head.getReceiptHandle(), 0, region);
                 case "batch" -> {
@@ -2617,17 +2597,113 @@ class SqsServiceTest {
                         head.getReceiptHandle(), head.getVisibleAt(), 0, region));
                 default -> throw new AssertionError("Unknown visibility operation: " + operation);
             }
+        });
+        assertEquals(1, received.size());
+        assertEquals(head.getMessageId(), received.getFirst().getMessageId());
+        assertEquals(2, received.getFirst().getReceiveCount());
+    }
 
-            // Require a wakeup before the one-second polling retry.
-            List<Message> received = receive.get(750, TimeUnit.MILLISECONDS);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deadLetterRedriveWakesParkedReceive(boolean fifo) throws Exception {
+        String region = "eu-west-1";
+        String suffix = fifo ? ".fifo" : "";
+        Map<String, String> attributes = fifo ? Map.of("FifoQueue", "true") : null;
+        Queue dlq = sqsService.createQueue("wakeup-dlq" + suffix, attributes, region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String policy = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+        Queue source = sqsService.createQueue("wakeup-source" + suffix,
+                fifo ? Map.of("FifoQueue", "true", "RedrivePolicy", policy) : Map.of("RedrivePolicy", policy), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "dead-lettered", 0,
+                fifo ? "group" : null, fifo ? "message" : null, region);
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).size());
+
+        List<Message> received = receiveAfterAction(dlq.getQueueUrl(), region, () ->
+                assertTrue(sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).isEmpty()));
+        assertEquals(1, received.size());
+        assertEquals(sent.getMessageId(), received.getFirst().getMessageId());
+        assertEquals("dead-lettered", received.getFirst().getBody());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void messageMoveTaskWakesParkedDestination(boolean fifo, boolean explicitDestination) throws Exception {
+        String region = "eu-west-1";
+        String suffix = fifo ? ".fifo" : "";
+        Map<String, String> attributes = fifo ? Map.of("FifoQueue", "true") : null;
+        Queue dlq = sqsService.createQueue("move-wakeup-dlq" + suffix, attributes, region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String policy = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+        Queue source = sqsService.createQueue("move-wakeup-origin" + suffix,
+                fifo ? Map.of("FifoQueue", "true", "RedrivePolicy", policy) : Map.of("RedrivePolicy", policy), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "moved", 0,
+                fifo ? "group" : null, fifo ? "message" : null, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        assertTrue(sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).isEmpty());
+        Queue destination = explicitDestination
+                ? sqsService.createQueue("move-wakeup-destination" + suffix, attributes, region) : source;
+        String destinationArn = explicitDestination
+                ? sqsService.getQueueAttributes(destination.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn")
+                : null;
+        AtomicReference<String> task = new AtomicReference<>();
+
+        List<Message> received = receiveAfterAction(destination.getQueueUrl(), region,
+                () -> task.set(sqsService.startMessageMoveTask(dlqArn, destinationArn, region)));
+        assertEquals(1, received.size());
+        assertEquals("moved", received.getFirst().getBody());
+        assertNotEquals(sent.getMessageId(), received.getFirst().getMessageId());
+        assertEquals(1, received.getFirst().getReceiveCount());
+        awaitMoveTaskStatus(dlqArn, task.get(), "COMPLETED");
+    }
+
+    @Test
+    void messageMoveTaskWakesParkedFifoSource() throws Exception {
+        String region = "eu-west-1";
+        Queue dlq = sqsService.createQueue("moving-head-dlq.fifo", Map.of("FifoQueue", "true"), region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String policy = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+        sqsService.createQueue("moving-head-origin.fifo",
+                Map.of("FifoQueue", "true", "RedrivePolicy", policy), region);
+        Queue destination = sqsService.createQueue("moving-head-destination.fifo", Map.of("FifoQueue", "true"), region);
+        String destinationArn = sqsService.getQueueAttributes(
+                destination.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        sqsService.sendMessage(dlq.getQueueUrl(), "head", 0, "group", "head", region);
+        Message next = sqsService.sendMessage(dlq.getQueueUrl(), "next", 0, "group", "next", region);
+        assertEquals("head", sqsService.receiveMessage(dlq.getQueueUrl(), 1, 30, 0, region).getFirst().getBody());
+        assertTrue(sqsService.receiveMessage(dlq.getQueueUrl(), 1, 30, 0, region).isEmpty());
+        AtomicReference<String> task = new AtomicReference<>();
+        try {
+            List<Message> received = receiveAfterAction(dlq.getQueueUrl(), region,
+                    () -> task.set(sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, region)));
             assertEquals(1, received.size());
-            assertEquals(head.getMessageId(), received.getFirst().getMessageId());
-            assertEquals(2, received.getFirst().getReceiveCount());
+            assertEquals(next.getMessageId(), received.getFirst().getMessageId());
+            assertEquals(1, received.getFirst().getReceiveCount());
+        } finally {
+            if (task.get() != null) {
+                sqsService.cancelMessageMoveTask(task.get(), region);
+                awaitMoveTaskStatus(dlqArn, task.get(), "CANCELLED");
+            }
+        }
+    }
+
+    private List<Message> receiveAfterAction(String queueUrl, String region, Runnable action) throws Exception {
+        FutureTask<List<Message>> receive = new FutureTask<>(
+                () -> sqsService.receiveMessage(queueUrl, 1, 30, 20, region));
+        Thread poller = new Thread(receive, "sqs-wakeup");
+        poller.start();
+        List<Message> received;
+        try {
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(5))
+                    .until(() -> poller.getState() == Thread.State.TIMED_WAITING);
+            action.run();
+            // Require a wakeup before the one-second polling retry.
+            received = receive.get(750, TimeUnit.MILLISECONDS);
         } finally {
             poller.interrupt();
             poller.join(5000);
         }
         assertFalse(poller.isAlive());
+        return received;
     }
 
     // --- DeleteQueue releases in-flight ReceiveMessage long polls ---

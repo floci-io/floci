@@ -1653,6 +1653,7 @@ public class SqsService implements Resettable, ResourceProvider {
             }
             String dlqStorageKey = regionKey(region, dlqUrl);
             getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
+            notifyReceivers(dlqStorageKey);
             LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
         }
 
@@ -1923,7 +1924,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // remainder runs on the background worker at the requested rate, draining
         // one message at a time so the source queue stays observably populated.
         long initialMoved = 0;
-        if (moveOneMessage(srcQueueInitial, destUrl, region)) {
+        if (moveOneMessage(srcQueueInitial, srcKey, destUrl, region)) {
             initialMoved = 1;
             updateMoveTaskCounter(taskHandle, initialMoved);
         }
@@ -1948,6 +1949,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (destUrl != null) {
             String destKey = regionKey(region, destUrl);
             getOrCreateQueue(destKey).addAll(List.of(moved));
+            notifyReceivers(destKey);
             return true;
         }
         if (msg.getOriginalSourceQueueUrl() != null) {
@@ -1957,6 +1959,7 @@ public class SqsService implements Resettable, ResourceProvider {
             // the queue any future receive will see.
             String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
             getOrCreateQueue(originKey).addAll(List.of(moved));
+            notifyReceivers(originKey);
             return true;
         }
         return false;
@@ -1972,13 +1975,14 @@ public class SqsService implements Resettable, ResourceProvider {
     /** Move the head message of {@code sourceQueue}. Returns {@code false} when there is
      *  nothing to move, the target queue is missing, or delivery failed; in the latter case
      *  the message is put back at the head so the source keeps its order. */
-    private boolean moveOneMessage(GuardedMessageQueue sourceQueue, String destUrl, String region) {
+    private boolean moveOneMessage(GuardedMessageQueue sourceQueue, String sourceKey, String destUrl, String region) {
         Message message = sourceQueue.drainFirstIf(msg -> canDeliverMovedMessage(msg, destUrl, region));
         if (message == null) {
             return false;
         }
         try {
             if (deliverMovedMessage(message, destUrl, region)) {
+                notifyReceivers(sourceKey);
                 return true;
             }
         } catch (RuntimeException e) {
@@ -2014,7 +2018,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     }
                 }
                 removeExpiredMessages(srcKey);
-                if (!moveOneMessage(srcQueue, destUrl, region)) {
+                if (!moveOneMessage(srcQueue, srcKey, destUrl, region)) {
                     break;
                 }
                 moved++;
