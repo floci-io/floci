@@ -1303,6 +1303,64 @@ class SqsIntegrationTest {
         }
     }
 
+    @Test
+    void changeMessageVisibility_callerInAnotherAccount_changesTheQueueOwnersMessage() {
+        String owner = "AWS4-HMAC-SHA256 Credential=111122223333/20260215/us-east-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String consumer = "AWS4-HMAC-SHA256 Credential=444455556666/20260215/us-east-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String queueUrl = given()
+            .header("Authorization", owner)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cross-account-visibility-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .header("Authorization", owner)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MessageBody", "cross-account")
+            .when().post("/").then().statusCode(200);
+
+            String receiptHandle = given()
+                .header("Authorization", consumer)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("VisibilityTimeout", "60")
+            .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.ReceiptHandle");
+
+            given()
+                .header("Authorization", consumer)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ChangeMessageVisibility")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("ReceiptHandle", receiptHandle)
+                .formParam("VisibilityTimeout", "0")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .header("Authorization", owner)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/").then().statusCode(200)
+                .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", equalTo("cross-account"));
+        } finally {
+            given()
+                .header("Authorization", owner)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/");
+        }
+    }
+
     private static Map<String, String> allQueueAttributes(String url) {
         XmlPath xml = given()
             .contentType("application/x-www-form-urlencoded")
