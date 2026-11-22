@@ -1102,7 +1102,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (portForwardManager != null) {
             portForwardManager.setPersister(persister);
             portForwardManager.setCurrentEnforcedPorts(instance -> RequestScopes.callAs(instance.getOwnerId(),
-                    instance.getRegion(), () -> desiredPublishedPorts(instance.getRegion(), instance)));
+                            instance.getRegion(), () -> desiredPublishedPorts(instance.getRegion(), instance)),
+                    (instance, family) -> RequestScopes.callAs(instance.getOwnerId(), instance.getRegion(),
+                            () -> Ec2PortForwardManager.hasUnrestrictedEgress(
+                                    publicationSecurityGroups(instance.getRegion(), instance), family)));
         }
         if (containerManager != null) {
             containerManager.setPersister(persister);
@@ -4728,16 +4731,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (!config.services().ec2().publishSecurityGroupPorts()) {
             return Ec2PortForwardManager.DesiredPorts.NONE;
         }
+        List<SecurityGroup> sgs = publicationSecurityGroups(region, inst);
+        int max = config.services().ec2().maxPublishedPortsPerInstance();
+        return securityGroupEnforcementEnabled()
+                ? Ec2PortForwardManager.extractWorldOpenPorts(sgs, max)
+                : Ec2PortForwardManager.DesiredPorts.anyFamily(Ec2PortForwardManager.extractPublishablePorts(sgs, max));
+    }
+
+    private List<SecurityGroup> publicationSecurityGroups(String region, Instance inst) {
         List<SecurityGroup> sgs = new ArrayList<>();
         if (inst.getSecurityGroups() != null) {
             for (GroupIdentifier gi : inst.getSecurityGroups()) {
                 securityGroups.get(key(region, gi.getGroupId())).ifPresent(sgs::add);
             }
         }
-        int max = config.services().ec2().maxPublishedPortsPerInstance();
-        return securityGroupEnforcementEnabled()
-                ? Ec2PortForwardManager.extractWorldOpenPorts(sgs, max)
-                : Ec2PortForwardManager.DesiredPorts.anyFamily(Ec2PortForwardManager.extractPublishablePorts(sgs, max));
+        return sgs;
     }
 
     private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
@@ -4799,6 +4807,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return;
         }
         String prefix = region + "::";
+        RuntimeException failure = null;
         for (Instance inst : instances.scan(k -> k.startsWith(prefix))) {
             if (inst.getSecurityGroups() == null || inst.getDockerContainerId() == null) {
                 continue;
@@ -4812,8 +4821,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (!"running".equals(state)) {
                 continue;
             }
-            portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
-            instances.put(key(region, inst.getInstanceId()), inst);
+            try {
+                portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
+                instances.put(key(region, inst.getInstanceId()), inst);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else if (failure != e) {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 

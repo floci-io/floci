@@ -8,8 +8,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.IpPermission;
@@ -17,7 +18,9 @@ import software.amazon.awssdk.services.ec2.model.IpPermission;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -26,9 +29,9 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(Ec2PublishedConnectionDockerIntegrationTest.Profile.class)
-@EnabledIfEnvironmentVariable(named = "FLOCI_TEST_EC2_PUBLISHING", matches = "true")
-class Ec2PublishedConnectionDockerIntegrationTest {
+@TestProfile(Ec2PublishedConnectionNightlyIntegrationTest.Profile.class)
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class Ec2PublishedConnectionNightlyIntegrationTest {
     public static class Profile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
@@ -41,12 +44,18 @@ class Ec2PublishedConnectionDockerIntegrationTest {
     @Inject Ec2Service service;
     @Inject DockerClient docker;
 
-    @Test
-    void revocationClosesListenerAndPreservesEstablishedSocket() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void revocationPreservesOnlyTrackedSockets(boolean trackedEgress) throws Exception {
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "000000000000", Region.US_EAST_1)) {
             String group = ec2.createSecurityGroup(r -> r.groupName("echo-" + UUID.randomUUID())
                     .description("Published echo test")).groupId();
             try {
+                if (trackedEgress) {
+                    ec2.revokeSecurityGroupEgress(r -> r.groupId(group).ipPermissions(
+                            ec2.describeSecurityGroups(d -> d.groupIds(group)).securityGroups().getFirst()
+                                    .ipPermissionsEgress()));
+                }
                 String id = ec2.runInstances(r -> r.imageId("ami-alpine").instanceType("t3.micro").minCount(1)
                         .maxCount(1).securityGroupIds(group)).instances().getFirst().instanceId();
                 try {
@@ -78,7 +87,18 @@ class Ec2PublishedConnectionDockerIntegrationTest {
                                 // Docker Desktop may refuse or reset the new connection.
                             }
                         }
-                        assertEquals(3, echoByte(tracked, 3));
+                        if (trackedEgress) {
+                            assertEquals(3, echoByte(tracked, 3));
+                            List<String> drainName = List.of(id + "-8080-draining-");
+                            assertFalse(docker.listContainersCmd().withNameFilter(drainName).exec().isEmpty());
+                            ec2.stopInstances(r -> r.instanceIds(id));
+                            await().atMost(Duration.ofSeconds(30)).until(() -> docker.listContainersCmd()
+                                    .withShowAll(true).withNameFilter(drainName)
+                                    .exec().isEmpty());
+                            assertDisconnected(tracked);
+                        } else {
+                            assertDisconnected(tracked);
+                        }
                     }
                 } finally {
                     ec2.terminateInstances(r -> r.instanceIds(id));
@@ -93,5 +113,13 @@ class Ec2PublishedConnectionDockerIntegrationTest {
     private static int echoByte(Socket socket, int value) throws IOException {
         socket.getOutputStream().write(value);
         return socket.getInputStream().read();
+    }
+
+    private static void assertDisconnected(Socket socket) throws IOException {
+        try {
+            assertEquals(-1, echoByte(socket, 3));
+        } catch (SocketException expected) {
+            // A removed relay can reset the connection instead of closing it cleanly.
+        }
     }
 }

@@ -3,6 +3,7 @@ package io.floci.aws.services.ec2.portforward;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.ListenBacklog;
@@ -30,9 +31,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -101,6 +104,7 @@ public class Ec2PortForwardManager {
     // hard restart (not just the periodic/shutdown flush). Set by the owning service.
     private volatile Consumer<Instance> persister;
     private Function<Instance, DesiredPorts> currentEnforcedPorts;
+    private BiPredicate<Instance, PublishedPortFamily> unrestrictedEgress;
 
     @Inject
     public Ec2PortForwardManager(DockerClient dockerClient,
@@ -154,10 +158,22 @@ public class Ec2PortForwardManager {
     }
 
     private void closeRevoked(Instance instance, DesiredPorts desired) {
+        RuntimeException failure = null;
         for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
             if (desired.ports().get(port) != family(instance, port)) {
-                revoke(instance, port);
+                try {
+                    revoke(instance, port);
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else if (failure != e) {
+                        failure.addSuppressed(e);
+                    }
+                }
             }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -194,6 +210,18 @@ public class Ec2PortForwardManager {
             for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
                 unpublish(instance, port);
             }
+            if (enforced()) {
+                String prefix = ContainerStorageHelper.dockerName(config, "ec2-fwd-" + instance.getInstanceId() + "-");
+                try {
+                    for (Container relay : dockerClient.listContainersCmd().withShowAll(true)
+                            .withNameFilter(List.of("^/?" + Pattern.quote(prefix) + "[0-9]+-draining-[0-9a-f]+$"))
+                            .exec()) {
+                        lifecycleManager.removeIfExistsStrict(relay.getId());
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not clean up draining relays for instance {0}", instance.getInstanceId());
+                }
+            }
         }
     }
 
@@ -207,8 +235,10 @@ public class Ec2PortForwardManager {
     }
 
     /** Resolves current rules under the instance lock, including when launch supplied an older snapshot. */
-    public void setCurrentEnforcedPorts(Function<Instance, DesiredPorts> resolver) {
+    public void setCurrentEnforcedPorts(Function<Instance, DesiredPorts> resolver,
+                                        BiPredicate<Instance, PublishedPortFamily> egress) {
         currentEnforcedPorts = resolver;
+        unrestrictedEgress = egress;
     }
 
     /** Sets the callback used to persist an instance after its forwards change. */
@@ -345,7 +375,8 @@ public class Ec2PortForwardManager {
         try {
             InspectContainerResponse relay = dockerClient.inspectContainerCmd(name).exec();
             String id = relay.getId();
-            if (Boolean.TRUE.equals(relay.getHostConfig().getAutoRemove())) {
+            if (Boolean.TRUE.equals(relay.getHostConfig().getAutoRemove())
+                    && (unrestrictedEgress == null || !unrestrictedEgress.test(instance, family(instance, appPort)))) {
                 try {
                     ContainerExec.Result closed = ContainerExec.run(dockerClient, id, new String[]{"sh", "-ec", """
                             listener=$(cat /tmp/floci-listener)
@@ -358,8 +389,8 @@ public class Ec2PortForwardManager {
                 } catch (RuntimeException e) {
                     // An idle auto-removing relay may exit before Docker reports the exec result.
                     if (Boolean.TRUE.equals(dockerClient.inspectContainerCmd(id).exec().getState().getRunning())) {
-                        LOG.warnv(e, "Could not confirm listener closure for EC2 relay {0}, retaining its binding", id);
-                        throw e;
+                        LOG.warnv(e, "Could not close EC2 relay {0}'s listener, removing the relay to revoke host access", id);
+                        lifecycleManager.removeIfExistsStrict(id);
                     }
                     forget(instance, appPort);
                     return;
@@ -529,6 +560,17 @@ public class Ec2PortForwardManager {
             ports.put(port, PublishedPortFamily.IPV6);
         }
         return new DesiredPorts(ports);
+    }
+
+    public static boolean hasUnrestrictedEgress(List<SecurityGroup> groups, PublishedPortFamily family) {
+        // A dual-stack publication uses IPv4 for its connection to the guest.
+        return groups.stream().flatMap(group -> group.getIpPermissionsEgress().stream())
+                .filter(permission -> "-1".equals(permission.getIpProtocol())
+                        || (isTcp(permission.getIpProtocol()) && Integer.valueOf(0).equals(permission.getFromPort())
+                        && Integer.valueOf(65535).equals(permission.getToPort())))
+                .anyMatch(permission -> family == PublishedPortFamily.IPV6
+                        ? opensToEveryAddress(permission.getIpv6Ranges().stream().map(range -> range.getCidrIpv6()))
+                        : opensToEveryAddress(permission.getIpRanges().stream().map(range -> range.getCidrIp())));
     }
 
     /** Whether any of the CIDRs is a valid one with a prefix length of 0, which every address of its family matches. */
