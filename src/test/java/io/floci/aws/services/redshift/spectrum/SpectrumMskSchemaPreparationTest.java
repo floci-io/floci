@@ -38,6 +38,8 @@ class SpectrumMskSchemaPreparationTest {
     private ExternalCatalogRegistry glueSchemas;
     private KinesisSchemaRegistry kinesisSchemas;
     private MskSchemaRegistry mskSchemas;
+    private final ExternalFunctionRegistry functions =
+            new ExternalFunctionRegistry(AccountAwareStorageBackend.<ExternalFunctionBinding>inMemory(ACCOUNT));
     private KinesisService kinesisService;
     private ExternalTableMaterializer materializer;
     private BackendSql backend;
@@ -56,7 +58,7 @@ class SpectrumMskSchemaPreparationTest {
         KinesisStreamingViews views = new KinesisStreamingViews(
                 new KinesisViewRegistry(AccountAwareStorageBackend.<KinesisViewBinding>inMemory(ACCOUNT)),
                 kinesisService, null, null, Clock.systemUTC());
-        preparation = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, mskSchemas, materializer,
+        preparation = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, mskSchemas, functions, materializer,
                 new ExternalStatementParser(), mock(GlueService.class), metadata, new ExternalCatalogLocks(),
                 views, (accountId, clusterIdentifier) -> null);
     }
@@ -148,7 +150,7 @@ class SpectrumMskSchemaPreparationTest {
                 new KinesisViewRegistry(AccountAwareStorageBackend.<KinesisViewBinding>inMemory(ACCOUNT)),
                 null, null, null, Clock.systemUTC());
         SpectrumQueryPreparation withGlue = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, mskSchemas,
-                materializer, new ExternalStatementParser(), glue, new ExternalMetadataWriter(glue, new ObjectMapper()),
+                functions, materializer, new ExternalStatementParser(), glue, new ExternalMetadataWriter(glue, new ObjectMapper()),
                 new ExternalCatalogLocks(), views, (accountId, clusterIdentifier) -> null);
         preparation.prepare(CREATE, SESSION, backend);
 

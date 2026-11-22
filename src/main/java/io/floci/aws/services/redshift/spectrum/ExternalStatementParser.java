@@ -279,12 +279,12 @@ public class ExternalStatementParser {
 
     private static ExternalStatement.CreateFunction parseFunction(Matcher head, String text) {
         int open = head.end() - 1;
-        int close = matchingParenthesis(text, open);
+        int close = matchingParen(text, open);
         if (close < 0) {
             throw new SpectrumSqlException("42601", "Unbalanced parentheses in CREATE EXTERNAL FUNCTION");
         }
         List<String> argumentTypes = new ArrayList<>();
-        for (String argument : splitTopLevel(text.substring(open + 1, close))) {
+        for (String argument : argumentList(text.substring(open + 1, close))) {
             argumentTypes.add(ExternalFunctionTypes.base(argument));
         }
         String tail = text.substring(close + 1).replaceFirst("[\\s;]+$", "");
@@ -415,7 +415,7 @@ public class ExternalStatementParser {
     private static Optional<ExternalStatement> parseDropFunction(Matcher drop) {
         List<String> argumentTypes = new ArrayList<>();
         try {
-            for (String argument : splitTopLevel(drop.group(4))) {
+            for (String argument : argumentList(drop.group(4))) {
                 argumentTypes.add(dropArgumentType(argument));
             }
         } catch (SpectrumSqlException notExternal) {
@@ -432,8 +432,8 @@ public class ExternalStatementParser {
         if (ExternalFunctionTypes.isType(trimmed)) {
             return ExternalFunctionTypes.base(trimmed);
         }
-        int space = trimmed.indexOf(' ');
-        return ExternalFunctionTypes.base(space > 0 ? trimmed.substring(space + 1) : trimmed);
+        int nameEnd = trimmed.startsWith("\"") ? columnNameEnd(trimmed) : trimmed.indexOf(' ');
+        return ExternalFunctionTypes.base(nameEnd > 0 ? trimmed.substring(nameEnd) : trimmed);
     }
 
     private static long wholeNumber(String token, String clause) {
@@ -444,41 +444,9 @@ public class ExternalStatementParser {
         }
     }
 
-    /** The index of the parenthesis closing the one at {@code open}, or -1 when it never closes. */
-    private static int matchingParenthesis(String text, int open) {
-        int depth = 0;
-        for (int index = open; index < text.length(); index++) {
-            char current = text.charAt(index);
-            if (current == '(') {
-                depth++;
-            } else if (current == ')' && --depth == 0) {
-                return index;
-            }
-        }
-        return -1;
-    }
-
-    /** The comma-separated items of an argument list; a comma inside a length or precision stays in its item. */
-    private static List<String> splitTopLevel(String list) {
-        List<String> items = new ArrayList<>();
-        if (list.isBlank()) {
-            return items;
-        }
-        int depth = 0;
-        int start = 0;
-        for (int index = 0; index < list.length(); index++) {
-            char current = list.charAt(index);
-            if (current == '(') {
-                depth++;
-            } else if (current == ')') {
-                depth--;
-            } else if (current == ',' && depth == 0) {
-                items.add(list.substring(start, index));
-                start = index + 1;
-            }
-        }
-        items.add(list.substring(start));
-        return items;
+    /** The items of an argument list, none for an empty one; a comma inside a length or precision stays in its item. */
+    private static List<String> argumentList(String list) {
+        return list.isBlank() ? List.of() : split(list);
     }
 
     private record TokenSlice(String text, int end) { }

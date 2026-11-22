@@ -22,7 +22,7 @@ final class ExternalFunctionTypes {
             Map.entry("char", "character"), Map.entry("character", "character"), Map.entry("nchar", "character"),
             Map.entry("bpchar", "character"),
             Map.entry("varchar", "character varying"), Map.entry("character varying", "character varying"),
-            Map.entry("nvarchar", "character varying"), Map.entry("text", "character varying"),
+            Map.entry("nvarchar", "character varying"), Map.entry("text", "text"),
             Map.entry("boolean", "boolean"), Map.entry("bool", "boolean"),
             Map.entry("date", "date"),
             Map.entry("timestamp", "timestamp"), Map.entry("timestamp without time zone", "timestamp"));
@@ -46,8 +46,12 @@ final class ExternalFunctionTypes {
     private static Resolved resolve(String declared) {
         String text = declared.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
         String modifier = null;
+        int precision = -1;
+        int scale = -1;
         Matcher matcher = MODIFIER.matcher(text);
         if (matcher.find()) {
+            precision = Integer.parseInt(matcher.group(1));
+            scale = matcher.group(2) == null ? -1 : Integer.parseInt(matcher.group(2));
             modifier = "(" + matcher.group(1) + (matcher.group(2) == null ? "" : "," + matcher.group(2)) + ")";
             text = text.substring(0, matcher.start());
         }
@@ -56,7 +60,21 @@ final class ExternalFunctionTypes {
             throw new SpectrumSqlException("0A000", "Data type \"" + declared.trim()
                     + "\" is not supported for a Lambda UDF");
         }
+        if (modifier != null && !modifierFits(base, precision, scale)) {
+            throw new SpectrumSqlException("42601", "Invalid type modifier " + modifier + " for data type \""
+                    + base + "\"");
+        }
         return new Resolved(base, modifier);
+    }
+
+    /** Only the types that take a length or precision accept one, within the bounds Redshift documents. */
+    private static boolean modifierFits(String base, int precision, int scale) {
+        return switch (base) {
+            case "numeric" -> precision >= 1 && precision <= 38 && scale <= precision;
+            case "character" -> scale < 0 && precision >= 1 && precision <= 4096;
+            case "character varying" -> scale < 0 && precision >= 1 && precision <= 65535;
+            default -> false;
+        };
     }
 
     /** True when the text names a supported type, which tells an argument name from the start of a type. */

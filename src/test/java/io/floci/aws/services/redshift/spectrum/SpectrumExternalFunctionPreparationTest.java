@@ -17,6 +17,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -73,9 +74,41 @@ class SpectrumExternalFunctionPreparationTest {
         preparation.prepare("CREATE OR REPLACE EXTERNAL FUNCTION \"Sales\".f_now() RETURNS VARCHAR(8) STABLE "
                 + "LAMBDA 'now' IAM_ROLE '" + ROLE + "'", SESSION, backend);
 
-        verify(backend).execute(argThat(sql -> sql.startsWith("CREATE OR REPLACE FUNCTION \"Sales\".\"f_now\"() "
+        verify(backend).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION \"Sales\".\"f_now\"() "
                 + "RETURNS character varying(8) LANGUAGE plpgsql STABLE")));
         assertThat(bound("Sales", "f_now", List.of()).isPresent(), equalTo(true));
+    }
+
+    @Test
+    void orReplaceOnlyReplacesAFunctionTheRegistryMade() {
+        String replace = CREATE.replace("CREATE EXTERNAL", "CREATE OR REPLACE EXTERNAL");
+
+        preparation.prepare(replace, SESSION, backend);
+        preparation.prepare(replace, SESSION, backend);
+
+        verify(backend, times(1)).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION")));
+        verify(backend, times(1)).execute(argThat(sql -> sql.startsWith("CREATE OR REPLACE FUNCTION")));
+    }
+
+    @Test
+    void anOrdinaryFunctionOfTheSignatureIsNeverOverwrittenByAStub() {
+        doThrow(new SpectrumReadException("42723", "function already exists")).when(backend)
+                .execute(argThat(sql -> sql.startsWith("CREATE FUNCTION")));
+
+        SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> preparation.prepare(
+                CREATE.replace("CREATE EXTERNAL", "CREATE OR REPLACE EXTERNAL"), SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("42723"));
+        verify(backend, never()).execute(argThat(sql -> sql.startsWith("CREATE OR REPLACE")));
+        assertThat(bound("public", "exfunc_sum", List.of("integer", "integer")).isPresent(), equalTo(false));
+    }
+
+    @Test
+    void aPercentSignInAQuotedNameIsNotAPlaceholderOfTheStubsMessage() {
+        preparation.prepare("CREATE EXTERNAL FUNCTION \"pct%fn\"(INT) RETURNS INT STABLE LAMBDA 'f' IAM_ROLE '"
+                + ROLE + "'", SESSION, backend);
+
+        verify(backend).execute(argThat(sql -> sql.contains("RAISE EXCEPTION ''%'', E''External function public.pct%fn ")));
     }
 
     @Test

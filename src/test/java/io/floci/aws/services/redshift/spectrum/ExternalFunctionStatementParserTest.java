@@ -150,6 +150,39 @@ class ExternalFunctionStatementParserTest {
     }
 
     @Test
+    void dropFunctionReadsAQuotedArgumentNameThatHoldsASpace() {
+        ExternalStatement.DropFunction drop = (ExternalStatement.DropFunction) parser.parse(
+                "DROP FUNCTION f(\"arg name\" INT, \"a\"\"b c\" double precision)").orElseThrow();
+
+        assertThat(drop.argumentTypes(), equalTo(List.of("integer", "double precision")));
+    }
+
+    @Test
+    void rejectsATypeModifierTheTypeDoesNotTake() {
+        String tail = ") RETURNS INT STABLE LAMBDA 'f' IAM_ROLE '" + ROLE + "'";
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(INT(10)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(DATE(3)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(DECIMAL(39, 2)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(DECIMAL(5, 6)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(CHAR(0)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(VARCHAR(65536)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f(VARCHAR(5, 2)" + tail), equalTo("42601"));
+        assertThat(errorState("CREATE EXTERNAL FUNCTION f() RETURNS BIGINT(8) STABLE LAMBDA 'f' IAM_ROLE '" + ROLE + "'"),
+                equalTo("42601"));
+    }
+
+    @Test
+    void textStaysItsOwnTypeSoDroppingTextNeverNamesAVarcharFunction() {
+        ExternalStatement.CreateFunction text = create("CREATE EXTERNAL FUNCTION f(TEXT) RETURNS INT STABLE "
+                + "LAMBDA 'f' IAM_ROLE '" + ROLE + "'");
+        ExternalStatement.DropFunction drop = (ExternalStatement.DropFunction) parser.parse(
+                "DROP FUNCTION f(VARCHAR)").orElseThrow();
+
+        assertThat(text.argumentTypes(), equalTo(List.of("text")));
+        assertThat(drop.argumentTypes(), equalTo(List.of("character varying")));
+    }
+
+    @Test
     void anUnsupportedStatementErrorNamesTheType() {
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
                 () -> parser.parse("CREATE EXTERNAL FUNCTION f(JSONB) RETURNS INT STABLE LAMBDA 'f' IAM_ROLE '"

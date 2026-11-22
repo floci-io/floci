@@ -80,6 +80,24 @@ class ExternalFunctionRegistryTest {
     }
 
     @Test
+    void punctuationInAQuotedNameNeverMakesTwoFunctionsShareARegistration() {
+        ExternalFunctionBinding dottedSchema = binding(SESSION.clusterKey(), "a.b", "c", List.of("integer"));
+        ExternalFunctionBinding dottedName = binding(SESSION.clusterKey(), "a", "b.c", List.of("integer"));
+        ExternalFunctionBinding listLikeName = binding(SESSION.clusterKey(), "public", "f(integer)", List.of());
+        ExternalFunctionBinding plain = binding(SESSION.clusterKey(), "public", "f", List.of("integer"));
+        List.of(dottedSchema, dottedName, listLikeName, plain).forEach(registry::replace);
+
+        assertThat(registry.list(ACCOUNT, SESSION.clusterKey(), "dev").size(), equalTo(4));
+        registry.unbindFunction(dottedSchema);
+        registry.unbindFunction(listLikeName);
+
+        assertThat(registry.findFunction(SESSION, "a", "b.c", List.of("integer")).isPresent(), equalTo(true));
+        assertThat(registry.findFunction(SESSION, "public", "f", List.of("integer")).isPresent(), equalTo(true));
+        assertThat(registry.findFunction(SESSION, "a.b", "c", List.of("integer")).isPresent(), equalTo(false));
+        assertThat(registry.findFunction(SESSION, "public", "f(integer)", List.of()).isPresent(), equalTo(false));
+    }
+
+    @Test
     void clearForgetsEverything() {
         registry.replace(binding(SESSION.clusterKey(), "public", "f", List.of()));
 

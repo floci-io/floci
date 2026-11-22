@@ -35,7 +35,17 @@ public record ExternalFunctionBinding(String accountId, String clusterKey, Strin
         return nameOf(schemaName, functionName, argumentTypes);
     }
 
+    /**
+     * Each part is length-prefixed, so a quoted name holding a dot, a parenthesis or text that looks like an argument
+     * list can never read as another function's schema, name or signature.
+     */
     public static String nameOf(String schemaName, String functionName, List<String> argumentTypes) {
-        return schemaName + "." + functionName + "(" + String.join(",", argumentTypes) + ")";
+        StringBuilder name = new StringBuilder(part(schemaName)).append(part(functionName));
+        argumentTypes.forEach(type -> name.append(part(type)));
+        return name.toString();
+    }
+
+    private static String part(String value) {
+        return value.length() + ":" + value + ";";
     }
 }

@@ -1148,7 +1148,7 @@ DROP FUNCTION exfunc_sum(INT, INT) [CASCADE | RESTRICT];
 ```
 
 The statement creates a stub function of the same signature in the local database and remembers the Lambda function,
-role, volatility and batch options. `CREATE OR REPLACE` needs the same signature and return type, and an overload of
+role, volatility and batch options. `CREATE OR REPLACE` replaces only a function that `CREATE EXTERNAL FUNCTION` made, with the same signature and return type; an ordinary function of that signature is refused with `42723`. An overload of
 the same name with other argument types is a separate function. `DROP FUNCTION` removes both the stub and the
 registration; a `DROP FUNCTION` of any function Floci does not track is left to PostgreSQL.
 

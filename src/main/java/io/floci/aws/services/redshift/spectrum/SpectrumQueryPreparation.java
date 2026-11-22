@@ -92,7 +92,7 @@ public class SpectrumQueryPreparation {
                              BiFunction<String, String, String> clusterRegion) {
         this(registry, kinesisSchemas,
                 new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory("000000000000")),
-                materializer, parser, glue, metadata, catalogLocks,
+                inMemoryFunctions(), materializer, parser, glue, metadata, catalogLocks,
                 new KinesisStreamingViews(new KinesisViewRegistry(
                         AccountAwareStorageBackend.<KinesisViewBinding>inMemory("000000000000")),
                         null, null, null, Clock.systemUTC()), clusterRegion);
@@ -104,17 +104,11 @@ public class SpectrumQueryPreparation {
                              KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
         this(registry, kinesisSchemas,
                 new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory("000000000000")),
-                materializer, parser, glue, metadata, catalogLocks, views, clusterRegion);
+                inMemoryFunctions(), materializer, parser, glue, metadata, catalogLocks, views, clusterRegion);
     }
 
-    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
-                             MskSchemaRegistry mskSchemas, ExternalTableMaterializer materializer,
-                             ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
-                             ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
-                             BiFunction<String, String, String> clusterRegion) {
-        this(registry, kinesisSchemas, mskSchemas,
-                new ExternalFunctionRegistry(AccountAwareStorageBackend.<ExternalFunctionBinding>inMemory("000000000000")),
-                materializer, parser, glue, metadata, catalogLocks, views, clusterRegion);
+    private static ExternalFunctionRegistry inMemoryFunctions() {
+        return new ExternalFunctionRegistry(AccountAwareStorageBackend.<ExternalFunctionBinding>inMemory("000000000000"));
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
@@ -567,13 +561,16 @@ public class SpectrumQueryPreparation {
                 session.databaseName(), schema, function.functionName(), function.argumentTypes(),
                 function.returnType(), function.volatility(), function.lambdaFunction(), function.iamRoleArn(),
                 function.retryTimeoutMillis(), function.maxBatchRows(), function.maxBatchSizeBytes());
-        // The backend decides whether the name is taken (42723) or the return type differs on OR REPLACE (42P13),
-        // so a function created some other way is never overwritten and a stale binding never blocks a create.
-        backend.execute(stubSql(function, schema));
+        // OR REPLACE only replaces a function this registry made: any other function of the signature is an
+        // ordinary one that a stub must not overwrite, so it is created plainly and the backend refuses it (42723).
+        // The backend still decides whether the return type differs on a replace (42P13).
+        boolean replace = function.orReplace() && functions.findFunction(session, schema, function.functionName(),
+                function.argumentTypes()).isPresent();
+        backend.execute(stubSql(function, schema, replace));
         try {
             functions.replace(binding);
         } catch (RuntimeException exception) {
-            if (!function.orReplace()) {
+            if (!replace) {
                 try {
                     backend.execute(dropStubSql(schema, function.functionName(), function.argumentTypes(), false, false));
                 } catch (RuntimeException cleanupFailure) {
@@ -611,12 +608,13 @@ public class SpectrumQueryPreparation {
         return schemaName == null ? DEFAULT_FUNCTION_SCHEMA : schemaName;
     }
 
-    private static String stubSql(ExternalStatement.CreateFunction function, String schema) {
-        String body = "BEGIN RAISE EXCEPTION "
+    private static String stubSql(ExternalStatement.CreateFunction function, String schema, boolean replace) {
+        // The message is an argument, not the format string, so a % in a quoted name is not read as a placeholder.
+        String body = "BEGIN RAISE EXCEPTION '%', "
                 + PostgresWire.quoteLiteral("External function " + schema + "." + function.functionName()
                         + " cannot be called: invoking Lambda from SQL is not supported yet")
                 + " USING ERRCODE = '0A000'; END";
-        return "CREATE " + (function.orReplace() ? "OR REPLACE " : "") + "FUNCTION "
+        return "CREATE " + (replace ? "OR REPLACE " : "") + "FUNCTION "
                 + signature(schema, function.functionName(), function.argumentTypes())
                 + " RETURNS " + function.returnType() + " LANGUAGE plpgsql " + function.volatility() + " AS "
                 + PostgresWire.quoteLiteral(body);
