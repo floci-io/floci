@@ -272,6 +272,12 @@ public class ContainerLifecycleManager {
         return create(spec, resolvedImage, null);
     }
 
+    /** Creates a container Docker removes as soon as its process exits. */
+    public String createAutoRemoving(ContainerSpec spec) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return create(spec, resolvedImage, null, true, true);
+    }
+
     /**
      * Creates a container for a specific Docker platform.
      *
@@ -289,7 +295,12 @@ public class ContainerLifecycleManager {
     }
 
     private String create(ContainerSpec spec, String resolvedImage, String platform, boolean removeAnonymousVolumes) {
-        String containerId = createWithCaBundle(spec, resolvedImage, platform, removeAnonymousVolumes);
+        return create(spec, resolvedImage, platform, removeAnonymousVolumes, false);
+    }
+
+    private String create(ContainerSpec spec, String resolvedImage, String platform, boolean removeAnonymousVolumes,
+                          boolean autoRemove) {
+        String containerId = createWithCaBundle(spec, resolvedImage, platform, removeAnonymousVolumes, autoRemove);
         if (spec.hasNetworkConfiguration()) {
             try {
                 attachNetworkBeforeStart(containerId, spec);
@@ -312,11 +323,14 @@ public class ContainerLifecycleManager {
     }
 
     private String createWithCaBundle(ContainerSpec spec, String resolvedImage, String platform,
-                                      boolean removeAnonymousVolumes) {
+                                      boolean removeAnonymousVolumes, boolean autoRemove) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         // Built once: a dynamic port binding allocates its host port here.
         HostConfig hostConfig = buildHostConfig(spec);
+        if (autoRemove) {
+            hostConfig.withAutoRemove(true);
+        }
         Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
         if (caBundle.isEmpty()) {
             return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
