@@ -41,7 +41,7 @@ import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
-import io.floci.aws.services.emrserverless.SparkConnectServers;
+import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkConnectSession;
 import io.floci.aws.services.emrserverless.SparkConnectSessionOwner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
@@ -191,7 +191,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final Set<String> primaryNodeStarts = ConcurrentHashMap.newKeySet();
     private final AtomicLong primaryNodeStartCount = new AtomicLong();
     // The Spark Connect servers of the sessions, in the docker runner mode, and the tokens given for every session.
-    private final SparkConnectServers sessionServers;
+    private final SessionServers sessionServers;
     private final SessionOwner sessionOwner = new SessionOwner();
     private final IamService iamService;
     // Where a step's driver runs: image-template, with the release label for %s, and docker-network; null when
@@ -332,10 +332,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? releaseImages : null,
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-step-", 0).factory()),
                 iamService,
-                new SparkConnectServers(
+                new SessionServers(SessionServers.Kind.SPARK_CONNECT,
                         RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? sparkRunner : null,
                         Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-session-", 0).factory()),
-                        SparkConnectServers.checkThread("emr-session-checks"), SparkConnectServers.probe(proxy),
+                        SessionServers.checkThread("emr-session-checks"), SessionServers.sparkConnectProbe(proxy),
                         Clock.systemUTC()));
     }
 
@@ -351,13 +351,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                Executor stepExecutor, IamService iamService) {
         this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, sparkRunner, bootstrapRunner,
                 clusterStorage, releaseImages, stepExecutor, iamService,
-                new SparkConnectServers(sparkRunner, stepExecutor, null, (host, port) -> "not probed", clock));
+                new SessionServers(SessionServers.Kind.SPARK_CONNECT, sparkRunner, stepExecutor, null,
+                        (host, port) -> "not probed", clock));
     }
 
     EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups, SparkJobRunner sparkRunner,
                BootstrapRunner bootstrapRunner, ClusterStorage clusterStorage, ReleaseImages releaseImages,
-               Executor stepExecutor, IamService iamService, SparkConnectServers sessionServers) {
+               Executor stepExecutor, IamService iamService, SessionServers sessionServers) {
         this.sessionServers = sessionServers;
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
@@ -907,7 +908,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
-    /** Where a Spark Connect call carrying {@code token} goes: a session's server, {@link SparkConnectServers}. */
+    /** Where a Spark Connect call carrying {@code token} goes: a session's server, {@link SessionServers}. */
     @Override
     public Optional<Route> route(String token) {
         return sessionServers.route(token, sessionOwner);
@@ -3186,7 +3187,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * the job then runs on. A job a cancel, its cluster's end or a reset has passed makes none of it. Afterwards the
      * image may go once a newer one of its kind is made, and the metadata address to another.
      */
-    private final class ClusterPreparation implements SparkConnectServers.Preparation {
+    private final class ClusterPreparation implements SessionServers.Preparation {
 
         private final String clusterId;
         private final String accountId;

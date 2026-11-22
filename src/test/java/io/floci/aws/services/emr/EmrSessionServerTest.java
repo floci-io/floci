@@ -4,7 +4,8 @@ import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrSession;
-import io.floci.aws.services.emrserverless.SparkConnectServers;
+import io.floci.aws.services.emrserverless.SessionServers;
+import io.floci.aws.services.emrserverless.SparkConnectSessionOwner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
 import org.junit.jupiter.api.Test;
@@ -43,7 +44,7 @@ class EmrSessionServerTest {
 
     private final FakeServerRunner runner = new FakeServerRunner();
     private final AtomicBoolean answering = new AtomicBoolean(true);
-    private final SparkConnectServers.Probe probe = (host, port) ->
+    private final SessionServers.Probe probe = (host, port) ->
             answering.get() && SERVER_HOST.equals(host) && port == SERVER_PORT ? null : "Connection refused";
     private final EmrServiceFixture fixture = EmrServiceFixture.dockerSessions(runner, mock(IamService.class), probe);
     private final EmrService service = fixture.service;
@@ -136,7 +137,7 @@ class EmrSessionServerTest {
         runner.end(sessionId).complete(SparkJobRunner.Outcome.exitedWith(1));
         EmrSession failed = awaitState(clusterId, sessionId, "FAILED");
 
-        assertEquals(String.format(SparkConnectServers.SERVER_EXITED, 1), failed.getStateChangeReason());
+        assertEquals(String.format(SparkConnectSessionOwner.SERVER_EXITED, 1), failed.getStateChangeReason());
     }
 
     @Test

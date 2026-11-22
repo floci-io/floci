@@ -24,16 +24,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * The servers {@link SparkConnectServers} runs, read from its owner's side: what reaches the owner, in what order, and
+ * The servers {@link SessionServers} runs, read from its owner's side: what reaches the owner, in what order, and
  * what a call is answered, as servers start, take calls and stop.
  */
-class SparkConnectServersTest {
+class SessionServersTest {
 
     private static final String SESSION = "session-1";
     private static final String TOKEN = "a-token";
 
     private final ServerRunner runner = new ServerRunner();
-    private final SparkConnectServers servers = new SparkConnectServers(runner,
+    private final SessionServers servers = new SessionServers(SessionServers.Kind.SPARK_CONNECT, runner,
             task -> Thread.ofPlatform().daemon().start(task), null, (host, port) -> null, Clock.systemUTC());
     private final RecordingOwner owner = new RecordingOwner();
 
@@ -49,7 +49,15 @@ class SparkConnectServersTest {
         Route route = servers.route(TOKEN, owner).orElseThrow();
 
         assertEquals(Route.UNAVAILABLE, route.status());
-        assertEquals(String.format(SparkConnectServers.NO_RUNNING_SERVER, SESSION), route.refusal());
+        assertEquals(SessionServers.Kind.SPARK_CONNECT.noRunningServer(SESSION), route.refusal());
+    }
+
+    @Test
+    void sparkConnectServersRefuseACallInTheWordsTheyAlwaysHad() {
+        assertEquals("The authentication token has expired. Call GetSessionEndpoint for a new one.",
+                SessionServers.Kind.SPARK_CONNECT.tokenExpired());
+        assertEquals("Session " + SESSION + " has no Spark Connect server running.",
+                SessionServers.Kind.SPARK_CONNECT.noRunningServer(SESSION));
     }
 
     @Test
@@ -116,7 +124,7 @@ class SparkConnectServersTest {
     }
 
     /** An owner that records what reaches it, the idle as it ends, and answers as the test sets it to. */
-    private static final class RecordingOwner implements SparkConnectServers.Owner {
+    private static final class RecordingOwner implements SessionServers.Owner {
         final List<String> events = new CopyOnWriteArrayList<>();
         volatile Supplier<String> refusal = () -> null;
         volatile Runnable idleWait = () -> { };

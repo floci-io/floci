@@ -267,7 +267,7 @@ class EmrServerlessSessionServiceTest {
         assertEquals(String.format(EmrServerlessSessionService.NO_SERVER, sessionId), route.refusal());
         assertTrue(sessions.route("not-a-token").isEmpty());
         clock.advance(EmrServerlessSessionService.TOKEN_VALIDITY);
-        assertEquals(SparkConnectServers.TOKEN_EXPIRED, sessions.route(token).orElseThrow().refusal());
+        assertEquals(SessionServers.Kind.SPARK_CONNECT.tokenExpired(), sessions.route(token).orElseThrow().refusal());
     }
 
     @Test
