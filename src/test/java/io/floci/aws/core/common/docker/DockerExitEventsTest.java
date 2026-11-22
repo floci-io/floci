@@ -172,6 +172,23 @@ class DockerExitEventsTest {
                 .until(() -> exits.equals(List.of("c1=137")));
     }
 
+    // Catches: a subscription Docker never confirmed resetting the reconnect backoff, so a daemon that
+    // refuses the connection is tried again every second instead of on a doubling delay.
+    @Test
+    void anUnconfirmedSubscriptionKeepsTheBackoffGrowing() {
+        events.close();
+        dockerConfirms = false;
+        events = new DockerExitEvents(docker, streaming, true, Duration.ofMillis(50));
+        events.register("c1", code -> exits.add("c1=" + code));
+
+        subscriptions.get(0).onError(new RuntimeException("Connection refused"));
+        await("the stream should be opened again").atMost(Duration.ofSeconds(5))
+                .until(() -> subscriptions.size() == 2);
+        subscriptions.get(1).onError(new RuntimeException("Connection refused"));
+
+        assertEquals(2, events.failedSubscriptionCount(), "two refused subscriptions in a row");
+    }
+
     // Catches: a container removed while the stream was down staying registered forever.
     @Test
     void theSweepForgetsAContainerThatIsGone() {

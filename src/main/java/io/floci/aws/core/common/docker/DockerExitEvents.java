@@ -100,6 +100,12 @@ public class DockerExitEvents {
         return registered.size();
     }
 
+    int failedSubscriptionCount() {
+        synchronized (subscriptionLock) {
+            return failedSubscriptions;
+        }
+    }
+
     private void ensureSubscribed() {
         synchronized (subscriptionLock) {
             if (subscription != null || shutdown) {
@@ -145,9 +151,10 @@ public class DockerExitEvents {
                 LOG.warnv("Docker did not confirm the container events subscription within {0} ms; exits are"
                         + " checked by inspect once it does", subscribeConfirmation.toMillis());
                 awaitingConfirmation(callback);
-            }
-            synchronized (subscriptionLock) {
-                failedSubscriptions = 0;
+            } else {
+                synchronized (subscriptionLock) {
+                    failedSubscriptions = 0;
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
