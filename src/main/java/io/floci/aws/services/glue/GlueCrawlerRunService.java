@@ -347,7 +347,20 @@ public class GlueCrawlerRunService {
         }
         Instant finishesAt = record.getCurrentStart().plusSeconds(runDurationSeconds);
         if (!clock.instant().isBefore(finishesAt)) {
-            finish(record, finishesAt, crawlRunner.run(record.getCrawlerName()));
+            finish(record, finishesAt, runCrawl(record.getCrawlerName()));
+        }
+    }
+
+    /**
+     * A runner that throws must still end the crawl: otherwise the crawl stays active, every later read
+     * invokes the runner again, and a workflow's crawl never reaches its completion history.
+     */
+    private CrawlOutcome runCrawl(String crawlerName) {
+        try {
+            return crawlRunner.run(crawlerName);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Glue crawler {0} failed: {1}", crawlerName, e.getMessage());
+            return CrawlOutcome.failed(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
     }
 
