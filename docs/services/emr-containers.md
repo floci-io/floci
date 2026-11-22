@@ -78,9 +78,13 @@ cluster's container provider id in the request's account and Region, the run is 
 `stateDetails` "Cluster *id* does not exist." and `failureReason` `CLUSTER_UNAVAILABLE`, as that page
 gives it. Otherwise, in the `immediate` runner mode, the run is `COMPLETED` at once, or `RUNNING` for
 `job-run-duration-seconds` and then `COMPLETED`, and `CancelJobRun` moves a run that has not finished to
-`CANCELLED`; in the `docker` one it runs (see [Running job runs](#running-job-runs)). A run with a
-`retryPolicyConfiguration` reports `retryPolicyExecution` with one attempt. The release label is not
-checked against EMR on EKS's releases.
+`CANCELLED`; in the `docker` one it runs (see [Running job runs](#running-job-runs)). A
+`retryPolicyConfiguration` whose `maxAttempts` is not from 1 to 2,147,483,647 is refused with
+`ValidationException` ("Retry policy configuration's parameter value of maxAttempts is invalid"), as the
+development guide's "Using job retry policies" gives it. A `maxAttempts` of 1 disables retries, and then
+neither the policy nor `retryPolicyExecution` is shown ("These fields will not be visible when retry policy
+is disabled in the job"); with more, the run reports `retryPolicyExecution`, its `currentAttemptCount`
+starting at 1. The release label is not checked against EMR on EKS's releases.
 
 **Concurrent job limits.** `StartJobRun` applies the virtual cluster's limits, as the development guide's
 "Concurrent job limits for virtual clusters" describes them. At most `maxConcurrentJobRuns` runs are
@@ -178,10 +182,19 @@ wrapper with `FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE=docker` (see [Docker](../
   stream's name starts at the virtual cluster's id. Each line goes as the driver wrote it, but for an empty one,
   which CloudWatch Logs refuses as an event. A run from a job template whose destination leaves out its
   `logGroupName` or `logUri`, which the template's model allows, is refused with `ValidationException`, as
-  `StartJobRun` refuses a request that does. The `<spark-application-id>` has the form a Spark
-  application on Kubernetes gets, `spark-` and 32 hexadecimal digits, but is Floci's own: the driver's local
-  mode reports another. Floci runs no job submitter, so there are no submitter logs, and its executors run
+  `StartJobRun` refuses a request that does. With retries enabled, the driver pod's name has a suffix of
+  each attempt's own, `spark-<job-id>-driver-<random-suffix>`, as the guide gives it, so each attempt's logs
+  go to a folder and streams of their own, under the run's one `<spark-application-id>`. That id has the form
+  a Spark application on Kubernetes gets, `spark-` and 32 hexadecimal digits, but is Floci's own: the driver's
+  local mode reports another. Floci runs no job submitter, so there are no submitter logs, and its executors run
   in the driver's container, so their output is the driver's. `persistentAppUI`, `containerLogRotationConfiguration`
   and `managedLogs` are kept but not applied.
-* **Not emulated yet**: a `retryPolicyConfiguration` does not start the driver again, and a run waits for its
-  container however long it takes, with no `job-start-timeout`.
+* **Retries**: with a `maxAttempts` above 1, a driver that exits with an error is started again, "restarted
+  automatically if it fails", until the run has made `maxAttempts` attempts, after "an exponential retry
+  interval of (10 seconds, 20 seconds, 40 seconds ...) which is capped at 6 minutes". Between its attempts
+  the run is `SUBMITTED` and keeps its running slot, and each new attempt raises `currentAttemptCount`. A run
+  whose last attempt fails is `FAILED` as above. `CancelJobRun` between attempts cancels the run at once. A
+  run Floci stopped between its attempts waits out the rest of its backoff once it is read again, and then
+  makes its next attempt. A driver that cannot start, or that Floci stopped, is not retried. Floci sends no
+  EMR on EKS events, so there is no `EMR Job Run New Driver Attempt` event for each new driver.
+* **Not emulated yet**: a run waits for its container however long it takes, with no `job-start-timeout`.
