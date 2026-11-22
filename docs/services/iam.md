@@ -694,13 +694,52 @@ roles-per-instance-profile quota by any name, and this package used to answer pr
 
 Removing a role the profile does not hold is `NoSuchEntity` 404 with `Role <roleName> in Instance
 Profile <instanceProfileName> cannot be found.`, where this package removed nothing and answered
-200. A role that was deleted while the profile still lists it is a different case and is still
-removable, which is what the profile's own list decides.
+200. A profile that lists a role which is no longer there is a different case and is still
+removable, which is what the profile's own list decides; nothing served reaches that state any
+more, since the role cannot be deleted while a profile holds it.
 
 The two CloudFormation paths that detach a role read the profile's list and then remove what it
 named, so a pairing some other caller detaches in between is tolerated there rather than failing a
 stack delete or an update part way; a profile that has itself gone still ends the delete where it
 always did.
+
+### What a blocked delete names
+
+A delete that a dependency blocks is `DeleteConflict` 409, and the sentence it carries names the
+one dependency the caller has to clear. The four below are AWS's own, recorded against a real
+account across capture runs between 2026-10-25 and 2026-11-16, and each is entirely fixed text:
+no entity name, no count, nothing taken from the request. The wording is the contract rather than
+a description, because a cleanup loop reads it to choose what to do next.
+
+| What is still there | What the delete answers |
+| --- | --- |
+| The role is held by an instance profile | `Cannot delete entity, must remove roles from instance profile first.` |
+| The instance profile still holds a role | `Cannot delete entity, must remove roles from instance profile first.` |
+| A managed policy is attached | `Cannot delete entity, must detach all policies first.` |
+| An inline policy is embedded | `Cannot delete entity, must delete policies first.` |
+
+The last two are a selection rather than one sentence for both: a managed policy is detached and an
+inline one is deleted, so the remedy named is the one that clears what is actually there. That
+selection is recorded on the role, the group and the user alike.
+
+`DeleteRole` reads the three in the order of the table, and the first step of it is recorded too: a
+role both held by an instance profile and carrying attached policies is refused for the profile,
+which is the answer a cleanup loop needs, since detaching the policy changes nothing while the
+pairing is there. Attached ahead of inline is the order `DeleteUser` already answered; which of
+those two AWS names first for an entity carrying both is not recorded, so the role and the group
+follow the user rather than differ from it.
+
+This package used to read a role's attached and inline policies together and answer the detach
+sentence for either, conflate them the same way on a group, word the instance profile's own
+refusal itself, and let a role be deleted while a profile still held it. That last one is a
+behavior change for a caller that deleted a role out from under a profile: the profile has to let
+go of it first, and the refusal says so. Nothing takes a role out of a profile on the caller's
+behalf, on AWS or here. That holds for the two callers that delete a role of their own, the
+CloudFormation role provisioner and the Identity Center permission-set cleanup: each asks about the
+profile before it clears the policies it owns, so a role it turns out it cannot delete keeps what it
+had rather than being emptied by a delete that could not finish, and the refusal reaches the caller.
+A stack that owns both resources deletes the profile before the role, since dependents go before
+what they depend on.
 
 ### Access Keys
 

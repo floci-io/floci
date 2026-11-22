@@ -2939,6 +2939,59 @@ class IamServiceTest {
         assertEquals("P1", profiles.getFirst().getInstanceProfileName());
     }
 
+    /**
+     * A role delete asks which profiles hold the role rather than reading every profile in the
+     * account, so clearing out many roles while many profiles are about costs one lookup each and
+     * still refuses exactly the role that is paired.
+     */
+    @Test
+    void deletingManyRolesWithManyProfilesRefusesOnlyThePairedOne() {
+        for (int i = 0; i < 40; i++) {
+            iamService.createInstanceProfile("BulkProfile" + i, "/");
+            iamService.createRole("BulkRole" + i, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        }
+        iamService.addRoleToInstanceProfile("BulkProfile7", "BulkRole7");
+
+        for (int i = 0; i < 40; i++) {
+            if (i != 7) {
+                iamService.deleteRole("BulkRole" + i);
+            }
+        }
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> iamService.deleteRole("BulkRole7")).getErrorCode());
+
+        iamService.removeRoleFromInstanceProfile("BulkProfile7", "BulkRole7");
+        iamService.deleteRole("BulkRole7");
+    }
+
+    /**
+     * A pairing the store already carried is seen by a service that did not write it: the lookup
+     * is filled from the profiles it finds, so a restart does not make a held role deletable.
+     */
+    @Test
+    void aPairingAlreadyInStorageStillBlocksTheDelete() {
+        StorageBackend<String, IamRole> roles = new InMemoryStorage<>();
+        StorageBackend<String, InstanceProfile> profiles = new InMemoryStorage<>();
+        IamService before = iamServiceOn(roles, profiles);
+        before.createRole("CarriedRole", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
+        before.createInstanceProfile("CarriedProfile", "/");
+        before.addRoleToInstanceProfile("CarriedProfile", "CarriedRole");
+
+        IamService after = iamServiceOn(roles, profiles);
+
+        assertEquals("DeleteConflict", assertThrows(AwsException.class,
+                () -> after.deleteRole("CarriedRole")).getErrorCode());
+        after.removeRoleFromInstanceProfile("CarriedProfile", "CarriedRole");
+        after.deleteRole("CarriedRole");
+    }
+
+    private static IamService iamServiceOn(StorageBackend<String, IamRole> roles,
+                                           StorageBackend<String, InstanceProfile> instanceProfiles) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), roles, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), instanceProfiles, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false);
+    }
+
     // =========================================================================
     // AWS Managed Policy Seeding
     // =========================================================================

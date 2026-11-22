@@ -77,6 +77,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -380,6 +381,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String CREDENTIAL_REPORT_KEY = "credential-report";
     /** AWS generates a fresh report only if the most recent one is older than this. */
     private static final Duration CREDENTIAL_REPORT_MAX_AGE = Duration.ofHours(4);
+    /**
+     * The sentences AWS answers a blocked delete with, each of them entirely fixed text: no
+     * entity name, no count, nothing taken from the request. A cleanup routine reads the sentence
+     * to choose its next step (detach a managed policy, delete an inline one, or remove a role
+     * from its instance profile), so the wording is what names the dependency; one that describes
+     * the blocker instead sends the caller after the wrong remedy.
+     */
+    private static final String MUST_DETACH_POLICIES_FIRST =
+            "Cannot delete entity, must detach all policies first.";
+    private static final String MUST_DELETE_POLICIES_FIRST =
+            "Cannot delete entity, must delete policies first.";
+    private static final String MUST_REMOVE_PROFILE_ROLES_FIRST =
+            "Cannot delete entity, must remove roles from instance profile first.";
     public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
     public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
 
@@ -494,6 +508,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // Undo handles retain their ownership keys; completed attempts leave no permanent history.
     // Both keys and values are weak because each owner itself holds its canonical key.
     private final Map<InlinePolicyKey, WeakReference<InlinePolicyOwner>> inlinePolicyOwners = new WeakHashMap<>();
+    /**
+     * Which instance profiles hold each role, by storage scope then role name: the reverse of the
+     * list each profile carries, so a role delete asks a map instead of reading every profile in
+     * the account. The profiles stay the record and this is only an index into them, kept true by
+     * being written in the same two places a pairing is, both under {@code resourceNameLock},
+     * which is also the only lock under which it may be read. A scope is filled from storage the
+     * first time it is asked about, so profiles that were already there, from a restart or a
+     * store this process did not write, are in it before the first answer.
+     */
+    private final Map<String, Map<String, Set<String>>> profilesByRole = new HashMap<>();
     /**
      * Guards every check-then-write on a login profile. ChangePassword is the reason it has to
      * exist: it reads the profile to compare the old password, then writes the new one, so two
@@ -1015,8 +1039,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             if (!user.getAttachedPolicyArns().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
             }
             if (!user.getGroupNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -1027,8 +1050,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "Cannot delete entity, must delete login profile first.", 409);
             }
             if (!user.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete policies first.", 409);
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             // The credential locks are held across the delete rather than just the checks:
             // CreateAccessKey, UploadSigningCertificate and EnableMFADevice each confirm the user
@@ -1284,9 +1306,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void deleteGroup(String groupName) {
         synchronized (resourceNameLock) {
             IamGroup group = getGroup(groupName);
-            if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+            if (!group.getAttachedPolicyArns().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
+            }
+            if (!group.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             if (!group.getUserNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -1603,19 +1627,108 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         deleteRole(roleName, null);
     }
 
-    /** A service cleanup must not delete a different role that has since taken the name. */
+    /**
+     * A service cleanup must not delete a different role that has since taken the name.
+     *
+     * <p>One dependency is named at a time, and which one comes first is part of what AWS was
+     * recorded answering: a role both held by an instance profile and carrying attached policies
+     * is refused for the profile. Attached policies ahead of inline ones is the order
+     * {@link #deleteUser} already answers; which of those two AWS reports first is not recorded.
+     */
     public void deleteRole(String roleName, String expectedRoleId) {
         synchronized (resourceNameLock) {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
-                throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must detach all policies first.", 409);
+            if (heldByAnInstanceProfile(roleName)) {
+                throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+            }
+            if (!role.getAttachedPolicyArns().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DETACH_POLICIES_FIRST, 409);
+            }
+            if (!role.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICIES_FIRST, 409);
             }
             roles.delete(roleName);
             LOG.infov("Deleted IAM role: {0}", roleName);
+        }
+    }
+
+    /**
+     * Whether any instance profile still holds the role. The role itself is not re-read, since
+     * the caller resolved it already and a delete must not answer that a role it just found is
+     * missing; the membership read takes the profile's own monitor, the one the pairing writes
+     * hold. It is reached under {@code resourceNameLock}, which the attach path now takes outside
+     * that monitor, so no pairing can land between this answer and the delete that asked for it.
+     */
+    /**
+     * Refuses up front what {@link #deleteRole} refuses for an instance profile. A caller that
+     * clears a role's own policies before deleting it asks first: otherwise a role held by a
+     * profile it does not own is stripped of its permissions and then cannot be deleted, which
+     * leaves it live and weaker than it was. The pairing can still be made after this answers,
+     * and such a caller is no worse off then than it was before the delete checked at all.
+     */
+    public void requireNotHeldByAnInstanceProfile(String roleName) {
+        synchronized (resourceNameLock) {
+            if (heldByAnInstanceProfile(roleName)) {
+                throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+            }
+        }
+    }
+
+    private boolean heldByAnInstanceProfile(String roleName) {
+        return !profilesHolding(roleName).isEmpty();
+    }
+
+    /** The profile names holding the role, in this request's storage scope. */
+    private Set<String> profilesHolding(String roleName) {
+        return pairingIndex().getOrDefault(roleName, Set.of());
+    }
+
+    /**
+     * The pairing index for the scope this request reads profiles in, filled from those profiles
+     * the first time the scope comes up. Callers hold {@code resourceNameLock}: the maps are
+     * plain ones, and what they hold has to agree with a storage write taken under that lock.
+     */
+    private Map<String, Set<String>> pairingIndex() {
+        return profilesByRole.computeIfAbsent(instanceProfileScope(), scope -> {
+            Map<String, Set<String>> index = new HashMap<>();
+            for (InstanceProfile profile : instanceProfiles.scan(k -> true)) {
+                List<String> roleNames = profile.getRoleNames();
+                synchronized (roleNames) {
+                    for (String roleName : roleNames) {
+                        index.computeIfAbsent(roleName, name -> new HashSet<>())
+                                .add(profile.getInstanceProfileName());
+                    }
+                }
+            }
+            return index;
+        });
+    }
+
+    /**
+     * The account profiles are read in, or the empty string outside account-aware storage. The
+     * index is scoped exactly as {@code instanceProfiles} is, so one account's pairings are never
+     * read as another's.
+     */
+    private String instanceProfileScope() {
+        if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
+            String accountId = aware.accountId();
+            return accountId == null ? "" : accountId;
+        }
+        return "";
+    }
+
+    private void indexPairing(String instanceProfileName, String roleName) {
+        pairingIndex().computeIfAbsent(roleName, name -> new HashSet<>()).add(instanceProfileName);
+    }
+
+    private void unindexPairing(String instanceProfileName, String roleName) {
+        Map<String, Set<String>> index = pairingIndex();
+        Set<String> holding = index.get(roleName);
+        if (holding != null && holding.remove(instanceProfileName) && holding.isEmpty()) {
+            index.remove(roleName);
         }
     }
 
@@ -2956,12 +3069,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteInstanceProfile(String instanceProfileName) {
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        if (!profile.getRoleNames().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete instance profile with associated roles.", 409);
+        // Decided under the lock the attach path takes, so a role cannot be paired between the
+        // membership read and the delete; the profile's own monitor guards the read itself.
+        synchronized (resourceNameLock) {
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            List<String> roleNames = profile.getRoleNames();
+            synchronized (roleNames) {
+                if (!roleNames.isEmpty()) {
+                    throw new AwsException("DeleteConflict", MUST_REMOVE_PROFILE_ROLES_FIRST, 409);
+                }
+                instanceProfiles.delete(instanceProfileName);
+            }
         }
-        instanceProfiles.delete(instanceProfileName);
     }
 
     public List<InstanceProfile> listInstanceProfiles(String pathPrefix) {
@@ -2972,39 +3091,52 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
-        validateRoleName(roleName);
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        requireNotServiceLinked(getRole(roleName), roleName);
-        List<String> roleNames = profile.getRoleNames();
-        synchronized (roleNames) {
-            if (!roleNames.contains(roleName)) {
-                if (!roleNames.isEmpty()) {
-                    // The quota name is what says which of the operation's limits fired, and it is
-                    // this one rather than a roles-per-profile quota, which AWS publishes nowhere.
-                    throw new AwsException("LimitExceeded",
-                            "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
+        // The lock DeleteRole and DeleteInstanceProfile decide under, taken outside the profile's
+        // own monitor as every path here does, so this cannot pair a role with a profile while
+        // either delete is between reading the pairing and acting on what it read.
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            requireNotServiceLinked(getRole(roleName), roleName);
+            List<String> roleNames = profile.getRoleNames();
+            synchronized (roleNames) {
+                if (!roleNames.contains(roleName)) {
+                    if (!roleNames.isEmpty()) {
+                        // The quota name is what says which of the operation's limits fired, and
+                        // it is this one rather than a roles-per-profile quota, which AWS
+                        // publishes nowhere.
+                        throw new AwsException("LimitExceeded",
+                                "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
+                    }
+                    roleNames.add(roleName);
+                    instanceProfiles.put(instanceProfileName, profile);
+                    indexPairing(instanceProfileName, roleName);
                 }
-                roleNames.add(roleName);
-                instanceProfiles.put(instanceProfileName, profile);
             }
         }
     }
 
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
-        validateRoleName(roleName);
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        // Tolerates an already-deleted role that the profile still lists, so guard only what is
-        // still there; what the profile never held is a different case and AWS refuses it.
-        roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
-        List<String> roleNames = profile.getRoleNames();
-        // Whether the pairing is there and the removal of it are one decision, taken on the
-        // monitor the attach path holds, so a concurrent attach cannot land between them.
-        synchronized (roleNames) {
-            if (!roleNames.remove(roleName)) {
-                throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
-                        + instanceProfileName + " cannot be found.", 404);
+        // The lock the attach and the two deletes decide under, outside the profile's own monitor
+        // as they all take it: the pairing index is written here and read by DeleteRole, and both
+        // have to see the same thing the profile's own list says.
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            // Tolerates an already-deleted role that the profile still lists, so guard only what
+            // is still there; what the profile never held is a different case and AWS refuses it.
+            roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
+            List<String> roleNames = profile.getRoleNames();
+            // Whether the pairing is there and the removal of it are one decision, taken on the
+            // monitor the attach path holds, so a concurrent attach cannot land between them.
+            synchronized (roleNames) {
+                if (!roleNames.remove(roleName)) {
+                    throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
+                            + instanceProfileName + " cannot be found.", 404);
+                }
+                instanceProfiles.put(instanceProfileName, profile);
+                unindexPairing(instanceProfileName, roleName);
             }
-            instanceProfiles.put(instanceProfileName, profile);
         }
     }
 
