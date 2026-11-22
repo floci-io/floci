@@ -99,6 +99,10 @@ public class EmrServerlessJobRunService implements Resettable {
     static final String STATE_QUEUED = "QUEUED";
     private static final String MODE_BATCH = "BATCH";
     private static final String MODE_STREAMING = "STREAMING";
+    // CancelJobRun's grace period: its default for a streaming run, and its range.
+    private static final int DEFAULT_STREAMING_GRACE_SECONDS = 120;
+    private static final int MIN_GRACE_SECONDS = 15;
+    private static final int MAX_GRACE_SECONDS = 1800;
     private static final String RUNNER_DOCKER = "docker";
     // The service a container run's driver belongs to, which names it and labels it.
     static final String SERVICE = "emr-serverless";
@@ -463,11 +467,18 @@ public class EmrServerlessJobRunService implements Resettable {
         applications.stopApplication(applicationId);
     }
 
+    /** Cancels a run that has not finished, with the default grace period of {@link #gracePeriod}. */
+    public synchronized JobRun cancelJobRun(String applicationId, String jobRunId) {
+        return cancelJobRun(applicationId, jobRunId, null);
+    }
+
     /**
      * Cancels a run that has not finished. A finished run is refused, with AWS's wording. A container
-     * run is CANCELLING until its driver has stopped.
+     * run is CANCELLING until its driver has stopped: at once, or after the grace period of {@link #gracePeriod}, in
+     * which its driver gets SIGTERM and may end by itself, and is stopped when the period ends if it has not.
      */
-    public synchronized JobRun cancelJobRun(String applicationId, String jobRunId) {
+    public synchronized JobRun cancelJobRun(String applicationId, String jobRunId, Integer gracePeriodSeconds) {
+        checkGracePeriod(gracePeriodSeconds);
         applications.getApplication(applicationId);
         JobRunRecord record = settle(findRun(applicationId, jobRunId));
         if (isTerminal(record.getJobRun())) {
@@ -483,10 +494,19 @@ public class EmrServerlessJobRunService implements Resettable {
         }
         if (record.isContainerRun()) {
             JobRun run = record.getJobRun();
+            // "Subsequent cancel requests during the CANCELLING state are ignored."
             if (!STATE_CANCELLING.equals(run.getState())) {
+                long grace = gracePeriod(run, gracePeriodSeconds);
                 markCancelling(record);
-                runExecutor.execute(() -> sparkRunner.stop(jobRunId));
-                LOG.infov("Cancelling EMR Serverless job run {0} on application {1}", jobRunId, applicationId);
+                if (grace > 0) {
+                    record.setShutdownDeadline(now.plusSeconds(grace));
+                    store.put(jobRunId, record);
+                    runExecutor.execute(() -> sparkRunner.interrupt(jobRunId));
+                } else {
+                    runExecutor.execute(() -> sparkRunner.stop(jobRunId));
+                }
+                LOG.infov("Cancelling EMR Serverless job run {0} on application {1} with a grace period of {2}s",
+                        jobRunId, applicationId, grace);
             }
             return run;
         }
@@ -532,13 +552,18 @@ public class EmrServerlessJobRunService implements Resettable {
 
     /** GetJobRun's {@code attempt}, an integer in the query string. */
     static Integer parseAttempt(String value) {
+        return queryInteger(value, "attempt");
+    }
+
+    /** An integer {@code member} of the query string, null where it is not given; another value is refused. */
+    static Integer queryInteger(String value, String member) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationException", "attempt must be an integer.", 400);
+            throw new AwsException("ValidationException", member + " must be an integer.", 400);
         }
     }
 
@@ -577,6 +602,19 @@ public class EmrServerlessJobRunService implements Resettable {
                 ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
         run.setMode(request.getMode());
         run.setRetryPolicy(request.getRetryPolicy());
+        run.setFlexExecution(flexExecution(request.getFlexExecution()));
+    }
+
+    // StartJobRun's flexExecution as the model's FlexExecution holds it: its one member, enabled, where it is given.
+    private static Map<String, Object> flexExecution(Map<String, Object> given) {
+        if (given == null) {
+            return null;
+        }
+        Map<String, Object> flex = new LinkedHashMap<>();
+        if (given.get("enabled") != null) {
+            flex.put("enabled", given.get("enabled"));
+        }
+        return flex;
     }
 
     /**
@@ -732,9 +770,13 @@ public class EmrServerlessJobRunService implements Resettable {
         // option" on EMR Serverless; with it off, or where the application names none, for the Docker host's own.
         SparkJobRunner.Job onPlatform = job.withPlatform(
                 honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null);
+        // Where a cancel may give it a grace period, its driver runs under an init process, which passes it the
+        // SIGTERM that starts the period.
+        SparkJobRunner.Job launched = gracefulCancels(run.getReleaseLabel())
+                ? onPlatform.asInterruptible() : onPlatform;
         executing.add(run.getJobRunId());
         long launchedIn = generation;
-        runExecutor.execute(() -> execute(onPlatform, launchedIn));
+        runExecutor.execute(() -> execute(launched, launchedIn));
     }
 
     /** The runner of the docker runner mode, or null in the immediate one. */
@@ -1094,8 +1136,48 @@ public class EmrServerlessJobRunService implements Resettable {
     private synchronized boolean stillGoing(String jobRunId, long launchedIn) {
         return launchedIn == generation && store.get(jobRunId)
                 .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())
-                        || STATE_RUNNING.equals(record.getJobRun().getState()))
+                        || STATE_RUNNING.equals(record.getJobRun().getState()) || shuttingDown(record))
                 .orElse(false);
+    }
+
+    // A run cancelled with a grace period that has not ended, whose driver may still end by itself.
+    private boolean shuttingDown(JobRunRecord record) {
+        return STATE_CANCELLING.equals(record.getJobRun().getState()) && record.getShutdownDeadline() != null
+                && clock.instant().isBefore(record.getShutdownDeadline());
+    }
+
+    /**
+     * The grace period, in seconds, of a cancel of {@code run}. From Amazon EMR release 7.9.0 a RUNNING run is given
+     * one, "during which the job can perform cleanup operations prior to final termination", the one asked for or else
+     * the default: "The default behavior for shutdown is to have no grace period" for a batch run, and a streaming run
+     * has a "120-second grace period enabled by default". "Grace period shutdown is only available for jobs in
+     * RUNNING state", so another run, or one on an earlier release, ends at once (EMR Serverless User Guide, "EMR
+     * Serverless job run cancellation with grace period").
+     */
+    private static long gracePeriod(JobRun run, Integer asked) {
+        if (!STATE_RUNNING.equals(run.getState()) || !gracefulCancels(run.getReleaseLabel())) {
+            return 0;
+        }
+        if (asked != null) {
+            return asked;
+        }
+        return MODE_STREAMING.equals(run.getMode()) ? DEFAULT_STREAMING_GRACE_SECONDS : 0;
+    }
+
+    /**
+     * Refuses a grace period other than 0, "Immediate termination", or one in the "Valid Range for Shutdown Grace
+     * period: 15-1800 seconds". No source gives AWS's error for one outside it, so the wording is Floci's.
+     */
+    private static void checkGracePeriod(Integer seconds) {
+        if (seconds != null && seconds != 0 && (seconds < MIN_GRACE_SECONDS || seconds > MAX_GRACE_SECONDS)) {
+            throw new AwsException("ValidationException", "shutdownGracePeriodInSeconds must be 0, or from "
+                    + MIN_GRACE_SECONDS + " to " + MAX_GRACE_SECONDS + " seconds.", 400);
+        }
+    }
+
+    // "This feature is supported with Amazon EMR releases 7.9.0 and higher", the AWS runtime for Apache Spark's too.
+    private static boolean gracefulCancels(String releaseLabel) {
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 9) || sparkRuntime(releaseLabel);
     }
 
     private synchronized void driverStarted(String jobRunId, long launchedIn) {
@@ -1667,6 +1749,11 @@ public class EmrServerlessJobRunService implements Resettable {
 
     private static void validate(StartJobRunRequest request) {
         Map<String, Integer> retryLimits = retryLimits(request.getRetryPolicy());
+        // FlexExecution's one member, "enabled", a boolean; another JSON type is refused as retryPolicy's are.
+        Object flex = request.getFlexExecution() != null ? request.getFlexExecution().get("enabled") : null;
+        if (flex != null && !(flex instanceof Boolean)) {
+            throw new AwsException("SerializationException", "flexExecution.enabled must be a boolean", 400);
+        }
         List<String> violations = new ArrayList<>();
         if (request.getClientToken() == null) {
             violations.add(SmithyValidationErrors.notNull("clientToken"));
@@ -1787,6 +1874,7 @@ public class EmrServerlessJobRunService implements Resettable {
         summary.setId(run.getJobRunId());
         summary.setName(run.getName());
         summary.setMode(run.getMode());
+        summary.setFlexExecution(run.getFlexExecution());
         summary.setArn(run.getArn());
         summary.setCreatedBy(run.getCreatedBy());
         summary.setCreatedAt(run.getCreatedAt());
@@ -1810,6 +1898,7 @@ public class EmrServerlessJobRunService implements Resettable {
         summary.setId(attempt.getJobRunId());
         summary.setName(attempt.getName());
         summary.setMode(attempt.getMode());
+        summary.setFlexExecution(attempt.getFlexExecution());
         summary.setArn(attempt.getArn());
         summary.setCreatedBy(attempt.getCreatedBy());
         summary.setJobCreatedAt(attempt.getCreatedAt());

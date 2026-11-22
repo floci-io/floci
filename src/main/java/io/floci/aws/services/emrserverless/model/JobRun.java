@@ -33,6 +33,8 @@ public class JobRun {
     private Long executionTimeoutMinutes;
     private String mode;
     private Map<String, Object> retryPolicy;
+    // StartJobRun's flexExecution as sent; null where it gave none.
+    private Map<String, Object> flexExecution;
     private Integer attempt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant attemptCreatedAt;
@@ -87,6 +89,9 @@ public class JobRun {
     public void setMode(String mode) { this.mode = mode; }
     public Map<String, Object> getRetryPolicy() { return retryPolicy; }
     public void setRetryPolicy(Map<String, Object> retryPolicy) { this.retryPolicy = retryPolicy; }
+
+    public Map<String, Object> getFlexExecution() { return flexExecution; }
+    public void setFlexExecution(Map<String, Object> flexExecution) { this.flexExecution = flexExecution; }
     public Integer getAttempt() { return attempt; }
     public void setAttempt(Integer attempt) { this.attempt = attempt; }
     public Instant getAttemptCreatedAt() { return attemptCreatedAt; }

@@ -53,7 +53,6 @@ public class EmrServerlessCfnProvisioner implements CfnResourceProvisioner {
             Set.of("initialCapacity", "imageConfiguration", "workerTypeSpecifications");
     private static final String SCHEDULER = "schedulerConfiguration";
     /** The registry schema's {@code Architecture} enum, which model validation holds a template to. */
-    private static final Set<String> ARCHITECTURES = Set.of("ARM64", "X86_64");
     /** The schema's read-only properties, which a user cannot set. */
     private static final List<String> READ_ONLY = List.of("ApplicationId", "Arn");
 
@@ -157,7 +156,7 @@ public class EmrServerlessCfnProvisioner implements CfnResourceProvisioner {
      */
     private static void checkTemplate(JsonNode template) {
         String architecture = template.path("Architecture").textValue();
-        if (architecture != null && !ARCHITECTURES.contains(architecture)) {
+        if (architecture != null && !EmrServerlessService.ARCHITECTURES.contains(architecture)) {
             throw CfnPropertyTypes.modelValidation("#/Architecture: " + architecture + " is not a valid enum value)");
         }
         for (String readOnly : READ_ONLY) {
