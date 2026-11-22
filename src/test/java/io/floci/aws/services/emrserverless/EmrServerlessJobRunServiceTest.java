@@ -34,8 +34,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1201,6 +1203,53 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void aRunsCredentialsAreScopedByItsInlinePolicyAndItKeepsOnlyThePolicysMembers() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        String readOnly = "arn:aws:iam::aws:policy/ReadOnlyAccess";
+        StartJobRunRequest scoped = request(null, null);
+        scoped.setExecutionIamPolicy(Map.of("policy", policy, "policyArns", List.of(readOnly), "extra", "dropped"));
+        String scopedRun = service.startJobRun(applicationId, scoped).getJobRunId();
+        runNext();
+        service.startJobRun(applicationId, request(null, null));
+        runNext();
+
+        assertEquals(Arrays.asList(policy, null), runner.sessionPolicies);
+        assertEquals(Map.of("policy", policy, "policyArns", List.of(readOnly)),
+                service.getJobRun(applicationId, scopedRun, null).getExecutionIamPolicy());
+    }
+
+    @Test
+    void anExecutionIamPolicyOutsideTheModelsBoundsIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        List<String> elevenArns = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            elevenArns.add("arn:aws:iam::aws:policy/Policy" + i);
+        }
+        Map<Map<String, Object>, String> refusals = new LinkedHashMap<>();
+        refusals.put(Map.of("policy", ""), "'executionIamPolicy.policy'");
+        refusals.put(Map.of("policy", "x".repeat(2049)), "'executionIamPolicy.policy'");
+        refusals.put(Map.of("policyArns", elevenArns), "'executionIamPolicy.policyArns'");
+        refusals.put(Map.of("policyArns", List.of("arn:aws:iam::1:p/x")), "'executionIamPolicy.policyArns.1.member'");
+        for (Map.Entry<Map<String, Object>, String> refusal : refusals.entrySet()) {
+            StartJobRunRequest refused = request(null, null);
+            refused.setExecutionIamPolicy(refusal.getKey());
+            AwsException error = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, refused));
+            assertEquals("ValidationException", error.getErrorCode());
+            assertTrue(error.getMessage().contains(refusal.getValue()), error.getMessage());
+        }
+        for (Map<String, Object> malformed : List.<Map<String, Object>>of(Map.of("policy", 1),
+                Map.of("policyArns", "arn:aws:iam::aws:policy/ReadOnlyAccess"))) {
+            StartJobRunRequest refused = request(null, null);
+            refused.setExecutionIamPolicy(malformed);
+            assertEquals("SerializationException", assertThrows(AwsException.class,
+                    () -> service.startJobRun(applicationId, refused)).getErrorCode());
+        }
+    }
+
+    @Test
     void eachAttemptIsLaunchedWhileItsApplicationCannotBeDeleted() {
         FakeRunner runner = new FakeRunner();
         runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
@@ -1906,6 +1955,8 @@ class EmrServerlessJobRunServiceTest {
         final Set<String> stopped = new HashSet<>();
         final Set<String> interrupted = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
+        // The session policy each run's credentials were scoped by, as its driver started.
+        final List<String> sessionPolicies = new ArrayList<>();
         // What progress.cancelled() said once the driver ran, and again after whileRunning.
         final List<Boolean> cancelledAsRunning = new ArrayList<>();
         Outcome outcome = Outcome.exitedWith(0);
@@ -1935,6 +1986,7 @@ class EmrServerlessJobRunServiceTest {
                 resolved(progress, WorkerType.EXECUTOR, job.executors().image(), executorsResolve);
             }
             driversStarted.add(job.runId());
+            sessionPolicies.add(progress.sessionPolicy());
             progress.started();
             cancelledAsRunning.add(progress.cancelled());
             whileRunning.run();

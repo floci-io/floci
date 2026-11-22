@@ -103,6 +103,14 @@ public interface SparkJobRunner {
          */
         default void executorsRan(List<Duration> lifetimes) {
         }
+
+        /**
+         * The inline session policy the run's credentials are scoped by, so that its permissions are what its
+         * execution role and the policy both allow; null for none.
+         */
+        default String sessionPolicy() {
+            return null;
+        }
     }
 
     /** What a run's container runs as: its driver, or one of its executors. */
