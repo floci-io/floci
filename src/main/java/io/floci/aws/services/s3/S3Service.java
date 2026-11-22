@@ -1040,10 +1040,15 @@ public class S3Service implements Resettable, ResourceProvider {
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
-        object.setServerSideEncryption(normalizedServerSideEncryption);
-        object.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
-            || "aws:kms:dsse".equals(normalizedServerSideEncryption)
-                ? effectiveOptions.getSseKmsKeyId()
+        // An object written with neither an encryption header nor an SSE-C key is encrypted with the
+        // bucket's default encryption.
+        ObjectEncryption encryption = normalizedServerSideEncryption == null && sseCustomerKey == null
+                ? defaultEncryption(bucket)
+                : new ObjectEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
+        object.setServerSideEncryption(encryption.algorithm());
+        object.setSseKmsKeyId("aws:kms".equals(encryption.algorithm())
+            || "aws:kms:dsse".equals(encryption.algorithm())
+                ? encryption.kmsKeyId()
                 : null);
         if (sseCustomerKey != null) {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
@@ -5389,6 +5394,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 if (upload.getSseCustomerAlgorithm() != null) {
                     object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                     object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
+                    // Encrypted with the customer's key, not the bucket default the store applied.
+                    object.setServerSideEncryption(null);
+                    object.setSseKmsKeyId(null);
                 }
                 String bucketOwnerAccount = resolveBucketEntry(bucket)
                         .map(AccountAwareStorageBackend.OwnedEntry::account)
@@ -7271,6 +7279,27 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     record SseCustomerKey(String algorithm, String keyMd5) {}
+
+    /** The server-side encryption an object is stored with, and its KMS key for {@code aws:kms} and {@code aws:kms:dsse}. */
+    private record ObjectEncryption(String algorithm, String kmsKeyId) {}
+
+    /**
+     * The encryption S3 applies to an object written to {@code bucket} without encryption headers: the
+     * bucket's default encryption ({@code ApplyServerSideEncryptionByDefault}), or SSE-S3
+     * ({@code AES256}) for a bucket with none, the base level of encryption S3 has applied to every
+     * bucket since January 5, 2023.
+     */
+    private static ObjectEncryption defaultEncryption(Bucket bucket) {
+        String configuration = bucket.getEncryptionConfiguration();
+        String algorithm = configuration == null
+                ? null
+                : XmlParser.extractFirst(configuration, "SSEAlgorithm", null);
+        if (algorithm == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(algorithm.trim())) {
+            return new ObjectEncryption("AES256", null);
+        }
+        String kmsKeyId = XmlParser.extractFirst(configuration, "KMSMasterKeyID", null);
+        return new ObjectEncryption(algorithm.trim(), kmsKeyId == null || kmsKeyId.isBlank() ? null : kmsKeyId.trim());
+    }
 
     record SseCustomerHeaders(String algorithm, String key, String keyMd5) {
         static final SseCustomerHeaders EMPTY = new SseCustomerHeaders(null, null, null);
