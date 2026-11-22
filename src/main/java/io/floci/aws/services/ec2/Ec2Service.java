@@ -1101,6 +1101,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         };
         if (portForwardManager != null) {
             portForwardManager.setPersister(persister);
+            portForwardManager.setCurrentEnforcedPorts(instance -> RequestScopes.callAs(instance.getOwnerId(),
+                    instance.getRegion(), () -> desiredPublishedPorts(instance.getRegion(), instance)));
         }
         if (containerManager != null) {
             containerManager.setPersister(persister);
