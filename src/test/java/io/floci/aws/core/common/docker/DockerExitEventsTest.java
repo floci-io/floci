@@ -33,6 +33,7 @@ class DockerExitEventsTest {
     private final DockerClient streaming = mock(DockerClient.class);
     private final List<ResultCallback.Adapter<Event>> subscriptions = new CopyOnWriteArrayList<>();
     private final List<String> exits = new CopyOnWriteArrayList<>();
+    private volatile boolean dockerConfirms = true;
     private DockerExitEvents events;
 
     @BeforeEach
@@ -42,7 +43,9 @@ class DockerExitEventsTest {
         when(command.exec(any())).thenAnswer(invocation -> {
             ResultCallback.Adapter<Event> callback = invocation.getArgument(0);
             subscriptions.add(callback);
-            callback.onStart(() -> { });
+            if (dockerConfirms) {
+                callback.onStart(() -> { });
+            }
             return callback;
         });
         events = new DockerExitEvents(docker, streaming, true);
@@ -55,13 +58,18 @@ class DockerExitEventsTest {
 
     private void inspected(String containerId, String status, Long exitCode) {
         InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse response = mock(InspectContainerResponse.class);
-        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
+        InspectContainerResponse response = state(status, exitCode);
         when(docker.inspectContainerCmd(containerId)).thenReturn(inspect);
         when(inspect.exec()).thenReturn(response);
+    }
+
+    private static InspectContainerResponse state(String status, Long exitCode) {
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
         when(response.getState()).thenReturn(state);
         when(state.getStatus()).thenReturn(status);
         when(state.getExitCodeLong()).thenReturn(exitCode);
+        return response;
     }
 
     private static Event die(String containerId, Map<String, String> attributes) {
@@ -114,6 +122,54 @@ class DockerExitEventsTest {
         await("the exit should be reported once").during(Duration.ofMillis(200)).atMost(Duration.ofSeconds(5))
                 .until(() -> exits.size() == 1);
         assertEquals(List.of("c1=2"), exits);
+    }
+
+    // Catches: an exit the stream missed never being reported because the sweep's one inspect failed.
+    @Test
+    void aSweepRetriesAContainerItCouldNotInspect() {
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse exited = state("exited", 2L);
+        when(docker.inspectContainerCmd("c1")).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new RuntimeException("daemon busy")).thenReturn(exited);
+        events.register("c1", code -> exits.add("c1=" + code));
+
+        events.sweep();
+
+        await("the retried inspect should report the exit").atMost(Duration.ofSeconds(5))
+                .until(() -> exits.size() == 1);
+        assertEquals(List.of("c1=2"), exits);
+    }
+
+    // Catches: a registration reopening the stream during the reconnect backoff, so the delayed
+    // resubscribe finds a stream and never sweeps for the exits the gap hid.
+    @Test
+    void aRegistrationDuringTheBackoffStillSweeps() {
+        inspected("ended", "exited", 1L);
+        inspected("other", "running", null);
+        events.register("ended", code -> exits.add("ended=" + code));
+
+        subscriptions.get(0).onError(new RuntimeException("daemon restarted"));
+        events.register("other", code -> exits.add("other=" + code));
+
+        assertEquals(2, subscriptions.size(), "the registration should open the stream again at once");
+        await("the reopened stream should sweep").atMost(Duration.ofSeconds(5))
+                .until(() -> exits.contains("ended=1"));
+    }
+
+    // Catches: a registration returning before Docker confirmed the stream and the exit in between
+    // never being reported, as the warning promises it is.
+    @Test
+    void anUnconfirmedSubscriptionSweepsOnceItStarts() {
+        events.close();
+        dockerConfirms = false;
+        events = new DockerExitEvents(docker, streaming, true, Duration.ofMillis(50));
+        inspected("c1", "exited", 137L);
+
+        events.register("c1", code -> exits.add("c1=" + code));
+        subscriptions.get(0).onStart(() -> { });
+
+        await("the stream should sweep once it starts").atMost(Duration.ofSeconds(5))
+                .until(() -> exits.equals(List.of("c1=137")));
     }
 
     // Catches: a container removed while the stream was down staying registered forever.

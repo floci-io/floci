@@ -7,6 +7,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.DockerExitEvents;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
@@ -71,7 +72,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                     mock(DockerHostResolver.class), config, new RegionResolver("us-east-1", "000000000000"),
                     mock(EcrRegistryManager.class),
                     mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class),
-                    mock(LambdaExecutionRoleCredentials.class), null);
+                    mock(LambdaExecutionRoleCredentials.class), null, mock(DockerExitEvents.class));
         }
 
         @Override
@@ -287,7 +288,8 @@ class ContainerLauncherCodeVolumeReuseTest {
                 mock(RuntimeApiServerFactory.class), mock(DockerHostResolver.class), config,
                 new RegionResolver("us-east-1", "000000000000"),
                 mock(EcrRegistryManager.class), mock(LambdaLayerService.class),
-                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), null);
+                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), null,
+                mock(DockerExitEvents.class));
 
         assertThrows(IllegalStateException.class,
                 () -> real.populateCodeVolume("vol", fn("sha"), "img"));

@@ -133,30 +133,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
     private final Ec2Service ec2Service;
-    /** Null, or off, watches each container's exit with its own wait stream (LambdaExitWatcher). */
+    /** When off, each container's exit is watched with its own wait stream (LambdaExitWatcher). */
     private final DockerExitEvents exitEvents;
     private final LambdaContainerReconciler containerReconciler;
     /** The VPC address each VpcConfig function's container holds, returned once it is removed. */
     private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
-
-    public ContainerLauncher(ContainerBuilder containerBuilder,
-                             ContainerLifecycleManager lifecycleManager,
-                             @StreamingDocker DockerClient streamingDocker,
-                             ContainerLogStreamer logStreamer,
-                             ImageResolver imageResolver,
-                             RuntimeApiServerFactory runtimeApiServerFactory,
-                             DockerHostResolver dockerHostResolver,
-                             EmulatorConfig config,
-                             RegionResolver regionResolver,
-                             EcrRegistryManager ecrRegistryManager,
-                             LambdaLayerService layerService,
-                             LaunchedContainerAwsEnv awsEnv,
-                             LambdaExecutionRoleCredentials executionRoleCredentials,
-                             Ec2Service ec2Service) {
-        this(containerBuilder, lifecycleManager, streamingDocker, logStreamer, imageResolver, runtimeApiServerFactory,
-                dockerHostResolver, config, regionResolver, ecrRegistryManager, layerService, awsEnv,
-                executionRoleCredentials, ec2Service, null);
-    }
 
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
@@ -482,7 +463,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Now start the container with code in place
         joinVpcNetwork(fn, containerId, lambdaAccountId, lambdaRegion);
-        boolean exitByEvents = exitEvents != null && exitEvents.enabled();
+        boolean exitByEvents = exitEvents.enabled();
         if (exitByEvents) {
             // Events report only what happens after the subscription, so register before the start.
             exitEvents.register(containerId, runtimeApiServer::handleRuntimeProcessExited);

@@ -13,6 +13,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Map;
@@ -43,14 +44,19 @@ public class DockerExitEvents {
     private static final Duration SUBSCRIBE_CONFIRMATION = Duration.ofSeconds(5);
     private static final Duration FIRST_RESUBSCRIBE_DELAY = Duration.ofSeconds(1);
     private static final Duration MAX_RESUBSCRIBE_DELAY = Duration.ofSeconds(30);
+    private static final Duration FIRST_INSPECT_RETRY_DELAY = Duration.ofMillis(200);
+    private static final int MAX_INSPECT_ATTEMPTS = 5;
 
     private final DockerClient dockerClient;
     private final DockerClient streamingDocker;
     private final boolean enabled;
+    private final Duration subscribeConfirmation;
     private final Map<String, Registration> registered = new ConcurrentHashMap<>();
     private final Object subscriptionLock = new Object();
     private volatile ResultCallback.Adapter<Event> subscription;
     private volatile boolean shutdown;
+    /** Set while the stream may have missed events; the next subscription to start sweeps and clears it. */
+    private final AtomicBoolean sweepPending = new AtomicBoolean();
     private int failedSubscriptions;
 
     @Inject
@@ -60,9 +66,15 @@ public class DockerExitEvents {
     }
 
     DockerExitEvents(DockerClient dockerClient, DockerClient streamingDocker, boolean enabled) {
+        this(dockerClient, streamingDocker, enabled, SUBSCRIBE_CONFIRMATION);
+    }
+
+    DockerExitEvents(DockerClient dockerClient, DockerClient streamingDocker, boolean enabled,
+                     Duration subscribeConfirmation) {
         this.dockerClient = dockerClient;
         this.streamingDocker = streamingDocker;
         this.enabled = enabled;
+        this.subscribeConfirmation = subscribeConfirmation;
     }
 
     /** Whether exits are watched through the events subscription rather than one wait per container. */
@@ -101,6 +113,12 @@ public class DockerExitEvents {
     private void subscribe() {
         ResultCallback.Adapter<Event> callback = new ResultCallback.Adapter<>() {
             @Override
+            public void onStart(Closeable stream) {
+                super.onStart(stream);
+                sweepIfPending();
+            }
+
+            @Override
             public void onNext(Event event) {
                 onEvent(event);
             }
@@ -123,17 +141,40 @@ public class DockerExitEvents {
                     .withEventTypeFilter(EventType.CONTAINER)
                     .withEventFilter("die")
                     .exec(callback);
-            if (!callback.awaitStarted(SUBSCRIBE_CONFIRMATION.toMillis(), TimeUnit.MILLISECONDS)) {
-                LOG.warnv("Docker did not confirm the container events subscription within {0} s; exits are"
-                        + " checked by inspect once it does", SUBSCRIBE_CONFIRMATION.toSeconds());
+            if (!callback.awaitStarted(subscribeConfirmation.toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.warnv("Docker did not confirm the container events subscription within {0} ms; exits are"
+                        + " checked by inspect once it does", subscribeConfirmation.toMillis());
+                awaitingConfirmation(callback);
             }
             synchronized (subscriptionLock) {
                 failedSubscriptions = 0;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            awaitingConfirmation(callback);
         } catch (RuntimeException e) {
             streamEnded(callback, e);
+        }
+    }
+
+    /**
+     * A registration returned before Docker confirmed the stream, so an exit in between could be missed:
+     * the stream sweeps once it starts, or now if it started while this was being set.
+     */
+    private void awaitingConfirmation(ResultCallback.Adapter<Event> callback) {
+        sweepPending.set(true);
+        try {
+            if (callback.awaitStarted(0, TimeUnit.MILLISECONDS)) {
+                sweepIfPending();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void sweepIfPending() {
+        if (sweepPending.getAndSet(false)) {
+            Thread.ofVirtual().name("floci-container-exit-sweep").start(this::sweep);
         }
     }
 
@@ -144,6 +185,7 @@ public class DockerExitEvents {
                 return;
             }
             subscription = null;
+            sweepPending.set(true);
             failedSubscriptions++;
             delayMillis = Math.min(MAX_RESUBSCRIBE_DELAY.toMillis(),
                     FIRST_RESUBSCRIBE_DELAY.toMillis() << Math.min(failedSubscriptions - 1, 5));
@@ -153,6 +195,7 @@ public class DockerExitEvents {
         CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS).execute(this::resubscribe);
     }
 
+    /** Opens the stream again unless a registration already has; whichever stream starts first sweeps. */
     private void resubscribe() {
         synchronized (subscriptionLock) {
             if (subscription != null || shutdown) {
@@ -160,29 +203,45 @@ public class DockerExitEvents {
             }
             subscribe();
         }
-        sweep();
     }
 
     /** Inspects every registered container, reporting the exits a gap in the subscription hid. */
     void sweep() {
         for (Registration registration : registered.values()) {
-            InspectContainerResponse.ContainerState state;
-            try {
-                state = dockerClient.inspectContainerCmd(registration.containerId()).exec().getState();
-            } catch (NotFoundException e) {
-                registered.remove(registration.containerId(), registration);
-                continue;
-            } catch (RuntimeException e) {
-                LOG.debugv("Could not inspect container {0} after the events stream reconnected: {1}",
-                        registration.containerId(), e.getMessage());
-                continue;
+            sweep(registration, 1);
+        }
+    }
+
+    /** One container's check; an inspect that fails is tried again with a doubling delay, as LambdaExitWatcher does. */
+    private void sweep(Registration registration, int attempt) {
+        if (shutdown || registration.reported().get() || registered.get(registration.containerId()) != registration) {
+            return;
+        }
+        InspectContainerResponse.ContainerState state;
+        try {
+            state = dockerClient.inspectContainerCmd(registration.containerId()).exec().getState();
+        } catch (NotFoundException e) {
+            registered.remove(registration.containerId(), registration);
+            return;
+        } catch (RuntimeException e) {
+            if (attempt >= MAX_INSPECT_ATTEMPTS) {
+                LOG.warnv("Could not inspect container {0} after the events stream reconnected, {1} attempts;"
+                        + " its exit is reported only by a later event: {2}",
+                        registration.containerId(), attempt, e.getMessage());
+                return;
             }
-            // "created" has not started yet; only a container that ran and ended has exited.
-            String status = state == null ? null : state.getStatus();
-            if ("exited".equals(status) || "dead".equals(status)) {
-                Long exitCode = state.getExitCodeLong();
-                report(registration, exitCode != null ? exitCode.intValue() : -1);
-            }
+            long delayMillis = FIRST_INSPECT_RETRY_DELAY.toMillis() << (attempt - 1);
+            LOG.debugv("Could not inspect container {0} after the events stream reconnected; trying again in {1} ms: {2}",
+                    registration.containerId(), delayMillis, e.getMessage());
+            CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
+                    .execute(() -> sweep(registration, attempt + 1));
+            return;
+        }
+        // "created" has not started yet; only a container that ran and ended has exited.
+        String status = state == null ? null : state.getStatus();
+        if ("exited".equals(status) || "dead".equals(status)) {
+            Long exitCode = state.getExitCodeLong();
+            report(registration, exitCode != null ? exitCode.intValue() : -1);
         }
     }
 
