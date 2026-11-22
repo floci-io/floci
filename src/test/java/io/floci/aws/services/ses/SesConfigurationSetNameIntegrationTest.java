@@ -13,8 +13,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesConfigurationSetNameIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String SIXTY_FIVE =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -75,7 +73,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v1_invalidCharacters_sameMessageAsV2() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "DescribeConfigurationSet")
             .formParam("ConfigurationSetName", "a.b")
         .when()
@@ -91,7 +89,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v1_tooLong() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "DeleteConfigurationSet")
             .formParam("ConfigurationSetName", SIXTY_FIVE)
         .when()
@@ -111,7 +109,7 @@ class SesConfigurationSetNameIntegrationTest {
         }) {
             given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", V1_AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action[0])
                 .formParam(action[1], "")
                 .formParam("Enabled", "true")
@@ -128,7 +126,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v1_updateSendingEnabled_validatesTheName() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "UpdateConfigurationSetSendingEnabled")
             .formParam("ConfigurationSetName", "a.b")
             .formParam("Enabled", "true")
@@ -145,7 +143,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v1_sendEmail_validatesTheConfigurationSetName() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendEmail")
             .formParam("Source", "sender@example.com")
             .formParam("Destination.ToAddresses.member.1", "success@simulator.amazonses.com")

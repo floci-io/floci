@@ -20,8 +20,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesTemplateNameIntegrationTest {
 
-    private static final String V1_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String BLANK = "The template name must be specified.";
     private static final String TOO_LONG = "Template name cannot exceed 64 characters.";
 
@@ -47,7 +45,7 @@ class SesTemplateNameIntegrationTest {
         for (String action : new String[] {"CreateTemplate", "UpdateTemplate"}) {
             given()
                 .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-                .header("Authorization", V1_AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam("Template.TemplateName", name)
                 .formParam("Template.SubjectPart", "S")
@@ -62,7 +60,7 @@ class SesTemplateNameIntegrationTest {
         for (String action : new String[] {"GetTemplate", "DeleteTemplate", "TestRenderTemplate"}) {
             given()
                 .contentType("application/x-www-form-urlencoded; charset=UTF-8")
-                .header("Authorization", V1_AUTH)
+                .header("Authorization", SesV1Requests.AUTH)
                 .formParam("Action", action)
                 .formParam("TemplateName", name)
                 .formParam("TemplateData", "{}")
@@ -135,7 +133,7 @@ class SesTemplateNameIntegrationTest {
     void theNameIsCheckedBeforeTheContent() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", "name probe")
             .formParam("Template.TextPart", "t")
@@ -161,7 +159,7 @@ class SesTemplateNameIntegrationTest {
     void v1SpellsOutAControlCharacterOfTheName() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "GetTemplate")
             .formParam("TemplateName", "name\tprobe\u0001")
         .when()
@@ -186,7 +184,7 @@ class SesTemplateNameIntegrationTest {
         String name = "Name_probe-0123456789" + "a".repeat(43);
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "CreateTemplate")
             .formParam("Template.TemplateName", name)
             .formParam("Template.SubjectPart", "S")
@@ -206,7 +204,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", V1_AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "GetTemplate")
             .formParam("TemplateName", name)
         .when()

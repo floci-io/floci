@@ -16,8 +16,6 @@ import static org.hamcrest.Matchers.notNullValue;
 @QuarkusTest
 class SesSendRawNoDestinationIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String TO = "success@simulator.amazonses.com";
     private static final String VERIFIED_SENDER = "no-destination-sender@floci.test";
 
@@ -35,7 +33,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutDestination_takesRecipientsFromHeaders() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", VERIFIED_SENDER)
         .when()
@@ -45,7 +43,7 @@ class SesSendRawNoDestinationIntegrationTest {
 
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "%s",
@@ -67,7 +65,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutAnyRecipient_returnsMissingToHeader() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -86,7 +84,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutAnyRecipient_reportsUnknownConfigurationSetFirst() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "ConfigurationSetName": "no-destination-missing-cs",
@@ -105,7 +103,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithEmptyDestination_returnsMissingToHeader() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -125,7 +123,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithNonArrayDestinationMember_returnsSerializationException() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -144,7 +142,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutDestination_checksHeaderRecipientSyntax() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -163,7 +161,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v2SendEmail_rawWithoutDestination_checksCcHeaderRecipientSyntax() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .body("""
                 {
                     "FromEmailAddress": "sender@example.com",
@@ -182,7 +180,7 @@ class SesSendRawNoDestinationIntegrationTest {
     void v1SendRawEmail_withoutAnyRecipient_returnsMissingToHeader() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV1Requests.AUTH)
             .formParam("Action", "SendRawEmail")
             .formParam("Source", "sender@example.com")
             .formParam("RawMessage.Data", rawData("From: sender@example.com\r\n"))

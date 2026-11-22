@@ -1233,8 +1233,7 @@ class SesV2IntegrationTest {
         for (String region : List.of("us-east-1", "ap-northeast-1")) {
             given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/email/aws4_request")
+                .header("Authorization", SesV1Requests.authFor(region))
                 .formParam("Action", "VerifyEmailIdentity")
                 .formParam("EmailAddress", "multi@example.com")
             .when()
