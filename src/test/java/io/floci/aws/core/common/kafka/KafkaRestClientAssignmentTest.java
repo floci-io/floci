@@ -56,6 +56,10 @@ class KafkaRestClientAssignmentTest {
             record(exchange);
             respond(exchange, 404, "{\"error_code\":40401,\"message\":\"Topic missing not found\"}");
         });
+        fakeServer.createContext("/topics/other-404-code", exchange -> {
+            record(exchange);
+            respond(exchange, 404, "{\"error_code\":40402,\"message\":\"Partition not found\"}");
+        });
         fakeServer.createContext("/topics/broken", exchange -> {
             record(exchange);
             respond(exchange, 503, "{\"error_code\":50301,\"message\":\"broker unavailable\"}");
@@ -121,6 +125,24 @@ class KafkaRestClientAssignmentTest {
                 () -> client.listPartitions(restBaseUri(), "missing"));
 
         assertEquals("missing", thrown.getTopic());
+    }
+
+    @Test
+    void listPartitionsReportsUnrelated404AsRestClientFailureNotMissingTopic() {
+        URI wrongPrefix = URI.create(restBaseUri() + "wrong-prefix/");
+
+        KafkaRestClientException thrown = assertThrows(KafkaRestClientException.class,
+                () -> client.listPartitions(wrongPrefix, "orders"));
+
+        assertEquals(404, thrown.getStatusCode());
+    }
+
+    @Test
+    void listPartitionsReports404WithOtherErrorCodeAsRestClientFailureNotMissingTopic() {
+        KafkaRestClientException thrown = assertThrows(KafkaRestClientException.class,
+                () -> client.listPartitions(restBaseUri(), "other-404-code"));
+
+        assertEquals(404, thrown.getStatusCode());
     }
 
     @Test

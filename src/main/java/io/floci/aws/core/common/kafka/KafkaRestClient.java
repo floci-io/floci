@@ -41,6 +41,7 @@ public class KafkaRestClient {
 
     private static final String CONSUMER_CONTENT_TYPE = "application/vnd.kafka.v2+json";
     private static final String BINARY_RECORDS_ACCEPT = "application/vnd.kafka.binary.v2+json";
+    private static final int ERROR_CODE_TOPIC_NOT_FOUND = 40401;
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -91,7 +92,7 @@ public class KafkaRestClient {
         try {
             response = send("GET", restBaseUri.resolve("topics/" + urlEncode(topic)), null);
         } catch (KafkaRestClientException e) {
-            if (e.getStatusCode() == 404) {
+            if (e.getStatusCode() == 404 && isTopicNotFoundError(e.getResponseBody())) {
                 throw new KafkaTopicNotFoundException(topic, e);
             }
             throw e;
@@ -102,6 +103,23 @@ public class KafkaRestClient {
         }
         partitions.sort(Integer::compare);
         return partitions;
+    }
+
+    private boolean isTopicNotFoundError(String responseBody) {
+        if (responseBody == null || responseBody.isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(responseBody);
+            if (root == null) {
+                return false;
+            }
+            JsonNode errorCode = root.path("error_code");
+            return errorCode.isIntegralNumber() && errorCode.asInt() == ERROR_CODE_TOPIC_NOT_FOUND;
+        } catch (IOException ignored) {
+            // Non-JSON 404 body (e.g. wrong base path or reverse proxy page) is not a Karapace topic-not-found error.
+            return false;
+        }
     }
 
     /**
