@@ -540,7 +540,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (progress.cancelled()) {
                 return Outcome.halted();
             }
-            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.runId());
+            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.runId(),
+                    progress.sessionPolicy());
             Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                     job.service(), job.runId(), job.accountId(), job.region()));
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.

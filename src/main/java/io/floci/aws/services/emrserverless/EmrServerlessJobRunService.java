@@ -100,6 +100,13 @@ public class EmrServerlessJobRunService implements Resettable {
     static final String STATE_QUEUED = "QUEUED";
     private static final String MODE_BATCH = "BATCH";
     private static final String MODE_STREAMING = "STREAMING";
+    // JobRunExecutionIamPolicy's members, and the model's bounds on them: PolicyDocument's and Arn's lengths, and
+    // PolicyArnList's size.
+    private static final String INLINE_POLICY = "policy";
+    private static final String POLICY_ARNS = "policyArns";
+    private static final int MAX_POLICY_LENGTH = 2048;
+    private static final int MIN_ARN_LENGTH = 20;
+    private static final int MAX_POLICY_ARNS = 10;
     // CancelJobRun's grace period: its default for a streaming run, and its range.
     private static final int DEFAULT_STREAMING_GRACE_SECONDS = 120;
     private static final int MIN_GRACE_SECONDS = 15;
@@ -595,7 +602,7 @@ public class EmrServerlessJobRunService implements Resettable {
     private static void requested(JobRun run, StartJobRunRequest request) {
         run.setName(request.getName());
         run.setExecutionRole(request.getExecutionRoleArn());
-        run.setExecutionIamPolicy(request.getExecutionIamPolicy());
+        run.setExecutionIamPolicy(executionIamPolicy(request.getExecutionIamPolicy()));
         run.setConfigurationOverrides(request.getConfigurationOverrides());
         run.setJobDriver(request.getJobDriver());
         run.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
@@ -604,6 +611,61 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setMode(request.getMode());
         run.setRetryPolicy(request.getRetryPolicy());
         run.setFlexExecution(flexExecution(request.getFlexExecution()));
+    }
+
+    // StartJobRun's executionIamPolicy as the model's JobRunExecutionIamPolicy holds it: its policy and policyArns.
+    private static Map<String, Object> executionIamPolicy(Map<String, Object> given) {
+        if (given == null) {
+            return null;
+        }
+        Map<String, Object> policy = new LinkedHashMap<>();
+        for (String member : List.of(INLINE_POLICY, POLICY_ARNS)) {
+            if (given.get(member) != null) {
+                policy.put(member, given.get(member));
+            }
+        }
+        return policy;
+    }
+
+    /**
+     * What is wrong with StartJobRun's executionIamPolicy, against the model's constraints: an inline policy of 1 to
+     * 2,048 characters, and at most 10 policy ARNs of 20 to 2,048 characters each. A member of another JSON type is
+     * refused with SerializationException, as retryPolicy's are.
+     */
+    private static List<String> executionIamPolicyViolations(Map<String, Object> given) {
+        List<String> violations = new ArrayList<>();
+        Object policy = given != null ? given.get(INLINE_POLICY) : null;
+        Object arns = given != null ? given.get(POLICY_ARNS) : null;
+        if (policy != null && !(policy instanceof String)) {
+            throw new AwsException("SerializationException", "executionIamPolicy.policy must be a string", 400);
+        }
+        if (arns != null && !(arns instanceof List<?> list && list.stream().allMatch(String.class::isInstance))) {
+            throw new AwsException("SerializationException",
+                    "executionIamPolicy.policyArns must be a list of strings", 400);
+        }
+        if (policy instanceof String document) {
+            String violation = SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(
+                    "executionIamPolicy.policy", document, 1, MAX_POLICY_LENGTH);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        }
+        if (arns instanceof List<?> list) {
+            String size = SmithyValidationErrors.sizeOutOfRange("executionIamPolicy.policyArns", list.size(), 0,
+                    MAX_POLICY_ARNS);
+            if (size != null) {
+                violations.add(size);
+            }
+            for (int i = 0; i < list.size(); i++) {
+                String violation = SmithyValidationErrors.lengthOutOfRange(
+                        "executionIamPolicy.policyArns." + (i + 1) + ".member", (String) list.get(i), MIN_ARN_LENGTH,
+                        MAX_POLICY_LENGTH);
+                if (violation != null) {
+                    violations.add(violation);
+                }
+            }
+        }
+        return violations;
     }
 
     // StartJobRun's flexExecution as the model's FlexExecution holds it: its one member, enabled, where it is given.
@@ -1140,6 +1202,18 @@ public class EmrServerlessJobRunService implements Resettable {
                 .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())
                         || STATE_RUNNING.equals(record.getJobRun().getState()) || shuttingDown(record))
                 .orElse(false);
+    }
+
+    /**
+     * The inline policy of a run's executionIamPolicy, which scopes its credentials: "The resulting job IAM role
+     * permissions will be an intersection of this policy and the policy associated with your job execution role".
+     * Null where it has none. Its policyArns are not applied, as Floci's IAM applies no managed session policy, an
+     * assumed role's included.
+     */
+    private synchronized String inlinePolicy(String jobRunId) {
+        return store.get(jobRunId).map(record -> record.getJobRun().getExecutionIamPolicy())
+                .map(policy -> policy.get(INLINE_POLICY)).filter(String.class::isInstance).map(String.class::cast)
+                .orElse(null);
     }
 
     // A run cancelled with a grace period that has not ended, whose driver may still end by itself.
@@ -1794,7 +1868,7 @@ public class EmrServerlessJobRunService implements Resettable {
         if (flex != null && !(flex instanceof Boolean)) {
             throw new AwsException("SerializationException", "flexExecution.enabled must be a boolean", 400);
         }
-        List<String> violations = new ArrayList<>();
+        List<String> violations = executionIamPolicyViolations(request.getExecutionIamPolicy());
         if (request.getClientToken() == null) {
             violations.add(SmithyValidationErrors.notNull("clientToken"));
         }
@@ -1990,6 +2064,11 @@ public class EmrServerlessJobRunService implements Resettable {
         public void executorsRan(List<Duration> lifetimes) {
             RequestScopes.runAs(job.accountId(), job.region(),
                     () -> keepExecutorLifetimes(job.runId(), launchedIn, lifetimes));
+        }
+
+        @Override
+        public String sessionPolicy() {
+            return RequestScopes.callAs(job.accountId(), job.region(), () -> inlinePolicy(job.runId()));
         }
     }
 }

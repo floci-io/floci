@@ -407,7 +407,13 @@ worker of its own on EMR Serverless (see **Executors** below).
   executors, in the driver's JVM in local mode, and the Python workers they start.
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
-  job's own SDK clients reach Floci too.
+  job's own SDK clients reach Floci too. A run's `executionIamPolicy.policy` scopes that session as an
+  assumed role's session policy does, so with IAM enforcement on "The resulting job IAM role permissions will be
+  an intersection of this policy and the policy associated with your job execution role". Its `policyArns` are
+  kept and given back but not applied, as Floci's IAM applies no managed session policy, an assumed role's
+  included. `StartJobRun` refuses an inline policy outside 1 to 2,048 characters, more than 10 policy ARNs, or
+  one outside 20 to 2,048 characters, with the framework's `ValidationException`, and either member of another
+  JSON type with `SerializationException`. Only those two members are kept.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, the container also gets Floci's CA bundle as a
   Java trust store, `/etc/floci-ca-bundle.p12`, which every JVM in it uses through
   `JAVA_TOOL_OPTIONS`, each saying so on its standard error (`Picked up JAVA_TOOL_OPTIONS: ...`); a
