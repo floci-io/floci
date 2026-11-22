@@ -2,6 +2,7 @@ package io.floci.aws.services.redshift.proxy;
 
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.spectrum.BackendSql;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
 import io.floci.aws.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
@@ -667,6 +668,48 @@ class RedshiftInterceptingBridgeTest {
         Mockito.verify(preparation, Mockito.never()).prepare(Mockito.anyString(), Mockito.any(), Mockito.any(),
                 Mockito.any());
         Mockito.verify(interceptor, Mockito.never()).execute(Mockito.any(), Mockito.anyString(), Mockito.anyString(), Mockito.any());
+    }
+
+    @Test
+    @Timeout(20)
+    void aRegisteredDropFunctionIsRefusedNotForwardedWhenTheBackendStaysBusy() throws Exception {
+        String sql = "DROP FUNCTION exfunc_sum(INT)";
+        SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
+        SpectrumQueryPreparation preparation = Mockito.mock(SpectrumQueryPreparation.class);
+        Mockito.when(interceptor.preparation()).thenReturn(preparation);
+        Mockito.when(preparation.needsBackendForDdl(Mockito.eq(sql), Mockito.any())).thenReturn(true);
+        startBridge(interceptor);
+        // a query nobody answers keeps the backend busy for longer than the ownership budget
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("SELECT 1"));
+        PostgresWireDecoder backendIn = new PostgresWireDecoder(testBackendEnd.getInputStream());
+        assertEquals('Q', backendIn.nextMessage().type());
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage("drop", sql, List.of());
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(parse, sql));
+        testClientEnd.getOutputStream().flush();
+
+        // the flush the bridge sends to look for the backend's replies is all that reaches it
+        assertEquals('H', backendIn.nextMessage().type());
+        // the ownership budget (2s) runs out first; the unanswered query then finishes within the wait that follows
+        Thread.sleep(2_800);
+        testBackendEnd.getOutputStream().write(concat(frame('C', cString("SELECT")), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+
+        InputStream response = testClientEnd.getInputStream();
+        assertEquals('C', response.read());
+        skipFrameBody(response);
+        assertEquals('Z', response.read());
+        skipFrameBody(response);
+        assertEquals('E', response.read());
+        int length = ByteBuffer.wrap(response.readNBytes(4)).getInt();
+        String error = new String(response.readNBytes(length - 4), StandardCharsets.UTF_8);
+
+        assertTrue(error.contains("58030"), error);
+        assertTrue(error.contains("Unable to prepare external function DDL"), error);
+        Mockito.verify(interceptor, Mockito.never()).plan(Mockito.anyString(), Mockito.any(SpectrumSession.class),
+                Mockito.any(BackendSql.class));
+        // the Parse itself never reaches the backend, so PostgreSQL cannot drop the stub behind the registry
+        testBackendEnd.setSoTimeout(500);
+        assertThrows(SocketTimeoutException.class, backendIn::nextMessage);
     }
 
     private static void skipFrameBody(InputStream in) throws IOException {

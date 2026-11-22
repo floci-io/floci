@@ -30,7 +30,21 @@ public final class PostgresBackendSession implements BackendSql {
             output.flush();
             return awaitSingleString(new PostgresWireDecoder(backend.getInputStream()));
         } catch (IOException exception) {
+            abandon(backend, exception);
             throw new SpectrumReadException(SQLSTATE_IO, "Unable to run a statement on the Redshift backend", exception);
+        }
+    }
+
+    /**
+     * Closes a backend whose private exchange did not finish. Its replies may still arrive, and the response pump
+     * would forward them to the client as if the client had asked; a closed connection is the one state where
+     * nothing can be misattributed.
+     */
+    static void abandon(Socket backend, IOException cause) {
+        try {
+            backend.close();
+        } catch (IOException closeFailure) {
+            cause.addSuppressed(closeFailure);
         }
     }
 

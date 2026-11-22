@@ -14,6 +14,8 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 
+import static io.floci.aws.testing.PostgresDataRows.dataRow;
+
 /** Extended-query backend for COPY tests, including catalog discovery and transaction recovery. */
 final class FakeCopyBackend {
     private final Socket socket;
@@ -207,20 +209,5 @@ final class FakeCopyBackend {
         PostgresWire.write(out, 'E', Arrays.copyOf(error, error.length - 1),
                 new byte[]{'W'}, PostgresWire.cStringBytes("COPY events, line " + line
                         + ", column id: \"bad\""), new byte[1]);
-    }
-
-    private static byte[] dataRow(List<String> row) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        bytes.write(new byte[]{(byte) (row.size() >> 8), (byte) row.size()});
-        for (String value : row) {
-            if (value == null) {
-                bytes.write(PostgresWire.int32(-1));
-                continue;
-            }
-            byte[] field = value.getBytes(StandardCharsets.UTF_8);
-            bytes.write(PostgresWire.int32(field.length));
-            bytes.write(field);
-        }
-        return bytes.toByteArray();
     }
 }

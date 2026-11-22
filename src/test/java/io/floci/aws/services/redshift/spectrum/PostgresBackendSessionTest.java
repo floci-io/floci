@@ -9,14 +9,18 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static io.floci.aws.testing.PostgresDataRows.dataRow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresBackendSessionTest {
 
@@ -282,12 +286,12 @@ class PostgresBackendSessionTest {
                     OutputStream output = socket.getOutputStream();
                     // First query returns "analytics".
                     readFrame(input);
-                    send(output, 'D', dataRow("analytics"));
+                    send(output, 'D', dataRow(List.of("analytics")));
                     send(output, 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
                     send(output, 'Z', new byte[]{'I'});
                     // Second query returns SQL NULL.
                     readFrame(input);
-                    send(output, 'D', new byte[]{0, 1, (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff});
+                    send(output, 'D', dataRow(Collections.singletonList(null)));
                     send(output, 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
                     send(output, 'Z', new byte[]{'I'});
                     // Third query returns no rows.
@@ -321,7 +325,7 @@ class PostgresBackendSessionTest {
                     } while (frame.type() != 'H');
                     send(socket.getOutputStream(), '1', new byte[0]);
                     send(socket.getOutputStream(), '2', new byte[0]);
-                    send(socket.getOutputStream(), 'D', dataRow("analytics"));
+                    send(socket.getOutputStream(), 'D', dataRow(List.of("analytics")));
                     send(socket.getOutputStream(), 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
                     send(socket.getOutputStream(), '3', new byte[0]);
                     send(socket.getOutputStream(), '3', new byte[0]);
@@ -336,16 +340,57 @@ class PostgresBackendSessionTest {
         }
     }
 
-    private static byte[] dataRow(String value) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        byte[] body = new byte[6 + bytes.length];
-        body[0] = 0;
-        body[1] = 1;
-        body[2] = (byte) ((bytes.length >>> 24) & 0xff);
-        body[3] = (byte) ((bytes.length >>> 16) & 0xff);
-        body[4] = (byte) ((bytes.length >>> 8) & 0xff);
-        body[5] = (byte) (bytes.length & 0xff);
-        System.arraycopy(bytes, 0, body, 6, bytes.length);
-        return body;
+    @Test
+    void aSimpleLookupThatTimesOutClosesTheBackendSoLateRepliesCannotReachTheClient() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            backend.setSoTimeout(200);
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<Void> server = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    readFrame(socket.getInputStream());
+                    // never replies: the lookup times out while its answer is still to come
+                    assertEquals(-1, socket.getInputStream().read());
+                    return null;
+                }
+            });
+
+            SpectrumReadException error = assertThrows(SpectrumReadException.class,
+                    () -> new PostgresBackendSession(backend).queryString("SELECT pg_catalog.current_schema()"));
+
+            assertEquals("58030", error.sqlState());
+            assertTrue(backend.isClosed());
+            server.get();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void anExtendedLookupThatTimesOutClosesTheBackendSoLateRepliesCannotReachTheClient() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            backend.setSoTimeout(200);
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<Void> server = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    Frame frame;
+                    do {
+                        frame = readFrame(socket.getInputStream());
+                    } while (frame.type() != 'H');
+                    // ParseComplete only: the rest of the exchange is still to come when the lookup gives up
+                    send(socket.getOutputStream(), '1', new byte[0]);
+                    assertEquals(-1, socket.getInputStream().read());
+                    return null;
+                }
+            });
+
+            SpectrumReadException error = assertThrows(SpectrumReadException.class,
+                    () -> new PostgresExtendedBackendSession(backend).queryString("SELECT pg_catalog.current_schema()"));
+
+            assertEquals("58030", error.sqlState());
+            assertTrue(backend.isClosed());
+            server.get();
+            executor.shutdownNow();
+        }
     }
 }

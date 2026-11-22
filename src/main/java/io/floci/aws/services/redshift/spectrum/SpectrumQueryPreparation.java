@@ -632,17 +632,19 @@ public class SpectrumQueryPreparation {
             return functions.findFunction(session, resolved.get(), function.functionName(), function.argumentTypes());
         }
         // The stub may already be gone; check the current schema so a stale binding is cleared when DROP fails (42883).
-        return backend.queryString(CURRENT_SCHEMA_SQL)
-                .filter(schema -> !schema.isEmpty())
+        return currentSchemaOf(backend)
                 .flatMap(schema -> functions.findFunction(session, schema, function.functionName(),
                         function.argumentTypes()));
     }
 
     private static String currentSchema(BackendSql backend) {
-        return backend.queryString(CURRENT_SCHEMA_SQL)
-                .filter(schema -> !schema.isEmpty())
-                .orElseThrow(() -> new SpectrumSqlException(INVALID_SCHEMA_NAME,
-                        "no schema has been selected to create in"));
+        return currentSchemaOf(backend).orElseThrow(() -> new SpectrumSqlException(INVALID_SCHEMA_NAME,
+                "no schema has been selected to create in"));
+    }
+
+    /** The session's current schema, empty when the search_path selects none. */
+    private static Optional<String> currentSchemaOf(BackendSql backend) {
+        return backend.queryString(CURRENT_SCHEMA_SQL).filter(schema -> !schema.isEmpty());
     }
 
     static String resolveFunctionSchemaSql(String functionName, List<String> argumentTypes) {

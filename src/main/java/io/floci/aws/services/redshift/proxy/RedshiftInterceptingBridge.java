@@ -373,7 +373,11 @@ public class RedshiftInterceptingBridge {
                         resolved[0] = spectrumInterceptor.plan(parse.sql(), spectrumSession(), relationalBackend);
                         return true;
                     });
-                    plan = owned ? resolved[0] : new SpectrumInterceptor.Plan.Forward();
+                    if (!owned) {
+                        // Forwarding would let PostgreSQL drop the stub and leave its binding behind.
+                        throw new SpectrumReadException("58030", "Unable to prepare external function DDL");
+                    }
+                    plan = resolved[0];
                 } else {
                     plan = spectrumInterceptor.plan(parse.sql(), spectrumSession());
                 }

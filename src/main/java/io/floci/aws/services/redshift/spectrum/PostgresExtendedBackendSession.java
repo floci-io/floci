@@ -46,6 +46,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
             closeAndFlush();
             return awaitSingleStringClosed();
         } catch (IOException exception) {
+            PostgresBackendSession.abandon(backend, exception);
             throw failure(exception);
         }
     }
