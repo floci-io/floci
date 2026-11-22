@@ -1132,6 +1132,41 @@ service, never through Firehose or S3.
   the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
 - Refreshes of the views over one stream run one at a time.
 
+### Scalar Lambda UDFs
+
+`CREATE EXTERNAL FUNCTION` registers a scalar Lambda UDF, and `DROP FUNCTION` removes it.
+
+```sql
+CREATE [OR REPLACE] EXTERNAL FUNCTION exfunc_sum(INT, INT)
+RETURNS INT
+{ VOLATILE | STABLE }
+LAMBDA 'lambda_sum'
+IAM_ROLE 'arn:aws:iam::123456789012:role/LambdaUdfRole'
+[RETRY_TIMEOUT 20000] [MAX_BATCH_ROWS 1000] [MAX_BATCH_SIZE 5 MB];
+
+DROP FUNCTION exfunc_sum(INT, INT) [CASCADE | RESTRICT];
+```
+
+The statement creates a stub function of the same signature in the local database and remembers the Lambda function,
+role, volatility and batch options. `CREATE OR REPLACE` replaces only a function that `CREATE EXTERNAL FUNCTION` made, with the same signature and return type; an ordinary function of that signature is refused with `42723`. An overload of
+the same name with other argument types is a separate function. `DROP FUNCTION` removes both the stub and the
+registration; a `DROP FUNCTION` of any function Floci does not track is left to PostgreSQL.
+
+- **Calling the function is not supported yet.** The stub refuses every call with SQLSTATE `0A000`; invoking Lambda
+  from SQL is a later change. Creating and dropping the function work today.
+- Argument and return types are `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL`, `REAL`, `DOUBLE PRECISION`, `CHAR`,
+  `VARCHAR`, `BOOLEAN`, `DATE` and `TIMESTAMP`, with their aliases. Any other type is refused with `0A000`.
+- `VOLATILE` or `STABLE` is required, and `IMMUTABLE` is refused with `0A000`, as Redshift does not support it for
+  Lambda UDFs. `IAM_ROLE DEFAULT` is refused with `0A000`.
+- `MAX_BATCH_SIZE` takes `KB` or `MB` (`KB` when omitted) between 1 KB and 5 MB, and `MAX_BATCH_ROWS` is at least 1.
+  The defaults are the documented 20000 ms, 2147483647 rows and 5 MB. The options are stored, and not applied yet.
+- An unqualified name is created in `public`. The role and the Lambda function are not checked at creation.
+- `CREATE EXTERNAL FUNCTION` and `DROP FUNCTION` of such a function inside an explicit transaction fail with SQLSTATE
+  `25001`, because the registration is not part of the PostgreSQL transaction.
+- Privileges on `LANGUAGE exfunc` are not modeled: any user the backend lets create a function can create one.
+- `DROP SCHEMA ... CASCADE` of a schema holding such a function removes the stub. The registration is cleared by the
+  next `DROP FUNCTION` of it, or replaced by a new `CREATE`.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
