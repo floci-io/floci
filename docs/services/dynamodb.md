@@ -218,8 +218,8 @@ Floci does the same on the `ReturnValues` of `PutItem`, `UpdateItem` and `Delete
 `Item` of a failed condition check, on `TransactGetItems`, and on the `Item` of a
 `TransactWriteItems` cancellation reason. Each map is shuffled on its own. Lists and sets keep their order.
 
-`GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams keep the stored order, as on AWS.
-Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to keep the stored order everywhere. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
+`GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams return the same order on every call, as on AWS.
+Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to turn the shuffle off. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
 
 ## Time to Live
 
