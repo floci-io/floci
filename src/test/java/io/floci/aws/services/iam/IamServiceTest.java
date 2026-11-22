@@ -2215,6 +2215,81 @@ class IamServiceTest {
     }
 
     @Test
+    void deletePolicyWithAVersionBesideItsDefaultNamesTheVersions() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        iamService.createPolicyVersion(policy.getArn(), policyDocument("two"), false);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deletePolicy(policy.getArn()));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("This policy has more than one version. Before you delete a policy, you must"
+                + " delete the policy's versions. The default version is deleted with the policy.",
+                ex.getMessage());
+    }
+
+    /**
+     * What a stack's own cleanup does before it deletes a policy it owns: the default survives
+     * with its document, every other version is gone, and the delete goes through.
+     */
+    @Test
+    void clearingTheOtherVersionsKeepsTheDefaultAndFreesTheDelete() {
+        String current = policyDocument("current");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("second"), false);
+        iamService.createPolicyVersion(policyArn, current, true);
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v3", left.getFirst().getVersionId());
+        assertEquals(current, left.getFirst().getDocument());
+        iamService.deletePolicy(policyArn);
+        AwsException gone = assertThrows(AwsException.class, () -> iamService.getPolicy(policyArn));
+        assertEquals("NoSuchEntity", gone.getErrorCode());
+    }
+
+    /**
+     * The clearing is on the way to a delete that an attachment refuses, so it asks about the
+     * attachment first: a stack whose policy some principal it never recorded still holds keeps
+     * every version it had, and hears the same sentence the delete would have given it.
+     */
+    @Test
+    void clearingIsRefusedWhileThePolicyIsAttachedAndKeepsEveryVersion() {
+        iamService.createUser("outsider", "/");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("one"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, policyDocument("two"), false);
+        iamService.attachUserPolicy("outsider", policyArn);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.clearNonDefaultPolicyVersions(policyArn));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("Cannot delete a policy attached to entities. Detach it first.",
+                ex.getMessage());
+        assertEquals(2, iamService.listPolicyVersions(policyArn).size());
+    }
+
+    /** The version a SetDefaultPolicyVersion just chose is the one the clearing keeps. */
+    @Test
+    void clearingKeepsTheVersionJustMadeDefault() {
+        String second = policyDocument("second");
+        IamPolicy policy = iamService.createPolicy("P", "/", null, policyDocument("first"), null);
+        String policyArn = policy.getArn();
+        iamService.createPolicyVersion(policyArn, second, false);
+        iamService.setDefaultPolicyVersion(policyArn, "v2");
+
+        iamService.clearNonDefaultPolicyVersions(policyArn);
+
+        List<PolicyVersion> left = iamService.listPolicyVersions(policyArn);
+        assertEquals(1, left.size());
+        assertEquals("v2", left.getFirst().getVersionId());
+        assertEquals(second, left.getFirst().getDocument());
+        assertEquals("v2", iamService.getPolicy(policyArn).getDefaultVersionId());
+    }
+
+    @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
         IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);

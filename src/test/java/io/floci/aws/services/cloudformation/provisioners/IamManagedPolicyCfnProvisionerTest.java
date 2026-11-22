@@ -172,6 +172,25 @@ class IamManagedPolicyCfnProvisionerTest {
         order.verify(iam).deletePolicy(ARN);
     }
 
+    /**
+     * The versions an update left on the policy go before the delete that would otherwise be
+     * refused over them, and after the detaches, which is the order AWS's steps for deleting a
+     * managed policy are written in.
+     */
+    @Test
+    void deleteClearsTheVersionsAnUpdateLeftBeforeRemovingThePolicy() {
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("ManagedPolicyRoleTargets", "web-role");
+
+        provisioner.delete(r, "us-east-1");
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).detachRolePolicy("web-role", ARN);
+        order.verify(iam).clearNonDefaultPolicyVersions(ARN);
+        order.verify(iam).deletePolicy(ARN);
+    }
+
     @Test
     void deleteDetachesEveryStoredPrincipalBeforeRemovingThePolicy() {
         StackResource r = resource();

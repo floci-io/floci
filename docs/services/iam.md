@@ -706,10 +706,10 @@ always did.
 ### What a blocked delete names
 
 A delete that a dependency blocks is `DeleteConflict` 409, and the sentence it carries names the
-one dependency the caller has to clear. The four below are AWS's own, recorded against a real
+one dependency the caller has to clear. The five below are AWS's own, recorded against a real
 account across capture runs between 2026-10-25 and 2026-11-16, and each is entirely fixed text:
-no entity name, no count, nothing taken from the request. The wording is the contract rather than
-a description, because a cleanup loop reads it to choose what to do next.
+no entity name, no count, no version id, nothing taken from the request. The wording is the
+contract rather than a description, because a cleanup loop reads it to choose what to do next.
 
 | What is still there | What the delete answers |
 | --- | --- |
@@ -717,10 +717,11 @@ a description, because a cleanup loop reads it to choose what to do next.
 | The instance profile still holds a role | `Cannot delete entity, must remove roles from instance profile first.` |
 | A managed policy is attached | `Cannot delete entity, must detach all policies first.` |
 | An inline policy is embedded | `Cannot delete entity, must delete policies first.` |
+| A managed policy has a version beside its default | `This policy has more than one version. Before you delete a policy, you must delete the policy's versions. The default version is deleted with the policy.` |
 
-The last two are a selection rather than one sentence for both: a managed policy is detached and an
-inline one is deleted, so the remedy named is the one that clears what is actually there. That
-selection is recorded on the role, the group and the user alike.
+The managed and inline rows are a selection rather than one sentence for both: a managed policy is
+detached and an inline one is deleted, so the remedy named is the one that clears what is actually
+there. That selection is recorded on the role, the group and the user alike.
 
 `DeleteRole` reads the three in the order of the table, and the first step of it is recorded too: a
 role both held by an instance profile and carrying attached policies is refused for the profile,
@@ -728,6 +729,16 @@ which is the answer a cleanup loop needs, since detaching the policy changes not
 pairing is there. Attached ahead of inline is the order `DeleteUser` already answered; which of
 those two AWS names first for an entity carrying both is not recorded, so the role and the group
 follow the user rather than differ from it.
+
+The last row is a policy's own delete rather than an entity's, and the one sentence of the five
+that is three: a managed policy carrying a version beside its default is refused until the other
+versions are deleted, and the text closes by saying the default is not one of them, which is the
+same version `DeletePolicyVersion` refuses. `DeletePolicy` reports an attachment first and the
+versions second, the order AWS's own steps for deleting a managed policy are written in, detach the
+policy from every user, group and role and then delete all versions of the policy. Which of the two
+AWS names for a policy carrying both is not recorded, so that order is this package's reading. The
+attachment count was all a delete here read, so a policy with a version history went with the
+history and answered nothing, leaving a caller that had skipped a published step no sign of it.
 
 This package used to read a role's attached and inline policies together and answer the detach
 sentence for either, conflate them the same way on a group, word the instance profile's own
@@ -740,6 +751,18 @@ profile before it clears the policies it owns, so a role it turns out it cannot 
 had rather than being emptied by a delete that could not finish, and the refusal reaches the caller.
 A stack that owns both resources deletes the profile before the role, since dependents go before
 what they depend on.
+
+Nothing clears a managed policy's versions on the caller's behalf, which is the behavior change for
+a caller that deleted a versioned policy in one call: the versions go first, through
+`ListPolicyVersions` and `DeletePolicyVersion`, which is the loop AWS publishes for it. Floci's own
+CloudFormation provisioner for `AWS::IAM::ManagedPolicy` does that before it deletes a policy its
+stack owns, since every update of such a policy publishes the new document as a new default version
+and leaves the version before it stored: a delete that cleared nothing would leave a stack able to
+create and update a policy it could never take down again. The clearing asks the attachment
+question first and answers it with the sentence the delete would, so a policy that some principal
+the stack never recorded still holds keeps its history instead of spending it on a delete that was
+going to be refused anyway. That is the published order again: detach, then the versions, then the
+policy.
 
 ### Access Keys
 
