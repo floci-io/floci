@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -19,15 +20,12 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createConfigurationSet() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-alpha",
@@ -45,7 +43,7 @@ class SesConfigurationSetV2IntegrationTest {
     void createConfigurationSet_duplicateRejected() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "v2-cs-alpha"}
                 """)
@@ -61,7 +59,7 @@ class SesConfigurationSetV2IntegrationTest {
     void createConfigurationSet_missingName() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -74,7 +72,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(5)
     void getConfigurationSet_returnsRoundTrip() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-alpha")
         .then()
@@ -88,7 +86,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(6)
     void getConfigurationSet_unknownReturns404() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-ghost")
         .then()
@@ -101,7 +99,7 @@ class SesConfigurationSetV2IntegrationTest {
     void listConfigurationSets() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "v2-cs-beta"}
                 """)
@@ -111,7 +109,7 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets")
         .then()
@@ -124,14 +122,14 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(8)
     void deleteConfigurationSet() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/configuration-sets/v2-cs-alpha")
         .then()
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-alpha")
         .then()
@@ -142,7 +140,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(9)
     void deleteConfigurationSet_unknownReturns404() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/configuration-sets/v2-cs-ghost")
         .then()
@@ -155,7 +153,7 @@ class SesConfigurationSetV2IntegrationTest {
     void createConfigurationSet_invalidNameCharacters() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "bad name!"}
                 """)
@@ -172,7 +170,7 @@ class SesConfigurationSetV2IntegrationTest {
         String longName = "a".repeat(65);
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "%s"}
                 """.formatted(longName))
@@ -188,7 +186,7 @@ class SesConfigurationSetV2IntegrationTest {
     void createConfigurationSet_tagWithMissingValue_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-tag-no-value",
@@ -209,7 +207,7 @@ class SesConfigurationSetV2IntegrationTest {
     void createConfigurationSet_tagWithMissingKey_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-bad-tag-key",
@@ -229,7 +227,7 @@ class SesConfigurationSetV2IntegrationTest {
         String longKey = "k".repeat(129);
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-long-tag-key",
@@ -249,7 +247,7 @@ class SesConfigurationSetV2IntegrationTest {
         String longValue = "v".repeat(257);
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-long-tag-value",
@@ -270,7 +268,7 @@ class SesConfigurationSetV2IntegrationTest {
         // the ListTagsForResource endpoint, not just GET configuration-sets/{name}.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-tag-roundtrip",
@@ -287,7 +285,7 @@ class SesConfigurationSetV2IntegrationTest {
 
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/v2-cs-tag-roundtrip";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -305,7 +303,7 @@ class SesConfigurationSetV2IntegrationTest {
         // (verified against real AWS SES V2 on 2026-06-12).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-inline-options",
@@ -319,7 +317,7 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-inline-options")
         .then()
@@ -338,7 +336,7 @@ class SesConfigurationSetV2IntegrationTest {
         // 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-bad-reason",
@@ -357,7 +355,7 @@ class SesConfigurationSetV2IntegrationTest {
 
         // Validation happens before the store write, so the set must not exist.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-bad-reason")
         .then()
@@ -372,7 +370,7 @@ class SesConfigurationSetV2IntegrationTest {
         // (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-string-sending",
@@ -385,7 +383,7 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-string-sending")
         .then()
@@ -401,7 +399,7 @@ class SesConfigurationSetV2IntegrationTest {
         // defaults to true (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-empty-sending",
@@ -414,7 +412,7 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-empty-sending")
         .then()
@@ -429,7 +427,7 @@ class SesConfigurationSetV2IntegrationTest {
         // set is not created (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-null-sending",
@@ -443,7 +441,7 @@ class SesConfigurationSetV2IntegrationTest {
             .body("__type", equalTo("SerializationException"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-null-sending")
         .then()
@@ -456,7 +454,7 @@ class SesConfigurationSetV2IntegrationTest {
         // Verified against real AWS SES V2 on 2026-06-13.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-number-sending",
@@ -480,7 +478,7 @@ class SesConfigurationSetV2IntegrationTest {
         // 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-empty-suppression",
@@ -495,7 +493,7 @@ class SesConfigurationSetV2IntegrationTest {
             .body("message", equalTo("An internal failure has occurred."));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-empty-suppression")
         .then()
@@ -508,7 +506,7 @@ class SesConfigurationSetV2IntegrationTest {
         // Verified against real AWS SES V2 on 2026-06-13.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-string-reasons",
@@ -530,7 +528,7 @@ class SesConfigurationSetV2IntegrationTest {
         // (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-empty-reasons",
@@ -543,7 +541,7 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-empty-reasons")
         .then()
@@ -560,7 +558,7 @@ class SesConfigurationSetV2IntegrationTest {
         // (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-null-reason",
@@ -575,7 +573,7 @@ class SesConfigurationSetV2IntegrationTest {
             .body("message", equalTo("Reason null is invalid, must be one of [BOUNCE, COMPLAINT]."));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/configuration-sets/v2-cs-null-reason")
         .then()
@@ -588,7 +586,7 @@ class SesConfigurationSetV2IntegrationTest {
         // Verified against real AWS SES V2 on 2026-06-13.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-boolean-reason",
@@ -611,7 +609,7 @@ class SesConfigurationSetV2IntegrationTest {
         // 2026-06-13).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-string-suppression",
@@ -627,7 +625,7 @@ class SesConfigurationSetV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "ConfigurationSetName": "v2-cs-string-options",
@@ -649,7 +647,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(30)
     void getConfigurationSet_reputationOptions_defaultsEnabled() {
         putConfigSet("v2-cs-rep-default");
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-rep-default")
         .then().statusCode(200)
             .body("ReputationOptions.ReputationMetricsEnabled", equalTo(true));
@@ -659,11 +657,11 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(31)
     void putReputationOptions_disables_andEchoes() {
         putConfigSet("v2-cs-rep");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ReputationMetricsEnabled\": false}")
         .when().put("/v2/email/configuration-sets/v2-cs-rep/reputation-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-rep")
         .then().statusCode(200)
             .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
@@ -672,13 +670,13 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(32)
     void createConfigurationSet_inlineReputation_echoed() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "v2-cs-rep-inline",
                  "ReputationOptions": {"ReputationMetricsEnabled": false}}
                 """)
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-rep-inline")
         .then().statusCode(200)
             .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
@@ -688,11 +686,11 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(33)
     void putDeliveryOptions_echoed() {
         putConfigSet("v2-cs-delivery");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": 300}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery/delivery-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-delivery")
         .then().statusCode(200)
             .body("DeliveryOptions.TlsPolicy", equalTo("REQUIRE"))
@@ -703,7 +701,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(34)
     void putDeliveryOptions_nonexistentPool_returns400() {
         putConfigSet("v2-cs-delivery-pool");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"OPTIONAL\", \"SendingPoolName\": \"ghost-pool\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-pool/delivery-options")
         .then().statusCode(400)
@@ -716,11 +714,11 @@ class SesConfigurationSetV2IntegrationTest {
     void putArchivingOptions_validArn_echoed() {
         putConfigSet("v2-cs-archiving");
         String arn = "arn:aws:ses:us-east-1:123456789012:mailmanager-archive/a-abcdefghijklmnopqrstuvwx";
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ArchiveArn\": \"" + arn + "\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-archiving/archiving-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-archiving")
         .then().statusCode(200)
             .body("ArchivingOptions.ArchiveArn", equalTo(arn));
@@ -734,11 +732,11 @@ class SesConfigurationSetV2IntegrationTest {
         // behaviour of other local AWS emulators).
         String arn = "not-an-arn";
         putConfigSet("v2-cs-archiving-any");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ArchiveArn\": \"" + arn + "\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-archiving-any/archiving-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-archiving-any")
         .then().statusCode(200)
             .body("ArchivingOptions.ArchiveArn", equalTo(arn));
@@ -747,13 +745,13 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(37)
     void putTrackingOptions_verifiedDomain_echoed() {
-        SesDomainIdentityTestHelper.createVerified("track.floci.test", AUTH_HEADER);
+        SesDomainIdentityTestHelper.createVerified("track.floci.test", AUTH);
         putConfigSet("v2-cs-tracking");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"track.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking/tracking-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-tracking")
         .then().statusCode(200)
             .body("TrackingOptions.CustomRedirectDomain", equalTo("track.floci.test"))
@@ -764,7 +762,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(38)
     void putTrackingOptions_unverifiedDomain_returns400() {
         putConfigSet("v2-cs-tracking-unverified");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"never-verified.example.com\", \"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-unverified/tracking-options")
         .then().statusCode(400)
@@ -777,9 +775,9 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_invalidHttpsPolicy_returns400() {
         // AWS validates the HttpsPolicy enum only after CustomRedirectDomain
         // presence and verification, so the domain must be verified to reach it.
-        SesDomainIdentityTestHelper.createVerified("track-enum.floci.test", AUTH_HEADER);
+        SesDomainIdentityTestHelper.createVerified("track-enum.floci.test", AUTH);
         putConfigSet("v2-cs-tracking-enum");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"track-enum.floci.test\", \"HttpsPolicy\": \"BOGUS\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-enum/tracking-options")
         .then().statusCode(400)
@@ -792,11 +790,11 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(100)
     void putTrackingOptions_pendingDomain_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"EmailIdentity\": \"track-pending.floci.test\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
         putConfigSet("v2-cs-tracking-pending");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"track-pending.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-pending/tracking-options")
         .then().statusCode(400)
@@ -811,11 +809,11 @@ class SesConfigurationSetV2IntegrationTest {
         // ReputationMetricsEnabled member as "false" (verified against real AWS
         // SES V2 on 2026-06-17) — it is not required and does not error.
         putConfigSet("v2-cs-rep-empty");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{}")
         .when().put("/v2/email/configuration-sets/v2-cs-rep-empty/reputation-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-rep-empty")
         .then().statusCode(200)
             .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
@@ -825,7 +823,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(41)
     void putDeliveryOptions_invalidTlsPolicy_returns400() {
         putConfigSet("v2-cs-delivery-tls");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"MAYBE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-tls/delivery-options")
         .then().statusCode(400)
@@ -839,7 +837,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(42)
     void putDeliveryOptions_nonNumericMaxDeliverySeconds_returns400() {
         putConfigSet("v2-cs-delivery-max");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": \"soon\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-max/delivery-options")
         .then().statusCode(400)
@@ -851,7 +849,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(43)
     void putTrackingOptions_nonStringHttpsPolicy_returns400() {
         putConfigSet("v2-cs-tracking-type");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"HttpsPolicy\": 123}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-type/tracking-options")
         .then().statusCode(400)
@@ -863,7 +861,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(44)
     void putArchivingOptions_nonStringArn_returns400() {
         putConfigSet("v2-cs-archiving-type");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ArchiveArn\": true}")
         .when().put("/v2/email/configuration-sets/v2-cs-archiving-type/archiving-options")
         .then().statusCode(400)
@@ -877,7 +875,7 @@ class SesConfigurationSetV2IntegrationTest {
         // MaxDeliverySeconds is an integer; a fractional value must not be
         // silently truncated.
         putConfigSet("v2-cs-delivery-frac");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": 1.5}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-frac/delivery-options")
         .then().statusCode(400)
@@ -891,7 +889,7 @@ class SesConfigurationSetV2IntegrationTest {
         // AWS requires CustomRedirectDomain whenever HttpsPolicy is set
         // (verified against real AWS 2026-06-17); an empty body is accepted.
         putConfigSet("v2-cs-tracking-nodomain");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-nodomain/tracking-options")
         .then().statusCode(400)
@@ -905,7 +903,7 @@ class SesConfigurationSetV2IntegrationTest {
         // AWS checks domain verification before the HttpsPolicy enum, so an
         // unverified domain wins over an invalid enum value.
         putConfigSet("v2-cs-tracking-order");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"unverified-order.example.com\", \"HttpsPolicy\": \"BOGUS\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-order/tracking-options")
         .then().statusCode(400)
@@ -918,11 +916,11 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_verifiedEmailIdentityAsDomain_returns400() {
         // CustomRedirectDomain must be a verified *domain* identity; a verified
         // email-address identity does not qualify.
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"EmailIdentity\": \"redirect@floci.test\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
         putConfigSet("v2-cs-tracking-email-id");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"redirect@floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-email-id/tracking-options")
         .then().statusCode(400)
@@ -937,7 +935,7 @@ class SesConfigurationSetV2IntegrationTest {
         // storing it (verified against real AWS 2026-06-17), even with no
         // HttpsPolicy set.
         putConfigSet("v2-cs-tracking-blank");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"   \"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-blank/tracking-options")
         .then().statusCode(400)
@@ -950,7 +948,7 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_unverifiedDomainWithoutHttpsPolicy_returns400() {
         // AWS verifies CustomRedirectDomain even when HttpsPolicy is omitted.
         putConfigSet("v2-cs-tracking-nopolicy");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"never-verified-nopolicy.example.com\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-nopolicy/tracking-options")
         .then().statusCode(400)
@@ -963,20 +961,20 @@ class SesConfigurationSetV2IntegrationTest {
     void putTrackingOptions_emptyBody_clears() {
         // An empty PUT body clears tracking options rather than persisting an
         // empty block that GetConfigurationSet would echo as {}.
-        SesDomainIdentityTestHelper.createVerified("clear.floci.test", AUTH_HEADER);
+        SesDomainIdentityTestHelper.createVerified("clear.floci.test", AUTH);
         putConfigSet("v2-cs-tracking-clear");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"CustomRedirectDomain\": \"clear.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-clear/tracking-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-tracking-clear")
         .then().statusCode(200).body("TrackingOptions.HttpsPolicy", equalTo("REQUIRE"));
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{}")
         .when().put("/v2/email/configuration-sets/v2-cs-tracking-clear/tracking-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-tracking-clear")
         .then().statusCode(200).body("TrackingOptions", nullValue());
     }
@@ -985,18 +983,18 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(52)
     void putDeliveryOptions_emptyBody_clears() {
         putConfigSet("v2-cs-delivery-clear");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"REQUIRE\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-clear/delivery-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-delivery-clear")
         .then().statusCode(200).body("DeliveryOptions.TlsPolicy", equalTo("REQUIRE"));
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-clear/delivery-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-delivery-clear")
         .then().statusCode(200).body("DeliveryOptions", nullValue());
     }
@@ -1007,7 +1005,7 @@ class SesConfigurationSetV2IntegrationTest {
         // AWS rejects a blank SendingPoolName with a distinct message (verified
         // against real AWS 2026-06-17), separate from the non-existent-pool case.
         putConfigSet("v2-cs-delivery-blankpool");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"SendingPoolName\": \"   \"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-blankpool/delivery-options")
         .then().statusCode(400)
@@ -1019,7 +1017,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(54)
     void putDeliveryOptions_maxDeliverySecondsBelowMinimum_returns400() {
         putConfigSet("v2-cs-delivery-min");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"MaxDeliverySeconds\": 5}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-min/delivery-options")
         .then().statusCode(400)
@@ -1033,7 +1031,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(55)
     void putDeliveryOptions_maxDeliverySecondsAboveMaximum_returns400() {
         putConfigSet("v2-cs-delivery-overmax");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"MaxDeliverySeconds\": 999999}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-overmax/delivery-options")
         .then().statusCode(400)
@@ -1047,12 +1045,12 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(56)
     void putVdmOptions_echoed() {
         putConfigSet("v2-cs-vdm");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"ENABLED\"}, "
                     + "\"GuardianOptions\": {\"OptimizedSharedDelivery\": \"DISABLED\"}}}")
         .when().put("/v2/email/configuration-sets/v2-cs-vdm/vdm-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-vdm")
         .then().statusCode(200)
             .body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("ENABLED"))
@@ -1063,7 +1061,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(57)
     void putVdmOptions_invalidEngagementMetrics_returns400() {
         putConfigSet("v2-cs-vdm-bad");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"NONSENSE\"}}}")
         .when().put("/v2/email/configuration-sets/v2-cs-vdm-bad/vdm-options")
         .then().statusCode(400)
@@ -1076,11 +1074,11 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(58)
     void createConfigurationSet_inlineVdm_echoed() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"v2-cs-vdm-inline\", "
                     + "\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"DISABLED\"}}}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-vdm-inline")
         .then().statusCode(200)
             .body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("DISABLED"));
@@ -1090,18 +1088,18 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(59)
     void putVdmOptions_emptyBody_clears() {
         putConfigSet("v2-cs-vdm-clear");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"ENABLED\"}}}")
         .when().put("/v2/email/configuration-sets/v2-cs-vdm-clear/vdm-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-vdm-clear")
         .then().statusCode(200).body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("ENABLED"));
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{}")
         .when().put("/v2/email/configuration-sets/v2-cs-vdm-clear/vdm-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-vdm-clear")
         .then().statusCode(200).body("VdmOptions", nullValue());
     }
@@ -1109,7 +1107,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(60)
     void createConfigurationSet_invalidInlineVdm_returns400_andDoesNotCreate() {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"v2-cs-vdm-inline-bad\", "
                     + "\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"NONSENSE\"}}}")
         .when().post("/v2/email/configuration-sets")
@@ -1120,7 +1118,7 @@ class SesConfigurationSetV2IntegrationTest {
                     + "Member must satisfy enum value set: [ENABLED, DISABLED]"));
 
         // Validation happens before the store write, so the set must not exist.
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-vdm-inline-bad")
         .then().statusCode(404)
             .body("__type", equalTo("NotFoundException"));
@@ -1132,15 +1130,15 @@ class SesConfigurationSetV2IntegrationTest {
         // A SendingPoolName that refers to a dedicated IP pool created via
         // CreateDedicatedIpPool is accepted and echoed (verified against real
         // AWS 2026-06-18).
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"PoolName\": \"v2-cs-pool-ref\"}")
         .when().post("/v2/email/dedicated-ip-pools").then().statusCode(200);
         putConfigSet("v2-cs-delivery-poolref");
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"TlsPolicy\": \"REQUIRE\", \"SendingPoolName\": \"v2-cs-pool-ref\"}")
         .when().put("/v2/email/configuration-sets/v2-cs-delivery-poolref/delivery-options")
         .then().statusCode(200);
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/v2-cs-delivery-poolref")
         .then().statusCode(200)
             .body("DeliveryOptions.SendingPoolName", equalTo("v2-cs-pool-ref"));
@@ -1152,7 +1150,7 @@ class SesConfigurationSetV2IntegrationTest {
         // AWS restJson1 rejects a non-string tag member with SerializationException rather than
         // coercing it (probe-confirmed: a numeric Key returns "NUMBER_VALUE can not be converted to a
         // String"). Floci matches the type/status; its error body uses __type (project-wide).
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-key\", \"Tags\": [{\"Key\": 123, \"Value\": \"v\"}]}")
         .when().post("/v2/email/configuration-sets")
         .then().statusCode(400).body("__type", equalTo("SerializationException"));
@@ -1162,12 +1160,12 @@ class SesConfigurationSetV2IntegrationTest {
     @Order(63)
     void createConfigurationSet_nonStringTagValue_returnsSerializationException() {
         // A boolean value and an object value are both non-string members and rejected the same way.
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-val\", \"Tags\": [{\"Key\": \"k\", \"Value\": true}]}")
         .when().post("/v2/email/configuration-sets")
         .then().statusCode(400).body("__type", equalTo("SerializationException"));
 
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"v2-cs-nonstr-obj\", \"Tags\": [{\"Key\": \"k\", \"Value\": {\"x\": 1}}]}")
         .when().post("/v2/email/configuration-sets")
         .then().statusCode(400).body("__type", equalTo("SerializationException"));
@@ -1181,7 +1179,7 @@ class SesConfigurationSetV2IntegrationTest {
         // for a null element (a server-side bug); Floci normalizes all of them to 400
         // SerializationException. Probe-confirmed against real AWS.
         for (String badElement : new String[] {"true", "123", "\"k\"", "[\"k\",\"v\"]", "null"}) {
-            given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"ConfigurationSetName\": \"v2-cs-bad-el\", \"Tags\": [" + badElement + "]}")
             .when().post("/v2/email/configuration-sets")
             .then().statusCode(400).body("__type", equalTo("SerializationException"));
@@ -1189,7 +1187,7 @@ class SesConfigurationSetV2IntegrationTest {
     }
 
     private static void putConfigSet(String name) {
-        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+        given().contentType("application/json").header("Authorization", AUTH)
             .body("{\"ConfigurationSetName\": \"" + name + "\"}")
         .when().post("/v2/email/configuration-sets").then().statusCode(200);
     }

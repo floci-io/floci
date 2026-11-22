@@ -52,7 +52,7 @@ final class CfnPropertyTypes {
     private static final Pattern SIGNED_WHOLE_NUMBER = Pattern.compile("[+-]?\\d+");
     private static final Set<String> TRUE_TEXT = Set.of("true", "True", "TRUE");
     private static final Set<String> FALSE_TEXT = Set.of("false", "False", "FALSE");
-    private static final String INTEGER_RANGE_HINT = ". This may occur when a numeric value exceeds 32-bit"
+    static final String INTEGER_RANGE_HINT = ". This may occur when a numeric value exceeds 32-bit"
             + " integer max (2147483647). Consider using 'number' type or ensure value fits in integer range.";
 
     private static final class Holder {
@@ -82,38 +82,13 @@ final class CfnPropertyTypes {
         return shape;
     }
 
-    /** Reject unmodeled members for a provisioner that passes the whole schema-shaped object to a service. */
-    static void rejectUnknownMembers(String resourceType, JsonNode properties) {
-        String shape = Holder.MODEL.operations().get(resourceType);
-        if (shape == null) {
-            throw notVendored(resourceType);
-        }
-        rejectUnknownMembers(properties, shape);
-    }
-
-    private static void rejectUnknownMembers(JsonNode value, String shapeName) {
-        if (value == null || value.isNull()) {
-            return;
-        }
-        Shape shape = Holder.MODEL.shapes().get(shapeName);
-        if ("structure".equals(shape.type()) && value.isObject()) {
-            value.properties().forEach(member -> {
-                String nested = shape.members().get(member.getKey());
-                if (nested == null) {
-                    throw new AwsException("ValidationError", "Unknown property: " + member.getKey(), 400);
-                }
-                rejectUnknownMembers(member.getValue(), nested);
-            });
-        } else if ("list".equals(shape.type()) && value.isArray()) {
-            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
-        } else if ("map".equals(shape.type()) && value.isObject()) {
-            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
-        }
-    }
-
     private static IllegalStateException notVendored(String what) {
         return new IllegalStateException(what + " is not in " + RESOURCE_NAME
                 + "; add the type to tools/aws/regen_cfn_property_types.py");
+    }
+
+    private static boolean hasStringConstraints(Shape shape) {
+        return shape.minLength() != null || shape.maxLength() != null || shape.pattern() != null;
     }
 
     /**
@@ -170,9 +145,8 @@ final class CfnPropertyTypes {
 
     /**
      * A walk over template values against the shapes the resource schemas declare, resolving them
-     * on the way. What {@code AWS::NoValue} stands for is left out, and members a shape does not
-     * declare are resolved as they are. How a scalar converts, and what a value of the wrong type
-     * does, is each reader's own.
+     * on the way. What {@code AWS::NoValue} stands for is left out. How an unmodeled member or a
+     * scalar converts, and what a value of the wrong type does, is each reader's own.
      */
     private abstract static class ShapeWalk {
 
@@ -191,6 +165,9 @@ final class CfnPropertyTypes {
 
         abstract JsonNode readBoolean(String path, String property, JsonNode value);
 
+        void checkString(String path, Shape shape, String value) {
+        }
+
         /** Checks the members {@code shape} requires of the object {@code value} at {@code path}; none by default. */
         void checkRequired(String path, JsonNode value, Shape shape) {
         }
@@ -198,6 +175,10 @@ final class CfnPropertyTypes {
         /** The members of the object {@code value} in the order they are read: the template's by default. */
         Iterable<Map.Entry<String, JsonNode>> members(JsonNode value, Shape shape) {
             return value.properties();
+        }
+
+        JsonNode readUnknown(String path, String name, JsonNode raw) {
+            return engine.resolveNode(raw);
         }
 
         JsonNode read(String path, String property, JsonNode raw, String shapeName) {
@@ -217,7 +198,7 @@ final class CfnPropertyTypes {
                 case "structure" -> readObject(path, property, value, shape);
                 case "map" -> readMap(path, property, value, shape.element());
                 case "list" -> readList(path, property, value, shape.element());
-                case "string" -> readString(path, property, value);
+                case "string" -> readString(path, property, value, shape);
                 case "integer" -> readInteger(path, property, value);
                 case "boolean" -> readBoolean(path, property, value);
                 default -> value == raw ? engine.resolveNode(raw) : value;
@@ -240,7 +221,7 @@ final class CfnPropertyTypes {
             ObjectNode out = JsonNodeFactory.instance.objectNode();
             for (Map.Entry<String, JsonNode> member : members(value, shape)) {
                 String memberShape = shape.members().get(member.getKey());
-                JsonNode read = memberShape == null ? engine.resolveNode(member.getValue())
+                JsonNode read = memberShape == null ? readUnknown(path, member.getKey(), member.getValue())
                         : read(child(path, member.getKey()), member.getKey(), member.getValue(), memberShape);
                 if (read != null) {
                     out.set(member.getKey(), read);
@@ -309,12 +290,14 @@ final class CfnPropertyTypes {
             return out;
         }
 
-        private JsonNode readString(String path, String property, JsonNode value) {
+        private JsonNode readString(String path, String property, JsonNode value, Shape shape) {
             if (value.isContainerNode()) {
                 mismatch(path, property, "String", containerName(value));
                 return null;
             }
-            return value.isTextual() ? value : TextNode.valueOf(value.asText());
+            JsonNode text = value.isTextual() ? value : TextNode.valueOf(value.asText());
+            checkString(path, shape, text.textValue());
+            return text;
         }
 
         static String child(String path, String name) {
@@ -347,6 +330,17 @@ final class CfnPropertyTypes {
          */
         JsonNode read(String path, JsonNode raw, String shapeName) {
             return read(path, path.substring(path.lastIndexOf('/') + 1), engine.omitNoValue(raw), shapeName);
+        }
+
+        /**
+         * The property {@code property} of {@code resourceType} in {@code props} read as the shape its
+         * resource schema declares; null when {@code props} lacks it or it is {@code AWS::NoValue}.
+         */
+        JsonNode readProperty(String resourceType, JsonNode props, String property) {
+            if (props == null || !props.has(property)) {
+                return null;
+            }
+            return read(property, props.get(property), propertyShape(resourceType, property));
         }
 
         /** Throws the first model validation failure found by {@link #read}, if any. */
@@ -410,15 +404,16 @@ final class CfnPropertyTypes {
      * (#/ContainerDefinitions/0/Memory: expected type: Integer, found: String. This may occur ...
      * \n#/ContainerDefinitions/0/LinuxParameters/Capabilities/Add: expected type: JSONArray, found:
      * String)". At each object its missing required members come first, then its members in the
-     * schema's order. When every value converts, only the required members the converted model lacks
-     * fail it, grouped where their paths meet as the schema validator groups them: "Model validation
-     * failed (#/ContainerDefinitions: 2 schema violations found)\n#/ContainerDefinitions/0: required
-     * key [Name] not found (#/ContainerDefinitions/0)\n...".
+     * schema's order. When every value converts, missing required members and each failing string
+     * constraint are grouped where their paths meet as the schema validator groups them: "Model
+     * validation failed (#/ContainerDefinitions: 2 schema violations found)\n#/ContainerDefinitions/0:
+     * required key [Name] not found (#/ContainerDefinitions/0)\n...".
      */
     static final class HandlerReader extends ShapeWalk {
 
         private final List<Violation> violations = new ArrayList<>();
         private boolean unconverted;
+        private boolean preserveEcsHandlerSemantics;
 
         HandlerReader(CloudFormationTemplateEngine engine) {
             this(engine, Holder.MODEL);
@@ -434,14 +429,16 @@ final class CfnPropertyTypes {
             if (shape == null) {
                 throw notVendored(resourceType);
             }
+            // ECS forwards unmodeled members and uses presence-only required checks in its API path.
+            preserveEcsHandlerSemantics = "AWS::ECS::TaskDefinition".equals(resourceType);
             JsonNode raw = props == null || props.isNull() ? JsonNodeFactory.instance.objectNode() : props;
             JsonNode read = read("", "", engine.omitNoValue(raw), shape);
             if (unconverted) {
                 throw modelValidation(String.join("\n", violations.stream().map(Violation::text).toList()) + ")");
             }
-            List<Violation> missing = violations.stream().filter(Violation::required).toList();
-            if (!missing.isEmpty()) {
-                throw modelValidation(grouped(missing));
+            List<Violation> groupedViolations = violations.stream().filter(Violation::grouped).toList();
+            if (!groupedViolations.isEmpty()) {
+                throw modelValidation(grouped(groupedViolations));
             }
             return read;
         }
@@ -484,9 +481,43 @@ final class CfnPropertyTypes {
         }
 
         @Override
+        void checkString(String path, Shape shape, String value) {
+            if (!hasStringConstraints(shape)) {
+                return;
+            }
+            int length = value.codePointCount(0, value.length());
+            if (shape.minLength() != null && length < shape.minLength()) {
+                record(new Violation(path, "expected minLength: " + shape.minLength() + ", actual: " + length,
+                        true), true);
+            }
+            if (shape.maxLength() != null && length > shape.maxLength()) {
+                record(new Violation(path, "expected maxLength: " + shape.maxLength() + ", actual: " + length,
+                        true), true);
+            }
+            // A schema pattern is not anchored: the validator CloudFormation runs looks for it in the value, as the
+            // Studio schema's Name pattern [a-zA-Z0-9_-]+ takes "notebooks for etl".
+            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).find()) {
+                record(new Violation(path, "failed validation constraint for keyword [pattern]", true), true);
+            }
+        }
+
+        @Override
         void checkRequired(String path, JsonNode value, Shape shape) {
             for (String member : shape.required()) {
-                if (!value.has(member)) {
+                JsonNode raw = value.get(member);
+                boolean absent = raw == null;
+                if (!absent && !preserveEcsHandlerSemantics) {
+                    absent = raw.isNull();
+                    Shape memberShape = model.shapes().get(shape.members().get(member));
+                    if (!absent && "string".equals(memberShape.type())) {
+                        JsonNode resolved = engine.resolveNode(raw);
+                        absent = resolved == null || resolved.isNull() || resolved.isMissingNode();
+                        if (!absent && !hasStringConstraints(memberShape)) {
+                            absent = resolved.isTextual() && resolved.textValue().isBlank();
+                        }
+                    }
+                }
+                if (absent) {
                     record(new Violation(path, "required key [" + member + "] not found", true), true);
                 }
             }
@@ -503,6 +534,15 @@ final class CfnPropertyTypes {
             });
             value.properties().forEach(member -> ordered.putIfAbsent(member.getKey(), member.getValue()));
             return ordered.entrySet();
+        }
+
+        @Override
+        JsonNode readUnknown(String path, String name, JsonNode raw) {
+            if (preserveEcsHandlerSemantics) {
+                return super.readUnknown(path, name, raw);
+            }
+            record(new Violation(path, "extraneous key [" + name + "] is not permitted", false), false);
+            return null;
         }
 
         private void record(Violation violation, boolean converts) {
@@ -557,8 +597,8 @@ final class CfnPropertyTypes {
             return path.isEmpty() ? "#" : "#/" + path;
         }
 
-        /** One violation of the model at {@code path}, a missing required member or a type. */
-        private record Violation(String path, String message, boolean required) {
+        /** One violation of the model at {@code path}; schema keyword failures use grouped output. */
+        private record Violation(String path, String message, boolean grouped) {
 
             String text() {
                 return pointer(path) + ": " + message;
@@ -567,11 +607,11 @@ final class CfnPropertyTypes {
     }
 
     /** The resource handler's model validation failure; {@code violations} ends with its closing parenthesis. */
-    private static AwsException modelValidation(String violations) {
+    static AwsException modelValidation(String violations) {
         return new AwsException("InvalidRequest", "Model validation failed (" + violations, 400);
     }
 
-    private static AwsException templateMismatch(String property, String expected, String found) {
+    static AwsException templateMismatch(String property, String expected, String found) {
         return new AwsException("ValidationError", "Property [" + property + "] expected type: "
                 + expected + ", found: " + found, 400);
     }

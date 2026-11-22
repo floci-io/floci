@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -17,16 +18,13 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTagsV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void tags_lifecycle_onConfigurationSet() {
         // Seed: create a configuration set we can tag against
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "tag-cs-1"}
                 """)
@@ -39,7 +37,7 @@ class SesTagsV2IntegrationTest {
 
         // Initially empty
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -50,7 +48,7 @@ class SesTagsV2IntegrationTest {
         // TagResource
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [
                   {"Key": "env", "Value": "dev"},
@@ -63,7 +61,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -76,7 +74,7 @@ class SesTagsV2IntegrationTest {
         // TagResource on existing key replaces value (merge semantics)
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [
                   {"Key": "env", "Value": "prod"}
@@ -88,7 +86,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -99,7 +97,7 @@ class SesTagsV2IntegrationTest {
 
         // UntagResource removes specific keys
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -108,7 +106,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -124,7 +122,7 @@ class SesTagsV2IntegrationTest {
         // Seed: create an email template we can tag against
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tag-tpl-1",
@@ -140,7 +138,7 @@ class SesTagsV2IntegrationTest {
 
         // Initially empty
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -151,7 +149,7 @@ class SesTagsV2IntegrationTest {
         // Tag the template
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [
                   {"Key": "env", "Value": "stg"},
@@ -164,7 +162,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -174,7 +172,7 @@ class SesTagsV2IntegrationTest {
 
         // Remove a key
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -183,7 +181,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -199,7 +197,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:template/missing-tpl";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -216,7 +214,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/missing-cs";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -231,7 +229,7 @@ class SesTagsV2IntegrationTest {
     void listTagsForResource_unsupportedResourceType_returns404() {
         String arn = "arn:aws:ses:us-east-1:000000000000:identity/example.com";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -244,7 +242,7 @@ class SesTagsV2IntegrationTest {
     void tagResource_invalidArn_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "not-an-arn", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """)
@@ -262,7 +260,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": []}
                 """.formatted(arn))
@@ -272,7 +270,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -284,7 +282,7 @@ class SesTagsV2IntegrationTest {
         // The no-op still checks existence: an unknown resource stays NotFound.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "arn:aws:ses:us-east-1:000000000000:configuration-set/nowhere", "Tags": []}
                 """)
@@ -302,7 +300,7 @@ class SesTagsV2IntegrationTest {
         // carries "message":null, which restJson1 SDKs parse identically).
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .delete("/v2/email/tags")
@@ -321,7 +319,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses::000000000000:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "k", "Value": "v"}]}
                 """.formatted(arn))
@@ -337,7 +335,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:s3:us-east-1:000000000000:bucket/my-bucket";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "k", "Value": "v"}]}
                 """.formatted(arn))
@@ -355,7 +353,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:eu-west-1:000000000000:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "k", "Value": "v"}]}
                 """.formatted(arn))
@@ -374,7 +372,7 @@ class SesTagsV2IntegrationTest {
         // (probe-confirmed).
         String arn = "arn:aws:ses:eu-west-1:000000000000:configuration-set/tag-cs-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -392,7 +390,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/has spaces";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "k", "Value": "v"}]}
                 """.formatted(arn))
@@ -410,7 +408,7 @@ class SesTagsV2IntegrationTest {
         // routes the lookup to the ARN's region and surfaces NotFound instead.
         String arn = "arn:aws:ses:eu-west-1:000000000000:template/tag-tpl-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -429,7 +427,7 @@ class SesTagsV2IntegrationTest {
         // addresses an ARN nothing was tagged under — 200 with an empty tag set.
         String arn = "arn:aws:ses:eu-west-1:000000000000:template/tag-tpl-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -444,7 +442,7 @@ class SesTagsV2IntegrationTest {
         // Seed: create an email identity we can tag against
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailIdentity": "tag-id-1@example.com"}
                 """)
@@ -457,7 +455,7 @@ class SesTagsV2IntegrationTest {
 
         // Initially empty
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -468,7 +466,7 @@ class SesTagsV2IntegrationTest {
         // Tag it
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [
                   {"Key": "env", "Value": "stg"},
@@ -481,7 +479,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -491,7 +489,7 @@ class SesTagsV2IntegrationTest {
 
         // Untag a key
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -500,7 +498,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -516,7 +514,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:identity/missing-id@example.com";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -533,7 +531,7 @@ class SesTagsV2IntegrationTest {
         // Identity follows the same strict region check as templates for UntagResource.
         String arn = "arn:aws:ses:eu-west-1:000000000000:identity/tag-id-1@example.com";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -551,7 +549,7 @@ class SesTagsV2IntegrationTest {
         // was tagged under — 200 with an empty tag set (probe-confirmed).
         String arn = "arn:aws:ses:eu-west-1:000000000000:identity/tag-id-1@example.com";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -567,7 +565,7 @@ class SesTagsV2IntegrationTest {
         // existing key (net count unchanged) is allowed. Probe-confirmed against real AWS.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "tag-cs-merge"}
                 """)
@@ -581,7 +579,7 @@ class SesTagsV2IntegrationTest {
         // Seed with the full 50 tags.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": " + tagArray(0, 50) + "}")
         .when()
             .post("/v2/email/tags")
@@ -591,7 +589,7 @@ class SesTagsV2IntegrationTest {
         // Updating an existing key keeps the count at 50 and is accepted.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"k0\", \"Value\": \"updated\"}]}")
         .when()
             .post("/v2/email/tags")
@@ -601,7 +599,7 @@ class SesTagsV2IntegrationTest {
         // Adding one new key would make 51 — rejected with the merge-specific message.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"extra\", \"Value\": \"v\"}]}")
         .when()
             .post("/v2/email/tags")
@@ -618,7 +616,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{\"ResourceArn\": \"" + arn + "\", \"Tags\": [{\"Key\": \"aws:foo\", \"Value\": \"v\"}]}")
         .when()
             .post("/v2/email/tags")
@@ -637,7 +635,7 @@ class SesTagsV2IntegrationTest {
         String id = "atomic-tag-id@example.com";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailIdentity": "%s", "Tags": [
                   {"Key": "dup", "Value": "1"},
@@ -653,7 +651,7 @@ class SesTagsV2IntegrationTest {
 
         // The failed create must leave no identity behind.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/identities/" + id)
         .then()
@@ -666,7 +664,7 @@ class SesTagsV2IntegrationTest {
         // Seed: create a contact list with inline tags
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ContactListName": "tag-cl-1", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """)
@@ -679,7 +677,7 @@ class SesTagsV2IntegrationTest {
 
         // Inline create tags are visible via ListTagsForResource
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -691,7 +689,7 @@ class SesTagsV2IntegrationTest {
         // TagResource merges an additional key
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "owner", "Value": "alice"}]}
                 """.formatted(arn))
@@ -701,7 +699,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -711,7 +709,7 @@ class SesTagsV2IntegrationTest {
 
         // UntagResource removes a key
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -720,7 +718,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -734,7 +732,7 @@ class SesTagsV2IntegrationTest {
         // existence check but returns an empty set for the untagged mismatched ARN.
         String euArn = "arn:aws:ses:eu-west-1:000000000000:contact-list/tag-cl-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", euArn)
             .queryParam("TagKeys", "k")
         .when()
@@ -744,7 +742,7 @@ class SesTagsV2IntegrationTest {
             .body(containsString("Failed to untag resource"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", euArn)
         .when()
             .get("/v2/email/tags")
@@ -754,7 +752,7 @@ class SesTagsV2IntegrationTest {
 
         // Free the one-list-per-account slot so later contact-list tests aren't order-dependent.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/contact-lists/tag-cl-1")
         .then()
@@ -767,7 +765,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:contact-list/missing-cl";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -784,7 +782,7 @@ class SesTagsV2IntegrationTest {
         // Seed: CVET creation requires a verified From identity
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailIdentity": "tag-cvet-sender@floci.test"}
                 """)
@@ -795,7 +793,7 @@ class SesTagsV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tag-cvet-1",
@@ -814,7 +812,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/tag-cvet-1";
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -824,7 +822,7 @@ class SesTagsV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [
                   {"Key": "env", "Value": "dev"},
@@ -839,7 +837,7 @@ class SesTagsV2IntegrationTest {
         // UpdateCustomVerificationEmailTemplate must not wipe the tags
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "tag-cvet-sender@floci.test",
@@ -855,7 +853,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -864,7 +862,7 @@ class SesTagsV2IntegrationTest {
             .body("Tags", hasSize(2));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -873,7 +871,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -889,7 +887,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/missing-cvet";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -906,7 +904,7 @@ class SesTagsV2IntegrationTest {
         // Seed: create a pool with inline tags
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"PoolName": "tag-pool-1", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """)
@@ -918,7 +916,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:dedicated-ip-pool/tag-pool-1";
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -929,7 +927,7 @@ class SesTagsV2IntegrationTest {
 
         // GetDedicatedIpPool keeps the AWS shape: no Tags member
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/dedicated-ip-pools/tag-pool-1")
         .then()
@@ -939,7 +937,7 @@ class SesTagsV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "owner", "Value": "alice"}]}
                 """.formatted(arn))
@@ -949,7 +947,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "env")
         .when()
@@ -958,7 +956,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -974,7 +972,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:000000000000:dedicated-ip-pool/missing-pool";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
                 """.formatted(arn))
@@ -992,7 +990,7 @@ class SesTagsV2IntegrationTest {
         // corrected retry does not hit AlreadyExistsException.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"PoolName": "atomic-tag-pool", "Tags": [
                   {"Key": "dup", "Value": "1"},
@@ -1007,7 +1005,7 @@ class SesTagsV2IntegrationTest {
             .body("message", equalTo("Cannot provide multiple tags with the same key"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/dedicated-ip-pools/atomic-tag-pool")
         .then()
@@ -1020,7 +1018,7 @@ class SesTagsV2IntegrationTest {
         // Probe-confirmed.
         String arn = "arn:aws:ses:eu-west-1:000000000000:custom-verification-email-template/tag-cvet-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -1038,7 +1036,7 @@ class SesTagsV2IntegrationTest {
         // was tagged under — 200 with an empty tag set (probe-confirmed).
         String arn = "arn:aws:ses:eu-west-1:000000000000:custom-verification-email-template/tag-cvet-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -1053,7 +1051,7 @@ class SesTagsV2IntegrationTest {
         // Probe-confirmed.
         String arn = "arn:aws:ses:eu-west-1:000000000000:dedicated-ip-pool/tag-pool-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -1071,7 +1069,7 @@ class SesTagsV2IntegrationTest {
         // was tagged under — 200 with an empty tag set (probe-confirmed).
         String arn = "arn:aws:ses:eu-west-1:000000000000:dedicated-ip-pool/tag-pool-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -1087,7 +1085,7 @@ class SesTagsV2IntegrationTest {
         // the name here exists nowhere, yet the account error wins over NotFound.
         String arn = "arn:aws:ses:us-east-1:999999999999:configuration-set/nowhere";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -1102,7 +1100,7 @@ class SesTagsV2IntegrationTest {
         String arn = "arn:aws:ses:us-east-1:999999999999:configuration-set/tag-cs-1";
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "k", "Value": "v"}]}
                 """.formatted(arn))
@@ -1120,7 +1118,7 @@ class SesTagsV2IntegrationTest {
         // not "Failed to untag resource" (probe-confirmed).
         String arn = "arn:aws:ses:eu-west-1:999999999999:configuration-set/tag-cs-1";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "k")
         .when()
@@ -1137,7 +1135,7 @@ class SesTagsV2IntegrationTest {
         // identity tag-cvet-sender@floci.test was verified by the lifecycle case at @Order(25).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tag-cvet-inline",
@@ -1155,7 +1153,7 @@ class SesTagsV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn",
                     "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/tag-cvet-inline")
         .when()
@@ -1169,7 +1167,7 @@ class SesTagsV2IntegrationTest {
         // retry does not hit AlreadyExistsException (probe-confirmed message and atomicity).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tag-cvet-atomic",
@@ -1188,7 +1186,7 @@ class SesTagsV2IntegrationTest {
             .body(containsString("Cannot provide multiple tags with the same key"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/custom-verification-email-templates/tag-cvet-atomic")
         .then()
@@ -1196,7 +1194,7 @@ class SesTagsV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tag-cvet-atomic",

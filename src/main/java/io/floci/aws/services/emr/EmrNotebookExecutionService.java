@@ -1,6 +1,5 @@
 package io.floci.aws.services.emr;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -13,6 +12,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrNotebookExecution;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
+import io.floci.aws.services.emrserverless.SparkJobRunner;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -21,7 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,10 +29,11 @@ import java.util.Set;
 
 /**
  * Notebook executions on EMR clusters (Amazon EMR Management Guide, "Sample programmatic commands for EMR Notebooks").
- * Floci keeps an execution and its lifecycle, but runs no notebook: in either runner mode an execution is RUNNING from
- * the moment it starts and FINISHED once the cluster's step duration ({@code step-duration-seconds}) has passed, unless
- * it is stopped first or its cluster shuts down; it writes no output notebook. Executions are kept apart from their
- * clusters.
+ * In the immediate runner mode Floci keeps an execution and its lifecycle but runs no notebook: it is RUNNING from the
+ * moment it starts and FINISHED once the cluster's step duration ({@code step-duration-seconds}) has passed, unless it
+ * is stopped first or its cluster shuts down, and writes no output notebook. In the docker runner mode it runs the
+ * notebook on its cluster ({@link EmrNotebookRunner}, {@link EmrService#runOnCluster}) and writes it as run. Executions
+ * are kept apart from their clusters.
  */
 @ApplicationScoped
 public class EmrNotebookExecutionService {
@@ -42,6 +43,15 @@ public class EmrNotebookExecutionService {
     static final String FINISHED = "FINISHED";
     static final String FAILED = "FAILED";
     static final String STOPPED = "STOPPED";
+    static final String STOPPING = "STOPPING";
+    static final String INTERRUPTED = "Floci stopped while the notebook execution was running.";
+    static final String NO_NOTEBOOK = "Execution failed for cluster %s: Floci keeps no EMR Notebook's S3 location, so"
+            + " it runs a notebook only from its NotebookS3Location.";
+    static final String CELL_FAILED = "Execution failed for cluster %s: a cell of the notebook raised an error, which"
+            + " the output notebook holds.";
+    // Its run failed otherwise, before a cell ran or as the notebook as run was written, which may then be missing.
+    static final String RUN_FAILED = "Execution failed for cluster %s: the notebook's run exited with code %s, as"
+            + " Floci's log says.";
     static final List<String> STATUSES = List.of(START_PENDING, "STARTING", RUNNING, "FINISHING", FINISHED,
             "FAILING", FAILED, "STOP_PENDING", "STOPPING", STOPPED);
     private static final Set<String> ENDED = Set.of(FINISHED, FAILED, STOPPED);
@@ -65,6 +75,9 @@ public class EmrNotebookExecutionService {
     private final RegionResolver regionResolver;
     private final Clock clock;
     private final Duration runDuration;
+    // The executions whose notebook a thread of this process runs; one not here that has not ended was left by a
+    // restart.
+    private final Set<String> running = new HashSet<>();
 
     @Inject
     public EmrNotebookExecutionService(StorageFactory storageFactory, EmrService clusters,
@@ -138,8 +151,106 @@ public class EmrNotebookExecutionService {
                 : new LinkedHashMap<>());
         execution.setSequence(store.scan(key -> true).stream().mapToLong(EmrNotebookExecution::getSequence)
                 .max().orElse(0) + 1);
+        execution.setContainerExecution(clusters.runsOnClusters());
         store.put(id, execution);
-        return copy(execution);
+        if (execution.isContainerExecution()) {
+            runNotebook(execution);
+        }
+        // As stored: a run that could not be handed to its thread has ended it already.
+        return copy(store.get(id).orElse(execution));
+    }
+
+    /**
+     * Runs the execution's notebook on its cluster. The notebook is its {@code NotebookS3Location}: no source gives the
+     * S3 location of an EMR Notebook named by {@code EditorId} alone, which Floci keeps none of, so such an execution
+     * fails at once, in Floci's own wording. No source gives where AWS writes the notebook as run either: Floci writes
+     * it under the {@code OutputNotebookS3Location} prefix, else beside the notebook, in a folder named for the
+     * execution, as {@code <name>.ipynb} and {@code <name>.html}, and gives the one the {@code OutputNotebookFormat}
+     * names, the HTML one, else the notebook, as its {@code OutputNotebookURI}.
+     */
+    private void runNotebook(EmrNotebookExecution execution) {
+        if (execution.getNotebookS3Bucket() == null || execution.getNotebookS3Key() == null) {
+            end(execution, FAILED, String.format(NO_NOTEBOOK, execution.getEngineId()), now());
+            return;
+        }
+        String key = execution.getNotebookS3Key();
+        String file = key.substring(key.lastIndexOf('/') + 1);
+        String name = file.endsWith(".ipynb") ? file.substring(0, file.length() - ".ipynb".length()) : file;
+        String base = execution.getOutputNotebookS3Bucket() != null
+                ? join(execution.getOutputNotebookS3Bucket(), trimSlashes(execution.getOutputNotebookS3Key()))
+                : join(execution.getNotebookS3Bucket(), trimSlashes(key.substring(0, key.length() - file.length())));
+        String folder = "s3://" + join(base, execution.getId());
+        execution.setOutputNotebookUri(folder + "/" + name
+                + ("HTML".equals(execution.getOutputNotebookFormat()) ? ".html" : ".ipynb"));
+        store.put(execution.getId(), execution);
+        Map<String, String> environment = new LinkedHashMap<>(execution.getEnvironmentVariables() != null
+                ? execution.getEnvironmentVariables() : Map.of());
+        environment.put(EmrNotebookRunner.PROGRAM_VARIABLE, EmrNotebookRunner.PROGRAM);
+        running.add(execution.getId());
+        clusters.runOnCluster(execution.getEngineId(), execution.getId(), execution.getExecutionRoleArn(),
+                EmrNotebookRunner.command("s3://" + execution.getNotebookS3Bucket() + "/" + key, folder, name,
+                        execution.getNotebookParams()), environment, MAX_RUN, new NotebookRun(execution.getId()));
+    }
+
+    private static String join(String first, String second) {
+        return second.isEmpty() ? first : first + "/" + second;
+    }
+
+    private static String trimSlashes(String key) {
+        String trimmed = key == null ? "" : key;
+        while (trimmed.startsWith("/")) {
+            trimmed = trimmed.substring(1);
+        }
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    private synchronized void notebookStarted(String executionId) {
+        store.get(executionId).filter(execution -> START_PENDING.equals(execution.getStatus()))
+                .ifPresent(execution -> {
+                    execution.setStatus(RUNNING);
+                    store.put(executionId, execution);
+                });
+    }
+
+    /**
+     * The notebook's run has ended: FINISHED where every cell ran, "Execution is finished for cluster ...", as AWS's
+     * example puts it; STOPPED where StopNotebookExecution stopped it; FAILED where a cell raised (the program's
+     * {@link EmrNotebookRunner#CELL_RAISED}), where the run failed otherwise, where it could not start, where its
+     * cluster shut down, or after 30 days, in Floci's own wording.
+     */
+    private synchronized void notebookEnded(String executionId, SparkJobRunner.Outcome outcome) {
+        running.remove(executionId);
+        store.get(executionId).filter(execution -> !ENDED.contains(execution.getStatus())).ifPresent(execution -> {
+            String cluster = execution.getEngineId();
+            Instant now = now();
+            if (STOPPING.equals(execution.getStatus())) {
+                end(execution, STOPPED, "Execution is stopped for cluster " + cluster + ".", now);
+            } else if (outcome.timedOut()) {
+                end(execution, FAILED, "Execution is terminated for cluster " + cluster
+                        + ", as it ran for more than 30 days.", now);
+            } else if (outcome.stopped()) {
+                end(execution, FAILED, "Execution failed for cluster " + cluster
+                        + ", as the cluster was terminated.", now);
+            } else if (outcome.failure() != null) {
+                end(execution, FAILED, "Execution failed for cluster " + cluster + ": " + outcome.failure(), now);
+            } else if (outcome.exitCode() != null && outcome.exitCode() == 0) {
+                end(execution, FINISHED, "Execution is finished for cluster " + cluster + ".", now);
+            } else if (outcome.exitCode() != null && outcome.exitCode() == EmrNotebookRunner.CELL_RAISED) {
+                end(execution, FAILED, String.format(CELL_FAILED, cluster), now);
+            } else {
+                end(execution, FAILED, String.format(RUN_FAILED, cluster, outcome.exitCode()), now);
+            }
+        });
+    }
+
+    private synchronized boolean notebookGoing(String executionId) {
+        return running.contains(executionId) && store.get(executionId)
+                .map(execution -> !ENDED.contains(execution.getStatus())
+                        && !STOPPING.equals(execution.getStatus()))
+                .orElse(false);
     }
 
     public synchronized EmrNotebookExecution describe(String executionId) {
@@ -155,6 +266,15 @@ public class EmrNotebookExecutionService {
         EmrNotebookExecution execution = settle(require(executionId));
         if (ENDED.contains(execution.getStatus())) {
             throw EmrService.invalid("Notebook execution " + executionId + " has already ended.");
+        }
+        if (running.contains(executionId)) {
+            // STOPPING until its run has stopped, as AWS's example has it: "Execution is being stopped for cluster".
+            execution.setStatus(STOPPING);
+            execution.setLastStateChangeReason("Execution is being stopped for cluster " + execution.getEngineId()
+                    + ".");
+            store.put(executionId, execution);
+            clusters.stopOnCluster(executionId);
+            return;
         }
         end(execution, STOPPED, "Execution is stopped for cluster " + execution.getEngineId() + ".", now());
     }
@@ -248,6 +368,13 @@ public class EmrNotebookExecutionService {
         if (ENDED.contains(execution.getStatus())) {
             return execution;
         }
+        // Its run ends it; without one, Floci stopped while it ran, and nothing is left to.
+        if (execution.isContainerExecution()) {
+            if (!running.contains(execution.getId())) {
+                end(execution, FAILED, INTERRUPTED, now());
+            }
+            return execution;
+        }
         boolean changed = false;
         if (START_PENDING.equals(execution.getStatus())) {
             execution.setStatus(RUNNING);
@@ -274,19 +401,11 @@ public class EmrNotebookExecutionService {
         return execution;
     }
 
-    /**
-     * What a marker resumes only: the account, the Region and each filter, an absent one told apart from any value, as
-     * a JSON list.
-     */
+    // What a marker resumes only: the account, the Region and each filter, EmrService.listingNamespace.
     private String listingNamespace(String editorId, String status, Instant from, Instant to, String engineId) {
-        List<String> parts = Arrays.asList("ListNotebookExecutions", regionResolver.getAccountId(),
+        return EmrService.listingNamespace("ListNotebookExecutions", regionResolver.getAccountId(),
                 regionResolver.getRegion(), editorId, status, from != null ? from.toString() : null,
                 to != null ? to.toString() : null, engineId);
-        try {
-            return EmrService.SNAPSHOT_MAPPER.writeValueAsString(parts);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot write a listing's namespace", e);
-        }
     }
 
     // The execution's cluster as it now stands, or null once it is gone; any other failure is the caller's.
@@ -299,6 +418,31 @@ public class EmrNotebookExecutionService {
         execution.setLastStateChangeReason(reason);
         execution.setEndTime(at);
         store.put(execution.getId(), execution);
+    }
+
+    /** What a notebook's run on its cluster tells the service, as the execution's account. */
+    private final class NotebookRun implements EmrService.ClusterRun {
+
+        private final String executionId;
+
+        NotebookRun(String executionId) {
+            this.executionId = executionId;
+        }
+
+        @Override
+        public void started() {
+            notebookStarted(executionId);
+        }
+
+        @Override
+        public void ended(SparkJobRunner.Outcome outcome) {
+            notebookEnded(executionId, outcome);
+        }
+
+        @Override
+        public boolean cancelled() {
+            return !notebookGoing(executionId);
+        }
     }
 
     private EmrNotebookExecution require(String executionId) {

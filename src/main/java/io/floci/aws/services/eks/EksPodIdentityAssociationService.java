@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.model.Cluster;
@@ -111,7 +112,7 @@ public class EksPodIdentityAssociationService {
                             && tags.equals(previous.tags())) {
                         return previous;
                     }
-                    throw invalid("clientRequestToken was already used with different parameters");
+                    throw invalid(EksAddonService.TOKEN_REUSED);
                 }
             }
         }
@@ -125,7 +126,7 @@ public class EksPodIdentityAssociationService {
 
         String associationId = generateAssociationId();
         // The association lives in the cluster's region and account, which its ARN names.
-        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), regionResolver.getDefaultRegion());
+        String region = regionResolver.regionOf(cluster.getArn());
         String accountId = AwsArnUtils.accountOrDefault(cluster.getArn(),
                 cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getDefaultAccountId());
         String associationArn = AwsArnUtils.Arn.of("eks", region, accountId,
@@ -190,7 +191,7 @@ public class EksPodIdentityAssociationService {
             if (matches) {
                 return current;
             }
-            throw invalid("clientRequestToken was already used with different parameters");
+            throw invalid(EksAddonService.TOKEN_REUSED);
         }
 
         String newRoleArn = current.roleArn();
@@ -322,6 +323,17 @@ public class EksPodIdentityAssociationService {
             associations.put(key, new StoredAssociation(retagged, found.get().clientRequestToken()));
         }
         return Optional.of(tags);
+    }
+
+    /**
+     * The tags of the association {@code associationId} of {@code cluster} in {@code account}, read in place, if its ARN
+     * is {@code associationArn}.
+     */
+    Optional<Map<String, String>> tagsInAccount(String account, Cluster cluster, String associationId,
+                                                String associationArn) {
+        return AccountAwareStorageBackend.readInAccount(associations, account, prefix(cluster) + associationId)
+                .filter(stored -> associationArn.equals(stored.association().associationArn()))
+                .map(stored -> stored.association().tags());
     }
 
     private static String prefix(Cluster cluster) {

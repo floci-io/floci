@@ -315,8 +315,14 @@ public class KinesisService implements ResourceProvider {
         String consumerArn = streamArn + "/consumer/" + consumerName + ":" + System.currentTimeMillis();
         KinesisConsumer consumer = new KinesisConsumer(consumerName, consumerArn, streamArn);
         consumer.getTags().putAll(tags);
-        synchronized (consumerStore) {
-            consumerStore.put(regionKey(region, consumerArn), consumer);
+        // Same lock order as deleteStream (stream monitor, then consumerStore), so a registration
+        // cannot land between a delete's consumer sweep and its removal of the stream.
+        String streamKey = regionKey(region, streamNameFromTagArn(streamArn));
+        synchronized (lockFor(streamKey)) {
+            describeStreamByArn(streamArn, region);
+            synchronized (consumerStore) {
+                consumerStore.put(regionKey(region, consumerArn), consumer);
+            }
         }
         LOG.infov("Registered Kinesis consumer: {0} for stream {1}", consumerName, streamArn);
         return consumer;
@@ -355,11 +361,35 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void deleteStream(String streamName, String region) {
+        // Internal callers (CloudFormation delete) treat an already-gone stream as deleted.
+        deleteStream(streamName, true, true, region);
+    }
+
+    public void deleteStream(String streamName, boolean enforceConsumerDeletion, String region) {
+        deleteStream(streamName, enforceConsumerDeletion, false, region);
+    }
+
+    private void deleteStream(String streamName, boolean enforceConsumerDeletion, boolean missingIsDeleted,
+                              String region) {
         String storageKey = regionKey(region, streamName);
         // Delete under the per-stream monitor every writer takes, so the delete is serialized with
         // any in-flight append, split, merge or metadata write on this stream. See lockFor for why
         // the monitor is deliberately left in the map.
         synchronized (lockFor(storageKey)) {
+            if (missingIsDeleted && store.get(storageKey).isEmpty()) {
+                return;
+            }
+            KinesisStream stream = resolveStream(streamName, region);
+            synchronized (consumerStore) {
+                List<KinesisConsumer> consumers = listStreamConsumers(stream.getStreamArn(), region);
+                if (!consumers.isEmpty() && !enforceConsumerDeletion) {
+                    throw new AwsException("ResourceInUseException",
+                            "Stream " + streamName + " has registered consumers", 400);
+                }
+                for (KinesisConsumer consumer : consumers) {
+                    consumerStore.delete(regionKey(region, consumer.getConsumerArn()));
+                }
+            }
             store.delete(storageKey);
         }
         LOG.infov("Deleted Kinesis stream: {0}", streamName);
@@ -371,7 +401,7 @@ public class KinesisService implements ResourceProvider {
             KinesisStream stream = resolveStream(streamName, region);
             requireActive(stream);
             validateTagCapacity(stream.getTags(), tags);
-            stream.getTags().putAll(tags);
+            stream.setTags(withTags(stream.getTags(), tags));
             store.put(key, stream);
         }
     }
@@ -381,7 +411,7 @@ public class KinesisService implements ResourceProvider {
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
             requireActive(stream);
-            tagKeys.forEach(stream.getTags()::remove);
+            stream.setTags(withoutTags(stream.getTags(), tagKeys));
             store.put(key, stream);
         }
     }
@@ -396,7 +426,7 @@ public class KinesisService implements ResourceProvider {
             synchronized (consumerStore) {
                 KinesisConsumer consumer = resolveConsumerForTags(key);
                 validateResourceTagLimit(consumer.getTags(), tags);
-                consumer.getTags().putAll(tags);
+                consumer.setTags(withTags(consumer.getTags(), tags));
                 consumerStore.put(key, consumer);
             }
             return;
@@ -407,7 +437,7 @@ public class KinesisService implements ResourceProvider {
             KinesisStream stream = describeStreamByArn(resourceArn, region);
             requireActive(stream);
             validateResourceTagLimit(stream.getTags(), tags);
-            stream.getTags().putAll(tags);
+            stream.setTags(withTags(stream.getTags(), tags));
             store.put(key, stream);
         }
     }
@@ -417,7 +447,7 @@ public class KinesisService implements ResourceProvider {
             String key = regionKey(region, resourceArn);
             synchronized (consumerStore) {
                 KinesisConsumer consumer = resolveConsumerForTags(key);
-                tagKeys.forEach(consumer.getTags()::remove);
+                consumer.setTags(withoutTags(consumer.getTags(), tagKeys));
                 consumerStore.put(key, consumer);
             }
             return;
@@ -427,9 +457,48 @@ public class KinesisService implements ResourceProvider {
         synchronized (lockFor(key)) {
             KinesisStream stream = describeStreamByArn(resourceArn, region);
             requireActive(stream);
-            tagKeys.forEach(stream.getTags()::remove);
+            stream.setTags(withoutTags(stream.getTags(), tagKeys));
             store.put(key, stream);
         }
+    }
+
+    /**
+     * A new map holding {@code tags} and {@code added}: a tag call gives the resource a new map, under its lock, so a
+     * lookup reads one whole set.
+     */
+    private static Map<String, String> withTags(Map<String, String> tags, Map<String, String> added) {
+        Map<String, String> merged = new HashMap<>(tags);
+        merged.putAll(added);
+        return merged;
+    }
+
+    /** A new map holding {@code tags} without {@code removed}, as {@link #withTags}. */
+    private static Map<String, String> withoutTags(Map<String, String> tags, List<String> removed) {
+        Map<String, String> remaining = new HashMap<>(tags);
+        removed.forEach(remaining::remove);
+        return remaining;
+    }
+
+    /**
+     * The tags of the stream whose ARN is {@code streamArn} in {@code account}, read in place under the key the
+     * handlers read, the stream's name in the ARN's Region, and matched on the whole ARN it records; none when there
+     * is no such stream.
+     */
+    Map<String, String> streamTagsInAccount(String account, String streamArn, String streamName) {
+        return AccountAwareStorageBackend.readInAccount(store, account,
+                        regionKey(AwsArnUtils.parse(streamArn).region(), streamName))
+                .filter(stream -> streamArn.equals(stream.getStreamArn()))
+                .map(KinesisStream::getTags).orElse(Map.of());
+    }
+
+    /**
+     * The tags of the consumer whose ARN is {@code consumerArn} in {@code account}, read in place under the key the
+     * handlers read, the ARN in its Region; none when there is no such consumer.
+     */
+    Map<String, String> consumerTagsInAccount(String account, String consumerArn) {
+        return AccountAwareStorageBackend.readInAccount(consumerStore, account,
+                        regionKey(AwsArnUtils.parse(consumerArn).region(), consumerArn))
+                .map(KinesisConsumer::getTags).orElse(Map.of());
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {

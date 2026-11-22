@@ -7,6 +7,7 @@ import io.floci.aws.services.cloudfront.model.DistributionConfig;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -39,6 +40,8 @@ class CloudFrontDistributionConfigMembersTest {
             "//*[local-name()='Logging']/*[local-name()='Prefix']";
     private static final String WEB_ACL_ID =
             "//*[local-name()='WebACLId']";
+    private static final String CONNECTION_MODE =
+            "//*[local-name()='DistributionConfig']/*[local-name()='ConnectionMode']";
 
     private final CloudFrontService cloudFrontService;
 
@@ -181,6 +184,22 @@ class CloudFrontDistributionConfigMembersTest {
         return XmlParser.extractFirst(response, "Id", null);
     }
 
+    private static ValidatableResponse updateDistribution(String id, String body) {
+        String etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+        return given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(body)
+        .when()
+            .put(API + id + "/config")
+        .then();
+    }
+
+    private static String summaryWebAclId(String id) {
+        return "//*[local-name()='DistributionSummary']"
+                + "[*[local-name()='Id' and text()='" + id + "']]"
+                + "/*[local-name()='WebACLId']";
+    }
+
     @Test
     void createDistributionParsesAnExplicitLoggingBlock() {
         // Goes through the request path rather than the service, so the parser is what is
@@ -225,26 +244,13 @@ class CloudFrontDistributionConfigMembersTest {
         // Turning logging on for an existing distribution is an UpdateDistribution, which
         // parses the body through the same path and must not drop the block either.
         String id = postDistribution(distributionConfigBody("origin-logging-update", ""));
-        String etag = given()
-        .when()
-            .get(API + id + "/config")
-        .then()
-            .statusCode(200)
-            .extract().header("ETag");
-
-        given()
-            .contentType(ContentType.XML)
-            .header("If-Match", etag)
-            .body(distributionConfigBody("origin-logging-update", """
+        updateDistribution(id, distributionConfigBody("origin-logging-update", """
                 <Logging>
                   <Enabled>true</Enabled>
                   <IncludeCookies>false</IncludeCookies>
                   <Bucket>update-logs.s3.amazonaws.com</Bucket>
                   <Prefix>update/</Prefix>
                 </Logging>"""))
-        .when()
-            .put(API + id + "/config")
-        .then()
             .statusCode(200)
             .body(hasXPath(LOGGING_ENABLED, equalTo("true")))
             .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("false")))
@@ -268,9 +274,7 @@ class CloudFrontDistributionConfigMembersTest {
             .body(hasXPath(WEB_ACL_ID, equalTo(firstAcl)))
             .extract().asString();
         String id = XmlParser.extractFirst(created, "Id", null);
-        String summaryAcl = "//*[local-name()='DistributionSummary']"
-                + "[*[local-name()='Id' and text()='" + id + "']]"
-                + "/*[local-name()='WebACLId']";
+        String summaryAcl = summaryWebAclId(id);
 
         given().when().get(API + id + "/config").then()
                 .statusCode(200)
@@ -282,27 +286,15 @@ class CloudFrontDistributionConfigMembersTest {
                 .statusCode(200)
                 .body(hasXPath(summaryAcl, equalTo(firstAcl)));
 
-        String etag = given().when().get(API + id + "/config").then()
-                .statusCode(200).extract().header("ETag");
-        given().contentType(ContentType.XML).header("If-Match", etag)
-                .body(distributionConfigBody(originId,
-                        "<WebACLId>" + secondAcl + "</WebACLId>"))
-        .when()
-            .put(API + id + "/config")
-        .then()
+        updateDistribution(id, distributionConfigBody(originId,
+                "<WebACLId>" + secondAcl + "</WebACLId>"))
             .statusCode(200)
             .body(hasXPath(WEB_ACL_ID, equalTo(secondAcl)));
         given().when().get(DISTRIBUTIONS).then()
                 .statusCode(200)
                 .body(hasXPath(summaryAcl, equalTo(secondAcl)));
 
-        etag = given().when().get(API + id + "/config").then()
-                .statusCode(200).extract().header("ETag");
-        given().contentType(ContentType.XML).header("If-Match", etag)
-                .body(distributionConfigBody(originId, "<WebACLId></WebACLId>"))
-        .when()
-            .put(API + id + "/config")
-        .then()
+        updateDistribution(id, distributionConfigBody(originId, "<WebACLId></WebACLId>"))
             .statusCode(200)
             .body(hasXPath(WEB_ACL_ID, equalTo("")));
         given().when().get(API + id + "/config").then()
@@ -320,9 +312,7 @@ class CloudFrontDistributionConfigMembersTest {
     void webAclIdDefaultsToEmptyWhenOmitted() {
         String id = postDistribution(distributionConfigBody(
                 "origin-no-web-acl-" + UUID.randomUUID(), ""));
-        String summaryAcl = "//*[local-name()='DistributionSummary']"
-                + "[*[local-name()='Id' and text()='" + id + "']]"
-                + "/*[local-name()='WebACLId']";
+        String summaryAcl = summaryWebAclId(id);
 
         given().when().get(API + id + "/config").then()
                 .statusCode(200)
@@ -339,33 +329,91 @@ class CloudFrontDistributionConfigMembersTest {
         String legacyAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/legacy";
         String id = postDistribution(distributionConfigBody(originId,
                 "<WebACLId>" + firstAcl + "</WebACLId>"));
-        String etag = given().when().get(API + id + "/config").then()
-                .statusCode(200).extract().header("ETag");
 
-        given().contentType(ContentType.XML).header("If-Match", etag)
-                .body(distributionConfigBody(originId,
-                        "<WebAclId>" + legacyAcl + "</WebAclId>"))
-        .when()
-            .put(API + id + "/config")
-        .then()
+        updateDistribution(id, distributionConfigBody(originId,
+                "<WebAclId>" + legacyAcl + "</WebAclId>"))
             .statusCode(200)
             .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
         given().when().get(API + id + "/config").then()
                 .statusCode(200)
                 .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
 
-        etag = given().when().get(API + id + "/config").then()
-                .statusCode(200).extract().header("ETag");
-        given().contentType(ContentType.XML).header("If-Match", etag)
-                .body(distributionConfigBody(originId,
-                        "<WebACLId></WebACLId><WebAclId>" + legacyAcl + "</WebAclId>"))
-        .when()
-            .put(API + id + "/config")
-        .then()
+        updateDistribution(id, distributionConfigBody(originId,
+                "<WebACLId></WebACLId><WebAclId>" + legacyAcl + "</WebAclId>"))
             .statusCode(200)
             .body(hasXPath(WEB_ACL_ID, equalTo("")));
         given().when().get(API + id + "/config").then()
                 .statusCode(200)
                 .body(hasXPath(WEB_ACL_ID, equalTo("")));
+    }
+
+    @Test
+    void connectionModeRoundTripsThroughCreateUpdateAndDistributionReads() {
+        String originId = "origin-connection-mode-" + UUID.randomUUID();
+        String created = given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody(originId, "<ConnectionMode>tenant-only</ConnectionMode>"))
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(201)
+            .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")))
+            .extract().asString();
+        String id = XmlParser.extractFirst(created, "Id", null);
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='ConnectionMode']", equalTo("tenant-only")));
+        given().when().get(API + id).then()
+                .statusCode(200)
+                .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryConnectionMode(id), equalTo("tenant-only")));
+
+        updateDistribution(id, distributionConfigBody(originId, "<ConnectionMode>tenant-only</ConnectionMode>"))
+            .statusCode(200)
+            .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")));
+    }
+
+    @Test
+    void connectionModeIsLeftOutWhenTheRequestOmitsIt() {
+        // No published sentence says which mode an omitted ConnectionMode reads back as, so
+        // the member is reported only when the caller set it.
+        String id = postDistribution(distributionConfigBody(
+                "origin-no-connection-mode-" + UUID.randomUUID(), ""));
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='ConnectionMode'])", equalTo("0")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath("count(" + summaryConnectionMode(id) + ")", equalTo("0")));
+    }
+
+    @Test
+    void connectionModeOutsideItsEnumerationIsRefused() {
+        String originId = "origin-bad-connection-mode-" + UUID.randomUUID();
+        given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody(originId, "<ConnectionMode>shared</ConnectionMode>"))
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")))
+            .body(hasXPath("//*[local-name()='Message']",
+                    equalTo("The ConnectionMode specified is not valid.")));
+        // The refused request created no distribution.
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='Origin']/*[local-name()='Id' and text()='"
+                        + originId + "'])", equalTo("0")));
+    }
+
+    private static String summaryConnectionMode(String id) {
+        return "//*[local-name()='DistributionSummary']"
+                + "[*[local-name()='Id' and text()='" + id + "']]"
+                + "/*[local-name()='ConnectionMode']";
     }
 }

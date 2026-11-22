@@ -1080,10 +1080,9 @@ public class S3Controller {
                 return handleGetObjectTagging(bucket, key, versionId);
             }
             if (params.has("annotation")) {
-                String annotationNameParam = params.first("annotationName");
-                // An empty annotationName is not a Get request for the empty name: it falls
-                // through to ListObjectAnnotations, matching the blank-name put semantics.
-                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                // A request naming an annotation is GetObjectAnnotation, as botocore's model, which requires the
+                // name, reads it and IAM checks it: an empty name is refused as one, not listed.
+                if (params.first("annotationName") != null) {
                     s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
                     return handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders);
                 }
@@ -1421,19 +1420,8 @@ public class S3Controller {
                 }
             }
             checkVersionId(bucket, params.first("versionId"));
-            // HEAD honors the annotation subresource so a HEAD probe reports the same status and
-            // annotation metadata a GET would, instead of falling through to the object's headers.
-            if (params.has("annotation")) {
-                String annotationNameParam = params.first("annotationName");
-                // An empty annotationName is not a Get request for the empty name: it falls
-                // through to ListObjectAnnotations, matching the blank-name put semantics.
-                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
-                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
-                    return headOnlyResponse(handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders));
-                }
-                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
-                return headOnlyResponse(handleListObjectAnnotations(bucket, key, uriInfo));
-            }
+            // Botocore models no HEAD of an annotation, so a HEAD is HeadObject whatever its query names, as IAM
+            // checks it.
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -1747,12 +1735,15 @@ public class S3Controller {
                 return started ? Response.accepted().build() : Response.ok().build();
             }
 
-            if (hasQueryParam(uriInfo, "select")) {
-                s3Service.authorizeGetObject(bucket, key, versionId, authorization);
+            // SelectObjectContent is POST ?select&select-type=2, as botocore routes it and IAM checks it, and its
+            // request names no version, so it reads the current one.
+            if (hasQueryParam(uriInfo, "select")
+                    && "2".equals(ResteasyRequests.queryParameters(uriInfo).getFirst("select-type"))) {
+                s3Service.authorizeGetObject(bucket, key, null, authorization);
                 // The object and its metadata are opened as one snapshot, as for GetObject, and the
                 // query reads it as the response is written, so the object is never held in memory.
                 S3SelectService.EventStream events = s3SelectService.select(
-                        s3Service.openObject(bucket, key, versionId), new String(body, StandardCharsets.UTF_8));
+                        s3Service.openObject(bucket, key, null), new String(body, StandardCharsets.UTF_8));
                 StreamingOutput entity = events::writeTo;
                 return Response.ok(entity)
                         .type("application/octet-stream")

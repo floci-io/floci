@@ -66,6 +66,7 @@ public class EcrRegistryManager {
     private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
     private static final int GC_KILL_GRACE_SECONDS = 2;
+    static final long RECONCILE_RETRY_MILLIS = 30_000;
 
     /**
      * Matches an AWS-shaped ECR image URI in any partition:
@@ -112,6 +113,8 @@ public class EcrRegistryManager {
     private volatile boolean started;
     private volatile boolean ready;
     private volatile boolean reconciled;
+    /** When a reconcile retry last failed, by {@link #clock}; 0 while none has. */
+    private volatile long reconcileRetryFailedAt;
     // Bug #6150: Track active garbage collection window
     private volatile boolean garbageCollecting;
     private final Object writeAdmissionLock = new Object();
@@ -403,6 +406,33 @@ public class EcrRegistryManager {
     }
 
     /**
+     * Reads the catalog into the reconcile hook again when the read at start failed, so a
+     * registry that answered its health check but not its catalog does not leave the
+     * repositories it holds without metadata. A no-op once a read succeeded, with no hook,
+     * or before the registry started. A retry that fails waits {@link #RECONCILE_RETRY_MILLIS}
+     * before the next, so a lookup made meanwhile does not pay a catalog read each time.
+     *
+     * <p>Holds the monitor {@link #ensureStarted()} and the storage deletes take, so the
+     * hook's metadata writes cannot interleave with a forced repository delete.
+     */
+    public synchronized void ensureCatalogReconciled() {
+        if (reconciled || reconcileHook == null || !started) {
+            return;
+        }
+        long now = clock.millis();
+        if (reconcileRetryFailedAt != 0 && now - reconcileRetryFailedAt < RECONCILE_RETRY_MILLIS) {
+            return;
+        }
+        runReconcileOnce();
+        reconcileRetryFailedAt = reconciled ? 0 : now;
+    }
+
+    /** Whether the registry's catalog has been read into the reconcile hook since it started. */
+    public boolean isCatalogReconciled() {
+        return reconciled;
+    }
+
+    /**
      * Attempts {@link #ensureStarted()} and reports whether the backing registry is
      * usable, instead of propagating the failure. Callers that only need repository
      * metadata (ARN, URI, tags) use this so ECR's control plane keeps working when
@@ -468,6 +498,9 @@ public class EcrRegistryManager {
             registryAddress = null;
             started = false;
             ready = false;
+            // The recovered registry's catalog is read again: it can hold images the one read before did not.
+            reconciled = false;
+            reconcileRetryFailedAt = 0;
             if (presence == ContainerPresence.ABSENT) {
                 portAllocator.release(hostPort);
                 hostPort = config.services().ecr().registryBasePort();
@@ -597,8 +630,8 @@ public class EcrRegistryManager {
         String region = regionResolver.getDefaultRegion();
 
         this.logStream = adopted
-                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
-                : logStreamer.attach(containerId, logGroup, logStreamName, region, "ecr:registry");
+                ? logStreamer.attachPolledFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
+                : logStreamer.attachPolled(containerId, logGroup, logStreamName, region, "ecr:registry");
     }
 
     private void closeLogStream() {
@@ -630,7 +663,9 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            List<String> repos = httpClient().catalog();
+            // The strict read: a catalog the registry failed to give is not an empty one, and taking
+            // it as one would leave the repositories it holds without metadata.
+            List<String> repos = httpClient().catalogStrict();
             reconcileHook.accept(repos);
             reconciled = true;
         } catch (Exception e) {
@@ -715,7 +750,8 @@ public class EcrRegistryManager {
                 final String finalExecId = execId;
 
                 try {
-                    ResultCallback.Adapter<Frame> asyncCallback = dockerClient.execStartCmd(finalExecId)
+                    ResultCallback.Adapter<Frame> asyncCallback = lifecycleManager.getStreamingDockerClient()
+                            .execStartCmd(finalExecId)
                             .exec(new ResultCallback.Adapter<Frame>() {
                                 @Override
                                 public void onNext(Frame frame) {
@@ -869,6 +905,7 @@ public class EcrRegistryManager {
         started = false;
         ready = false;
         reconciled = false;
+        reconcileRetryFailedAt = 0;
         reopenWriteAdmission();
         hostPort = config.services().ecr().registryBasePort();
     }

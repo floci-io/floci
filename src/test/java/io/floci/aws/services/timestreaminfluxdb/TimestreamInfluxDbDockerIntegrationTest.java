@@ -1,7 +1,7 @@
 package io.floci.aws.services.timestreaminfluxdb;
 
 import com.github.dockerjava.api.DockerClient;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -30,12 +30,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Runs Timestream for InfluxDB on real InfluxDB containers, published on host ports 18186 to 18285.
- * The settings come from {@link ContainerDataPlaneProfile}, which this class shares with
+ * The settings come from {@link CloudFormationSettingsProfile}, which this class shares with
  * {@code EksImdsDockerIntegrationTest}.
  */
 @Tag("docker")
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 // Three 180 s status waits on real containers, plus the requests and cleanup around them.
 @Timeout(value = 15, unit = TimeUnit.MINUTES)
 class TimestreamInfluxDbDockerIntegrationTest {

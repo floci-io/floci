@@ -11,7 +11,12 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.postgresql.PGConnection;
+import org.postgresql.replication.LogSequenceNumber;
+import org.postgresql.replication.PGReplicationStream;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -211,6 +216,63 @@ class RdsPostgresIamRoleIntegrationTest {
     }
 
     @Test
+    void iamLogicalReplicationConnectionRequiresTheReplicationPrivilege() throws Exception {
+        String id = uniqueId();
+        String group = id + "-logical";
+        try {
+            // The master user is no superuser, so logical replication comes from the parameter group, as on RDS.
+            rds("CreateDBParameterGroup").formParam("DBParameterGroupName", group)
+                    .formParam("DBParameterGroupFamily", "postgres16").formParam("Description", "logical replication")
+                    .when().post("/").then().statusCode(200);
+            rds("ModifyDBParameterGroup").formParam("DBParameterGroupName", group)
+                    .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
+                    .formParam("Parameters.member.1.ParameterValue", "1")
+                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
+                    .when().post("/").then().statusCode(200);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true, group);
+            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user", "CREATE TABLE events (id int)");
+            Properties replication = token(port, "app_user");
+            replication.setProperty("replication", "database");
+            replication.setProperty("assumeMinServerVersion", "10");
+            replication.setProperty("preferQueryMode", "simple");
+            refused(port, replication, "42501");
+
+            asMaster(port, "GRANT rds_replication TO app_user");
+            try (Connection connection = connect(port, replication);
+                 Statement statement = connection.createStatement()) {
+                try (ResultSet rows = statement.executeQuery("IDENTIFY_SYSTEM")) {
+                    assertTrue(rows.next());
+                    assertEquals("appdb", rows.getString("dbname"));
+                }
+                physicalReplicationRefused(statement, "CREATE_REPLICATION_SLOT app_physical TEMPORARY PHYSICAL");
+                physicalReplicationRefused(statement, "BASE_BACKUP");
+                String startPoint;
+                try (ResultSet rows = statement.executeQuery(
+                        "CREATE_REPLICATION_SLOT app_slot TEMPORARY LOGICAL test_decoding")) {
+                    assertTrue(rows.next());
+                    assertEquals("app_slot", rows.getString("slot_name"));
+                    startPoint = rows.getString("consistent_point");
+                }
+
+                PGReplicationStream stream = connection.unwrap(PGConnection.class).getReplicationAPI()
+                        .replicationStream().logical().withSlotName("app_slot")
+                        .withStartPosition(LogSequenceNumber.valueOf(startPoint)).start();
+                asMaster(port, "INSERT INTO events VALUES (42)");
+                String change;
+                do {
+                    ByteBuffer message = stream.read();
+                    change = StandardCharsets.UTF_8.decode(message).toString();
+                } while (!change.contains("INSERT"));
+                assertEquals("table public.events: INSERT: id[integer]:42", change);
+            }
+            assertUser(port, replication, "app_user");
+        } finally {
+            deleteInstance(id);
+            rds("DeleteDBParameterGroup").formParam("DBParameterGroupName", group).when().post("/");
+        }
+    }
+
+    @Test
     void roleLookupIgnoresClientEncodingAndCatalogShadows() throws Exception {
         String id = uniqueId();
         String name = "café\"reader";
@@ -245,8 +307,19 @@ class RdsPostgresIamRoleIntegrationTest {
     }
 
     private static void refused(int port, Properties properties) {
+        refused(port, properties, "28P01");
+    }
+
+    private static void refused(int port, Properties properties, String sqlState) {
         SQLException exception = assertThrows(SQLException.class, () -> connect(port, properties).close());
-        assertEquals("28P01", exception.getSQLState());
+        assertEquals(sqlState, exception.getSQLState());
+    }
+
+    private static void physicalReplicationRefused(Statement statement, String command) {
+        SQLException exception = assertThrows(SQLException.class, () -> statement.execute(command));
+        assertEquals("42501", exception.getSQLState());
+        assertTrue(exception.getMessage().startsWith("ERROR: permission denied to use physical replication"),
+                exception.getMessage());
     }
 
     private static void assertUser(int port, Properties properties, String user) throws SQLException {

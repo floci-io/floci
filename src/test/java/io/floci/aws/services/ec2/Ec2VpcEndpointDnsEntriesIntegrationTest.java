@@ -158,6 +158,7 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
             Map.entry("glue", "glue"),
             Map.entry("athena", "athena"),
             Map.entry("iot.data", ""),
+            Map.entry("dynamodb", ""),
             Map.entry("execute-api", "*.execute-api"));
 
     static Stream<Arguments> advertisedServicePrivateDnsNames() {

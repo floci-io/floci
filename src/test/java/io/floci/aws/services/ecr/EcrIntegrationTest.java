@@ -1,7 +1,12 @@
 package io.floci.aws.services.ecr;
 
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -12,6 +17,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.net.URI;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -35,6 +41,15 @@ class EcrIntegrationTest {
     private static final String WEST_REGION = "us-west-2";
     private static final String WEST_CREDENTIAL =
             "AWS4-HMAC-SHA256 Credential=000000000000/20260923/" + WEST_REGION + "/ecr/aws4_request";
+    private static final String OTHER_ACCOUNT = "111111111111";
+    private static final String OTHER_ACCOUNT_CREDENTIAL =
+            "AWS4-HMAC-SHA256 Credential=" + OTHER_ACCOUNT + "/20260923/us-east-1/ecr/aws4_request";
+
+    @Inject
+    EcrService ecrService;
+
+    @Inject
+    EcrRegistryManager registryManager;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -517,5 +532,50 @@ class EcrIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("PullThroughCacheRuleNotFoundException"));
+    }
+
+    @Test
+    @Order(17)
+    void theCatalogReconcileGivesAPreProxyNamespaceToTheDefaultAccountWhicheverRequestStartedTheRegistry() {
+        String legacy = "legacy-reconcile/service";
+
+        // The reconcile runs inside the request that started the registry, here one of account 111111111111.
+        // The earlier tests' last delete stopped the registry, and a catalog is only ever read from a running one.
+        RequestScopes.runAs(OTHER_ACCOUNT, () -> {
+            registryManager.tryEnsureStarted();
+            ecrService.reconcileFromCatalog(List.of(legacy));
+        });
+
+        describeRepository(legacy, null)
+            .statusCode(200)
+            .body("repositories[0].registryId", equalTo("000000000000"));
+        describeRepository(legacy, OTHER_ACCOUNT_CREDENTIAL)
+            .statusCode(400)
+            .body("__type", equalTo("RepositoryNotFoundException"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DeleteRepository")
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s", "force": true }
+                """.formatted(legacy))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    /** DescribeRepositories for one name, as the account {@code authorization} names, or the default one when null. */
+    private static ValidatableResponse describeRepository(String name, String authorization) {
+        RequestSpecification request = given()
+            .header("X-Amz-Target", PREFIX + "DescribeRepositories")
+            .contentType(CT)
+            .body("""
+                { "repositoryNames": ["%s"] }
+                """.formatted(name));
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        return request.when().post("/").then();
     }
 }

@@ -118,7 +118,7 @@ public final class ExternalReferenceScanner {
     /**
      * The first external table or schema an {@code INSERT}, {@code UPDATE}, {@code DELETE}, {@code MERGE},
      * {@code TRUNCATE}, {@code COPY}, {@code SELECT INTO}, {@code CREATE TABLE}, {@code CREATE VIEW}, {@code CREATE INDEX},
-     * {@code ALTER TABLE} or {@code DROP} anywhere in
+     * {@code ALTER TABLE}, {@code ALTER SCHEMA ... RENAME TO} or {@code DROP} anywhere in
      * {@code sql} changes: every statement of a batch and every data-modifying CTE is checked, not only
      * the first write. The external DDL Floci implements is parsed before this is reached.
      */
@@ -131,6 +131,10 @@ public final class ExternalReferenceScanner {
             Optional<Reference> moved = movedIntoExternalSchema(tokens, i, schemaNames);
             if (moved.isPresent()) {
                 return moved;
+            }
+            Optional<Reference> renamed = renamedExternalSchema(tokens, i, schemaNames);
+            if (renamed.isPresent()) {
+                return renamed;
             }
             Optional<Reference> truncated = truncatedTarget(tokens, i, schemaNames);
             if (truncated.isPresent()) {
@@ -173,6 +177,32 @@ public final class ExternalReferenceScanner {
                 if (schemaNames.contains(schema.value())) {
                     return Optional.of(new Reference(schema.value(), ""));
                 }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** {@code ALTER SCHEMA a RENAME TO b}: renaming an external schema would leave its binding stale. */
+    private static Optional<Reference> renamedExternalSchema(List<Token> tokens, int i, Set<String> schemaNames) {
+        if (!keywordAt(tokens, i, "alter") || !keywordAt(tokens, i + 1, "schema")) {
+            return Optional.empty();
+        }
+        int source = i + 2;
+        if (source >= tokens.size() || !tokens.get(source).isChain()) {
+            return Optional.empty();
+        }
+        if (!keywordAt(tokens, source + 1, "rename") || !keywordAt(tokens, source + 2, "to")) {
+            return Optional.empty();
+        }
+        Word from = tokens.get(source).chain().getFirst();
+        if (schemaNames.contains(from.value())) {
+            return Optional.of(new Reference(from.value(), ""));
+        }
+        int target = source + 3;
+        if (target < tokens.size() && tokens.get(target).isChain()) {
+            Word to = tokens.get(target).chain().getFirst();
+            if (schemaNames.contains(to.value())) {
+                return Optional.of(new Reference(to.value(), ""));
             }
         }
         return Optional.empty();

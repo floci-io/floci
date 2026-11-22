@@ -156,9 +156,9 @@ wrapping key spec: `GetParametersForImport` rejects that combination with
 The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
 rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
-An import token is scoped to one key and spent by the import that uses it, and a second
-`GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
-hours after they are issued.
+An import token is scoped to one key. It stays valid until it expires and can be used again; a
+reimport must carry the key's original material. Unlike AWS, a later `GetParametersForImport` call
+still replaces the earlier token. Tokens expire 24 hours after they are issued.
 
 `ExpirationModel=KEY_MATERIAL_EXPIRES` (the default) requires `ValidTo`, which must be in the
 future and no more than 365 days out. Once `ValidTo` passes, the material is dropped and the key

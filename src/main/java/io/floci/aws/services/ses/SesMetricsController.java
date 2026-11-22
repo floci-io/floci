@@ -30,7 +30,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
 
@@ -54,7 +53,6 @@ public class SesMetricsController {
 
     private static final int MAX_QUERIES = 10;
     private static final int MAX_DIMENSIONS = 3;
-    private static final Pattern NAME_CHARSET = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Duration MAX_INTERVAL = Duration.ofDays(60);
     private static final Duration WINDOW_SLACK = Duration.ofDays(1);
 
@@ -302,7 +300,7 @@ public class SesMetricsController {
             throw new AwsException("BadRequestException", "Invalid email identity provided.", 400);
         }
         String isp = dimensions.get("ISP");
-        if (isp != null && !NAME_CHARSET.matcher(isp).matches()) {
+        if (isp != null && !SesNames.hasOnlyAllowedCharacters(isp)) {
             throw new AwsException("BadRequestException", "Invalid ISP name provided.", 400);
         }
         requireName(dimensions.get("CONFIGURATION_SET"), "configuration set name",
@@ -317,10 +315,7 @@ public class SesMetricsController {
         if (value.isEmpty()) {
             throw new AwsException("BadRequestException", blankMessage, 400);
         }
-        if (!NAME_CHARSET.matcher(value).matches()) {
-            throw new AwsException("BadRequestException", "Invalid " + noun + " <" + value
-                    + ">: only alphanumeric ASCII characters, '_', and '-' are allowed.", 400);
-        }
+        SesNames.requireAllowedCharacters(value, "BadRequestException", "Invalid " + noun);
     }
 
     /**

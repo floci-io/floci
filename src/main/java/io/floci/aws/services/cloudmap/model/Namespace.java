@@ -25,7 +25,7 @@ public class Namespace {
     private String region;
     private String vpc;
     private String hostedZoneId;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public Namespace() {}
 

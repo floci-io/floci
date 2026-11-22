@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -2773,6 +2772,6 @@ final class CognitoAuthFlowHandler {
     }
 
     private String regionForPool(UserPool pool) {
-        return AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(pool.getArn());
     }
 }

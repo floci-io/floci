@@ -1,19 +1,15 @@
 package io.floci.aws.services.firehose;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.DatabaseSecretCredentials;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.services.firehose.model.RedshiftDestination;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
-import io.floci.aws.services.redshift.RedshiftService;
-import io.floci.aws.services.redshift.model.Cluster;
+import io.floci.aws.services.redshift.RedshiftJdbcTargets;
+import io.floci.aws.services.redshift.RedshiftJdbcTargets.Backend;
+import io.floci.aws.services.redshift.RedshiftJdbcUrl;
 import io.floci.aws.services.redshift.proxy.RedshiftRoleAccess;
-import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
-import io.floci.aws.services.secretsmanager.SecretsManagerService;
-import io.floci.aws.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -47,38 +43,22 @@ public class FirehoseRedshiftDelivery {
         void execute(String jdbcUrl, String user, String password, String sql) throws SQLException;
     }
 
-    /**
-     * Where a delivery connects. {@code defaultUser} signs in when the destination names none.
-     */
-    private record Backend(String description, String host, int port, String database, String defaultUser) {
-    }
-
-    private final RedshiftService redshiftService;
-    private final RedshiftServerlessService serverlessService;
-    private final SecretsManagerService secretsManagerService;
+    private final RedshiftJdbcTargets jdbcTargets;
     private final ServiceRoleAuthorizer roleAuthorizer;
     private final IamService iamService;
-    private final ObjectMapper mapper;
     private final SqlRunner runner;
 
     @Inject
-    public FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
-                                    SecretsManagerService secretsManagerService,
-                                    ServiceRoleAuthorizer roleAuthorizer, IamService iamService,
-                                    ObjectMapper mapper) {
-        this(redshiftService, serverlessService, secretsManagerService, roleAuthorizer, iamService, mapper,
-                FirehoseRedshiftDelivery::runJdbc);
+    public FirehoseRedshiftDelivery(RedshiftJdbcTargets jdbcTargets, ServiceRoleAuthorizer roleAuthorizer,
+                                    IamService iamService) {
+        this(jdbcTargets, roleAuthorizer, iamService, FirehoseRedshiftDelivery::runJdbc);
     }
 
-    FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
-                             SecretsManagerService secretsManagerService, ServiceRoleAuthorizer roleAuthorizer,
-                             IamService iamService, ObjectMapper mapper, SqlRunner runner) {
-        this.redshiftService = redshiftService;
-        this.serverlessService = serverlessService;
-        this.secretsManagerService = secretsManagerService;
+    FirehoseRedshiftDelivery(RedshiftJdbcTargets jdbcTargets, ServiceRoleAuthorizer roleAuthorizer,
+                             IamService iamService, SqlRunner runner) {
+        this.jdbcTargets = jdbcTargets;
         this.roleAuthorizer = roleAuthorizer;
         this.iamService = iamService;
-        this.mapper = mapper;
         this.runner = runner;
     }
 
@@ -128,9 +108,7 @@ public class FirehoseRedshiftDelivery {
      */
     public void copy(String accountId, String region, RedshiftDestination destination, String bucket, String key) {
         RedshiftJdbcUrl target = RedshiftJdbcUrl.parse(destination.getClusterJdbcUrl());
-        Backend backend = target.serverless()
-                ? workgroupBackend(accountId, region, target)
-                : clusterBackend(accountId, target);
+        Backend backend = jdbcTargets.resolve(accountId, region, target);
         String[] credentials = credentials(destination, backend, region);
         RedshiftDestination.CopyCommand command = destination.getCopyCommand();
         String jdbcUrl = "jdbc:postgresql://" + backend.host() + ":" + backend.port() + "/" + backend.database()
@@ -163,38 +141,10 @@ public class FirehoseRedshiftDelivery {
                 : null;
     }
 
-    private Backend clusterBackend(String accountId, RedshiftJdbcUrl target) {
-        Cluster cluster = redshiftService.describeClustersForAccount(accountId, target.clusterIdentifier()).get(0);
-        // The database name in the URL is ignored: the emulated container database is always "dev".
-        return new Backend("cluster " + target.clusterIdentifier(), "127.0.0.1", cluster.getEndpoint().getPort(),
-                "dev", cluster.getMasterUsername());
-    }
-
-    /**
-     * A workgroup has one database, so a URL that names another one cannot load anything: the same
-     * refusal the Data API gives, here a failed delivery that goes through the retry path.
-     */
-    private Backend workgroupBackend(String accountId, String region, RedshiftJdbcUrl target) {
-        RedshiftServerlessService.WorkgroupTarget workgroup = RequestScopes.callAs(accountId, region,
-                () -> serverlessService.getWorkgroupTarget(target.clusterIdentifier(), region));
-        if (!target.database().equals(workgroup.database())) {
-            throw new IllegalStateException("Database " + target.database() + " does not exist in workgroup "
-                    + workgroup.workgroupName() + "; the only database is " + workgroup.database() + ".");
-        }
-        int port = workgroup.endpoint() != null && workgroup.endpoint().getPort() > 0
-                ? workgroup.endpoint().getPort()
-                : workgroup.port();
-        return new Backend("workgroup " + workgroup.workgroupName(), "127.0.0.1", port,
-                workgroup.database(), workgroup.adminUsername());
-    }
-
     private String[] credentials(RedshiftDestination destination, Backend backend, String region) {
         RedshiftDestination.SecretsManagerConfiguration secrets = destination.getSecretsManagerConfiguration();
         if (secrets != null && Boolean.TRUE.equals(secrets.getEnabled())) {
-            SecretVersion secret = secretsManagerService.getSecretValue(secrets.getSecretArn(), null, null, region);
-            DatabaseSecretCredentials credentials = DatabaseSecretCredentials.parse(mapper, secret.getSecretString())
-                    .orElseThrow(() -> new IllegalStateException("Secret " + secrets.getSecretArn()
-                            + " does not contain username and password fields."));
+            DatabaseSecretCredentials credentials = jdbcTargets.credentialsFromSecret(secrets.getSecretArn(), region);
             return new String[] {credentials.username(), credentials.password()};
         }
         if (destination.getPassword() == null) {

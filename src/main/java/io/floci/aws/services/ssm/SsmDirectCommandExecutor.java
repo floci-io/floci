@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
+import io.floci.aws.core.common.docker.StreamingDocker;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -27,11 +28,15 @@ public class SsmDirectCommandExecutor {
     private static final Logger LOG = Logger.getLogger(SsmDirectCommandExecutor.class);
 
     private final DockerClient dockerClient;
+    /** Carries a command's output, a stream that stays open for as long as the command runs. */
+    private final DockerClient streamingDockerClient;
     private final Ec2Service ec2Service;
 
     @Inject
-    public SsmDirectCommandExecutor(DockerClient dockerClient, Ec2Service ec2Service) {
+    public SsmDirectCommandExecutor(DockerClient dockerClient, @StreamingDocker DockerClient streamingDockerClient,
+                                    Ec2Service ec2Service) {
         this.dockerClient = dockerClient;
+        this.streamingDockerClient = streamingDockerClient;
         this.ec2Service = ec2Service;
     }
 
@@ -125,7 +130,8 @@ public class SsmDirectCommandExecutor {
         BoundedOutputCollector stdout = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
         Instant start = Instant.now();
 
-        ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+        ResultCallback<Frame> callback = streamingDockerClient.execStartCmd(execId)
+                .exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
                 byte[] payload = frame.getPayload();

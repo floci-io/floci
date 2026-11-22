@@ -2,7 +2,10 @@ package io.floci.aws.services.pipes;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -23,10 +26,13 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -39,6 +45,9 @@ public class PipesService implements TagHandler, ResourceProvider {
     private static final int MIN_REDSHIFT_SQLS = 1;
     private static final int MAX_REDSHIFT_SQLS = 40;
     private static final int MAX_REDSHIFT_SQL_LENGTH = 100_000;
+
+    // CreatePipe refuses a target parameter that starts with $. and does not match this.
+    private static final Pattern TARGET_PARAMETER_PATH = Pattern.compile("\\$(?:\\.[\\w/-]+|\\[(?:\\d+|\\*)])+");
 
     private final StorageBackend<String, Pipe> storage;
     private final RegionResolver regionResolver;
@@ -301,25 +310,41 @@ public class PipesService implements TagHandler, ResourceProvider {
         return "pipes";
     }
 
+    /**
+     * Gives the pipe a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them never
+     * lose one's tags, and a lookup reads one whole set.
+     */
     @Override
-    public void tagResource(String region, String arn, Map<String, String> tags) {
+    public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
         Pipe pipe = findByArn(arn, region);
-        if (pipe.getTags() == null) {
-            pipe.setTags(new HashMap<>());
-        }
-        pipe.getTags().putAll(tags);
+        Map<String, String> merged = new HashMap<>(pipe.getTags() != null ? pipe.getTags() : Map.of());
+        merged.putAll(tags);
+        pipe.setTags(merged);
         String key = region + "::" + pipe.getName();
         storage.put(key, pipe);
     }
 
+    /** Gives the pipe a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
     @Override
-    public void untagResource(String region, String arn, List<String> tagKeys) {
+    public synchronized void untagResource(String region, String arn, List<String> tagKeys) {
         Pipe pipe = findByArn(arn, region);
         if (pipe.getTags() != null && tagKeys != null) {
-            tagKeys.forEach(pipe.getTags()::remove);
+            Map<String, String> remaining = new HashMap<>(pipe.getTags());
+            tagKeys.forEach(remaining::remove);
+            pipe.setTags(remaining);
         }
         String key = region + "::" + pipe.getName();
         storage.put(key, pipe);
+    }
+
+    /**
+     * The tags of the pipe whose ARN is {@code arn} in {@code account}, read in place under the key the handlers read,
+     * its name in the ARN's Region, and matched on the whole ARN it records; none when there is no such pipe.
+     */
+    Map<String, String> pipeTagsInAccount(String account, String arn, String name) {
+        return AccountAwareStorageBackend.readInAccount(storage, account, AwsArnUtils.parse(arn).region() + "::" + name)
+                .filter(pipe -> arn.equals(pipe.getArn()))
+                .map(Pipe::getTags).filter(Objects::nonNull).orElse(Map.of());
     }
 
     @Override
@@ -337,15 +362,22 @@ public class PipesService implements TagHandler, ResourceProvider {
                         "Resource " + arn + " does not exist.", 404));
     }
 
+    private void validateTargetConfiguration(String target, JsonNode targetParameters) {
+        if (AwsArnUtils.isArnFor(target, "sqs")) {
+            validateSqsTarget(target, targetParameters);
+        } else if (AwsArnUtils.isArnFor(target, "kinesis")) {
+            validateKinesisTarget(target, targetParameters);
+        } else if (PipesTargetInvoker.isRedshiftTarget(target)) {
+            validateRedshiftTarget(targetParameters);
+        }
+    }
+
     /**
      * A Redshift target runs its {@code Sqls} as one BatchExecuteStatement, which the PipeTargetRedshiftDataParameters
      * reference makes required together with {@code Database}, with 1 to 40 statements of at most 100,000
      * characters each.
      */
-    private void validateTargetConfiguration(String target, JsonNode targetParameters) {
-        if (!PipesTargetInvoker.isRedshiftTarget(target)) {
-            return;
-        }
+    private void validateRedshiftTarget(JsonNode targetParameters) {
         JsonNode parameters = targetParameters == null
                 ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters");
         if (!parameters.path("Database").isTextual() || parameters.path("Database").asText().isBlank()) {
@@ -366,6 +398,126 @@ public class PipesService implements TagHandler, ResourceProvider {
             }
         }
     }
+
+    private void validateSqsTarget(String target, JsonNode targetParameters) {
+        boolean fifo = AwsArnUtils.resourceIfArnFor(target, "sqs").orElse("").endsWith(".fifo");
+        JsonNode sqsParameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("SqsQueueParameters");
+        if (sqsParameters.isMissingNode() || sqsParameters.isNull()) {
+            if (fifo) {
+                throw validationFields(List.of(new ValidationField(
+                        "TargetParameters.SqsQueueParameters", "Missing required target parameter.")));
+            }
+            return;
+        }
+        String groupId = PipesTargetInvoker.text(sqsParameters, "MessageGroupId");
+        String dedupId = PipesTargetInvoker.text(sqsParameters, "MessageDeduplicationId");
+        List<ValidationField> errors = new ArrayList<>();
+        if (groupId != null && isInvalidDynamicPath(groupId)) {
+            errors.add(new ValidationField("MessageGroupId", invalidPathMessage(groupId)));
+        }
+        if (dedupId != null && isInvalidDynamicPath(dedupId)) {
+            errors.add(new ValidationField("MessageDeduplicationId", invalidPathMessage(dedupId)));
+        }
+        if (dedupId != null && !fifo) {
+            errors.add(new ValidationField("MessageDeduplicationId",
+                    "Parameter only applies to FIFO (first-in-first-out) queues."));
+        }
+        if (fifo && groupId == null) {
+            errors.add(new ValidationField("MessageGroupId",
+                    "MessageGroupId is required for FIFO (first-in-first-out) queues."));
+        }
+        if (!errors.isEmpty()) {
+            throw validationFields(errors);
+        }
+    }
+
+    private void validateKinesisTarget(String target, JsonNode targetParameters) {
+        JsonNode kinesisParameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("KinesisStreamParameters");
+        if (kinesisParameters.isObject()) {
+            validatePartitionKeySchema(kinesisParameters.path("PartitionKey"));
+        }
+        List<ValidationField> errors = new ArrayList<>();
+        String resource = AwsArnUtils.resourceIfArnFor(target, "kinesis").orElse("");
+        boolean plainStream = resource.startsWith("stream/") && resource.length() > "stream/".length()
+                && resource.indexOf('/', "stream/".length()) < 0;
+        if (!plainStream) {
+            errors.add(new ValidationField("Target", "Invalid pipe target ARN"));
+        } else if (!AwsArnUtils.parse(target).accountId().equals(regionResolver.getAccountId())) {
+            errors.add(new ValidationField("Target", "Creating cross-account pipe is not permitted."));
+        }
+        if (kinesisParameters.isMissingNode() || kinesisParameters.isNull()) {
+            errors.add(new ValidationField(
+                    "TargetParameters.KinesisStreamParameters", "Missing required target parameter."));
+        } else {
+            String partitionKey = PipesTargetInvoker.text(kinesisParameters, "PartitionKey");
+            if (partitionKey != null && isInvalidDynamicPath(partitionKey)) {
+                errors.add(new ValidationField("PartitionKey", invalidPathMessage(partitionKey)));
+            }
+        }
+        if (!errors.isEmpty()) {
+            throw validationFields(errors);
+        }
+    }
+
+    private static void validatePartitionKeySchema(JsonNode partitionKey) {
+        if (partitionKey.isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "[object has missing required properties ([\"PartitionKey\"])]", 400);
+        }
+        if (!partitionKey.isTextual()) {
+            throw new AwsException("ValidationException", "[instance type (" + jsonTypeName(partitionKey)
+                    + ") does not match any allowed primitive type (allowed: [\"string\"])]", 400);
+        }
+        String value = partitionKey.asText();
+        int length = value.codePointCount(0, value.length());
+        if (length > PipesTargetInvoker.MAX_PARTITION_KEY_LENGTH) {
+            throw new AwsException("ValidationException", "[string \"" + value + "\" is too long (length: "
+                    + length + ", maximum allowed: " + PipesTargetInvoker.MAX_PARTITION_KEY_LENGTH + ")]", 400);
+        }
+    }
+
+    private static String jsonTypeName(JsonNode node) {
+        if (node.isNull()) {
+            return "null";
+        }
+        if (node.isIntegralNumber()) {
+            return "integer";
+        }
+        if (node.isNumber()) {
+            return "number";
+        }
+        if (node.isBoolean()) {
+            return "boolean";
+        }
+        return node.isObject() ? "object" : "array";
+    }
+
+    private static boolean isInvalidDynamicPath(String value) {
+        return value.startsWith("$.") && !TARGET_PARAMETER_PATH.matcher(value).matches();
+    }
+
+    private static String invalidPathMessage(String value) {
+        return "Invalid JSON path " + value + " provided in the service target parameters.";
+    }
+
+    private static AwsException validationFields(List<ValidationField> errors) {
+        ArrayNode validationErrorFields = JsonNodeFactory.instance.arrayNode();
+        List<Map<String, String>> fieldList = new ArrayList<>();
+        for (ValidationField error : errors) {
+            validationErrorFields.addObject().put("Name", error.name()).put("Message", error.message());
+            Map<String, String> field = new LinkedHashMap<>();
+            field.put("name", error.name());
+            field.put("message", error.message());
+            fieldList.add(field);
+        }
+        ObjectNode message = JsonNodeFactory.instance.objectNode();
+        message.set("ValidationErrorFields", validationErrorFields);
+        return new AwsException("ValidationException", message.toString(), 400, Map.of("fieldList", fieldList));
+    }
+
+    private record ValidationField(String name, String message) {}
 
     private void validateSourceConfiguration(String source, JsonNode sourceParameters) {
         if (source == null) {

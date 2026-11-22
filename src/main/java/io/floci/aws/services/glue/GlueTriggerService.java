@@ -618,6 +618,9 @@ public class GlueTriggerService {
                             if (crawl.completedOn() != null) {
                                 entry.put("CompletedOn", EpochSeconds.fromInstant(crawl.completedOn()));
                             }
+                            if (crawl.errorMessage() != null) {
+                                entry.put("ErrorMessage", crawl.errorMessage());
+                            }
                             entry.put("LogGroup", "/aws-glue/crawlers");
                             entry.put("LogStream", name);
                             crawlList.add(entry);

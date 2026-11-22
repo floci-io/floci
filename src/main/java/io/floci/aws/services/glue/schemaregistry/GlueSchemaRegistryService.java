@@ -992,7 +992,7 @@ public class GlueSchemaRegistryService {
 
     private Schema schemaForVersion(SchemaVersion version) {
         String[] parts = parseSchemaArn(version.getSchemaArn());
-        String key = schemaKey(regionOf(version.getSchemaArn()), parts[0], parts[1]);
+        String key = schemaKey(regionResolver.regionOf(version.getSchemaArn()), parts[0], parts[1]);
         return schemaStore.get(key)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Schema not found for version: " + version.getSchemaVersionId(), 400));
@@ -1089,25 +1089,21 @@ public class GlueSchemaRegistryService {
 
     /** A stored schema's key, in the Region its ARN names. */
     private String schemaKey(Schema schema) {
-        return schemaKey(regionOf(schema.getSchemaArn()), schema.getRegistryName(), schema.getSchemaName());
-    }
-
-    /** The Region an ARN this service minted names; one stored without an ARN counts as the default Region's. */
-    private String regionOf(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
+        return schemaKey(regionResolver.regionOf(schema.getSchemaArn()), schema.getRegistryName(),
+                schema.getSchemaName());
     }
 
     /** The version by that id, if its schema is of {@code region}: another Region's is not found. */
     private SchemaVersion versionIn(String schemaVersionId, String region) {
         return versionStore.get(schemaVersionId)
-                .filter(version -> region.equals(regionOf(version.getSchemaArn())))
+                .filter(version -> region.equals(regionResolver.regionOf(version.getSchemaArn())))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Schema version not found: " + schemaVersionId, 400));
     }
 
     /** Refuses an ARN naming another Region: registries and schemas are Regional, so it names none here. */
     private void requireArnInRegion(String arn, String region, Supplier<AwsException> notFound) {
-        if (arn != null && !arn.isBlank() && !region.equals(regionOf(arn))) {
+        if (arn != null && !arn.isBlank() && !region.equals(regionResolver.regionOf(arn))) {
             throw notFound.get();
         }
     }
@@ -1131,9 +1127,9 @@ public class GlueSchemaRegistryService {
         List<AccountEntry<Schema>> renamed = new ArrayList<>();
         for (AccountEntry<Schema> entry : schemaAccounts.scanAllAccountEntries(LEGACY_KEY)) {
             Schema schema = entry.value();
-            String region = regionOf(schema.getSchemaArn());
+            String region = regionResolver.regionOf(schema.getSchemaArn());
             AccountEntry<Registry> registry = registries.get(entry.accountId() + "/" + schema.getRegistryName());
-            if (registry == null || region.equals(regionOf(registry.value().getRegistryArn()))) {
+            if (registry == null || region.equals(regionResolver.regionOf(registry.value().getRegistryArn()))) {
                 continue;
             }
             String key = registryKey(region, schema.getRegistryName());
@@ -1147,7 +1143,8 @@ public class GlueSchemaRegistryService {
             }
         }
         registryAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY,
-                registry -> registryKey(regionOf(registry.getRegistryArn()), registry.getRegistryName()));
+                registry -> registryKey(regionResolver.regionOf(registry.getRegistryArn()),
+                        registry.getRegistryName()));
         schemaAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY, this::schemaKey);
         // Written once moved, under the new key: a schema stored before accounts prefixed keys would otherwise
         // leave its unprefixed record beside a second legacy one.

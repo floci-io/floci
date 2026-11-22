@@ -189,7 +189,7 @@ public class ApiGatewayV2OpenApiImporter {
         // rejected reimport leave the previous definition intact.
         List<AuthorizerSpec> authorizerSpecs = authorizerSpecs(openAPI);
         collectUnresolvedSecurity(openAPI, authorizerSpecs, warnings);
-        validateIntegrationSubtypes(openAPI);
+        validateIntegrations(openAPI);
 
         if (failOnWarnings && !warnings.isEmpty()) {
             throw new AwsException("BadRequestException",
@@ -665,10 +665,11 @@ public class ApiGatewayV2OpenApiImporter {
     // ──────────────────────────── Integrations ────────────────────────────
 
     /**
-     * Validates every integration's subtype as CreateIntegration will, while planning, so a document
-     * with an invalid subtype is rejected before an import or reimport changes anything.
+     * Validates every integration's subtype and response parameters as CreateIntegration will, while
+     * planning, so a document with an invalid one is rejected before an import or reimport changes
+     * anything.
      */
-    private static void validateIntegrationSubtypes(OpenAPI openAPI) {
+    private static void validateIntegrations(OpenAPI openAPI) {
         forEachImportedOperation(openAPI, (method, path, operation) -> {
             Map<String, Object> definition = extensionAsMap(
                     operation == null ? null : operation.getExtensions(), EXT_INTEGRATION);
@@ -683,6 +684,7 @@ public class ApiGatewayV2OpenApiImporter {
                     integrationSubtype, (String) request.getOrDefault("payloadFormatVersion",
                             ApiGatewayV2Service.defaultPayloadFormatVersion(integrationSubtype)),
                     requestParameters);
+            ApiGatewayV2Service.responseParameters(request.get("responseParameters"));
         });
     }
 
@@ -711,6 +713,9 @@ public class ApiGatewayV2OpenApiImporter {
         }
 
         copyStringMap(definition, request, "requestParameters");
+        if (definition.get("responseParameters") != null) {
+            request.put("responseParameters", definition.get("responseParameters"));
+        }
         copyStringMap(definition, request, "requestTemplates");
         copyStringMap(definition, request, "responseTemplates");
 

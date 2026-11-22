@@ -9,6 +9,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -27,6 +28,8 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
     private static final String NO_VALUE_STACK = "cfn-sqs-queue-no-value";
     private static final String SSE_STACK = "cfn-sqs-queue-sse";
     private static final String FIFO_STACK = "cfn-sqs-queue-fifo";
+    private static final String FIFO_FALSE_STACK = "cfn-sqs-queue-fifo-false";
+    private static final String FIFO_NO_VALUE_STACK = "cfn-sqs-queue-fifo-no-value";
 
     @Test
     void declaredPropertiesReachTheQueueAndDroppedOnesReturnToTheirDefaults() {
@@ -220,6 +223,46 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
         assertEquals("perMessageGroupId", updated.get("FifoThroughputLimit"));
 
         cloudFormation(FIFO_STACK, "DeleteStack", null);
+    }
+
+    @Test
+    void aStandardQueueDeclaringFifoQueueFalseFailsTheStackAsAwsDoes() {
+        String template = """
+                {
+                  "Resources": {
+                    "Queue": {"Type": "AWS::SQS::Queue", "Properties": {"FifoQueue": false}}
+                  }
+                }
+                """;
+        cloudFormation(FIFO_FALSE_STACK, "CreateStack", template);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(FIFO_FALSE_STACK, CFN_AUTH);
+        assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
+        assertThat(CfnStackWaits.failedResourceReason(FIFO_FALSE_STACK, CFN_AUTH),
+                containsString("Unknown Attribute FifoQueue."));
+        cloudFormation(FIFO_FALSE_STACK, "DeleteStack", null);
+    }
+
+    @Test
+    void aFifoQueueAConditionDropsWithNoValueLeavesAStandardQueue() {
+        String template = """
+                {
+                  "Conditions": {"Fifo": {"Fn::Equals": ["yes", "no"]}},
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"FifoQueue": {"Fn::If": ["Fifo", true, {"Ref": "AWS::NoValue"}]}}
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        cloudFormation(FIFO_NO_VALUE_STACK, "CreateStack", template);
+        String queueUrl = XmlParser.extractPairs(describeStacks(FIFO_NO_VALUE_STACK, "CREATE_COMPLETE"), "Outputs",
+                "OutputKey", "OutputValue").get("QueueUrl");
+
+        assertFalse(queueAttributes(queueUrl).containsKey("FifoQueue"));
+        cloudFormation(FIFO_NO_VALUE_STACK, "DeleteStack", null);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {

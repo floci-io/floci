@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.dashboards.model.Dashboard;
@@ -26,6 +27,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -260,7 +262,7 @@ public class CloudWatchMetricsQueryHandler {
 
     private Response handlePutMetricAlarm(MultivaluedMap<String, String> params, String region) {
         MetricAlarm alarm = parseAlarm(params);
-        metricsService.putMetricAlarm(alarm, region);
+        metricsService.putMetricAlarm(alarm, region, parseEvaluationInterval(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("PutMetricAlarm", null)).build();
     }
 
@@ -708,6 +710,7 @@ public class CloudWatchMetricsQueryHandler {
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params) {
         Map<String, SortedSet<Integer>> memberIndexes = new HashMap<>();
+        Map<String, Map<String, List<String>>> fieldsByDatum = new HashMap<>();
         Set<String> statisticPrefixes = new HashSet<>();
         // An empty EntityMetricData entry serializes to no keys, so its index is absent
         // while later entries keep theirs: iterate the indexes present, not 1..first gap.
@@ -718,6 +721,7 @@ public class CloudWatchMetricsQueryHandler {
                 String prefix = member.group();
                 memberIndexes.computeIfAbsent(member.group(1), ignored -> new TreeSet<>())
                         .add(parseMetricMemberIndex(member.group(2), prefix));
+                fieldsByDatum.computeIfAbsent(prefix, ignored -> new HashMap<>()).put(key, params.get(key));
                 if (key.startsWith(prefix + "StatisticValues.")) {
                     statisticPrefixes.add(prefix);
                 }
@@ -728,11 +732,13 @@ public class CloudWatchMetricsQueryHandler {
             }
         }
         List<MetricDatum> datums = parseMetricData(params, "MetricData",
-                memberIndexes.getOrDefault("MetricData", Collections.emptySortedSet()), statisticPrefixes);
+                memberIndexes.getOrDefault("MetricData", Collections.emptySortedSet()),
+                fieldsByDatum, statisticPrefixes);
         for (int index : entityIndexes) {
             String listPrefix = "EntityMetricData.member." + index + ".MetricData";
             datums.addAll(parseMetricData(params, listPrefix,
-                    memberIndexes.getOrDefault(listPrefix, Collections.emptySortedSet()), statisticPrefixes));
+                    memberIndexes.getOrDefault(listPrefix, Collections.emptySortedSet()),
+                    fieldsByDatum, statisticPrefixes));
         }
         LOG.debugv("Query PutMetricData parsed {0} datums", datums.size());
         return datums;
@@ -747,7 +753,9 @@ public class CloudWatchMetricsQueryHandler {
     }
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params, String listPrefix,
-                                             SortedSet<Integer> memberIndexes, Set<String> statisticPrefixes) {
+                                             SortedSet<Integer> memberIndexes,
+                                             Map<String, Map<String, List<String>>> fieldsByDatum,
+                                             Set<String> statisticPrefixes) {
         List<MetricDatum> datums = new ArrayList<>();
         for (int i : memberIndexes) {
             String memberPrefix = listPrefix + ".member." + i + ".";
@@ -795,7 +803,7 @@ public class CloudWatchMetricsQueryHandler {
             }
             datum.setDimensions(dims);
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromQuery(fieldsByDatum.get(memberPrefix), memberPrefix, datum));
         }
         return datums;
     }
@@ -819,6 +827,7 @@ public class CloudWatchMetricsQueryHandler {
         a.setMetricName(params.getFirst("MetricName"));
         a.setNamespace(params.getFirst("Namespace"));
         a.setStatistic(params.getFirst("Statistic"));
+        a.setExtendedStatistic(params.getFirst("ExtendedStatistic"));
         a.setMetrics(parseAlarmMetricQueries(params));
         a.setPeriod(a.getMetrics().isEmpty() ? parseIntParam(params, "Period", 60) : null);
         a.setUnit(params.getFirst("Unit"));
@@ -916,6 +925,7 @@ public class CloudWatchMetricsQueryHandler {
                     .elem("MetricName", a.getMetricName())
                     .elem("Namespace", a.getNamespace())
                     .elem("Statistic", a.getStatistic())
+                    .elem("ExtendedStatistic", a.getExtendedStatistic())
                     .elem("Period", a.getPeriod() == null ? null : a.getPeriod().toString())
                     .elem("Unit", a.getUnit());
         }
@@ -1011,6 +1021,19 @@ public class CloudWatchMetricsQueryHandler {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    /** None if absent or empty; a value that is no integer is an InvalidParameterValue, as in PutMetricData. */
+    private BigInteger parseEvaluationInterval(MultivaluedMap<String, String> params) {
+        String value = params.getFirst("EvaluationInterval");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!QueryConstraintCheck.isInteger(value)) {
+            throw CloudWatchMetricsException.invalidParameterValue(
+                    "EvaluationInterval must be an integer between 10 and 3600.");
+        }
+        return new BigInteger(value.trim());
     }
 
     private double parseDouble(String value, double defaultValue) {

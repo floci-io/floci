@@ -1,31 +1,26 @@
 package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
-import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.CreateServiceRequest;
 import io.floci.aws.services.ecs.model.Deployment;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import io.floci.aws.services.ecs.model.ServiceDeployment;
 import io.floci.aws.services.ecs.model.ServiceRevision;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -48,7 +43,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -68,6 +62,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
     private boolean healthy;
     /** When set, the next launch is stopped by a user while its image is still pulling. */
     private boolean stopDuringPull;
+    /** The Cloud Map side a service is built with; none unless a test sets one first. */
+    private EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private EcsService service;
 
     @Test
@@ -218,7 +214,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         alarm.setStateValue("ALARM");
         when(metricsService.describeAlarms(List.of("deployment-failure"), null, REGION))
                 .thenReturn(List.of(alarm));
-        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        EcsService service = newService(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT), metricsService);
         EcsServiceModel model = createServiceWithDeploymentConfiguration(service, "cb-alarm", 1,
                 Map.of("alarms", Map.of(
                 "enable", true,
@@ -248,7 +244,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         alarm.setStateValue("ALARM");
         when(metricsService.describeAlarms(List.of("new-alarm"), null, REGION))
                 .thenReturn(List.of(alarm));
-        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        EcsService service = newService(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT), metricsService);
         EcsServiceModel model = createServiceWithDeploymentConfiguration(service, "cb-alarm-update", 1,
                 Map.of("alarms", Map.of("enable", true, "rollback", false,
                         "alarmNames", List.of("old-alarm"))));
@@ -310,7 +306,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
     @ValueSource(strings = {"LATEST", "1.3.0"})
     void rollbackRestoresTheMostRecentSuccessfulRevision(String requestedVersion) {
         EcsEventPublisher publisher = mock(EcsEventPublisher.class);
-        EcsService service = newService(new InMemoryStorageFactory(), null, publisher);
+        EcsService service = newService(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT), null, publisher);
         healthy = true;
         String successfulDeploymentId = createServiceWithDeploymentConfiguration(service, "cb-rollback", 1,
                 Map.of("deploymentCircuitBreaker", breaker(true, true)), requestedVersion).getDeploymentId();
@@ -358,6 +354,80 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 argThat(reason -> reason.contains(successfulDeploymentId)), eq(REGION));
     }
 
+    /**
+     * A rollback restores the Service Connect configuration of the revision it returns to, and with
+     * it the namespace ListServicesByNamespace lists the service under and the Cloud Map services
+     * behind its endpoints. When another service took a discovery name meanwhile, the rollback goes
+     * through without endpoints and drops the failed deployment's.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rollbackRestoresTheServiceConnectEndpoints(boolean namesStillFree) {
+        discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
+        String first = cloudMapNamespaceArn("first");
+        String second = cloudMapNamespaceArn("second");
+        when(discoveryRegistrar.namespaceArn("first", REGION)).thenReturn(first);
+        when(discoveryRegistrar.namespaceArn("second", REGION)).thenReturn(second);
+        List<ServiceConnectServiceResource> web = List.of(new ServiceConnectServiceResource("web",
+                "arn:aws:servicediscovery:" + REGION + ":000000000000:service/srv-web"));
+        List<ServiceConnectServiceResource> admin = List.of(new ServiceConnectServiceResource("admin",
+                "arn:aws:servicediscovery:" + REGION + ":000000000000:service/srv-admin"));
+        if (namesStillFree) {
+            when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("web")), eq(first),
+                    eq(REGION), any(), any())).thenReturn(web);
+        } else {
+            when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("web")), eq(first),
+                    eq(REGION), any(), any())).thenReturn(web).thenThrow(new AwsException(
+                    "InvalidParameterException", "SC service is already used by " + first, 400));
+        }
+        when(discoveryRegistrar.syncServiceConnectServices(any(), eq(List.of("admin")), eq(second),
+                eq(REGION), any(), any())).thenReturn(admin);
+        EcsService service = newService();
+        healthy = true;
+        service.createCluster("cb-connect-cluster", REGION);
+        registerTaskDef(service, "cb-connect-fam", "app:1");
+        CreateServiceRequest request = new CreateServiceRequest();
+        request.setCluster("cb-connect-cluster");
+        request.setServiceName("cb-connect");
+        request.setTaskDefinition("cb-connect-fam");
+        request.setDesiredCount(1);
+        request.setLaunchType(LaunchType.FARGATE);
+        request.setDeploymentConfiguration(Map.of("deploymentCircuitBreaker", breaker(true, true)));
+        request.setServiceConnectConfiguration(Map.of("enabled", true, "namespace", "first",
+                "services", List.of(Map.of("portName", "web"))));
+        String serviceArn = service.createService(request, REGION).getServiceArn();
+        service.reconcileServices();
+        service.reconcileServices();
+
+        healthy = false;
+        TaskDefinition broken = registerTaskDef(service, "cb-connect-fam", "app:broken");
+        String failedId = service.updateService("cb-connect-cluster", "cb-connect",
+                "cb-connect-fam:" + broken.getRevision(), null, null, null, false,
+                Map.of("enabled", true, "namespace", "second", "services", List.of(Map.of("portName", "admin"))),
+                REGION).getDeploymentId();
+        assertEquals(List.of(serviceArn), service.listServicesByNamespace("second", null, null, REGION).arns());
+        assertEquals(List.of(), service.listServicesByNamespace("first", null, null, REGION).arns());
+        assertEquals(admin, liveDeployment(service, "cb-connect").getServiceConnectResources());
+        for (int i = 0; i < 3; i++) {
+            service.reconcileServices();
+        }
+
+        assertEquals("ROLLBACK_IN_PROGRESS", deploymentOf(service, "cb-connect", failedId).getStatus());
+        assertEquals(List.of(serviceArn), service.listServicesByNamespace("first", null, null, REGION).arns());
+        assertEquals(List.of(), service.listServicesByNamespace("second", null, null, REGION).arns());
+        if (namesStillFree) {
+            assertEquals(web, liveDeployment(service, "cb-connect").getServiceConnectResources());
+        } else {
+            assertEquals(List.of(), liveDeployment(service, "cb-connect").getServiceConnectResources());
+            verify(discoveryRegistrar).syncServiceConnectServices(admin, List.of(), null, REGION, serviceArn,
+                    "InvalidParameterException");
+        }
+    }
+
+    private static String cloudMapNamespaceArn(String name) {
+        return "arn:aws:servicediscovery:" + REGION + ":" + EcsServiceFixtures.ACCOUNT + ":namespace/ns-" + name;
+    }
+
     @Test
     void rollbackKeepsTheCurrentDesiredCountAfterAScaleChange() {
         EcsService service = newService();
@@ -392,7 +462,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         alarm.setStateValue("OK");
         when(metricsService.describeAlarms(List.of("rollback-drain-alarm"), null, REGION))
                 .thenReturn(List.of(alarm));
-        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        EcsService service = newService(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT), metricsService);
         healthy = true;
         EcsServiceModel model = createService(service, "cb-drain", 2, breaker(true, true));
         model.setDeploymentConfiguration(Map.of(
@@ -597,7 +667,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
      */
     @Test
     void aFailedDeploymentStaysHaltedAcrossARestart() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        InMemoryStorageFactory storage = new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT);
         EcsService before = newService(storage);
         createService(before, "cb-restart", 1, breaker(true, false));
         for (int i = 0; i < 3; i++) {
@@ -615,7 +685,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     @Test
     void anAlarmStillFailsAnInProgressDeploymentAfterARestart() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        InMemoryStorageFactory storage = new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT);
         CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("restart-alarm");
@@ -640,7 +710,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     @Test
     void aCompletedDeploymentIsNotFailedByAnAlarmAfterARestart() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        InMemoryStorageFactory storage = new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT);
         CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("completed-restart-alarm");
@@ -669,7 +739,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
     @CsvSource({"LATEST,false,LATEST", "1.3.0,false,1.3.0", "LATEST,true,1.4.0", "1.3.0,true,1.3.0"})
     void aRollbackAfterRestartUsesThePersistedSuccessfulRevision(String requestedVersion, boolean legacy,
                                                                 String expectedVersion) throws JsonProcessingException {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        InMemoryStorageFactory storage = new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT);
         CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("restart-rollback-alarm");
@@ -787,7 +857,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     /** Docker mode over a container manager whose launches succeed or throw as the test says. */
     private EcsService newService() {
-        return newService(new InMemoryStorageFactory());
+        return newService(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT));
     }
 
     /** A service over {@code storage}; a second one over the same storage is a restart. */
@@ -801,9 +871,6 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     private EcsService newService(InMemoryStorageFactory storage, CloudWatchMetricsService metricsService,
                                   EcsEventPublisher eventPublisher) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(false);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         when(containerManager.stopTaskAndCollectExitCodes(any())).thenAnswer(invocation -> {
             EcsTaskHandle handle = invocation.getArgument(0);
@@ -822,34 +889,14 @@ class EcsServiceDeploymentCircuitBreakerTest {
             }
             return new EcsTaskHandle(task.getTaskArn(), Map.of("app", "docker-id"), Map.of());
         });
-        service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                containerManager,
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                storage,
-                eventPublisher,
-                new EcsExecSessionRegistry(),
-                null,
-                metricsService);
-        service.initializeStorage();
+        service = EcsServiceFixtures.builder()
+                .containerManager(containerManager)
+                .storageFactory(storage)
+                .cloudWatchMetricsService(metricsService)
+                .eventPublisher(eventPublisher)
+                .discoveryRegistrar(discoveryRegistrar)
+                .dockerMode()
+                .build();
         return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                        String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
     }
 }

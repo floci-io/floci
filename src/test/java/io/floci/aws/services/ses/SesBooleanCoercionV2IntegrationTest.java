@@ -20,8 +20,7 @@ import static org.hamcrest.Matchers.equalTo;
 class SesBooleanCoercionV2IntegrationTest {
 
     private static final String REGION = "il-central-1";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor(REGION);
     private static final String DOMAIN = "coercion.example.com";
     private static final String CS = "coercion-cs";
     private static final String ED = "coercion-ed";

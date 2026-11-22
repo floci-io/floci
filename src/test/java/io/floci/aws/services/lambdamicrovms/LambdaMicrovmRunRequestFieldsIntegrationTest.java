@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambdamicrovms;
 
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmImageFixture.BuildInputs;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -10,7 +11,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.UUID;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
@@ -36,28 +36,18 @@ class LambdaMicrovmRunRequestFieldsIntegrationTest {
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
+    private final LambdaMicrovmImageFixture images = new LambdaMicrovmImageFixture(cleanup, "run-fields-",
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1", null,
+                    "arn:aws:iam::000000000000:role/microvm-build", "s3://bucket/code.zip"),
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1", null,
+                    "arn:aws:iam::000000000000:role/microvm-build", "s3://bucket/code-v2.zip"));
+
     private String createImage() {
-        String name = "run-fields-" + UUID.randomUUID();
-        given().contentType("application/json").body("""
-                {"name":"%s",
-                 "baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
-                 "buildRoleArn":"arn:aws:iam::000000000000:role/microvm-build",
-                 "codeArtifact":{"uri":"s3://bucket/code.zip"}}
-                """.formatted(name))
-                .when().post(ROOT + "/microvm-images").then().statusCode(201);
-        cleanup.register(() -> given().when().delete(ROOT + "/microvm-images/" + name).then().statusCode(200));
-        return name;
+        return images.create();
     }
 
     private String createImageWithTwoVersions() {
-        String image = createImage();
-        given().contentType("application/json").body("""
-                {"baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
-                 "buildRoleArn":"arn:aws:iam::000000000000:role/microvm-build",
-                 "codeArtifact":{"uri":"s3://bucket/code-v2.zip"}}
-                """)
-                .when().put(ROOT + "/microvm-images/" + image).then().statusCode(200);
-        return image;
+        return images.createWithTwoVersions().name();
     }
 
     private Response run(String image, String fields) {

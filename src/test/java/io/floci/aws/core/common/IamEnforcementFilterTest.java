@@ -21,8 +21,6 @@ import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.scheduler.SchedulerController;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
-import io.vertx.core.http.HttpServerRequest;
-import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -41,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
@@ -446,7 +446,8 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).resolveRoute("apigateway", containerRequest);
         verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
-        verify(arnBuilder).buildResources("apigateway", containerRequest, "us-east-1", "000000000000", "aws");
+        verify(arnBuilder).buildResources("apigateway", "apigateway:POST", containerRequest, "us-east-1",
+                "000000000000", "aws");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
     }
 
@@ -479,7 +480,8 @@ class IamEnforcementFilterTest {
 
     @Test
     void apiGatewayResourcesAreBuiltInTheRequestsPartition() {
-        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in.
+        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in, on the
+        // operation the request is dispatched as, which the table of request resources reads.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/apigateway/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -494,12 +496,13 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
                         Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
         when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:GET");
-        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
 
         newFilter(resourceInfo(ApiGatewayController.class)).filter(containerRequest);
 
-        verify(arnBuilder).buildResources("apigateway", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+        verify(arnBuilder).buildResources("apigateway", "apigateway:GET", containerRequest, "xx-local-1",
+                "000000000000", "aws-cn");
     }
 
     @Test
@@ -1092,22 +1095,35 @@ class IamEnforcementFilterTest {
         verify(containerRequest).abortWith(any());
     }
 
+    /** A scoped presigned request whose resources are not its URL's own object is refused. */
     @Test
-    void scopedPresignedRequestWithoutRoutingContextIsDenied() {
-        assertScopedPresignedRequestWithoutHttpRequestIsDenied(null);
-    }
-
-    @Test
-    void scopedPresignedRequestWithoutHttpRequestIsDenied() {
-        assertScopedPresignedRequestWithoutHttpRequestIsDenied(mock(RoutingContext.class));
-    }
-
-    @Test
-    void scopedPresignedRequestUsesWirePathForAbsoluteFormProxyTarget() {
+    void aScopedPresignedRequestOnAnotherResourceIsDenied() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        RoutingContext routingContext = mock(RoutingContext.class);
-        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(eq("ASIASCOPE"), any()))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+
+        newFilter().filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
+    }
+
+    /**
+     * A scoped presigned request is checked on the resources its request names, as its service reads them: an S3 key
+     * keeps the slashes it was sent with, so {@code /bucket//key} is the object {@code /key}.
+     */
+    @Test
+    void aScopedPresignedRequestIsCheckedOnTheResourcesItsRequestNames() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
         requestContext.setAccountId("000000000000");
@@ -1119,16 +1135,14 @@ class IamEnforcementFilterTest {
         when(iamService.presignedScope("ASIASCOPE"))
                 .thenReturn(Optional.of(new IamService.PresignedScope(
                         "s3:GetObject", "arn:aws:s3:::bucket//key")));
-        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        when(routingContext.request()).thenReturn(httpRequest);
-        when(httpRequest.uri()).thenReturn("https://proxy.example/bucket//key?X-Amz-Algorithm=AWS4-HMAC-SHA256");
-        when(httpRequest.path()).thenReturn("/bucket//key");
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), any(), any(), any()))
+                .thenReturn(List.of("arn:aws:s3:::bucket//key"));
         when(conditionContextResolver.resolveRemainingTargets("s3", "s3:GetObject", containerRequest))
                 .thenReturn(List.of());
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
-        newFilter(currentVertxRequest).filter(containerRequest);
+        newFilter().filter(containerRequest);
 
         verify(containerRequest, never()).abortWith(any());
         verify(evaluator).evaluateResolvedResourcePolicy(any(), any(), any(),
@@ -1141,9 +1155,6 @@ class IamEnforcementFilterTest {
         // the extra actions of an object creation on its own: the policies here allow everything,
         // so only the guard can deny the legal hold.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        RoutingContext routingContext = mock(RoutingContext.class);
-        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
@@ -1160,42 +1171,17 @@ class IamEnforcementFilterTest {
         when(iamService.presignedScope("ASIASCOPE"))
                 .thenReturn(Optional.of(new IamService.PresignedScope(
                         "s3:PutObject", "arn:aws:s3:::bucket/key")));
-        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        when(routingContext.request()).thenReturn(httpRequest);
-        when(httpRequest.path()).thenReturn("/bucket/key");
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), any(), any(), any()))
+                .thenReturn(List.of("arn:aws:s3:::bucket/key"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
-        newFilter(currentVertxRequest).filter(containerRequest);
+        newFilter().filter(containerRequest);
 
         ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
         verify(containerRequest).abortWith(denied.capture());
         assertEquals(403, denied.getValue().getStatus());
         assertTrue(entityString(denied.getValue()).contains("s3:PutObjectLegalHold"));
-    }
-
-    private void assertScopedPresignedRequestWithoutHttpRequestIsDenied(RoutingContext routingContext) {
-        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
-        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
-                + "SignedHeaders=host, Signature=abc";
-        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
-        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
-        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
-        when(iamService.resolveCallerContext(eq("ASIASCOPE"), any()))
-                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
-        when(iamService.presignedScope("ASIASCOPE"))
-                .thenReturn(Optional.of(new IamService.PresignedScope(
-                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
-        if (routingContext != null) {
-            when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
-        }
-
-        newFilter(currentVertxRequest).filter(containerRequest);
-
-        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
-        verify(containerRequest).abortWith(response.capture());
-        assertEquals(403, response.getValue().getStatus());
     }
 
     @Test
@@ -1279,7 +1265,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1287,7 +1273,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -1301,14 +1287,14 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000")));
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000")));
         verify(evaluator).evaluateResolvedResourcePolicy(
                 any(),
                 eq(ResourcePolicyDecision.NEUTRAL),
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000")));
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000")));
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -1337,7 +1323,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1345,7 +1331,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -1428,7 +1414,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(conditions, "*", "222233334444"))))
+                sameContext(globalContext(conditions, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -1439,7 +1425,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(conditions, "*", "222233334444")));
+                sameContext(globalContext(conditions, "*", "222233334444")));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -1455,7 +1441,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(first, "*", "222233334444"))))
+                sameContext(globalContext(first, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1463,7 +1449,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(second, "*", "222233334444"))))
+                sameContext(globalContext(second, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -1474,7 +1460,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(second, "*", "222233334444")));
+                sameContext(globalContext(second, "*", "222233334444")));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -1513,6 +1499,22 @@ class IamEnforcementFilterTest {
                                                             String resourceArn, String accountId) {
         return IamConditionContextResolver.withGlobalContext(
                 serviceContext, resourceArn, "us-east-1", accountId, null);
+    }
+
+    // aws:CurrentTime and aws:EpochTime are the time of the request, so an expected context built
+    // apart from it cannot carry the same values: both keys must be there, and the rest must match.
+    private static Map<String, List<String>> sameContext(Map<String, List<String>> expected) {
+        return argThat(actual -> actual != null
+                && actual.containsKey("aws:CurrentTime")
+                && actual.containsKey("aws:EpochTime")
+                && withoutRequestTime(actual).equals(withoutRequestTime(expected)));
+    }
+
+    private static Map<String, List<String>> withoutRequestTime(Map<String, List<String>> context) {
+        Map<String, List<String>> rest = new LinkedHashMap<>(context);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
+        return rest;
     }
 
     private void stubTaggedTerminate(ContainerRequestContext containerRequest,
@@ -1565,7 +1567,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::bucket"),
-                eq(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444"))))
+                sameContext(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         IamEnforcementFilter filter = newFilter();
@@ -1578,7 +1580,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::bucket"),
-                eq(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444")));
+                sameContext(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444")));
     }
 
     @Test
@@ -2616,7 +2618,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.CROSS_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::partner-bucket"),
-                eq(expected)))
+                sameContext(expected)))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         filterWithBucketOwner("111111111111").filter(containerRequest);
@@ -2627,7 +2629,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.CROSS_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::partner-bucket"),
-                eq(expected));
+                sameContext(expected));
     }
 
     /** Builds a filter whose only resource-policy provider reports the given bucket owner. */

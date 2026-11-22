@@ -7,6 +7,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -40,11 +41,14 @@ import static org.mockito.Mockito.*;
 class PipesTargetInvokerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String FIFO_ARN = "arn:aws:sqs:us-east-1:000000000000:target.fifo";
+    private static final String STREAM_ARN = "arn:aws:kinesis:eu-west-1:111111111111:stream/target-stream";
     private static final String BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus";
 
     @Mock private LambdaService lambdaService;
     @Mock private SqsService sqsService;
     @Mock private SnsService snsService;
+    @Mock private KinesisService kinesisService;
     @Mock private EventBridgeService eventBridgeService;
     @Mock private StepFunctionsService stepFunctionsService;
     @Mock private RedshiftDataTargetSubmitter redshiftSubmitter;
@@ -57,7 +61,7 @@ class PipesTargetInvokerTest {
     @BeforeEach
     void setUp() {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService,
+        invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService, kinesisService,
                 eventBridgeService, stepFunctionsService, redshiftSubmitter, redshiftAuthorizer, serviceRegistry,
                 MAPPER, config);
     }
@@ -249,9 +253,158 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), isNull(), isNull(), eq(region));
         String sent = captor.getValue();
         assertEquals("{\"id\": \"msg-123\", \"content\": \"hello world\"}", sent);
+    }
+
+    private ObjectNode sqsParameters(String groupId, String dedupId) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        ObjectNode sqs = tp.putObject("SqsQueueParameters");
+        if (groupId != null) {
+            sqs.put("MessageGroupId", groupId);
+        }
+        if (dedupId != null) {
+            sqs.put("MessageDeduplicationId", dedupId);
+        }
+        return tp;
+    }
+
+    @Test
+    void sqs_literalGroupAndDeduplicationIdsReachTheQueue() {
+        Pipe pipe = createPipe(FIFO_ARN, sqsParameters("grp", "dup"));
+
+        invoker.invoke(pipe, "{\"g\":\"other\"}", "us-east-1");
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"g\":\"other\"}"), eq(0), eq("grp"), eq("dup"),
+                eq("us-east-1"));
+    }
+
+    @Test
+    void sqs_pathsReadTheEventBeforeTheTemplateRenders() {
+        ObjectNode tp = sqsParameters("$.body.g", "$.body.d");
+        tp.put("InputTemplate", "{\"t\": <$.body.g>}");
+        Pipe pipe = createPipe(FIFO_ARN, tp);
+
+        invoker.invoke(pipe, "{\"body\":{\"g\":\"grp\",\"d\":7}}", "us-east-1");
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"t\": \"grp\"}"), eq(0), eq("grp"), eq("7"),
+                eq("us-east-1"));
+    }
+
+    @Test
+    void sqs_anObjectPathBecomesItsCompactJson() {
+        Pipe pipe = createPipe(FIFO_ARN, sqsParameters("$.body.o", null));
+
+        invoker.invoke(pipe, "{\"body\":{\"o\":{\"a\":1,\"b\":\"c\"}}}", "us-east-1");
+
+        verify(sqsService).sendMessage(anyString(), anyString(), eq(0), eq("{\"a\":1,\"b\":\"c\"}"), isNull(),
+                eq("us-east-1"));
+    }
+
+    @Test
+    void sqs_aPathNamingNothingThrowsAndSendsNothing() {
+        Pipe pipe = createPipe(FIFO_ARN, sqsParameters("$.body.missing", null));
+
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> invoker.invoke(pipe, "{\"body\":{\"g\":\"grp\"}}", "us-east-1"));
+
+        assertTrue(ex.getMessage().contains("$.body.missing"), ex.getMessage());
+        verifyNoInteractions(sqsService);
+    }
+
+    @Test
+    void sqs_aDeduplicationPathNamingNothingThrowsAndSendsNothing() {
+        Pipe pipe = createPipe(FIFO_ARN, sqsParameters("grp", "$.body.missing"));
+
+        assertThrows(RuntimeException.class,
+                () -> invoker.invoke(pipe, "{\"body\":{\"g\":\"grp\"}}", "us-east-1"));
+
+        verifyNoInteractions(sqsService);
+    }
+
+    private Pipe kinesisPipe(String partitionKey, String inputTemplate) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        if (partitionKey != null) {
+            tp.putObject("KinesisStreamParameters").put("PartitionKey", partitionKey);
+        }
+        if (inputTemplate != null) {
+            tp.put("InputTemplate", inputTemplate);
+        }
+        return createPipe(STREAM_ARN, tp);
+    }
+
+    private void verifyKinesisPut(String data, String partitionKey) {
+        verify(kinesisService).putRecordForAccount(eq("111111111111"), eq("target-stream"),
+                eq(data.getBytes(StandardCharsets.UTF_8)), eq(partitionKey), eq("eu-west-1"));
+    }
+
+    @Test
+    void kinesis_literalPartitionKeyAndEventDataReachTheStreamTheArnNames() {
+        invoker.invoke(kinesisPipe("pk", null), "{\"a\":1}", "us-east-1");
+
+        verifyKinesisPut("{\"a\":1}", "pk");
+    }
+
+    @Test
+    void kinesis_pathPartitionKeyReadsTheEventBeforeTheTemplateRenders() {
+        invoker.invoke(kinesisPipe("$.body.k", "{\"t\": <$.body.k>}"), "{\"body\":{\"k\":\"key1\"}}",
+                "us-east-1");
+
+        verifyKinesisPut("{\"t\": \"key1\"}", "key1");
+    }
+
+    @Test
+    void kinesis_aNumberAtThePathBecomesItsText() {
+        invoker.invoke(kinesisPipe("$.body.k", null), "{\"body\":{\"k\":42}}", "us-east-1");
+
+        verifyKinesisPut("{\"body\":{\"k\":42}}", "42");
+    }
+
+    @Test
+    void kinesis_aPathNamingNothingThrowsAndPutsNothing() {
+        Pipe pipe = kinesisPipe("$.body.missing", null);
+
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> invoker.invoke(pipe, "{\"body\":{\"k\":1}}", "us-east-1"));
+
+        assertTrue(ex.getMessage().contains("$.body.missing"), ex.getMessage());
+        verifyNoInteractions(kinesisService);
+    }
+
+    @Test
+    void kinesis_anEmptyPartitionKeyThrowsAndPutsNothing() {
+        Pipe pipe = kinesisPipe("", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> invoker.invoke(pipe, "{\"a\":1}", "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value '' at 'records.1.member.partitionKey' failed to satisfy"
+                + " constraint: Member must have length greater than or equal to 1", ex.getMessage());
+        verifyNoInteractions(kinesisService);
+    }
+
+    @Test
+    void kinesis_aPathResolvingToMoreThan256CharactersThrowsAndPutsNothing() {
+        String key = "a".repeat(257);
+        Pipe pipe = kinesisPipe("$.body.k", null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> invoker.invoke(pipe, "{\"body\":{\"k\":\"" + key + "\"}}", "us-east-1"));
+
+        assertEquals("1 validation error detected: Value '" + key + "' at 'records.1.member.partitionKey'"
+                + " failed to satisfy constraint: Member must have length less than or equal to 256",
+                ex.getMessage());
+        verifyNoInteractions(kinesisService);
+    }
+
+    @Test
+    void kinesis_a256CharacterPartitionKeyIsWritten() {
+        String key = "a".repeat(256);
+
+        invoker.invoke(kinesisPipe(key, null), "{\"a\":1}", "us-east-1");
+
+        verifyKinesisPut("{\"a\":1}", key);
     }
 
     @Test
@@ -266,7 +419,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), isNull(), isNull(), eq(region));
         assertEquals("{\"id\": \"\"}", captor.getValue());
     }
 
@@ -279,7 +432,7 @@ class PipesTargetInvokerTest {
 
         invoker.invoke(pipe, payload, region);
 
-        verify(sqsService).sendMessage(anyString(), eq(payload), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), eq(payload), eq(0), isNull(), isNull(), eq(region));
     }
 
     @Test
@@ -315,7 +468,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), isNull(), isNull(), eq(region));
         assertEquals("{\"data\": {\"key\":\"value\"}}", captor.getValue());
     }
 
@@ -593,7 +746,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), isNull(), isNull(), eq(region));
         assertEquals(
                 "{\"message\": \"user registered\", \"messageType\": \"REGISTRATION\"}",
                 captor.getValue());

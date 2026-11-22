@@ -13,6 +13,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.net.http.HttpTimeoutException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
@@ -184,7 +185,7 @@ public class NpmExternalConnectionClient {
                     .header("Accept", accept)
                     .GET()
                     .build();
-            response = httpClient.send(request, BodyHandlers.ofInputStream());
+            response = sendWithTransportRetry(request);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
@@ -204,6 +205,20 @@ public class NpmExternalConnectionClient {
             LOG.warnv("Could not read {0} {1} from the public npm registry: {2}", namespace, packageName,
                     e.getMessage());
             return false;
+        }
+    }
+
+    private HttpResponse<InputStream> sendWithTransportRetry(HttpRequest request)
+            throws IOException, InterruptedException {
+        try {
+            return httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (HttpTimeoutException e) {
+            throw e;
+        } catch (IOException e) {
+            // Retry the idempotent GET once before a response body has been handed to its consumer.
+            // Body failures are handled separately, so partial files and buffers are never replayed.
+            LOG.debugv("Retrying public npm request after transport failure: {0}", e.getMessage());
+            return httpClient.send(request, BodyHandlers.ofInputStream());
         }
     }
 

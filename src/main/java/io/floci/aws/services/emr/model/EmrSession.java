@@ -1,5 +1,6 @@
 package io.floci.aws.services.emr.model;
 
+import io.floci.aws.services.emrserverless.SparkConnectSession;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -12,7 +13,7 @@ import java.util.Map;
  * repeated StartSession is a retry. Its engine and monitoring configurations are kept as the request's raw JSON.
  */
 @RegisterForReflection
-public class EmrSession {
+public class EmrSession implements SparkConnectSession {
 
     private String id;
     private String clusterId;
@@ -30,12 +31,16 @@ public class EmrSession {
     private Instant startedAt;
     private Instant endedAt;
     private Instant idleSince;
+    // The Spark Connect server URL, once its server answers.
+    private String serverUrl;
     private String engineConfigurations;
     private String monitoringConfiguration;
     private long sessionIdleTimeoutInMinutes;
     private Map<String, String> tags = new LinkedHashMap<>();
     private String clientRequestToken;
     private String request;
+    // Whether Floci runs a Spark Connect server for it, as it does in the docker runner mode.
+    private boolean containerSession;
 
     public EmrSession() {}
 
@@ -67,6 +72,8 @@ public class EmrSession {
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getEndedAt() { return endedAt; }
     public void setEndedAt(Instant endedAt) { this.endedAt = endedAt; }
+    public String getServerUrl() { return serverUrl; }
+    public void setServerUrl(String serverUrl) { this.serverUrl = serverUrl; }
     public Instant getIdleSince() { return idleSince; }
     public void setIdleSince(Instant idleSince) { this.idleSince = idleSince; }
     public String getEngineConfigurations() { return engineConfigurations; }
@@ -87,4 +94,6 @@ public class EmrSession {
     public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
     public String getRequest() { return request; }
     public void setRequest(String request) { this.request = request; }
+    public boolean isContainerSession() { return containerSession; }
+    public void setContainerSession(boolean containerSession) { this.containerSession = containerSession; }
 }

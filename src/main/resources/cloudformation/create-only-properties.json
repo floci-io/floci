@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"
@@ -184,7 +189,9 @@
     "KeyAlgorithm",
     "DomainName",
     "CertificateAuthorityArn",
-    "CertificateExport"
+    "CertificateExport",
+    "RootHierarchyType",
+    "CertificateUsage"
   ],
   "AWS::CloudFormation::CustomResource": [
     "ServiceToken"
@@ -217,6 +224,10 @@
   ],
   "AWS::CodeBuild::Project": [
     "Name"
+  ],
+  "AWS::CodeDeploy::Application": [
+    "ApplicationName",
+    "ComputePlatform"
   ],
   "AWS::CodePipeline::CustomActionType": [
     "Category",
@@ -517,6 +528,87 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::EMR::Cluster": [
+    "Steps",
+    "EbsRootVolumeSize",
+    "SecurityConfiguration",
+    "ScaleDownBehavior",
+    "ReleaseLabel",
+    "KerberosAttributes",
+    "ServiceRole",
+    "LogEncryptionKmsKeyId",
+    "Name",
+    "JobFlowRole",
+    "LogUri",
+    "AdditionalInfo",
+    "Applications",
+    "AutoScalingRole",
+    "BootstrapActions",
+    "Configurations",
+    "CustomAmiId",
+    "OSReleaseLabel",
+    "EbsRootVolumeIops",
+    "EbsRootVolumeThroughput",
+    "PlacementGroupConfigs",
+    "MonitoringConfiguration",
+    "SessionEnabled"
+  ],
+  "AWS::EMR::InstanceFleetConfig": [
+    "Name",
+    "LaunchSpecifications",
+    "ClusterId",
+    "InstanceFleetType"
+  ],
+  "AWS::EMR::InstanceGroupConfig": [
+    "InstanceRole",
+    "JobFlowId",
+    "Name",
+    "InstanceType",
+    "CustomAmiId",
+    "Configurations",
+    "EbsConfiguration",
+    "Market",
+    "BidPrice"
+  ],
+  "AWS::EMR::SecurityConfiguration": [
+    "Name",
+    "SecurityConfiguration"
+  ],
+  "AWS::EMR::Step": [
+    "JobFlowId",
+    "HadoopJarStep",
+    "Name",
+    "ActionOnFailure",
+    "LogUri",
+    "EncryptionKeyArn"
+  ],
+  "AWS::EMR::Studio": [
+    "AuthMode",
+    "EngineSecurityGroupId",
+    "ServiceRole",
+    "UserRole",
+    "VpcId",
+    "WorkspaceSecurityGroupId",
+    "TrustedIdentityPropagationEnabled",
+    "IdcUserAssignment",
+    "IdcInstanceArn",
+    "EncryptionKeyArn"
+  ],
+  "AWS::EMR::StudioSessionMapping": [
+    "StudioId",
+    "IdentityType",
+    "IdentityName"
+  ],
+  "AWS::EMRContainers::VirtualCluster": [
+    "ContainerProvider",
+    "Name",
+    "SecurityConfigurationId",
+    "SessionEnabled"
+  ],
+  "AWS::EMRServerless::Application": [
+    "Name",
+    "Type"
+  ],
   "AWS::ElastiCache::CacheCluster": [
     "Port",
     "SnapshotArns",
@@ -586,6 +678,9 @@
   "AWS::Events::Archive": [
     "ArchiveName",
     "SourceArn"
+  ],
+  "AWS::Events::Connection": [
+    "Name"
   ],
   "AWS::Events::EventBus": [
     "Name"
@@ -869,7 +964,8 @@
   "AWS::Route53::HealthCheck": [
     "HealthCheckConfig/Type",
     "HealthCheckConfig/MeasureLatency",
-    "HealthCheckConfig/RequestInterval"
+    "HealthCheckConfig/RequestInterval",
+    "HealthCheckConfig/EndpointType"
   ],
   "AWS::Route53::HostedZone": [
     "Name",
@@ -897,7 +993,7 @@
     "DistanceMetric",
     "EncryptionConfiguration",
     "IndexName",
-    "MetadataConfiguration",
+    "MetadataConfiguration/NonFilterableMetadataKeys",
     "VectorBucketArn",
     "VectorBucketName"
   ],
@@ -979,6 +1075,13 @@
   "AWS::Transfer::User": [
     "ServerId",
     "UserName"
+  ],
+  "AWS::VerifiedPermissions::Policy": [
+    "PolicyStoreId"
+  ],
+  "AWS::VerifiedPermissions::PolicyStore": [],
+  "AWS::VerifiedPermissions::PolicyTemplate": [
+    "PolicyStoreId"
   ],
   "AWS::WAFv2::IPSet": [
     "Name",

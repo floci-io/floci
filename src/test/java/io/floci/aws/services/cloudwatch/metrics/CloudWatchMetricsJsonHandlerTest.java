@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -372,6 +373,38 @@ class CloudWatchMetricsJsonHandlerTest {
         return ((ObjectNode) describeResp.getEntity()).get("MetricAlarms").get(0);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"\"60\"", "60.5", "true", "[60]", "4294967356"})
+    void putMetricAlarm_refusesAnIntervalThatIsNoIntegerOrBeyondAnInt(String interval) throws Exception {
+        ObjectNode request = alarmRequest("NoInteger");
+        request.set("EvaluationInterval", MAPPER.readTree(interval));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", request, REGION));
+
+        assertEquals("SerializationException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("NoInteger"), null, REGION).isEmpty());
+    }
+
+    @Test
+    void putMetricAlarm_takesANullIntervalAsNone() {
+        ObjectNode request = alarmRequest("NullInterval");
+        request.putNull("EvaluationInterval");
+
+        assertEquals(200, handler.handle("PutMetricAlarm", request, REGION).getStatus());
+    }
+
+    @Test
+    void putMetricAlarm_passesTheIntervalToTheService() {
+        ObjectNode request = alarmRequest("WithInterval").put("EvaluationInterval", 60);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", request, REGION));
+
+        assertEquals("InvalidParameterCombinationException", refused.jsonType());
+    }
+
     private static ObjectNode alarmRequest(String name) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("AlarmName", name);
@@ -399,6 +432,42 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
         assertEquals("breaching", alarm.get("TreatMissingData").asText());
         assertEquals("Count", alarm.get("Unit").asText());
+    }
+
+    @Test
+    void describeAlarms_returnsExtendedStatisticWhenSetAndOmitsWhenUnset() {
+        ObjectNode req = alarmRequest("P99Alarm");
+        req.put("ExtendedStatistic", "p99");
+
+        JsonNode alarm = describeFirstAlarm(req);
+
+        assertEquals("p99", alarm.get("ExtendedStatistic").asText());
+        assertFalse(alarm.has("Statistic"));
+
+        ObjectNode updatedReq = alarmRequest("P99Alarm");
+        updatedReq.put("Statistic", "Average");
+
+        JsonNode updatedAlarm = describeFirstAlarm(updatedReq);
+
+        assertEquals("Average", updatedAlarm.get("Statistic").asText());
+        assertFalse(updatedAlarm.has("ExtendedStatistic"));
+    }
+
+    @Test
+    void putMetricAlarm_rejectsStatisticAndExtendedStatisticTogether() {
+        ObjectNode req = alarmRequest("BothStatsAlarm");
+        req.put("Statistic", "Average");
+        req.put("ExtendedStatistic", "p99");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricAlarm", req, REGION));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("ValidationError", error.jsonType());
+        assertEquals("PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                + "Only one of them should be present", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAlarms(List.of("BothStatsAlarm"), null, REGION).isEmpty());
     }
 
     @Test

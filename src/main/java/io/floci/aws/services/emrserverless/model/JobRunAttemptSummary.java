@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * One entry of ListJobRunAttempts. {@code id} is the run's id, {@code jobCreatedAt} when the run was
@@ -17,6 +18,7 @@ public class JobRunAttemptSummary {
     private String id;
     private String name;
     private String mode;
+    private Map<String, Object> flexExecution;
     private String arn;
     private String createdBy;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
@@ -40,6 +42,9 @@ public class JobRunAttemptSummary {
     public void setName(String name) { this.name = name; }
     public String getMode() { return mode; }
     public void setMode(String mode) { this.mode = mode; }
+
+    public Map<String, Object> getFlexExecution() { return flexExecution; }
+    public void setFlexExecution(Map<String, Object> flexExecution) { this.flexExecution = flexExecution; }
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
     public String getCreatedBy() { return createdBy; }

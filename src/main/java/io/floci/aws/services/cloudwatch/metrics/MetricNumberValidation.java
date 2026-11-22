@@ -41,7 +41,7 @@ final class MetricNumberValidation {
         return Double.isFinite(value) && Math.abs(value) <= MAX_ABSOLUTE_VALUE;
     }
 
-    private static double finite(double value, String path) {
+    static double finite(double value, String path) {
         if (!isValid(value)) {
             throw invalid(path);
         }

@@ -1,19 +1,19 @@
 package io.floci.aws.services.glue;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Crawler;
 import io.floci.aws.services.glue.model.CrawlerRunRecord;
 import io.floci.aws.services.glue.model.CrawlerTargets;
+import io.floci.aws.services.glue.model.LastCrawlInfo;
 import io.floci.aws.services.glue.model.S3Target;
 import io.floci.aws.services.glue.model.Schedule;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -49,7 +50,7 @@ class GlueCrawlerRunServiceTest {
     @BeforeEach
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         glueService = new GlueService(storageFactory, new GlueSchemaRegistryService(storageFactory, regionResolver),
                 regionResolver, new ResourceGroupsTaggingService(storageFactory),
                 new KmsService(storageFactory, regionResolver));
@@ -67,6 +68,80 @@ class GlueCrawlerRunServiceTest {
 
     private GlueCrawlerRunService service(int runDurationSeconds) {
         return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, runDurationSeconds, clock);
+    }
+
+    private GlueCrawlerRunService service(CrawlRunner runner) {
+        return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, 0, clock, runner);
+    }
+
+    @Test
+    void aCrawlThatFailsReportsFailedWithItsErrorMessageAndNoTableChanges() {
+        createCrawler("raw", null);
+        GlueCrawlerRunService service = service(name -> CrawlOutcome.failed("Connection missing not found."));
+
+        service.startCrawler("raw");
+
+        Crawler crawler = service.withRunState(glueService.getCrawler("raw"));
+        assertEquals("READY", crawler.getState());
+        assertEquals("FAILED", crawler.getLastCrawl().getStatus());
+        assertEquals("Connection missing not found.", crawler.getLastCrawl().getErrorMessage());
+        Map<String, Object> metrics = metrics(service, "raw");
+        assertEquals(0, metrics.get("TablesCreated"));
+        assertEquals(0, metrics.get("TablesUpdated"));
+    }
+
+    @Test
+    void aRunnerThatThrowsEndsTheCrawlAsFailedInsteadOfLeavingItActive() {
+        createCrawler("raw", null);
+        AtomicInteger calls = new AtomicInteger();
+        GlueCrawlerRunService service = service(name -> {
+            calls.incrementAndGet();
+            throw new IllegalStateException("backend exploded");
+        });
+
+        service.startCrawler("raw", null, "wfr_1");
+
+        assertFalse(service.isRunning("raw"));
+        assertEquals(1, calls.get());
+        LastCrawlInfo lastCrawl = service.withRunState(glueService.getCrawler("raw")).getLastCrawl();
+        assertEquals("FAILED", lastCrawl.getStatus());
+        assertEquals("backend exploded", lastCrawl.getErrorMessage());
+        assertEquals("FAILED", service.crawlsInWorkflowRun("wfr_1").get(0).state());
+        assertEquals("backend exploded", service.crawlsInWorkflowRun("wfr_1").get(0).errorMessage());
+        service.startCrawler("raw");
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void metricsReportTheTableChangesOfTheLastCrawl() {
+        createCrawler("raw", null);
+        List<CrawlOutcome> outcomes = List.of(CrawlOutcome.succeeded(3, 0, 0), CrawlOutcome.succeeded(1, 2, 0));
+        int[] next = {0};
+        GlueCrawlerRunService service = service(name -> outcomes.get(next[0]++));
+
+        service.startCrawler("raw");
+        service.startCrawler("raw");
+
+        Map<String, Object> metrics = metrics(service, "raw");
+        assertEquals(1, metrics.get("TablesCreated"));
+        assertEquals(2, metrics.get("TablesUpdated"));
+        assertEquals(0, metrics.get("TablesDeleted"));
+        assertEquals("SUCCEEDED", service.withRunState(glueService.getCrawler("raw")).getLastCrawl().getStatus());
+    }
+
+    @Test
+    void aLaterSuccessfulCrawlClearsTheErrorMessageOfAFailedOne() {
+        createCrawler("raw", null);
+        List<CrawlOutcome> outcomes = List.of(CrawlOutcome.failed("boom"), CrawlOutcome.succeeded());
+        int[] next = {0};
+        GlueCrawlerRunService service = service(name -> outcomes.get(next[0]++));
+
+        service.startCrawler("raw");
+        service.startCrawler("raw");
+
+        LastCrawlInfo lastCrawl = service.withRunState(glueService.getCrawler("raw")).getLastCrawl();
+        assertEquals("SUCCEEDED", lastCrawl.getStatus());
+        assertNull(lastCrawl.getErrorMessage());
     }
 
     private void createCrawler(String name, String scheduleExpression) {
@@ -317,18 +392,5 @@ class GlueCrawlerRunServiceTest {
     @Test
     void negativeRunDurationIsRefusedAtConstruction() {
         assertThrows(IllegalArgumentException.class, () -> service(-1));
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        }
     }
 }

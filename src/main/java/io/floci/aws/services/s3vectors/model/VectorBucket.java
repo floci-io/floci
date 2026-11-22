@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @RegisterForReflection
 public class VectorBucket {
     private Instant creationTime;
-    private Map<String, String> tags = new ConcurrentHashMap<>();
+    private volatile Map<String, String> tags = new ConcurrentHashMap<>();
     private String vectorBucketName;
     private String vectorBucketArn;
     private Object encryptionConfiguration;

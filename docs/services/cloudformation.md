@@ -80,7 +80,7 @@ not checked: no member of those requests gives them.
 
 StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's ARN as `StackSetARN`, its `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
-With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
+With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, each stack set in its own Region whatever Region the Organizations call was sent to, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
 
 A template can declare `AWS::CloudFormation::StackSet` with required `StackSetName` and `PermissionModel` properties. Missing or blank values fail resource creation. Floci creates the stack set and an instance in every account, or account under every root and OU, and Region of its `StackInstancesGroup`. An update applies the template, parameters and settings to every instance, deploys to the targets and Regions the template adds, and removes the instances of a target it drops or of a Region it drops from a target it keeps; deleting the resource deletes every instance and then the stack set. `Ref` and `Fn::GetAtt StackSetId` return the stack set id. Resource updates require that original id; deleting a resource whose original id is gone succeeds. Changing `StackSetName` or `PermissionModel` replaces the resource. `UpdateReplacePolicy: Retain` preserves the displaced set; replacement rollback restores the previous identity and removes the replacement. In-place rollback restores the saved configuration, deployment targets and instances. A failed restore keeps its snapshot for `ContinueUpdateRollback`. `AdministrationRoleARN`, `ExecutionRoleName`, `OperationPreferences`, `CallAs` and `ParameterOverrides` are not applied.
 
@@ -214,12 +214,15 @@ cross-resource references.
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
-| KMS | `Key`, `Alias` |
+| KMS | `Key` (created with `Description`, `KeyPolicy`, `KeySpec`, `KeyUsage`, `Origin`, `MultiRegion`, `Enabled`, `EnableKeyRotation` and `Tags`; updated in place for `Description`, `KeyPolicy`, `Enabled`, `EnableKeyRotation` and `Tags`, keeping tags added outside the stack; a template that drops `Description`, `Enabled` or `EnableKeyRotation` clears the description, enables the key and turns rotation off, a dropped `KeyPolicy` keeps the current policy, and one the stack never declared keeps the value set outside it; a rotation change on a key that stays disabled fails, as AWS raises `DisabledException`; a change to `KeySpec`, `KeyUsage`, `Origin` or `MultiRegion` fails the update, as on AWS, and the stack rolls back), `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
-| EKS | `Cluster`, `Nodegroup` |
+| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack, for `Logging`, for `AccessConfig.AuthenticationMode` (a mode cannot be moved back, so a stack update that does so fails, and a stack rollback restores it) and for `ResourcesVpcConfig` endpoint access and `PublicAccessCidrs`; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion`; a change to the subnets or security groups of `ResourcesVpcConfig` fails the resource, as the emulator's `UpdateClusterConfig` does not change them), `Nodegroup` (created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place) |
+| EMR | `Cluster` (created through `RunJobFlow`, once it is waiting or running, its master, core and task groups or fleets as `RunJobFlow`'s `InstanceGroups` or `InstanceFleets`; `AdditionalInfo` and `Instances`' `HadoopVersion` are accepted with a warning and not stored; task groups and fleets need unique names; a template that sets the read-only `Id` or `MasterPublicDNS` is refused; updated in place for `AutoTerminationPolicy`, `ManagedScalingPolicy`, `StepConcurrencyLevel`, `VisibleToAllUsers`, `Tags` (keeping tags added outside the stack), `TerminationProtected`, `UnhealthyNodeReplacement`, a core or task group's `InstanceCount` and `AutoScalingPolicy` and a core or task fleet's target capacities, a dropped one taking its default; any other change, within `Instances` included, replaces the cluster and terminates the old one once the update commits; a termination-protected cluster refuses the delete), `InstanceGroupConfig` (a `TASK` group, the one role the reference allows, added through `AddInstanceGroups`; `InstanceCount` and `AutoScalingPolicy` update in place, and a create-only change adds a new group; the delete removes its policy and shrinks it to nothing, as a group cannot be removed from its cluster), `InstanceFleetConfig` (a `TASK` fleet, the one type the reference allows, added through `AddInstanceFleet`; `TargetOnDemandCapacity`, `TargetSpotCapacity`, `InstanceTypeConfigs` and `ResizeSpecifications` update in place through `ModifyInstanceFleet`, and a create-only change adds a new fleet; a rollback puts them back, but not an instance type the update added, which every later `ModifyInstanceFleet` must include, nor resize specifications where the fleet had none, which no request can clear, and dropped configs or resize specifications are kept for the same reason; the delete shrinks the fleet to nothing, as a fleet cannot be removed from its cluster), `Step` (added through `AddJobFlowSteps`, `LogUri` and `EncryptionKeyArn` as its `StepMonitoringConfiguration`; every property is create-only, so a change adds a new step, and a step stays in its cluster's history when deleted, as the schema's delete handler calls nothing), `SecurityConfiguration` (created with `Name`, generated when the template gives none, and the `SecurityConfiguration` JSON, as an object or its text; both are create-only, so any change replaces it and deletes the old one once the update commits, and a change that keeps a template's own `Name` is refused, as for every custom-named resource), `Studio` (created with every property; a template that sets the read-only `Arn`, `StudioId` or `Url` is refused; updated in place through `UpdateStudio` for `Name`, `Description`, `SubnetIds` and `DefaultS3Location`, a dropped setting kept as it is, and for `Tags`, keeping tags added outside the stack; a change to `IdpAuthUrl` or `IdpRelayStateParameterName` is accepted with a warning and not applied, as no Studio API changes them; a rollback puts back the name, description, location and tags, but not subnets an update added, which `UpdateStudio` cannot take away; a change to a create-only property replaces the Studio and deletes the old one once the update commits), `StudioSessionMapping` (`Ref` is `StudioId|IdentityType|IdentityName`, the schema's primary identifier; `SessionPolicyArn` updates in place, and a change to any of the three others replaces the mapping) |
+| EMR on EKS | `VirtualCluster` (created with `Name`, `ContainerProvider`, `SecurityConfigurationId`, `SessionEnabled` and `Tags`; a template that sets the read-only `Arn` or `Id` is refused; updated in place for `Tags` alone, which end as the template lists them, any other but an `aws:` one removed; a change to any other property replaces the virtual cluster, as the registry marks them create-only, and terminates the old one once the update commits; an update of a virtual cluster that is terminated or gone fails) |
+| EMR Serverless | `Application` (created with every property, `Name` and `Type` included; updated in place through `UpdateApplication` for the settings a template changes, a dropped setting kept as it is but for `InitialCapacity`, which is cleared, and for `Tags`, which end as the template lists them, any other removed; a change to `Name` or `Type` replaces the application and deletes the old one once the update commits; neither an update nor a delete stops a `STARTED` application, so one it refuses fails the resource, as on AWS) |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `ReplicationGroup` (starts a real container; modifying an existing group in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
@@ -231,17 +234,19 @@ cross-resource references.
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
-| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer` (created with `Name`, `Type`, `AuthorizerUri`, `IdentitySource`, `AuthorizerResultTtlInSeconds` and `ProviderARNs`; updated in place for those, keeping the id; a template that drops `AuthorizerResultTtlInSeconds`, `IdentitySource` or `ProviderARNs` restores the TTL of 300 and clears the identity source and the pools, a dropped `AuthorizerUri` keeps the current one, and dropping `IdentitySource` from a `TOKEN` or `COGNITO_USER_POOLS` authorizer fails the resource, as AWS requires it there; a change to `RestApiId` replaces the authorizer, as the registry marks it create-only, and deletes the old one once the update commits; `AuthorizerCredentials`, `AuthType` and `IdentityValidationExpression` are not stored), `Method`, `Deployment`, `Stage` (created with `RestApiId`, `StageName`, `DeploymentId` and `Description`; updated in place for `DeploymentId` and `Description`, keeping the stage variables and method settings set outside the stack; a template that drops `Description` clears it, and a dropped `DeploymentId` keeps the current one; a change to `RestApiId` or `StageName` replaces the stage, as the registry marks them create-only, and deletes the old one once the update commits unless `UpdateReplacePolicy: Retain` keeps it, a name already taken on the API fails the update; `AccessLogSetting`, `CacheClusterEnabled`, `CacheClusterSize`, `CanarySetting`, `ClientCertificateId`, `DocumentationVersion`, `MethodSettings`, `Tags`, `TracingEnabled` and `Variables` are accepted and not stored), `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
 | AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey`. `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS. |
 | AppConfig | `Application`, `Environment` (`Tags` and `DeletionProtectionCheck` are accepted and not stored), `ConfigurationProfile` (`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored), `DeploymentStrategy` (`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document). `Ref` returns the AppConfig ID of each. See [AppConfig](appconfig.md#cloudformation) for updates and replacement. |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
+| CodeDeploy | `Application` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolIdentityProvider` (Ref returns the ProviderName; changing only `ProviderType` is refused, as on AWS, because the name is always the template's and the replacement would need the same address), `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Verified Permissions | `PolicyStore`, `PolicyTemplate`, `Policy` |
 | ACM | `Certificate` |
-| EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored), `Connection` (Ref returns the connection name; an update changes the supplied properties in place and a dropped `KmsKeyIdentifier` or `InvocationConnectivityParameters` is cleared, a dropped `Description` stays as it is and an empty one clears it, while renaming it or dropping `AuthorizationType` or `AuthParameters` is refused; `KmsKeyIdentifier` and `InvocationConnectivityParameters` are stored and not applied) |
 | EventBridge V2 | `EventBus`, `Subscriber` (delivers only to Amazon SQS queues; `Transformer` RAW or WITH_METADATA; a target parameter takes a literal or a `$events` path) |
 | EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
 | Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported), `User` (management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user) |
@@ -256,7 +261,8 @@ cross-resource references.
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
-| Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
+| Amazon Bedrock | `ApplicationInferenceProfile` (Ref returns the profile id; InferenceProfileArn and InferenceProfileId are available through GetAtt) |
+| Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `StackSet`, `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
@@ -345,6 +351,18 @@ its tag keys keeps a key an older template dropped. When a later resource fails 
 tags the bus had before it are put back. Changing `Description` or `Policy` during `UpdateStack` is
 rejected until transactional resource rollback is available; this prevents a failed stack update
 from leaving the live bus in the rejected configuration.
+
+## EventBridge rules
+
+`AWS::Events::Rule` reports a rule on the default event bus by its name, and a rule on a custom event
+bus as `<event bus name>|<rule name>`, in `Ref` and in `DescribeStackResources`, as AWS's resource
+provider for the type does. A bus given by ARN counts by its name when it is in the stack's account,
+and keeps its ARN, `<event bus ARN>|<rule name>`, when it is in another account. EventBridge's own
+operations take the rule name and the bus separately, so split the value at the `|` before calling
+`DescribeRule` or `DeleteRule`. `Fn::GetAtt` still gives `RuleName` and `Arn`. A rule saved by an
+earlier Floci keeps its bare name as its id until an update changes the rule. An update that moves a
+rule to another bus, or renames it, creates the rule on that bus or under that name and leaves the
+old rule where it was.
 
 ## EventBridge archives
 
@@ -635,9 +653,11 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `CreateDBInstance` does, so `DescribeDBInstances` reports the declared groups and the encryption.
 
 - On `UpdateStack`, a changed `VPCSecurityGroups` moves the instance to the new groups in place, as
-  in AWS. A cluster member's groups are its cluster's, so an update whose template changes a
-  member's list fails with `InvalidParameterCombination` before anything changes, as RDS refuses
-  that change for a member. When the previous template declared groups and the new one does not, a
+  in AWS. A cluster member's groups are its cluster's, so an update that changes a member's list
+  fails with `InvalidParameterCombination` before the member changes, as RDS refuses that change for
+  a member. That includes a change made only through a parameter, or through a group the same
+  update replaces. A replaced security group is not rolled back yet, so that last update ends in
+  `UPDATE_ROLLBACK_FAILED`. When the previous template declared groups and the new one does not, a
   standalone instance is put on its VPC's default security group, as AWS's handler does; a cluster
   member, or an instance whose VPC has no default group, keeps its groups. While the template never
   declares groups, groups set outside the stack are kept.
@@ -650,8 +670,8 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   custom `DBInstanceIdentifier` cannot be replaced, so that update fails with a `ValidationError`, as
   in AWS. An instance created before Floci applied `StorageEncrypted` is unencrypted whatever its
   template said, and is replaced only by an update that changes the property. Its first update
-  reads the previous value from the previous template, resolved on that update, so a change made
-  only through a parameter, or anything else the update changes, is not seen there.
+  reads the previous value from the previous template, resolved with the parameters that deployment
+  had, so a change made only through a parameter replaces it too.
 - `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
 
 ## ELBv2 target group targets
@@ -879,8 +899,8 @@ A property the previous template declared and the new template drops is cleared 
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
 `AWS::ApiGatewayV2::Stage`, `Route` and `Authorizer`, an `AWS::EC2::Instance`, an `AWS::ECS::Service`, an
-`AWS::Lambda::Alias`, an `AWS::SecretsManager::Secret`, an `AWS::Cognito::UserPoolGroup` and an
-`AWS::CloudTrail::Trail`. Kept: required members (`AuthenticationType`, `Type`, a function's
+`AWS::Lambda::Alias`, an `AWS::SecretsManager::Secret`, an `AWS::Cognito::UserPoolGroup`, an
+`AWS::CloudTrail::Trail` and an `AWS::KMS::Key`. Kept: required members (`AuthenticationType`, `Type`, a function's
 `DataSourceName`, a `Route`'s `RouteKey`, an authorizer's `Name` and `AuthorizerType`), a data source's
 and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
@@ -900,8 +920,9 @@ dropped `Target` and `AuthorizerId`, and an `Authorizer`'s dropped `AuthorizerUr
 while the route's authorization type stays `JWT` or `CUSTOM`. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An `Alias`'s, a `Secret`'s and a `UserPoolGroup`'s dropped `Description` and a `Trail`'s dropped
-`S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. The other members of
-those four types are kept or create-only when dropped, as the drop policy table lists them, except a
+`S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. A key's dropped `Description` is cleared, its dropped `Enabled` enables it and its dropped
+`EnableKeyRotation` turns rotation off; a dropped `KeyPolicy` keeps the policy. The other members of
+those five types are kept or create-only when dropped, as the drop policy table lists them, except a
 `Secret`'s `Tags`, which every update drives to the template.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName`, or a `Route`'s or
 `Authorizer`'s `ApiId`, fails. Create-only members are not cleared either.
@@ -915,6 +936,10 @@ to the template.
 `src/test/resources/cloudformation/drop-policy.tsv` lists what a drop does to each property, and
 `CfnSchemaCoverageTest` keeps the list complete. Other services follow
 [#6606](https://github.com/floci-io/floci/issues/6606).
+
+A type whose provisioner arm does not read the engine's property changes (`ctx.changes`) needs a row
+with a reason in `src/test/resources/cloudformation/change-exempt.tsv`, and `CfnSchemaCoverageTest`
+fails without it. A type that moves onto the changes must delete its row.
 
 When a later resource fails the update, the rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
 place back to the members it had, including the ones the update cleared. An API that had no
@@ -1365,6 +1390,13 @@ aws cloudformation list-stack-instances \
 each instance's resources into that target account's namespace — so a queue named `orders` deployed
 into accounts `222222222222` and `333333333333` exists independently in each. The stack set, its
 instances, and its operation history are recorded in the administration (caller) account.
+
+A stack set is Regional, as on AWS: it is listed, described, updated and deleted only in the Region
+it was created in, its administrator Region, and so are its instances, operations and automatic
+deployment targets, while its instances deploy stacks in the Regions they name. The same name can be
+used for another stack set in another Region. Trusted access with Organizations
+(`ActivateOrganizationsAccess`) is the organization's and holds in every Region. A stack set stored
+before Floci kept them per Region is the default Region's.
 
 `DeleteStackInstances` removes instances and their resources, unless `RetainStacks=true`, which
 detaches the instances from the stack set but leaves their underlying stacks and resources in place.

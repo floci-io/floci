@@ -271,7 +271,6 @@ class WarmPoolTest {
         } finally {
             releaseSlowStop.countDown();
             executor.shutdownNow();
-            doNothing().when(containerLauncher).stop(slow);
             pool.afterReset();
             pool.shutdown();
         }

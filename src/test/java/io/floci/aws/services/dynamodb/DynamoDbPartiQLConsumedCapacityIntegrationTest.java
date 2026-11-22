@@ -176,7 +176,7 @@ class DynamoDbPartiQLConsumedCapacityIntegrationTest {
             }
             """)
             .body("ConsumedCapacity.Table.CapacityUnits", equalTo(1.5f))
-            .body("ConsumedCapacity.LocalSecondaryIndexes.'lsi-keys'.CapacityUnits", equalTo(0.5f));
+            .body("ConsumedCapacity.LocalSecondaryIndexes.'lsi-keys'.CapacityUnits", equalTo(2.0f));
         send("ExecuteStatement", """
             {
                 "Statement": "SELECT lsiSk FROM \\"PartiQLCapacityLsiTable\\".\\"lsi-keys\\"",

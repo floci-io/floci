@@ -85,7 +85,7 @@ public class NeptuneContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). Neptune metadata "
-                        + "operations keep working and clusters still reach 'available', but they "
+                        + "operations keep working and clusters still reach ''available'', but they "
                         + "have no backing graph database container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }
@@ -98,13 +98,7 @@ public class NeptuneContainerManager {
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType,
@@ -146,7 +140,7 @@ public class NeptuneContainerManager {
         String logGroup = "/aws/neptune/cluster/" + identity + "/" + dbType.name().toLowerCase() + "-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "neptune:" + identity);
         handle.setLogStream(logHandle);
 

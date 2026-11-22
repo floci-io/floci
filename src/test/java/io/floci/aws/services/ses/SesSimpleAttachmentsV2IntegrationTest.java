@@ -1,5 +1,7 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesMimeParser;
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
@@ -21,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -33,8 +36,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesSimpleAttachmentsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SENDER = "attach-sender@example.com";
     private static final byte[] PDF_BYTES = "%PDF-1.4 fake report \u0000\u0001ÿ".getBytes(StandardCharsets.ISO_8859_1);
     private static final byte[] PNG_BYTES = {(byte) 0x89, 'P', 'N', 'G', 0, 1, 2, 3, (byte) 0xfe};
@@ -96,7 +97,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
         assertTrue(wire.contains("X-Custom: custom-value"), wire);
         assertFalse(wire.contains("hidden@example.com"), "Bcc must not appear in the message");
 
-        Message message = SmtpRelay.parseMime(mime);
+        Message message = SesMimeParser.parse(mime);
         assertNotNull(message);
         assertEquals("With attachments", message.getSubject());
         List<Entity> leaves = new ArrayList<>();
@@ -144,7 +145,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
     @Test
     @Order(4)
     void simpleSend_withVirusInAnAttachment_isRejectedLikeARawSend() {
-        String virus = b64(SesContentScan.signature().getBytes(StandardCharsets.US_ASCII));
+        String virus = b64(SesTestSignature.value().getBytes(StandardCharsets.US_ASCII));
         String messageId = send("""
                 {"FromEmailAddress": "%s",
                  "Destination": {"ToAddresses": ["to@example.com"]},

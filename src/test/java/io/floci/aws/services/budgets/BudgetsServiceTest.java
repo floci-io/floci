@@ -4,11 +4,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.budgets.model.BudgetActionRecord;
 import io.floci.aws.services.budgets.model.BudgetRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -22,7 +27,8 @@ class BudgetsServiceTest {
     @BeforeEach
     void setUp() {
         service = new BudgetsService(AccountAwareStorageBackend.inMemory(ACCOUNT),
-                AccountAwareStorageBackend.<BudgetActionRecord>inMemory(ACCOUNT), mapper);
+                AccountAwareStorageBackend.<BudgetActionRecord>inMemory(ACCOUNT), mapper,
+                new RegionResolver("us-east-1", ACCOUNT));
     }
 
     @Test
@@ -106,6 +112,55 @@ class BudgetsServiceTest {
         JsonNode history = executed.getHistories().get(executed.getHistories().size() - 1);
         assertEquals("EXECUTE_ACTION", history.path("EventType").asText());
         assertEquals("EXECUTION_SUCCESS", history.path("Status").asText());
+    }
+
+    /**
+     * IAM's lookup reads the tags of the budget or the action the ARN names, as the tag calls leave them, and nothing
+     * for another account's, another partition's, a Regional or an unknown ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheBudgetOrTheActionTheArnNames() {
+        ObjectNode create = createBudget("tagged");
+        create.putArray("ResourceTags").addObject().put("Key", "team").put("Value", "web");
+        service.createBudget(create);
+        String arn = "arn:aws:budgets::" + ACCOUNT + ":budget/tagged";
+        ObjectNode tag = mapper.createObjectNode().put("ResourceARN", arn);
+        tag.putArray("ResourceTags").add(mapper.createObjectNode().put("Key", "team").put("Value", "data"))
+                .add(mapper.createObjectNode().put("Key", "env").put("Value", "dev"));
+        service.tagResource(tag);
+        ObjectNode untag = mapper.createObjectNode().put("ResourceARN", arn);
+        untag.putArray("ResourceTagKeys").add("env");
+        service.untagResource(untag);
+        ObjectNode action = actionRequest("tagged", "APPLY_IAM_POLICY");
+        action.putArray("ResourceTags").addObject().put("Key", "team").put("Value", "ops");
+        String actionArn = arn + "/action/" + service.createBudgetAction(action).getActionId();
+
+        assertEquals("budgets", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(actionArn));
+        assertTrue(service.storedTags(arn.replace(ACCOUNT, "210987654321")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("budgets::", "budgets:us-east-1:")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("budget/tagged", "budget/missing")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:ce::" + ACCOUNT + ":anomalymonitor/tagged").isEmpty());
+    }
+
+    /** A budget stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareBudgetInPlace() {
+        InMemoryStorage<String, BudgetRecord> raw = new InMemoryStorage<>();
+        BudgetsService legacyState = new BudgetsService(new AccountAwareStorageBackend<>(raw, null, ACCOUNT),
+                AccountAwareStorageBackend.<BudgetActionRecord>inMemory(ACCOUNT), mapper,
+                new RegionResolver("us-east-1", ACCOUNT));
+        BudgetRecord legacy = new BudgetRecord();
+        legacy.setAccountId(ACCOUNT);
+        legacy.setBudget(createBudget("legacy").get("Budget"));
+        legacy.setResourceTags(mapper.createArrayNode().add(mapper.createObjectNode().put("Key", "team")
+                .put("Value", "data")));
+        raw.put(ACCOUNT + "::legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags("arn:aws:budgets::" + ACCOUNT + ":budget/legacy"));
+        assertEquals(Set.of(ACCOUNT + "::legacy"), raw.keys());
     }
 
     private ObjectNode createBudget(String name) {

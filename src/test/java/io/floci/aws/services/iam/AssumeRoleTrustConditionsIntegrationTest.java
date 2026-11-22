@@ -98,7 +98,7 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String trustsDefault = createRole(trustAccountRoot(DEFAULT_ACCOUNT));
         String trustsOwnAccount = createRole(trustAccountRoot(OTHER_ACCOUNT));
 
-        assertTrustDenied(assumeRole(accessKeyId, trustsDefault, "sx", null), trustsDefault);
+        assertTrustDeniedToAnIamCaller(assumeRole(accessKeyId, trustsDefault, "sx", null));
         assumeRole(accessKeyId, trustsOwnAccount, "sx", null).then().statusCode(200);
     }
 
@@ -113,7 +113,7 @@ class AssumeRoleTrustConditionsIntegrationTest {
                 "{\"StringEquals\":{\"aws:username\":\"someone-else\"}}"));
 
         assumeRole(accessKeyId, namesTheCaller, "sx", null).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, namesSomeoneElse, "sx", null), namesSomeoneElse);
+        assertTrustDeniedToAnIamCaller(assumeRole(accessKeyId, namesSomeoneElse, "sx", null));
     }
 
     @Test
@@ -128,9 +128,9 @@ class AssumeRoleTrustConditionsIntegrationTest {
                 "{\"StringEquals\":{\"aws:PrincipalType\":\"AssumedRole\"}}"));
 
         assumeRole(accessKeyId, onlyUsers, "sx", null).then().statusCode(200);
-        assertTrustDenied(assumeRoleWithSession(session, onlyUsers), onlyUsers);
+        assertTrustDeniedToAnIamCaller(assumeRoleWithSession(session, onlyUsers));
         assumeRoleWithSession(session, onlySessions).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, onlySessions, "sx", null), onlySessions);
+        assertTrustDeniedToAnIamCaller(assumeRole(accessKeyId, onlySessions, "sx", null));
     }
 
     @Test
@@ -140,7 +140,7 @@ class AssumeRoleTrustConditionsIntegrationTest {
                 "{\"StringEquals\":{\"aws:PrincipalType\":\"Account\",\"aws:userid\":\"" + TRUSTED_ACCOUNT + "\"}}"));
 
         assumeRole(TRUSTED_ACCOUNT, onlyTheRoot, "sx", null).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, onlyTheRoot, "sx", null), onlyTheRoot);
+        assertTrustDeniedToAnIamCaller(assumeRole(accessKeyId, onlyTheRoot, "sx", null));
     }
 
     @Test
@@ -155,9 +155,9 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String sessionIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AROA*:sx\"}}"));
 
         assumeRole(accessKeyId, userIds, "sx", null).then().statusCode(200);
-        assertTrustDenied(assumeRoleWithSession(session, userIds), userIds);
+        assertTrustDeniedToAnIamCaller(assumeRoleWithSession(session, userIds));
         assumeRoleWithSession(session, sessionIds).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, sessionIds, "sx", null), sessionIds);
+        assertTrustDeniedToAnIamCaller(assumeRole(accessKeyId, sessionIds, "sx", null));
     }
 
     @Test
@@ -177,9 +177,9 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String conditionOnPathlessRole = createRole(condition.formatted(TRUSTED_ACCOUNT, pathlessArn));
 
         assumeRoleWithSession(session, namesRole).then().statusCode(200);
-        assertTrustDenied(assumeRoleWithSession(session, namesPathlessRole), namesPathlessRole);
+        assertTrustDeniedToAnIamCaller(assumeRoleWithSession(session, namesPathlessRole));
         assumeRoleWithSession(session, conditionOnRole).then().statusCode(200);
-        assertTrustDenied(assumeRoleWithSession(session, conditionOnPathlessRole), conditionOnPathlessRole);
+        assertTrustDeniedToAnIamCaller(assumeRoleWithSession(session, conditionOnPathlessRole));
     }
 
     @Test
@@ -195,8 +195,19 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String namesReplacement = createRole(
                 trustPrincipal("arn:aws:iam::" + TRUSTED_ACCOUNT + ":role/other/" + callerRole));
 
-        assertTrustDenied(assumeRoleWithSession(oldSession, namesReplacement), namesReplacement);
+        assertTrustDeniedToAnIamCaller(assumeRoleWithSession(oldSession, namesReplacement));
         assumeRoleWithSession(assumeCallerRole(callerRole, "/other/"), namesReplacement).then().statusCode(200);
+    }
+
+    /**
+     * A role in another account needs its trust policy to allow an IAM user or a role session
+     * beside the caller's identity policy, so IAM enforcement refuses such a caller the trust
+     * policy does not allow before STS does, with its own AccessDenied message.
+     */
+    private static void assertTrustDeniedToAnIamCaller(Response response) {
+        response.then().statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"))
+                .body(containsString("is not authorized to perform: sts:AssumeRole"));
     }
 
     private static void assertTrustDenied(Response response, String role) {

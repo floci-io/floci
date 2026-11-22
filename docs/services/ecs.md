@@ -413,6 +413,13 @@ existing provider counts; tasks from a previous deployment do not cover the new 
 With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
 local cluster has no container instances, so an EC2 default would have nowhere to place it.
 
+A `REPLICA` service task placed on the `EC2` launch type, or on a capacity provider other than
+`FARGATE` and `FARGATE_SPOT`, runs on an `ACTIVE` container instance of the cluster: the one
+running the fewest tasks, among the instances registered for that capacity provider when any are,
+otherwise among those registered for none. `DescribeTasks` then reports its
+`containerInstanceArn`. A cluster with no container instance to offer still runs the task, without
+one, where AWS would leave it unplaced. Placement constraints and strategies are not evaluated.
+
 #### Task metadata endpoint
 
 Floci serves the [task metadata endpoint version
@@ -506,11 +513,42 @@ Deliberate limits:
 | `DeleteService` | Delete a service (supports `force`) |
 | `DescribeServices` | Describe one or more services (includes `deployments`, see below) |
 | `ListServices` | List service ARNs in a cluster |
-| `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
+| `ListServicesByNamespace` | List the Region's services whose Service Connect configuration joined a Cloud Map namespace, given by name or ARN (a service with no namespace of its own joins its cluster's default); pages with `maxResults` and `nextToken` |
 
 `ListServices` filters on `launchType` and `schedulingStrategy` as well as `cluster`, and pages
-with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
-time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
+with `maxResults` and `nextToken`. Like `ListServicesByNamespace`, and unlike every other ECS
+listing, which pages a hundred at a time, a request that names no `maxResults` gets ten ARNs and
+a `nextToken`. A service joins the namespace its Service Connect configuration names, or its
+cluster's default when it names none, at the time the configuration is set: a later change to the
+cluster default does not move it.
+
+Each `services[]` entry of a Service Connect configuration is an endpoint, and Floci creates a
+Cloud Map service for it in the namespace the service joined, named its `discoveryName` or,
+without one, its `portName`, as AWS does. A client configuration, with no entries, gets one Cloud
+Map service for the client, `aws-ecs-sc.client.<UUID>.<service name>`, as on AWS; Floci derives the
+UUID from the service's ARN, since how AWS derives its own isn't documented. Each Cloud Map service
+is of type `HTTP`, with no DNS records, since Service Connect does not use Route 53, is described as
+`Managed by <ECS service ARN>` and is tagged `AmazonECSManaged=true`, as ECS creates them. The
+deployments of `DescribeServices` report them as `serviceConnectResources` (`discoveryName`, and the
+Cloud Map service's ARN as `discoveryArn`). An `UpdateService` keeps the Cloud Map service of an
+endpoint it keeps, creates the new ones and deletes the ones it drops, and `DeleteService` deletes
+them all, so the namespace can be deleted afterwards; AWS deletes them within a minute or so, Floci
+in the call. A deployment rollback brings them in line with the configuration it restores, or, when
+another service took one of its discovery names meanwhile, leaves the service without endpoints.
+
+A discovery name is up to 64 lowercase letters, numbers, underscores and hyphens, not beginning with
+a hyphen, and unique in its namespace, compared as Cloud Map compares names (without case in a DNS
+namespace). `CreateService` refuses a configuration that breaks this with `ClientException`, and
+`UpdateService` with `InvalidParameterException`, each with ECS's message, and the request then
+changes nothing: a name outside the rule; a name the configuration gives twice ("The following
+discoveryNames are defined more than once: [...]"); a name another ECS service's endpoint holds ("SC
+service is already used by" the namespace's ARN); or one a Cloud Map service created outside ECS
+holds, refused with Cloud Map's "Service already exists.", which ECS passes on. The Cloud Map
+services are created when `CreateService` or `UpdateService` sets the configuration, in the
+namespace it joins then, so a configuration whose namespace Cloud Map does not hold at that point
+gets none. Floci registers
+no task in them and does not route the `clientAliases`: a task reaches another service's tasks
+through `serviceRegistries` and DNS, not through Service Connect's names.
 
 With persistent storage, services survive a restart but their tasks do not: task state is
 held in memory. The service scheduler starts at boot, so within a few seconds of startup every
@@ -559,6 +597,17 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A task of a service with `loadBalancers` that runs on a container instance is registered in a
+  target group of target type `instance` as ECS registers it on AWS: the container instance's
+  `ec2InstanceId` on the container's host port. The load balancer and its health checks reach
+  that instance port at the task's container. When another task on the same instance already holds
+  the host port, as when Floci runs in Docker and publishes no host ports so the tasks share a
+  container port, the target gets a port from the ECS agent's dynamic range (32768 to 60999)
+  instead, and `networkBindings` keeps reporting the published port. The container's other
+  published host ports are taken on the instance too where free, so a target group health check on
+  one of them reaches the container. The task holds these ports until it is `STOPPED`, through its
+  deregistration delay, so a replacement on the same instance gets other ones. An `ip` target
+  group, or a task with no container instance, gets the container's own address.
 - A rolling deployment of a service with `loadBalancers` stops a stale task only once every
   replacement's targets report `healthy`. A replacement that never turns healthy holds the
   deployment.
@@ -785,6 +834,12 @@ re-registered `containerInstanceArn` all round-trip. The agent version is report
 `versionInfo`, which is where the `ContainerInstance` shape puts it, not as a top-level
 `agentVersion`. An instance also reports `registeredAt` and a `version` counter that each state
 change increments.
+
+The container instance's `ec2InstanceId` is the `instanceId` of the `instanceIdentityDocument` the
+agent registers with, so it names the EC2 instance the agent runs on, as on AWS. A registration
+without a document gets a generated `i-floci-...` id; one whose document is not JSON or names no
+`instanceId` fails with `InvalidParameterException`. Floci does not check
+`instanceIdentityDocumentSignature`.
 
 `DeregisterContainerInstance` leaves the instance in the cluster as `INACTIVE` rather than
 dropping it, so a later `DescribeContainerInstances` still answers for it, as on AWS. A cluster's
@@ -1044,6 +1099,9 @@ for reasons that have nothing to do with the role's policy.
 - **No user-defined Docker network is configured.** The endpoint has nowhere to listen.
 
 Each of these logs a warning naming the task and the role it asked for.
+
+The same credentials server and per-network proxy also serve a CodeBuild build its project's
+service role, whether or not this setting is on (see [CodeBuild](codebuild.md#the-builds-credentials)).
 
 ### Ephemeral task volumes
 

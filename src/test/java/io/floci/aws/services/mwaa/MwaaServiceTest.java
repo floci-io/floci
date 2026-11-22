@@ -69,9 +69,9 @@ class MwaaServiceTest {
         EmulatorConfig config = testConfig();
         currentAccount = "000000000000";
         currentRegion = "us-east-1";
-        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenAnswer(invocation -> currentAccount);
-        when(regionResolver.getRegion()).thenAnswer(invocation -> currentRegion);
+        RegionResolver regionResolver = Mockito.spy(new RegionResolver("us-east-1", "000000000000"));
+        Mockito.doAnswer(invocation -> currentAccount).when(regionResolver).getAccountId();
+        Mockito.doAnswer(invocation -> currentRegion).when(regionResolver).getRegion();
         S3Service s3Service = Mockito.mock(S3Service.class);
         clock = new MutableClock();
         mwaaService = new MwaaService(storageFactory, config, regionResolver, null, null, null, s3Service,
@@ -348,9 +348,7 @@ class MwaaServiceTest {
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
-        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         S3Service s3Service = Mockito.mock(S3Service.class);
         MwaaService misconfiguredService = new MwaaService(storageFactory, testConfig(List.of("2.10.5", "latest")),
                 regionResolver, null, null, null, s3Service);

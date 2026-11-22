@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
@@ -28,15 +29,12 @@ import static org.hamcrest.Matchers.notNullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTemplateV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void createTemplate() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "v2-welcome",
@@ -58,7 +56,7 @@ class SesTemplateV2IntegrationTest {
     void createTemplate_duplicateRejected() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "v2-welcome",
@@ -69,7 +67,8 @@ class SesTemplateV2IntegrationTest {
             .post("/v2/email/templates")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("AlreadyExistsException"));
+            .body("__type", equalTo("AlreadyExistsException"))
+            .body("message", equalTo("Template v2-welcome already exists for account id 000000000000"));
     }
 
     @Test
@@ -77,7 +76,7 @@ class SesTemplateV2IntegrationTest {
     void createTemplate_missingName() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"TemplateContent": {"Subject": "x"}}
                 """)
@@ -93,7 +92,7 @@ class SesTemplateV2IntegrationTest {
     void getTemplate() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/v2-welcome")
         .then()
@@ -109,7 +108,7 @@ class SesTemplateV2IntegrationTest {
     void getTemplate_notFound() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/does-not-exist")
         .then()
@@ -122,7 +121,7 @@ class SesTemplateV2IntegrationTest {
     void updateTemplate() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateContent": {
@@ -139,7 +138,7 @@ class SesTemplateV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/v2-welcome")
         .then()
@@ -153,9 +152,9 @@ class SesTemplateV2IntegrationTest {
     void updateTemplate_notFound() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
-                {"TemplateContent": {"Subject": "x"}}
+                {"TemplateContent": {"Subject": "x", "Text": "x"}}
                 """)
         .when()
             .put("/v2/email/templates/ghost")
@@ -170,7 +169,7 @@ class SesTemplateV2IntegrationTest {
         given()
             .config(DECIMAL_NUMBERS)
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates")
         .then()
@@ -185,7 +184,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_withTemplate_substitutesVariables() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailIdentity": "sender@example.com"}
                 """)
@@ -196,7 +195,7 @@ class SesTemplateV2IntegrationTest {
 
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "sender@example.com",
@@ -232,7 +231,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_withUnknownTemplate_returns404() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "sender@example.com",
@@ -257,7 +256,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_withTemplate_missingName_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "sender@example.com",
@@ -277,7 +276,7 @@ class SesTemplateV2IntegrationTest {
     void deleteTemplate() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/templates/v2-welcome")
         .then()
@@ -285,7 +284,7 @@ class SesTemplateV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/v2-welcome")
         .then()
@@ -297,7 +296,7 @@ class SesTemplateV2IntegrationTest {
     void deleteTemplate_notFound() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/templates/already-gone")
         .then()
@@ -310,7 +309,7 @@ class SesTemplateV2IntegrationTest {
     void createTemplate_rejectsLeadingTrailingWhitespace() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": " padded ",
@@ -329,7 +328,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_withInlineTemplate_substitutesVariables() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailIdentity": "inline-sender@example.com"}
                 """)
@@ -340,7 +339,7 @@ class SesTemplateV2IntegrationTest {
 
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "inline-sender@example.com",
@@ -380,7 +379,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_templateWithBothNameAndContent_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "inline-sender@example.com",
@@ -406,7 +405,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_withTemplateArn_resolvesStoredTemplate() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "arn-welcome",
@@ -423,7 +422,7 @@ class SesTemplateV2IntegrationTest {
 
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "inline-sender@example.com",
@@ -458,7 +457,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_templateWithMalformedArn_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "inline-sender@example.com",
@@ -483,7 +482,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_templateWithNameAndArn_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "inline-sender@example.com",
@@ -506,8 +505,7 @@ class SesTemplateV2IntegrationTest {
 
     // ──────────────── Cross-region isolation ────────────────
 
-    private static final String AUTH_EU_WEST_1 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-1/ses/aws4_request";
+    private static final String AUTH_EU_WEST_1 = SesV2Requests.authFor("eu-west-1");
 
     @Test
     @Order(20)
@@ -541,7 +539,7 @@ class SesTemplateV2IntegrationTest {
 
         // Verify it does NOT exist in us-east-1
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/region-test")
         .then()
@@ -561,7 +559,7 @@ class SesTemplateV2IntegrationTest {
     void createEmailTemplate_withTags_visibleViaGet() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "tpl-with-tags",
@@ -581,7 +579,7 @@ class SesTemplateV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/tpl-with-tags")
         .then()
@@ -597,7 +595,7 @@ class SesTemplateV2IntegrationTest {
         // tpl-with-tags is created in @Order(21) above
         String arn = "arn:aws:ses:us-east-1:000000000000:template/tpl-with-tags";
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags")
@@ -613,7 +611,7 @@ class SesTemplateV2IntegrationTest {
         // tpl-with-tags has 2 tags from @Order(21)
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateContent": {
@@ -628,7 +626,7 @@ class SesTemplateV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/tpl-with-tags")
         .then()
@@ -645,7 +643,7 @@ class SesTemplateV2IntegrationTest {
         // keys) atomically, before the template is persisted.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "v2-badtags",
@@ -662,7 +660,7 @@ class SesTemplateV2IntegrationTest {
 
         // The failed create must leave no template behind.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/v2-badtags")
         .then()
@@ -675,7 +673,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_malformedShape_returnsBadRequest(String label, String body) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-emails")
@@ -690,7 +688,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_nonObjectBody_isASerializationException(String body, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-emails")
@@ -706,7 +704,7 @@ class SesTemplateV2IntegrationTest {
     void sendEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-emails")

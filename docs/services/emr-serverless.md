@@ -9,7 +9,7 @@ EMR Serverless is an AWS service that provides serverless data analytics environ
 | `floci.emrserverless.enabled` | Whether the EMR Serverless API is enabled | `true` |
 | `floci.emrserverless.port` | The port the service is exposed on | `4566` |
 | `floci.services.emrserverless.job-run-duration-seconds` | How long a `BATCH` job run stays `RUNNING` before it succeeds; `0` makes it `SUCCESS` as soon as it starts | `0` |
-| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run in a container (see [Running Spark job runs](#running-spark-job-runs) and [Running Hive job runs](#running-hive-job-runs)) | `immediate` |
+| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs and sessions through their states without running anything; `docker` runs each job run, and each session's Spark Connect server, in a container (see [Running Spark job runs](#running-spark-job-runs), [Running Hive job runs](#running-hive-job-runs) and [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)) | `immediate` |
 | `floci.services.emrserverless.docker-network` | Docker network for job run containers | the global default |
 | `floci.services.emrserverless.image-template` | Image for a `docker` job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release |
 | `floci.services.emrserverless.hive-image-template` | Image for a `docker` Hive job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/hive/%s:latest` |
@@ -62,13 +62,15 @@ another.
 `CreateApplication` stores every configuration `UpdateApplication` does, `runtimeConfiguration`,
 `monitoringConfiguration`, `schedulerConfiguration`, `diskEncryptionConfiguration`,
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
-among them, and `GetApplication` returns each as it was written.
+among them, and `GetApplication` returns each as it was written, except for `schedulerConfiguration` (see
+**Concurrency and queuing** under job runs).
 
 `UpdateApplication` answers with the updated application, as `GetApplication` reports it.
 
 `UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
 `maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
-"Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
+"Updating Running Applications" describes, and a `schedulerConfiguration` naming only `maxConcurrentRuns`, as its
+"Job concurrency and queuing" page has it. For every other setting the API reference's "An application has to be in
 a stopped or created state in order to be updated" holds: a `STARTED` application's update naming one, even beside
 those or with its current value, is refused with `ValidationException`, "Application must be in a stopped or created
 state in order to be updated.", and so is an image change on an application with `initialCapacity` ("Custom image
@@ -92,32 +94,79 @@ In the default `immediate` runner mode, job runs are metadata only: nothing exec
 the job run states and `GetJobRun`'s response shape, and settles when it is read. In the `docker`
 runner mode a Spark run executes; see [Running Spark job runs](#running-spark-job-runs).
 
-* **Lifecycle**: a run is `RUNNING` from the moment it is submitted. With the default
+* **Lifecycle**: a run is `RUNNING` from the moment it is submitted, or from the moment it leaves the queue
+  (see **Concurrency and queuing**). With the default
   `job-run-duration-seconds` of `0`, a `BATCH` run is `SUCCESS` as soon as it starts; a positive
   duration keeps it `RUNNING` that long. A run whose duration would pass its
   `executionTimeoutMinutes` (720 when not given, as AWS reports it) is `CANCELLED` at the timeout.
   A `STREAMING` run stays `RUNNING` until it is cancelled.
+* **Concurrency and queuing**: as the user guide's "Job concurrency and queuing for an EMR Serverless
+  application" describes, at most `maxConcurrentRuns` of an application's batch and streaming runs run at once.
+  A run submitted beyond that is `QUEUED`, and the first queued run starts when one of them ends or is cancelled.
+  A run still queued `queueTimeoutMinutes` after it was submitted is `CANCELLED`, as the job run states give
+  a run that "has timed out" as a reason to be cancelled. Its `stateDetails` is Floci's wording, as no source
+  gives AWS's. A run that leaves the queue reports `queuedDurationMilliseconds`. A queued run is cancelled at
+  once, and keeps `StopApplication` from stopping the application. Queuing is "supported on Amazon EMR release
+  7.0.0 and higher" and "enabled by default on Amazon EMR release 7.3.0 and higher", the AWS runtime for Apache
+  Spark's releases included. An application that sets no `schedulerConfiguration` queues only from 7.3.0, with
+  the defaults of 15 runs and 360 minutes. `maxConcurrentRuns` must be 1 to 1000 and `queueTimeoutMinutes` 15
+  to 720, or the request is refused with `ValidationException`, in Floci's wording. Terraform's acceptance tests
+  record how AWS keeps the configuration. A member a request leaves out takes its default, and here keeps the
+  value already set where there is one. An empty object turns queuing off, on 7.3.0 and later too, and the
+  application then returns no `schedulerConfiguration`. Raising `maxConcurrentRuns` on a `STARTED` application
+  starts queued runs at once. With the default
+  `job-run-duration-seconds` of `0`, a `BATCH` run ends as it starts and never holds a slot, so only
+  `STREAMING` runs, or runs given a duration, wait.
 * **Auto-start**: a run submitted to a `CREATED` or `STOPPED` application starts the application,
   as `autoStartConfiguration.enabled` defaults to `true`. With auto-start turned off, the run is
   refused with `ValidationException` until the application is started. A run on a terminated
   application is refused.
 * **Idempotency**: `clientToken` is the idempotency token. Repeating a request with the same token
   returns the original run; reusing the token with a different request answers `ConflictException`
-  (HTTP 409) "Request did not match the original".
+  (HTTP 409) "Request did not match the original". The two are compared as the run each would start holds them:
+  `executionTimeoutMinutes` left out or 720, and `tags` left out or empty, count as the same; a member the run would
+  hold otherwise, such as a `mode` given where the original left it out, or a tag with an empty value, does not.
 * **Execution timeout**: `executionTimeoutMinutes` is 0 to 1,000,000, 0 meaning no timeout. From
   release `emr-7.11.0`, a `BATCH` run's timeout must be 1 to 10080 minutes (7 days), as the model and
   the 7.11.0 release notes say; a run outside that is refused with `ValidationException`. The AWS runtime for
   Apache Spark's releases, `emr-spark-8.0.0` on, hold their `BATCH` runs to it too: the notes apply it "from this
   release onwards", and the release list puts them after EMR Serverless 7.14.0.
 * **CancelJobRun** moves a run that has not finished to `CANCELLED`. A finished run answers
-  `ValidationException` "Job run is not in a cancellable state".
+  `ValidationException` "Job run is not in a cancellable state". In the `docker` mode, from release
+  `emr-7.9.0` on, a `RUNNING` run gets the `shutdownGracePeriodInSeconds` it is cancelled with, "during which
+  the job can perform cleanup operations prior to final termination": its driver gets SIGTERM, which runs its
+  JVM shutdown hooks, the run is `CANCELLING` until the driver ends, and a driver still running when the period
+  ends is stopped. "The default behavior for shutdown is to have no grace period" for a `BATCH` run, and a
+  `STREAMING` run has a "120-second grace period enabled by default"; 0 is "Immediate termination". "Grace period
+  shutdown is only available for jobs in RUNNING state", so a run that has not started yet, or one on an earlier
+  release, is stopped at once, and "Subsequent cancel requests during the CANCELLING state are ignored". A value
+  other than 0 or 15 to 1800, the user guide's "Valid Range for Shutdown Grace period", is refused with
+  `ValidationException`, in Floci's own wording.
+* **StartJobRun** keeps the run's `flexExecution` ("The Amazon EMR Serverless Flex settings for the job run"),
+  which `GetJobRun`, `ListJobRuns` and `ListJobRunAttempts` give back; an `enabled` that is not a boolean is
+  refused with `SerializationException`. Floci has no Flex capacity to run it on, so it changes nothing else.
+* **Resource utilization**: an ended Spark run gives its `totalResourceUtilization`, "The aggregate vCPU,
+  memory, and storage resources used from the time the job starts to execute, until the time the job
+  terminates, rounded up to the nearest second", and its `billedResourceUtilization`, which includes "a 1-minute
+  minimum usage for workers, plus additional storage over 20 GB per worker". Floci reckons both from the workers
+  the run asks for, its driver and the executors it starts with, sized as the user guide's "Supported worker
+  configurations" size them: a worker has the vCPUs its `cores` ask for, and memory for its Spark memory and that
+  memory's overhead, "10% of container memory, with a minimum of 384 MB", rounded up to the sizes its vCPUs allow.
+  Unset, a worker has 4 vCPUs, 14G of Spark memory and 20G of disk, and a run starts 3 executors, as the "Spark job
+  properties" give them, so a default worker is 4 vCPUs, 16 GB and 20 GB; `spark-submit`'s `--driver-cores`,
+  `--driver-memory`, `--executor-cores`, `--executor-memory` and `--num-executors` set over what `--conf` sets, as
+  Spark takes them. Its driver's worker counts for the whole attempt. Where its executors have containers of their
+  own (see **Executors**), each executor's worker counts for the time its container ran, as they come and go with
+  Spark's target; otherwise the executors it starts with count for the whole attempt. Each attempt gives its own,
+  and one that never started used nothing. A Hive run gives none, its Tez tasks coming and going with its query.
 * **StopApplication** refuses an application with a run that has not finished, a `STREAMING` run or
   a `CANCELLING` one included, as the API reference says "All scheduled and running jobs must be
   completed or cancelled before stopping an application." It answers `ValidationException`, the one
   error the model declares for this, with that sentence as its message: AWS's own message is not
   recorded, so the wording is Floci's reading. It terminates the application's sessions (see
   [Sessions](#sessions)).
-* **ListJobRuns** returns the newest runs first, filtered by `states`, `createdAtAfter`,
+* **ListJobRuns** returns the newest runs first, the later of two started within the same millisecond
+  first too, filtered by `states`, `createdAtAfter`,
   `createdAtBefore` and `mode`, at most 50 per page. With several `states`, the runs are grouped by
   state in the order the filter names them. A state or mode that does not exist, or more than 8
   states, is refused with `ValidationException`. An unknown application has no runs. A `nextToken`
@@ -139,56 +188,143 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   `networkConfiguration` come from the application.
 * **Dashboard**: `GetDashboardForJobRun` gives "a URL that you can use to access the application UIs for a job run",
   for the latest attempt or the `attempt` asked for, checked as `GetJobRun` checks it, and, as AWS's, "The URL is
-  valid for one hour after you generate it". EMR Serverless opens the run's live Spark or Tez UI while it runs and its
-  Spark History Server or persistent Tez UI once it has ended; Floci keeps neither, so the URL opens a page Floci
-  serves at `/_aws/emr-serverless/dashboard` on its own address (`base-url`, or `hostname`), with the attempt's
-  state, its times and where its driver's logs go in S3 and in CloudWatch Logs, kept as the attempt was admitted, so
-  a later change to the application's monitoring configuration does not move them. The link names the run and is signed
-  with a key Floci makes as it starts: one changed, or past its hour, or given before Floci restarted, opens a `403`
-  page asking for a new one, and one whose run has gone a `404`. Like the rest of Floci, the page asks for no
-  credentials. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
+  valid for one hour after you generate it". "For jobs in a running state, the application UI is a live user
+  interface such as the Spark or Tez web UI. For completed jobs, the application UI is a persistent application user
+  interface such as the Spark History Server or persistent Tez UI." With `runner-mode` set to `docker`, a Spark run's
+  link opens both for real, through Floci, each on a host of its own, `http://<secret>-<port>.emr-serverless-ui.<Floci's
+  host and port>/`, the secret 26 random letters and digits that only this link holds, so the host itself is the
+  link's authority, as the UI takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and
+  `localhost.floci.io` do, and Floci's TLS certificate names `*.emr-serverless-ui.localhost` and
+  `*.emr-serverless-ui.localhost.floci.io`. A link's host answers with a `403` page once its hour has passed, or when
+  it was given before Floci restarted.
+  * **While the attempt runs**, the link, on port 4040, opens its driver's Spark UI: port 4040 of its container, which
+    Docker publishes on the host's loopback interface alone, or which Floci, in a container on the same network,
+    reaches there. The release's image turns the UI off; Floci turns it on before the run's own settings, so a run
+    that turns it off again has none. Until the driver runs, and then until its Spark has started the UI, or for good
+    where the run turned it off, the host answers with a `503` page asking to try again, and once the attempt has
+    ended, with a `404` one.
+  * **Once the attempt has ended**, the link, on port 18080, opens a Spark History Server over the run's event logs,
+    for the 30 days EMR Serverless keeps them: "By default, EMR Serverless stores application logs securely in Amazon
+    EMR managed storage for a maximum of 30 days". The run's driver writes its event logs where the release's image
+    says (`spark.eventLog.dir`, `file:///var/log/spark/apps`), on a Docker volume of the run's own, every attempt's
+    there, and the server runs in a container of the release's image that starts as its link is first opened, the host
+    answering with a `503` page until it answers, and stops once no link to it is valid. The server lists the run's
+    applications, one per attempt, rather than opening the attempt's. A history goes 30 days after its run ended, or
+    once its run has gone, which Floci checks as it starts and every hour; a restart keeps the histories, and a reset
+    removes them all. Each history and its server carry the owner label of the Floci that keeps them, so another
+    Floci sharing the Docker daemon leaves them alone. Where Docker cannot tell whether a history is kept, its host
+    answers with the `503` page too, rather than taking the history for gone.
+  * **Otherwise**, the link opens a page Floci serves at `/_aws/emr-serverless/dashboard` on its own address
+    (`base-url`, or `hostname`): for a run whose logs are not kept in managed storage, its
+    `managedPersistenceMonitoringConfiguration`, or else its application's, with `enabled` false, as with logs in S3
+    alone the application UI is "Not supported" ("Otherwise, you can't use the built-in application UIs"), so Floci
+    keeps none of its event logs; for a run that turns its event logs off (`spark.eventLog.enabled`) or sends them
+    elsewhere (`spark.eventLog.dir`), as nothing is kept for a history server to read; for a Hive run, as Floci runs
+    no Tez UI; once a history has gone; and in the `immediate` mode. The page shows the attempt's state, its times,
+    where its driver's logs go in S3 and in CloudWatch Logs, and whether they are kept in managed storage, kept as the
+    attempt was admitted, so a later change to the application's monitoring configuration does not move them. Its link
+    names the run and is signed with a key Floci makes as it starts: one changed, or past its hour, or given before
+    Floci restarted, opens a `403` page asking for a new one, and one whose run has gone a `404`.
+
+  Like the rest of Floci, no link asks for credentials. AWS's link, by a user's report, opens a limited number of times
+  ("This URL has already been used the maximum number of times. Please generate a new URL."); Floci's open as often as
+  asked within their hour. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
 
 ## Sessions
 
 A session is "a managed connection between your local PySpark client and a Spark driver running on Amazon EMR
-Serverless", through Spark Connect. Floci keeps a session and its lifecycle, but runs no Spark driver for it, so
-nothing answers Spark Connect at its endpoint.
+Serverless", through Spark Connect. With `runner-mode` set to `docker`, Floci runs that driver, a Spark Connect server,
+in a container, and a client reaches it through Floci (see [Running a session's Spark
+Connect server](#running-a-sessions-spark-connect-server)). With the default `immediate` mode, Floci keeps a session
+and its lifecycle but runs no driver for it.
 
 * **Starting**: `StartSession` needs a Spark application on `emr-7.13.0` or later, or on the AWS runtime for Apache
   Spark (`emr-spark-8.0.0` on), whose `interactiveConfiguration.sessionEnabled` is `true`. As for a job run, a
   `CREATED` or `STOPPED` application is started unless its auto-start is off, when the session is refused, and so is
   one on a terminated application. Each of these refusals is `ValidationException` in Floci's own wording, as AWS's is
-  not recorded. `clientToken` is the idempotency token, as for a job run. An application holds at most 25 sessions
+  not recorded. `clientToken` is the idempotency token, compared as for a job run: `idleTimeoutMinutes` left out or
+  60, `tags` left out or empty, and `configurationOverrides` without a `runtimeConfiguration` count as the same. An
+  application holds at most 25 sessions
   that have not ended, as "Each EMR Serverless application supports up to 25 concurrent sessions by default"; a 26th
   is refused with `ServiceQuotaExceededException` (HTTP 402). Of `configurationOverrides`, only `runtimeConfiguration`
   is kept: "Only runtime configuration overrides are supported." A `runtimeConfiguration` with a member of the wrong
   JSON type is refused with `SerializationException`, and a configuration without its `classification` with
   `ValidationException`. `releaseLabel` and `networkConfiguration` come from
   the application, and `createdBy` is the caller's ARN.
-* **States**: a session is `IDLE` as soon as it starts, with `startedAt` and `idleSince` set. It is `TERMINATED` once
-  it has been idle for its `idleTimeoutMinutes` (0 to 1,000,000, 60 when not given, as "Default timeout is set to 1
-  hour"), or once 24 hours have passed since it started, as "Each session has a hard limit of 24 hours by default",
-  whichever comes first. No source says what an idle timeout of `0` does; Floci reads it as no idle timeout, as for a
-  job run's `executionTimeoutMinutes`. Floci never reports `SUBMITTED`, `STARTING`, `STARTED`, `BUSY`, `FAILED` or
-  `TERMINATING`.
-* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session
-  that has already ended is refused with `ValidationException`, in Floci's own wording.
+* **States**: in the `immediate` mode a session is `IDLE` as soon as it starts, with `startedAt` and `idleSince` set; in
+  the `docker` mode it goes through `SUBMITTED`, `STARTING` and `IDLE`, then `BUSY` and back (see below). It is
+  `TERMINATED` once it has been idle for its `idleTimeoutMinutes` (0 to 1,000,000, 60 when not given, as "Default
+  timeout is set to 1 hour"), or once 24 hours have passed since it started, as "Each session has a hard limit of 24
+  hours by default", whichever comes first. No source says what an idle timeout of `0` does; Floci reads it as no idle
+  timeout, as for a job run's `executionTimeoutMinutes`. Floci never reports `STARTED`.
+* **TerminateSession** ends a session with no server at once as `TERMINATED`; one whose server runs is `TERMINATING`
+  until its container has stopped, as "After you terminate a session, it enters the TERMINATING state and then the
+  TERMINATED state". A session that has already ended is refused with `ValidationException`, in Floci's own wording.
 * **StopApplication** terminates the application's sessions that have not ended, with `stateDetails` saying so. The
   API reference requires a stopping application's job runs to have ended but names no such requirement for sessions,
   and once an application is stopped "no resources are running on the application"; AWS's own handling is not
   recorded.
-* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
-  (`/_aws/emr-serverless/sessions/<applicationId>/<sessionId>`) and a fresh authentication token that expires in an
-  hour, as "Authentication tokens are time-limited to 1 hour". Nothing answers Spark Connect there. A session that has
-  ended is refused with `ValidationException`, in Floci's own wording.
-* **ListSessions** returns the newest sessions first, filtered by `states`, `createdAtAfter` and `createdAtBefore`, at
-  most 50 per page, grouped by state as `ListJobRuns` groups runs.
+* **GetSessionEndpoint** answers for a session that has not ended with Floci's own address as its endpoint, such as
+  `http://localhost:4566`, and a fresh authentication token that expires in an hour, as "Authentication tokens are
+  time-limited to 1 hour". AWS's endpoint is an `https://` URL without a port; a Spark Connect URL holds no path, so
+  Floci's is its address alone, port included, and the token names the session. A session that has ended, or is
+  `TERMINATING`, is refused with `ValidationException`, in Floci's own wording.
+* **ListSessions** returns the newest sessions first, as `ListJobRuns` orders runs, filtered by `states`,
+  `createdAtAfter` and `createdAtBefore`, at most 50 per page, grouped by state as `ListJobRuns` groups runs.
 * **GetResourceDashboard** takes a `resourceType` of `SESSION`, the only one, and gives a link like
-  `GetDashboardForJobRun`'s, valid for an hour, to a page about the session on Floci's address, which stands in for
-  the session's Spark UI or Spark History Server. `accessSystemProfileLogs` changes nothing.
+  `GetDashboardForJobRun`'s, valid for an hour: "While a session is active, the URL opens the live Apache Spark UI",
+  and "After a session ends, the Spark History Server remains available". With `runner-mode` set to `docker`, a link
+  given before the session has ended, or begun to, opens its Spark Connect server's Spark UI, and one given after,
+  for 30 days, a Spark History Server over its kept event logs, as a run's link opens its driver's (see [Running a
+  session's Spark Connect server](#running-a-sessions-spark-connect-server)); any other, one given while the session
+  is `TERMINATING` among them, opens a page about the session on Floci's address. `accessSystemProfileLogs` changes
+  nothing.
 
 A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).
+
+### Running a session's Spark Connect server
+
+With `runner-mode` set to `docker`, each session runs a Spark Connect server in a container, as a job run's driver runs:
+in the release's image, or the application's custom image, on the same Docker network, with the execution role's
+credentials, and with its executors in containers of their own when `executor-containers` is above 0. Its
+`spark-defaults` are the application's runtime configuration, then the session's `runtimeConfiguration`, merged as a
+job run's `applicationConfiguration` is. Floci sets `spark.connect.grpc.binding.port` itself and drops a
+`spark.connect.grpc.binding.address`, as that setting "is reserved by EMR Serverless and cannot be overridden by users".
+The server's port is published on the Docker host's loopback interface only, and clients reach it through Floci.
+
+* **Connecting**: build the connection string from `GetSessionEndpoint`'s answer as AWS's guide does, with the token in
+  the `x-aws-proxy-auth` parameter, but keep the endpoint's port:
+
+  ```python
+  endpoint = emr.get_session_endpoint(applicationId=app_id, sessionId=session_id)
+  scheme, address = endpoint["endpoint"].split("://", 1)  # http, localhost:4566
+  tls = ";use_ssl=true" if scheme == "https" else ""
+  spark = SparkSession.builder.remote(
+      f"sc://{address}/{tls};x-aws-proxy-auth={endpoint['authToken']}").getOrCreate()
+  ```
+
+  Floci serves plain HTTP unless its TLS is on, so `use_ssl=true` goes only with an `https://` endpoint, and then the
+  client has to trust Floci's CA (`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` for PySpark). The endpoint is `floci.base-url`, as
+  every URL Floci hands out is, so where Floci is reached through another port, as a container's mapped port, set
+  `floci.base-url` to that address. As AWS says, the client's PySpark must match the release's Spark (3.5.6 for
+  `emr-7.13.0`).
+* **Tokens**: a call whose token Floci did not give, or which has expired, fails with gRPC's `UNAUTHENTICATED`, as
+  "When a token expires, gRPC calls fail with an authentication error". A call to a session that is not `IDLE` or
+  `BUSY`, or, in the `immediate` mode, to any session, fails with `UNAVAILABLE`, in Floci's own wording.
+* **States**: a session is `SUBMITTED` until its container runs, `STARTING` until the server answers, then `IDLE`, with
+  `startedAt` and `idleSince` set. No source says when a session is `BUSY`: Floci makes it `BUSY` while a call runs on
+  its server, and `IDLE` again once none does, its idle timeout counting from then. A server that does not answer
+  within 10 minutes, or stops on its own, fails its session with `stateDetails` saying so (why it did not answer, or
+  its exit code); one Floci stopped running when it restarted fails too, and its container, if one is left, goes. The
+  24 hours count from when the server answers.
+* **Logs**: no source gives where a session's driver logs go, so Floci sends the server's output to its own log only,
+  not to the application's monitoring configuration.
+* **Spark UI**: `GetResourceDashboard`'s link opens the server's Spark UI on a host of its own, as a run's link opens
+  its driver's (see **Dashboard** under job runs): port 4040 of the server's container, published on the host's
+  loopback interface alone. Its host answers with a `503` page until the server's container runs, and with a `404` one
+  once the session has ended. The server keeps its event logs on a volume of the session's own, so once the session has
+  ended a new link opens a Spark History Server over them, for 30 days, as a run's does.
 
 ## Running Spark job runs
 
@@ -223,14 +359,17 @@ worker of its own on EMR Serverless (see **Executors** below).
   the default, or on the host's network or another container's network namespace, where two runs' ports would meet, the
   executors run in the driver's container instead, in Spark's local mode.
 
-* **States**: a run is `SCHEDULED` while its image is pulled and its container starts (the first run
+* **States**: a run beyond its application's `maxConcurrentRuns` is `QUEUED` first, its container not started until
+  it leaves the queue (see **Concurrency and queuing** under job runs). A run is `SCHEDULED` while its image is
+  pulled and its container starts (the first run
   of a release pulls its image, 3.5 to 4.3 GB unpacked; a pull still downloading after
   [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md), five minutes by default,
   is tried again, three attempts in all, so on a slow connection raise it or run `docker pull` on the
   image first, or the run is `FAILED` with "Could not pull image"), and `RUNNING` once the Spark driver runs, which sets `startedAt`. It
   is `SUCCESS` when the driver exits with code 0 and `FAILED` otherwise, with the exit code in
   `stateDetails`. `CancelJobRun`, or a `BATCH` run passing its `executionTimeoutMinutes`, makes it
-  `CANCELLING` until the driver is stopped, then `CANCELLED`, as the job run states describe. A run
+  `CANCELLING` until the driver is stopped, or ends within its grace period (see **CancelJobRun** above), then
+  `CANCELLED`, as the job run states describe. A run
   Floci was running when it stopped is `FAILED` once it is read again. Floci's shutdown and a state
   reset stop every driver, one whose image is still being pulled included, and a driver a hard stop
   left running is removed the first time job runs are used after Floci restarts, unless
@@ -268,7 +407,13 @@ worker of its own on EMR Serverless (see **Executors** below).
   executors, in the driver's JVM in local mode, and the Python workers they start.
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
-  job's own SDK clients reach Floci too.
+  job's own SDK clients reach Floci too. A run's `executionIamPolicy.policy` scopes that session as an
+  assumed role's session policy does, so with IAM enforcement on "The resulting job IAM role permissions will be
+  an intersection of this policy and the policy associated with your job execution role". Its `policyArns` are
+  kept and given back but not applied, as Floci's IAM applies no managed session policy, an assumed role's
+  included. `StartJobRun` refuses an inline policy outside 1 to 2,048 characters, more than 10 policy ARNs, or
+  one outside 20 to 2,048 characters, with the framework's `ValidationException`, and either member of another
+  JSON type with `SerializationException`. Only those two members are kept.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, the container also gets Floci's CA bundle as a
   Java trust store, `/etc/floci-ca-bundle.p12`, which every JVM in it uses through
   `JAVA_TOOL_OPTIONS`, each saying so on its standard error (`Picked up JAVA_TOOL_OPTIONS: ...`); a
@@ -323,6 +468,8 @@ worker of its own on EMR Serverless (see **Executors** below).
   move every run to emulation. A host of another architecture runs the image under emulation, which Docker Desktop
   has and a Linux host gets from QEMU's `binfmt_misc` handlers; without it the driver cannot start
   ("exec format error") and the run fails. Floci does not fall back to the host's platform when the setting is on.
+  `CreateApplication` and `UpdateApplication` refuse an `architecture` other than `ARM64` or `X86_64`, the
+  model's enum, with the framework's `ValidationException`.
 
 ## Running Hive job runs
 
@@ -367,6 +514,6 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
-* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
+* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, the account's limit of 2000 `QUEUED` runs, a session's `totalResourceUtilization` and `billedResourceUtilization`, and a Hive run's (see **Resource utilization**), and Flex capacity (`flexExecution` is kept and given back only).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
-* **Sessions run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and nothing answers Spark Connect at the endpoint `GetSessionEndpoint` gives (see [Sessions](#sessions)).
+* **Sessions in the `immediate` mode run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and a Spark Connect call to it is refused; the `docker` mode runs one (see [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)).

@@ -42,12 +42,12 @@ public final class SigV4RequestValidator {
 
     /**
      * Well-known local-dev credential pair used pervasively by default AWS SDK clients
-     * (AwsBasicCredentials.create("test", "test")) against this emulator, mirrored from the
-     * identical fallback in S3Service/PreSignedUrlFilter. Deliberately not a fallback for any
-     * other unregistered access key, only this exact, already-public pair is honored.
+     * (AwsBasicCredentials.create("test", "test")) against this emulator. Every site that honors it
+     * reads it from here. Deliberately not a fallback for any other unregistered access key, only
+     * this exact, already-public pair is honored.
      */
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
+    public static final String LEGACY_ACCESS_KEY_ID = "test";
+    public static final String LEGACY_SECRET_KEY = "test";
 
     private final IamService iamService;
 

@@ -20,6 +20,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StarWildcard;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -1209,7 +1210,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = getInAccount(targetStore, accountId, ruleKey).orElse(List.of());
-                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
+                    String eventJson = buildEventEnvelope(entry, eventId, region, accountId);
                     for (Target target : targets) {
                         dispatcher.dispatch(rule.getArn(), target, eventJson, region,
                                 () -> getInAccount(targetStore, accountId, ruleKey).orElse(List.of()));
@@ -1508,6 +1509,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             if (element.has("suffix")) {
                 return value != null && value.endsWith(element.get("suffix").asText());
             }
+            // Amazon EventBridge User Guide, Comparison operators for use in event patterns,
+            // Matching using wildcards: each * matches any run of characters in a string value,
+            // and \* and \\ stand for a literal * and \.
+            if (element.has("wildcard")) {
+                JsonNode wildcard = element.get("wildcard");
+                return value != null && wildcard.isTextual()
+                        && StarWildcard.matchesEscaped(wildcard.asText(), value);
+            }
             if (element.has("equals-ignore-case")) {
                 return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
             }
@@ -1589,7 +1598,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     // ──────────────────────────── Target Routing ────────────────────────────
 
 
-    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId,
+    private String buildEventEnvelope(Map<String, Object> entry, String eventId,
                                       String callRegion, String callAccountId) {
         try {
             String source = (String) entry.getOrDefault("Source", "");
@@ -1621,7 +1630,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             node.put("region", envelopeRegion);
             node.putArray("resources").addAll(resources);
             node.set("detail", objectMapper.readTree(detail));
-            node.put("event-bus-name", busName);
             return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
@@ -2001,6 +2009,18 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Connection updateConnection(String name, String description, String authorizationType,
                                        String authParameters, String invocationConnectivityParameters,
                                        String kmsKeyIdentifier, String region) {
+        return updateConnection(name, description, authorizationType, authParameters,
+                invocationConnectivityParameters, kmsKeyIdentifier, Set.of(), region);
+    }
+
+    /**
+     * As {@link #updateConnection(String, String, String, String, String, String, String)}, and the
+     * settings named in {@code cleared} ({@code InvocationConnectivityParameters} or
+     * {@code KmsKeyIdentifier}) are removed, as a CloudFormation update that drops them does.
+     */
+    public Connection updateConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, Set<String> cleared, String region) {
         String key = connectionKey(region, name);
         Connection connection = connectionStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -2014,7 +2034,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             connection.setAuthorizationType(authorizationType);
         }
         if (description != null) {
-            connection.setDescription(description);
+            // An empty description clears it, as the stack update that sets one does
+            connection.setDescription(description.isEmpty() ? null : description);
         }
         if (authParameters != null) {
             connection.setAuthParameters(authParameters);
@@ -2025,11 +2046,42 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         if (kmsKeyIdentifier != null) {
             connection.setKmsKeyIdentifier(kmsKeyIdentifier);
         }
+        if (cleared.contains("InvocationConnectivityParameters")) {
+            connection.setInvocationConnectivityParameters(null);
+        }
+        if (cleared.contains("KmsKeyIdentifier")) {
+            connection.setKmsKeyIdentifier(null);
+        }
         Instant now = Instant.now();
         connection.setConnectionState(ConnectionState.AUTHORIZED);
         connection.setLastModifiedTime(now);
         connection.setLastAuthorizedTime(now);
         connectionStore.put(key, connection);
+        return connection;
+    }
+
+    /**
+     * Puts a connection's mutable settings back to the values {@code previous} carries, exactly:
+     * unlike {@link #updateConnection} a null clears the field, and the authorization state and
+     * timestamps come back with it. The ARN, secret ARN and creation time are the stored
+     * connection's own and stay. Used by a failed CloudFormation update to undo an in-place update.
+     */
+    public synchronized Connection restoreConnection(Connection previous, String region) {
+        String key = connectionKey(region, previous.getName());
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + previous.getName() + " does not exist.", 400));
+        connection.setDescription(previous.getDescription());
+        connection.setAuthorizationType(previous.getAuthorizationType());
+        connection.setAuthParameters(previous.getAuthParameters());
+        connection.setInvocationConnectivityParameters(previous.getInvocationConnectivityParameters());
+        connection.setKmsKeyIdentifier(previous.getKmsKeyIdentifier());
+        connection.setConnectionState(previous.getConnectionState());
+        connection.setStateReason(previous.getStateReason());
+        connection.setLastModifiedTime(previous.getLastModifiedTime());
+        connection.setLastAuthorizedTime(previous.getLastAuthorizedTime());
+        connectionStore.put(key, connection);
+        LOG.infov("Restored connection: {0}", previous.getName());
         return connection;
     }
 

@@ -47,4 +47,19 @@ public class RuntimeApiServerFactory {
     public void release(RuntimeApiServer server) {
         portAllocator.release(server.getPort());
     }
+
+    /**
+     * Stops a server whose environment failed to launch, waiting up to five seconds. Stop it before
+     * releasing its port, or the still-listening server makes a later cold start that reuses the port
+     * serve this runtime too.
+     */
+    public static void stopBeforeRelease(RuntimeApiServer server) {
+        try {
+            server.stop().get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.debugv("Runtime API server stop failed during launch cleanup: {0}", e.getMessage());
+        }
+    }
 }

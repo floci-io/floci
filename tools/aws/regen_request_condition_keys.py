@@ -22,6 +22,12 @@ it. `SERVICES` names, for each namespace, the keys read and where:
   name as `route53:ChangeResourceRecordSetsActions`, `...RecordTypes` and `...NormalizedRecordNames`. The names
   are read as `DNSName` members, which Route 53 spells as AWS normalizes them for the key, through the spelling
   the service registers for that shape.
+- `sts`: an AssumeRole request is checked with the session name and external ID it passes as
+  `sts:RoleSessionName` and `sts:ExternalId`, so the caller's identity-based policy can require them as a
+  trust policy can; an AssumeRole without `ExternalId` names none. AssumeRoleWithWebIdentity carries
+  `RoleSessionName` too, but is not signed, so no identity-based policy is evaluated for it.
+  `sts:SourceIdentity`, `sts:TransitiveTagKeys` and the session tags are not read: Floci does not model source
+  identity or session tags.
 
 The table comes from two sources:
 
@@ -117,6 +123,15 @@ SERVICES = {
                     "route53:ChangeResourceRecordSetsRecordTypes": "Type"},
         "stored": (),
         "not_in_request": {},
+    },
+    "sts": {
+        "model": "sts",
+        "request": {"sts:ExternalId": "ExternalId", "sts:RoleSessionName": "RoleSessionName"},
+        "stored": (),
+        "not_in_request": {
+            ("sts:AssumeRoleWithSAML", "sts:RoleSessionName"): "the session name is the assertion's RoleSessionName "
+                                                               "attribute, not a request member",
+        },
     },
 }
 

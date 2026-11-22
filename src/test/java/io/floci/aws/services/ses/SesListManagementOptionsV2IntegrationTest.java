@@ -24,8 +24,7 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesListManagementOptionsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("us-west-2");
     private static final String LIST = "lmo-newsletter";
     private static final String FROM = "lmo-sender@floci.test";
 

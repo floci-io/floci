@@ -4,9 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.emrserverless.EmrServerlessAppUis;
 import io.floci.aws.services.emrserverless.EmrServerlessController;
-import io.floci.aws.services.emrserverless.EmrServerlessDashboards;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
 import io.floci.aws.services.emrserverless.EmrServerlessService;
 import io.floci.aws.services.emrserverless.EmrServerlessSessionService;
@@ -32,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -82,8 +82,8 @@ class AslExecutorEmrServerlessSyncTest {
                 .sfnService(instance)
                 .customResourceLiveness(null)
                 .emrServerlessTaskInvoker(new EmrServerlessTaskInvoker(
-                        new EmrServerlessController(applications, jobRuns, sessions,
-                                mock(EmrServerlessDashboards.class), mock(RegionResolver.class)), objectMapper))
+                        new EmrServerlessController(applications, jobRuns, sessions, mock(EmrServerlessAppUis.class)),
+                        objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();
@@ -127,37 +127,37 @@ class AslExecutorEmrServerlessSyncTest {
         assertEquals("data", run.path("Tags").path("team").asText());
         assertEquals("4g", run.path("ConfigurationOverrides").path("ApplicationConfiguration").path(0)
                 .path("Properties").path("spark.executor.memory").asText());
-        verify(jobRuns, never()).cancelJobRun(anyString(), anyString());
+        verify(jobRuns, never()).cancelJobRun(anyString(), anyString(), any());
     }
 
     @Test
     void startJobRunSyncCancelsItsRunWhenTheTaskTimesOut() {
         when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("RUNNING"));
-        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID)).thenReturn(jobRun("CANCELLED"));
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("CANCELLED"));
 
         Execution execution = run(timingOut("startJobRun.sync"), START_JOB_RUN);
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Timeout", execution.getError());
-        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID);
+        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null);
     }
 
     @Test
     void startJobRunSyncStillTimesOutWhenEmrServerlessRefusesTheCancel() {
         when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("RUNNING"));
-        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID))
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null))
                 .thenThrow(new AwsException("ValidationException", "Job run is not in a cancellable state", 400));
 
         Execution execution = run(timingOut("startJobRun.sync"), START_JOB_RUN);
 
         assertEquals("States.Timeout", execution.getError());
-        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID);
+        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null);
     }
 
     @Test
     void anInternalErrorCancellingTheRunFailsTheTaskWithIt() {
         when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("RUNNING"));
-        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID))
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null))
                 .thenThrow(new AwsException("InternalServerException", "Request processing failed", 500));
 
         Execution execution = run(timingOut("startJobRun.sync"), START_JOB_RUN);
@@ -169,7 +169,8 @@ class AslExecutorEmrServerlessSyncTest {
     @Test
     void aFaultWhileCancellingTheRunIsNotPassedOver() {
         when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("RUNNING"));
-        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID)).thenThrow(new IllegalStateException("store closed"));
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null))
+                .thenThrow(new IllegalStateException("store closed"));
 
         Execution execution = run(timingOut("startJobRun.sync"), START_JOB_RUN);
 
@@ -180,7 +181,7 @@ class AslExecutorEmrServerlessSyncTest {
 
     @Test
     void cancelJobRunSyncFailsWhenTheRunSucceedsInstead() throws Exception {
-        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID)).thenReturn(jobRun("CANCELLING"));
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("CANCELLING"));
         when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("SUCCESS"));
 
         Execution execution = run(task("cancelJobRun.sync"),
@@ -188,6 +189,33 @@ class AslExecutorEmrServerlessSyncTest {
 
         assertEquals("States.TaskFailed", execution.getError());
         assertEquals("SUCCESS", objectMapper.readTree(execution.getCause()).path("JobRun").path("State").asText());
+    }
+
+    @Test
+    void cancelJobRunSyncPassesItsGracePeriodOn() {
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, 30)).thenReturn(jobRun("CANCELLING"));
+        when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("CANCELLED"));
+
+        Execution execution = run(task("cancelJobRun.sync"), "{\"ApplicationId\": \"" + APPLICATION_ID
+                + "\", \"JobRunId\": \"" + JOB_RUN_ID + "\", \"ShutdownGracePeriodInSeconds\": 30}");
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID, 30);
+    }
+
+    @Test
+    void cancelJobRunSyncReadsItsGracePeriodInEitherCaseAndRefusesOneThatIsNotANumber() {
+        when(jobRuns.cancelJobRun(APPLICATION_ID, JOB_RUN_ID, 45)).thenReturn(jobRun("CANCELLING"));
+        when(jobRuns.getJobRun(APPLICATION_ID, JOB_RUN_ID, null)).thenReturn(jobRun("CANCELLED"));
+        String ids = "{\"applicationId\": \"" + APPLICATION_ID + "\", \"jobRunId\": \"" + JOB_RUN_ID + "\", ";
+
+        Execution lowercase = run(task("cancelJobRun.sync"), ids + "\"shutdownGracePeriodInSeconds\": 45}");
+        Execution structure = run(task("cancelJobRun.sync"), ids + "\"ShutdownGracePeriodInSeconds\": {}}");
+
+        assertEquals("SUCCEEDED", lowercase.getStatus());
+        verify(jobRuns).cancelJobRun(APPLICATION_ID, JOB_RUN_ID, 45);
+        assertEquals("FAILED", structure.getStatus());
+        verify(jobRuns, times(1)).cancelJobRun(anyString(), anyString(), any());
     }
 
     @Test

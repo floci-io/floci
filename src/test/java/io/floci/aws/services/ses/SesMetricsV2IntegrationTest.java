@@ -34,8 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesMetricsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/sa-east-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("sa-east-1");
     private static final String SENDER = "metrics-sender@example.com";
 
     private static final long DAY = Duration.ofDays(1).toSeconds();

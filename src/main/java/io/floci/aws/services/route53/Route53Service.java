@@ -645,17 +645,17 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
                 recordStore.get(zoneId).orElse(List.of()));
 
         records.sort((a, b) -> {
-            int cmp = normalizeRecordName(a.getName()).compareTo(normalizeRecordName(b.getName()));
+            int cmp = Route53RecordName.sortKey(a.getName()).compareTo(Route53RecordName.sortKey(b.getName()));
             if (cmp != 0) return cmp;
             return a.getType().compareTo(b.getType());
         });
 
         if (startName != null && !startName.isEmpty()) {
-            String normalizedStart = normalizeRecordName(startName);
+            String startKey = Route53RecordName.sortKey(startName);
             final String finalStartType = startType;
             records = records.stream()
                     .filter(r -> {
-                        int cmp = normalizeRecordName(r.getName()).compareTo(normalizedStart);
+                        int cmp = Route53RecordName.sortKey(r.getName()).compareTo(startKey);
                         if (cmp > 0) return true;
                         if (cmp == 0 && finalStartType != null && !finalStartType.isEmpty()) {
                             return r.getType().compareTo(finalStartType) >= 0;
@@ -849,14 +849,14 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
                 String rName = normalizeName(rrs.getName()).toLowerCase();
                 if (rName.equals(normalizedQname)) {
                     nameMatches.add(rrs);
-                } else if (rName.startsWith("*.")) {
+                } else if (wildcardSuffix(rName) != null) {
                     zoneWildcards.add(rrs);
                 }
             }
             if (nameMatches.isEmpty()) {
                 for (ResourceRecordSet rrs : zoneWildcards) {
                     String rName = normalizeName(rrs.getName()).toLowerCase();
-                    String wildcardSuffix = rName.substring(2); // e.g. "corp.internal."
+                    String wildcardSuffix = wildcardSuffix(rName); // e.g. "corp.internal."
                     if (normalizedQname.endsWith("." + wildcardSuffix)) {
                         // A wildcard cannot match when the name or an ancestor closer than the wildcard's
                         // parent exists, and a name with records only beneath it exists too (RFC 4592 2.2)
@@ -871,6 +871,17 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
             }
         }
         return !nameMatches.isEmpty() ? nameMatches : wildcardMatches;
+    }
+
+    /** Parent domain of a wildcard record name, accepting both Route 53's {@code \052.} and legacy {@code *.} forms. */
+    private static String wildcardSuffix(String rName) {
+        if (rName.startsWith("\\052.")) {
+            return rName.substring(5);
+        }
+        if (rName.startsWith("*.")) {
+            return rName.substring(2);
+        }
+        return null;
     }
 
     /** Length of the longest whole-label suffix two normalized names share, trailing dot included. */

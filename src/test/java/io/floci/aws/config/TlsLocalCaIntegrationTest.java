@@ -1,9 +1,6 @@
 package io.floci.aws.config;
 
-import io.floci.aws.services.acm.CertificateGenerator;
-import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.bouncycastle.asn1.x509.Extension;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -18,13 +15,10 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.List;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,10 +29,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * Boots the HTTP server on the TLS registry keys {@code TlsConfigSource} publishes, with a leaf
  * issued by the local CA, and proves a client that trusts only {@code GET /_floci/ca.pem} completes
  * a handshake. A file assertion cannot show that Quarkus read the registry entry or that the served
- * chain is the CA's; only a handshake can.
+ * chain is the CA's; only a handshake can. {@link SelfSignedTlsProfile} lays the CA and the leaf down
+ * the way {@code TlsConfigSource} would, under the persistent path the CA endpoint reads.
  */
 @QuarkusTest
-@TestProfile(TlsLocalCaIntegrationTest.LocalCaProfile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class TlsLocalCaIntegrationTest {
 
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
@@ -93,40 +88,5 @@ class TlsLocalCaIntegrationTest {
     private static X509Certificate parse(String pem) throws Exception {
         return (X509Certificate) CertificateFactory.getInstance("X.509")
                 .generateCertificate(new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)));
-    }
-
-    /**
-     * Lays down what {@code TlsConfigSource} would: a CA under {persistent-path}/tls and a leaf
-     * issued by it, published as the registry's default key store. The persistent path is the
-     * same directory, so the CDI producer behind {@code /_floci/ca.pem} loads the same CA.
-     */
-    public static final class LocalCaProfile implements QuarkusTestProfile {
-
-        private static final Path DATA_DIR = Path.of("target", "floci-tls-local-ca-test").toAbsolutePath();
-        private static final Path TLS_DIR = DATA_DIR.resolve("tls");
-        private static final Path CERT_FILE = TLS_DIR.resolve("floci-server.crt");
-        private static final Path KEY_FILE = TLS_DIR.resolve("floci-server.key");
-
-        static {
-            try {
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", List.of("localhost", "127.0.0.1"),
-                        KeyAlgorithm.RSA_2048, null);
-                Files.writeString(CERT_FILE, leaf.certificatePem());
-                Files.writeString(KEY_FILE, leaf.privateKeyPem());
-            } catch (IOException e) {
-                throw new IllegalStateException("Failed to prepare the local CA test files", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", CERT_FILE.toString(),
-                    "quarkus.tls.key-store.pem.0.key", KEY_FILE.toString(),
-                    "quarkus.http.insecure-requests", "enabled"
-            );
-        }
     }
 }

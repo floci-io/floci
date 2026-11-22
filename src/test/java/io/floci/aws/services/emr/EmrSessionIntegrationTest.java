@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EmrRequests.emr;
-import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -83,7 +82,7 @@ class EmrSessionIntegrationTest {
 
         emr("GetSessionEndpoint", "{\"ClusterId\":\"" + clusterId + "\",\"SessionId\":\"" + sessionId + "\"}")
                 .then().statusCode(200)
-                .body("Endpoint", endsWith("/_aws/emr/sessions/" + clusterId + "/" + sessionId))
+                .body("Endpoint", matchesPattern("https?://[^/]+"))
                 .body("AuthToken", matchesPattern("[0-9a-f]{64}"))
                 .body("AuthTokenExpirationTime", notNullValue());
 

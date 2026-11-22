@@ -93,6 +93,8 @@ class EcsContainerManagerSharedTaskNetworkTest {
         when(containerBuilder.resolveDockerNetwork(any())).thenReturn(Optional.of(NETWORK));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()));

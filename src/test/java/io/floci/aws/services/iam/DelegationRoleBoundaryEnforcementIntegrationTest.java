@@ -1,7 +1,7 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.RequestScopes;
-import io.floci.aws.testing.PartnerPermissionBoundaryEnforcementProfile;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -30,7 +30,7 @@ import static org.hamcrest.Matchers.equalTo;
  * so the approver's own policy is what authorizes the write and what the condition is read against.
  */
 @QuarkusTest
-@TestProfile(PartnerPermissionBoundaryEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class DelegationRoleBoundaryEnforcementIntegrationTest {
 
     private static final String CUSTOMER = "222233334444";

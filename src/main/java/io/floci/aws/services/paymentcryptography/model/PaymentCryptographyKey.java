@@ -66,9 +66,15 @@ public class PaymentCryptographyKey {
     private String keyCertificatePem;
     private long createTimestamp;
     private long usageStartTimestamp;
+    private long usageStopTimestamp;
     private long deletePendingTimestamp;
     private long deleteTimestamp;
     private volatile Map<String, String> tags = new HashMap<>();
+    /**
+     * The resource-based policy attached to the key, in JSON, or null when the key has none.
+     * It is the key's own, so it goes when the key goes.
+     */
+    private String resourcePolicy;
     /** The region of the primary of a multi-region key, and its own region otherwise. */
     private String primaryRegion;
     /** The regions a multi-region key is in, besides the primary's. */
@@ -157,6 +163,12 @@ public class PaymentCryptographyKey {
         this.usageStartTimestamp = usageStartTimestamp;
     }
 
+    /** When the key was last stopped, zero while it has not been stopped. */
+    public long getUsageStopTimestamp() { return usageStopTimestamp; }
+    public void setUsageStopTimestamp(long usageStopTimestamp) {
+        this.usageStopTimestamp = usageStopTimestamp;
+    }
+
     /** When the key is deleted, zero while it is not scheduled for deletion. */
     public long getDeletePendingTimestamp() { return deletePendingTimestamp; }
     public void setDeletePendingTimestamp(long deletePendingTimestamp) {
@@ -183,4 +195,8 @@ public class PaymentCryptographyKey {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    /** The resource-based policy of the key, or null when it has none. */
+    public String getResourcePolicy() { return resourcePolicy; }
+    public void setResourcePolicy(String resourcePolicy) { this.resourcePolicy = resourcePolicy; }
 }

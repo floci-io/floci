@@ -8,7 +8,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.kafka.KafkaHeaderDto;
+import io.floci.aws.core.common.kafka.KafkaOffsetDto;
+import io.floci.aws.core.common.kafka.KafkaRecordDto;
+import io.floci.aws.core.common.kafka.KafkaTopicPartition;
 import io.floci.aws.services.dynamodb.DynamoDbTtlIdentity;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader;
 import io.floci.aws.services.kinesis.KinesisService;
@@ -58,7 +63,7 @@ public class PipesPoller implements Resettable {
     private final PipesFilterMatcher filterMatcher;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
-    private final String defaultRegion;
+    private final RegionResolver regionResolver;
     private volatile LongSupplier clockMs = System::currentTimeMillis;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
@@ -80,7 +85,8 @@ public class PipesPoller implements Resettable {
                        PipesTargetInvoker targetInvoker,
                        PipesFilterMatcher filterMatcher,
                        ObjectMapper objectMapper,
-                       EmulatorConfig config) {
+                       EmulatorConfig config,
+                       RegionResolver regionResolver) {
         this.vertx = vertx;
         this.sqsService = sqsService;
         this.kinesisService = kinesisService;
@@ -90,7 +96,7 @@ public class PipesPoller implements Resettable {
         this.filterMatcher = filterMatcher;
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
-        this.defaultRegion = config.defaultRegion();
+        this.regionResolver = regionResolver;
     }
 
     void setClockForTest(LongSupplier clockMs) {
@@ -154,7 +160,8 @@ public class PipesPoller implements Resettable {
                     return;
                 }
                 String sourceArn = pipe.getSource();
-                String region = extractRegionFromArn(sourceArn);
+                // A source that names no Region, such as a self-managed Kafka URI, polls in the default Region.
+                String region = regionResolver.regionOf(sourceArn);
                 if (sourceArn.contains(":sqs:")) {
                     pollSqs(pipe, region);
                 } else if (sourceArn.contains(":kinesis:")) {
@@ -757,7 +764,7 @@ public class PipesPoller implements Resettable {
         List<ObjectNode> nodes = new ArrayList<>();
         for (Message msg : messages) {
             nodes.add(SqsEventRecordBuilder.build(objectMapper, msg, pipe.getSource(),
-                    extractRegionFromArn(pipe.getSource()), clockMs));
+                    regionResolver.regionOf(pipe.getSource()), clockMs));
         }
         return nodes;
     }
@@ -937,11 +944,6 @@ public class PipesPoller implements Resettable {
     /** Keys polling state by pipe lifetime, so a pipe recreated under the same ARN starts afresh. */
     private static String pipeKey(Pipe pipe) {
         return pipe.getArn() + "@" + pipe.getCreationTime();
-    }
-
-    /** The region a source ARN names; a source with none, such as a self-managed Kafka URI, polls in the default. */
-    String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
     /**

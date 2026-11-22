@@ -55,6 +55,7 @@ import io.floci.aws.services.iot.IotController;
 import io.floci.aws.services.iot.IotDataController;
 import io.floci.aws.services.iot.IotDomainConfigurationController;
 import io.floci.aws.services.iot.IotFleetIndexingController;
+import io.floci.aws.services.iot.IotLoggingController;
 import io.floci.aws.services.lakeformation.LakeFormationController;
 import io.floci.aws.services.lambda.LambdaController;
 import io.floci.aws.services.lambda.durable.DurableExecutionController;
@@ -664,7 +665,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("TransferService."), Set.of("transfer"), Set.of(), Set.of()),
                 descriptor("route53", "route53", config.services().route53().enabled(), true,
-                        "route53", config.storage().mode(), 5000L, null, ServiceProtocol.REST_XML,
+                        "route53", config.storage().mode(), 5000L, AwsNamespaces.ROUTE53, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("route53"), Set.of(), Set.of(Route53Controller.class)),
                 descriptor("textract", "textract", config.services().textract().enabled(), true,
@@ -755,7 +756,8 @@ public class ResolvedServiceCatalog {
                         // signs under its own name while IotController serves its /things/*/jobs routes
                         Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class, IotDomainConfigurationController.class,
-                                IotAuthorizerController.class, IotFleetIndexingController.class)),
+                                IotAuthorizerController.class, IotFleetIndexingController.class,
+                                IotLoggingController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

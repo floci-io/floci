@@ -324,6 +324,78 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresInitSqlCreatesRdsReplicationRoleWhenMissing() {
+        String sql = RdsContainerManager.postgresIamRoleInitSql();
+
+        assertTrue(sql.contains("rolname = 'rds_replication'"));
+        assertTrue(sql.contains("CREATE ROLE rds_replication"));
+    }
+
+    @Test
+    void postgresIsInitializedAsRdsadminWithTheMasterCreatedByTheInitScript() {
+        List<String> env = RdsContainerManager.buildEnvVars(DatabaseEngine.POSTGRES, "admin", "Secret1!", "appdb");
+
+        assertTrue(env.contains("POSTGRES_USER=rdsadmin"));
+        assertTrue(env.contains("POSTGRES_DB=appdb"));
+        assertFalse(env.contains("POSTGRES_PASSWORD=Secret1!"), "rdsadmin must not get the master user's password");
+        assertTrue(env.stream().anyMatch(variable -> variable.matches("POSTGRES_PASSWORD=[0-9a-f]{48}")));
+    }
+
+    @Test
+    void postgresMasterNamedRdsadminStaysTheBootstrapSuperuser() {
+        assertFalse(RdsContainerManager.bootstrapsAsAdminRole("rdsadmin"));
+        assertTrue(RdsContainerManager.bootstrapsAsAdminRole("admin"));
+        assertTrue(RdsContainerManager.bootstrapsAsAdminRole(null));
+        assertEquals(List.of("POSTGRES_USER=rdsadmin", "POSTGRES_PASSWORD=Secret1!", "POSTGRES_DB=rdsadmin",
+                        "POSTGRES_HOST_AUTH_METHOD=md5"),
+                RdsContainerManager.buildEnvVars(DatabaseEngine.POSTGRES, "rdsadmin", "Secret1!", null));
+    }
+
+    @Test
+    void postgresMasterInitSqlCreatesTheMasterAsAnOrdinaryRoleThatOwnsItsDatabases() {
+        String sql = RdsContainerManager.postgresMasterInitSql("ad\"min", "it's", "appdb");
+
+        assertTrue(sql.startsWith("CREATE ROLE \"ad\"\"min\" WITH LOGIN PASSWORD 'it''s';\n"));
+        assertTrue(sql.contains("ALTER ROLE \"ad\"\"min\" WITH LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE"
+                + " NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';"));
+        assertTrue(sql.contains("GRANT rds_superuser TO \"ad\"\"min\";"));
+        assertTrue(sql.contains("ALTER DATABASE postgres OWNER TO \"ad\"\"min\";"));
+        assertTrue(sql.contains("ALTER DATABASE template1 OWNER TO \"ad\"\"min\";"));
+        assertTrue(sql.endsWith("ALTER DATABASE \"appdb\" OWNER TO \"ad\"\"min\";\n"));
+        assertFalse(RdsContainerManager.postgresMasterInitSql("admin", "pw", "postgres")
+                .contains("ALTER DATABASE \"postgres\""));
+        assertTrue(RdsContainerManager.postgresMasterInitSql("admin", "pw", "rdsadmin")
+                .endsWith("ALTER DATABASE \"rdsadmin\" OWNER TO \"admin\";\n"),
+                "A database requested as rdsadmin must be the master's, which the role setup closes to others");
+    }
+
+    @Test
+    void postgresRdsRolesSqlGrantsRdsSuperuserWhatRdsGrantsIt() {
+        String sql = RdsContainerManager.postgresRdsRolesSql("admin");
+
+        assertTrue(sql.contains("ARRAY['rds_superuser', 'rds_password', 'rds_replication', 'rds_iam']"));
+        assertTrue(sql.contains("'pg_monitor', 'pg_read_all_data', 'pg_signal_backend'"));
+        assertTrue(sql.contains("GRANT %I TO rds_superuser WITH ADMIN OPTION"));
+        assertTrue(sql.contains("GRANT rds_iam TO rds_superuser WITH ADMIN OPTION, INHERIT FALSE, SET FALSE"),
+                "The master must be able to grant rds_iam without becoming an IAM-only member of it");
+        assertTrue(sql.contains("SELECT 'CREATE DATABASE rdsadmin' WHERE NOT EXISTS"));
+        assertTrue(sql.contains("\n\\gexec\n"));
+        assertTrue(sql.endsWith("REVOKE ALL ON DATABASE rdsadmin FROM PUBLIC;\n"));
+    }
+
+    @Test
+    void restoreScriptTakesTheKeptDatabasesFromTheRolesItDropsAndEndsWithTheClosingSql() {
+        String script = RdsContainerManager.postgresRestoreScript("SELECT 'closing';\n");
+
+        int owners = script.indexOf("ALTER DATABASE template1 OWNER TO CURRENT_USER");
+        int drops = script.indexOf("DROP ROLE IF EXISTS");
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        assertTrue(script.contains("ALTER DATABASE postgres OWNER TO CURRENT_USER"));
+        assertTrue(owners >= 0 && owners < drops, "A kept database must not keep a role from being dropped");
+        assertTrue(script.indexOf("SELECT 'closing';") > replay);
+    }
+
+    @Test
     void mysqlMasterGrantSqlGrantsGlobalPrivilegesWithGrantOption() {
         String sql = RdsContainerManager.mysqlMasterGrantSql("admin");
 
@@ -566,7 +638,7 @@ class RdsContainerManagerTest {
         verify(lifecycleManager).create(spec.capture());
         assertEquals(dbPath.toString(), spec.getValue().binds().getFirst().getPath());
         assertEquals("floci-aws-rds-db1", spec.getValue().name());
-        verify(logStreamer).attachForAccount(
+        verify(logStreamer).attachPolledForAccount(
                 "222222222222", "container-id", "/aws/rds/instance/db1/error",
                 "log-stream", "us-west-2", "rds:" + runtimeId);
     }
@@ -807,8 +879,7 @@ class RdsContainerManagerTest {
                 .when(lifecycleManager).removeIfExistsStrict(any());
         doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -829,8 +900,7 @@ class RdsContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.create(any()))
                 .thenThrow(new IllegalStateException("no such image: mysql:8.0"));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
@@ -842,14 +912,32 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void aRenamedRuntimeKeepsItsPostgresSuperuserLogin() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "blue-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("blue", 3306))));
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String blue = "arn:aws:rds:us-east-1:000000000000:db:blue";
+        String green = "arn:aws:rds:us-east-1:000000000000:db:green";
+        manager.start(blue, "blue", null, DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        RdsContainerHandle.PostgresSuperuser login = new RdsContainerHandle.PostgresSuperuser("rdsadmin", "secret");
+        manager.getActiveHandle(blue).setPostgresSuperuser(login);
+
+        manager.renameRuntime(blue, green, "green");
+
+        assertSame(login, manager.postgresHandoverLogin(green));
+        assertEquals("rdsadmin", manager.postgresSuperuser("blue-container", "admin"));
+        assertNull(manager.postgresHandoverLogin(blue));
+    }
+
+    @Test
     void tryStartSucceedsForTheSameRuntimeOnceADaemonAppears() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         doThrow(new IllegalStateException("Failed to remove stale container floci-rds-db1"))
                 .when(lifecycleManager).removeIfExistsStrict(any());
         doThrow(new IllegalStateException("Failed to remove container floci-rds-db1"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -860,8 +948,7 @@ class RdsContainerManagerTest {
         Mockito.reset(lifecycleManager);
         stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
                 "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
@@ -881,8 +968,7 @@ class RdsContainerManagerTest {
                 .thenThrow(new IllegalStateException("java.net.SocketException: Connection reset"));
         doThrow(new IllegalStateException("Failed to remove container created-container"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -917,8 +1003,7 @@ class RdsContainerManagerTest {
                 .thenThrow(new IllegalStateException("connection reset after Docker create"));
         doThrow(new IllegalStateException("fixed-name cleanup unavailable"))
                 .when(lifecycleManager).stopAndRemoveStrict(any(), any());
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -1100,7 +1185,7 @@ class RdsContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("db1", 3307))));
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
-        when(logStreamer.attachForAccount(any(), any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolledForAccount(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed"))
                 .thenReturn(null);
         RdsContainerManager manager = new RdsContainerManager(
@@ -1136,7 +1221,7 @@ class RdsContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
-        when(logStreamer.attachForAccount(any(), any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolledForAccount(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed"));
         doThrow(new IllegalStateException("Docker cleanup failed"))
                 .doNothing()
@@ -1548,6 +1633,15 @@ class RdsContainerManagerTest {
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
                 "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptCreatesThePredefinedRolesAfterReplayingTheDump() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        int roles = script.indexOf(RdsContainerManager.postgresIamRoleInitSql());
+        assertTrue(replay >= 0 && roles > replay, "Roles a dump lacks must be created after it is replayed");
     }
 
     @Test

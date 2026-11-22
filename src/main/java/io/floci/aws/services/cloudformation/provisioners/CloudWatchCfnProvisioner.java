@@ -7,6 +7,7 @@ import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -77,10 +78,19 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
         addAlarmActions(props, "OKActions", ctx, alarm.getOkActions());
         addAlarmActions(props, "InsufficientDataActions", ctx, alarm.getInsufficientDataActions());
 
-        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region());
+        BigInteger interval = ctx.resolveOptionalBigInteger(props, "EvaluationInterval");
+        if (interval != null && declaresMetrics(props)) {
+            CloudWatchMetricsService.rejectEvaluationInterval(name, interval, true);
+        }
+        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region(), interval);
         // Ref returns the alarm name; Fn::GetAtt Arn returns the alarm ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", alarm.getAlarmArn());
+    }
+
+    /** Whether the template sets a non-empty {@code Metrics} (the engine has dropped {@code AWS::NoValue} by now). */
+    private static boolean declaresMetrics(JsonNode props) {
+        return props != null && props.path("Metrics").size() > 0;
     }
 
     private void addAlarmActions(JsonNode props, String field, ProvisionContext ctx, List<String> target) {

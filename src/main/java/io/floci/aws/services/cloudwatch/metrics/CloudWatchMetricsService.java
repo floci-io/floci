@@ -32,6 +32,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -149,7 +150,7 @@ public class CloudWatchMetricsService {
                 datum.setTimestamp(nowSeconds);
             }
             // Synthesize StatisticValues if only a scalar value was provided
-            if (datum.getSampleCount() == 0 && datum.getSum() == 0) {
+            if (!datum.hasSampleCount() && datum.getSum() == 0) {
                 datum.setSampleCount(1);
                 datum.setSum(datum.getValue());
                 datum.setMinimum(datum.getValue());
@@ -322,7 +323,9 @@ public class CloudWatchMetricsService {
             if (parts.length < 6) return false;
             try {
                 long ts = Long.parseLong(parts[parts.length - 2]);
-                return ts >= startEpoch && ts <= endEpoch;
+                boolean beforeEnd = endTime == null || ts < endEpoch
+                        || (ts == endEpoch && endTime.getNano() > 0);
+                return ts >= startEpoch && beforeEnd;
             } catch (NumberFormatException e) {
                 return false;
             }
@@ -420,11 +423,57 @@ public class CloudWatchMetricsService {
      * a child changes state.
      */
     public synchronized void putMetricAlarm(MetricAlarm alarm, String region) {
+        putMetricAlarm(alarm, region, null);
+    }
+
+    /**
+     * Creates or updates a metric alarm. An {@code evaluationInterval}, an integer of any size, is checked after
+     * the alarm name and against its range of 10 to 3600, then against the alarm: the PutMetricAlarm reference
+     * says it "cannot be specified" for an alarm configured with MetricName or Metrics.
+     */
+    public synchronized void putMetricAlarm(MetricAlarm alarm, String region, BigInteger evaluationInterval) {
+        if (evaluationInterval != null) {
+            rejectEvaluationInterval(alarm.getAlarmName(), evaluationInterval,
+                    alarm.getMetricName() != null || !alarm.getMetrics().isEmpty());
+        }
+        if (alarm.getStatistic() != null && !alarm.getStatistic().isBlank()
+                && alarm.getExtendedStatistic() != null && !alarm.getExtendedStatistic().isBlank()) {
+            throw new AwsException("ValidationError",
+                    "PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                            + "Only one of them should be present", 400);
+        }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
         if (created) {
             evaluateComposites(region, Set.of(alarm.getAlarmName()));
         }
+    }
+
+    /**
+     * Refuses an {@code EvaluationInterval} as {@code PutMetricAlarm} does: by the alarm name, then the range, then
+     * the alarm's configuration. Public for the CloudFormation provisioner, which does not keep a template's
+     * {@code Metrics} on the alarm it passes to {@link #putMetricAlarm(MetricAlarm, String, BigInteger)}.
+     */
+    public static void rejectEvaluationInterval(String alarmName, BigInteger interval, boolean metricConfigured) {
+        List<String> violations = Stream.of(alarmNameViolation(alarmName), rangeViolation(interval))
+                .filter(Objects::nonNull).toList();
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+        if (metricConfigured) {
+            throw CloudWatchMetricsException.invalidParameterCombination(
+                    "EvaluationInterval cannot be specified for alarms configured with MetricName or Metrics.");
+        }
+    }
+
+    private static String rangeViolation(BigInteger interval) {
+        if (interval.compareTo(BigInteger.valueOf(10)) < 0) {
+            return SmithyValidationErrors.valueTooSmall("evaluationInterval", interval.toString(), 10);
+        }
+        if (interval.compareTo(BigInteger.valueOf(3600)) > 0) {
+            return SmithyValidationErrors.valueTooLarge("evaluationInterval", interval.toString(), 3600);
+        }
+        return null;
     }
 
     public void putCompositeAlarm(CompositeAlarm alarm, String region) {
@@ -467,13 +516,19 @@ public class CloudWatchMetricsService {
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private void putAlarm(Alarm alarm, String region) {
-        String name = alarm.getAlarmName();
+    /** The violation of the alarm name's constraints, or null for a name that meets them. */
+    private static String alarmNameViolation(String name) {
         String violation = name == null ? SmithyValidationErrors.notNull("alarmName")
                 : SmithyValidationErrors.lengthOutOfRange("alarmName", name, 1, 255);
         if (violation == null && name.isBlank()) {
             violation = SmithyValidationErrors.lengthTooShort("alarmName", name, 1);
         }
+        return violation;
+    }
+
+    private void putAlarm(Alarm alarm, String region) {
+        String name = alarm.getAlarmName();
+        String violation = alarmNameViolation(name);
         if (violation != null) {
             throw SmithyValidationErrors.validationError(violation);
         }

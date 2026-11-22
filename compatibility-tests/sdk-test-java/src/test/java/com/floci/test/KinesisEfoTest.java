@@ -67,7 +67,7 @@ class KinesisEfoTest {
     @AfterAll
     static void cleanup() {
         try {
-            kinesis.deleteStream(r -> r.streamName(STREAM_NAME));
+            kinesis.deleteStream(r -> r.streamName(STREAM_NAME).enforceConsumerDeletion(true));
         } catch (Exception ignored) {}
         if (kinesis != null) kinesis.close();
         if (kinesisAsync != null) kinesisAsync.close();

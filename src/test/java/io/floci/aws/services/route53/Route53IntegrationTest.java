@@ -714,6 +714,87 @@ class Route53IntegrationTest {
         given().when().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
     }
 
+    @Test
+    @Order(27)
+    void listResourceRecordSets_escapesWildcardRecordNameAsOctal() {
+        String location = given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Name>sandbox.example.com</Name>
+                          <CallerReference>wildcard-list-ref</CallerReference>
+                        </CreateHostedZoneRequest>
+                        """)
+                .when().post("/2013-04-01/hostedzone")
+                .then().statusCode(201).extract().header("Location");
+        String wildcardZoneId = location.substring(location.lastIndexOf('/') + 1);
+
+        try {
+            given()
+                    .contentType(XML)
+                    .body("""
+                            <?xml version="1.0" encoding="UTF-8"?>
+                            <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                              <ChangeBatch>
+                                <Changes>
+                                  <Change>
+                                    <Action>CREATE</Action>
+                                    <ResourceRecordSet>
+                                      <Name>*.sandbox.example.com</Name>
+                                      <Type>A</Type>
+                                      <TTL>60</TTL>
+                                      <ResourceRecords>
+                                        <ResourceRecord><Value>10.0.0.1</Value></ResourceRecord>
+                                      </ResourceRecords>
+                                    </ResourceRecordSet>
+                                  </Change>
+                                </Changes>
+                              </ChangeBatch>
+                            </ChangeResourceRecordSetsRequest>
+                            """)
+                    .when().post("/2013-04-01/hostedzone/" + wildcardZoneId + "/rrset")
+                    .then().statusCode(200);
+
+            given()
+                    .queryParam("name", "\\052.sandbox.example.com.")
+                    .queryParam("type", "A")
+                    .queryParam("maxitems", 1)
+                    .when().get("/2013-04-01/hostedzone/" + wildcardZoneId + "/rrset")
+                    .then()
+                    .statusCode(200)
+                    .body("ListResourceRecordSetsResponse.ResourceRecordSets.ResourceRecordSet[0].Name",
+                            equalTo("\\052.sandbox.example.com."))
+                    .body("ListResourceRecordSetsResponse.ResourceRecordSets.ResourceRecordSet[0].Type",
+                            equalTo("A"));
+        } finally {
+            given()
+                    .contentType(XML)
+                    .body("""
+                            <?xml version="1.0" encoding="UTF-8"?>
+                            <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                              <ChangeBatch>
+                                <Changes>
+                                  <Change>
+                                    <Action>DELETE</Action>
+                                    <ResourceRecordSet>
+                                      <Name>\\052.sandbox.example.com.</Name>
+                                      <Type>A</Type>
+                                      <TTL>60</TTL>
+                                      <ResourceRecords>
+                                        <ResourceRecord><Value>10.0.0.1</Value></ResourceRecord>
+                                      </ResourceRecords>
+                                    </ResourceRecordSet>
+                                  </Change>
+                                </Changes>
+                              </ChangeBatch>
+                            </ChangeResourceRecordSetsRequest>
+                            """)
+                    .when().post("/2013-04-01/hostedzone/" + wildcardZoneId + "/rrset");
+            given().when().delete("/2013-04-01/hostedzone/" + wildcardZoneId);
+        }
+    }
+
     private String createZoneForCommentTest(String callerReference, String comment) {
         String location = given()
                 .contentType(XML)

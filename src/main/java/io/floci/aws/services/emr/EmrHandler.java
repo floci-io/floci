@@ -38,6 +38,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.PrimitiveIterator;
 
 /**
  * EMR (elasticmapreduce) JSON 1.1 handler. Dispatched from {@link AwsJson11Controller}
@@ -49,6 +51,20 @@ public class EmrHandler {
     private static final Logger LOG = Logger.getLogger(EmrHandler.class);
     /** "There is a limit of 25 volumes per instance." (Amazon EMR Management Guide, Instance storage) */
     private static final int EBS_VOLUMES_PER_INSTANCE = 25;
+    // The enums of RunJobFlow's RepoUpgradeOnBoot and of a PlacementGroupConfig's InstanceRole and PlacementStrategy.
+    private static final List<String> REPO_UPGRADES = List.of("SECURITY", "NONE");
+    private static final List<String> INSTANCE_ROLES = List.of("MASTER", "CORE", "TASK");
+    private static final List<String> PLACEMENT_STRATEGIES = List.of("SPREAD", "PARTITION", "CLUSTER", "NONE");
+    private static final String PRIMARY_ROLE = "MASTER";
+    // The logging configurations of a cluster's MonitoringConfiguration and of a session's.
+    private static final List<String> CLUSTER_LOGGING = List.of("CloudWatchLogConfiguration", "S3LoggingConfiguration");
+    private static final List<String> SESSION_LOGGING = List.of("S3LoggingConfiguration",
+            "CloudWatchLoggingConfiguration", "ManagedLoggingConfiguration");
+    // RunJobFlow's uniform form's instance groups (see uniformInstanceGroups).
+    static final String UNIFORM_MASTER_GROUP = "Master InstanceGroup";
+    static final String UNIFORM_CORE_GROUP = "Core InstanceGroup";
+    static final String NO_CORE_INSTANCE_TYPE =
+            "SlaveInstanceType is required when InstanceCount is greater than 1.";
     // ListInstances "Provides information for all active Amazon EC2 instances and Amazon EC2 instances terminated in the
     // last 30 days, up to a maximum of 2,000": that many to a call, the rest after its Marker.
     static final int INSTANCES_PER_PAGE = 2000;
@@ -161,6 +177,18 @@ public class EmrHandler {
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
 
     private Response handleRunJobFlow(JsonNode request, String region) {
+        EmrCluster created = service.runJobFlow(clusterFrom(request, region), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("JobFlowId", created.getId());
+        response.put("ClusterArn", created.getClusterArn());
+        return Response.ok(response).build();
+    }
+
+    /**
+     * The cluster a RunJobFlow request describes, its members read and checked as RunJobFlow reads them, for this
+     * handler and for CloudFormation's {@code AWS::EMR::Cluster}, which describes a cluster in the same members.
+     */
+    public EmrCluster clusterFrom(JsonNode request, String region) {
         EmrCluster cluster = new EmrCluster();
         cluster.setName(text(request, "Name"));
         cluster.setReleaseLabel(text(request, "ReleaseLabel"));
@@ -174,6 +202,7 @@ public class EmrHandler {
         cluster.setVisibleToAllUsers(request.path("VisibleToAllUsers").asBoolean(true));
         cluster.setStepConcurrencyLevel(request.path("StepConcurrencyLevel").asInt(1));
         cluster.setEbsRootVolumeSize(request.path("EbsRootVolumeSize").asInt(0));
+        readClusterSettings(request, cluster);
         cluster.setApplications(rawArray(request.path("Applications")));
         cluster.setConfigurations(rawArray(request.path("Configurations")));
         cluster.setTags(parseTags(request.path("Tags")));
@@ -198,16 +227,163 @@ public class EmrHandler {
         cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
         cluster.setSessionEnabled(request.path("SessionEnabled").asBoolean(false));
-        cluster.setEc2Attributes(buildEc2Attributes(instances, region));
-        cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
-        cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
+        cluster.setEc2Attributes(buildEc2Attributes(request, instances, region));
+        List<EmrInstanceGroup> groups = parseInstanceGroups(instances.path("InstanceGroups"));
+        List<EmrInstanceFleet> fleets = parseInstanceFleets(instances.path("InstanceFleets"));
+        cluster.setInstanceGroups(groups.isEmpty() && fleets.isEmpty() ? uniformInstanceGroups(instances) : groups);
+        cluster.setInstanceFleets(fleets);
+        checkPlacementGroups(request.path("PlacementGroupConfigs"), cluster);
         cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
+        return cluster;
+    }
 
-        EmrCluster created = service.runJobFlow(cluster, region);
-        ObjectNode response = objectMapper.createObjectNode();
-        response.put("JobFlowId", created.getId());
-        response.put("ClusterArn", created.getClusterArn());
-        return Response.ok(response).build();
+    /**
+     * The settings of the cluster as a whole that DescribeCluster gives back as they were asked for: the root volume's
+     * IOPS and throughput, the Amazon Linux release, the log encryption key, RepoUpgradeOnBoot, the realm of its
+     * KerberosAttributes, its PlacementGroupConfigs and its MonitoringConfiguration. A member its model requires, or
+     * a value outside its enum, is refused as the framework refuses one. RepoUpgradeOnBoot "Applies only when
+     * CustomAmiID is used", where "If omitted, the default is SECURITY". Of the KerberosAttributes only the realm is
+     * kept, its passwords never.
+     */
+    private void readClusterSettings(JsonNode request, EmrCluster cluster) {
+        List<String> violations = new ArrayList<>();
+        cluster.setEbsRootVolumeIops(intOrNull(request.path("EbsRootVolumeIops"), "EbsRootVolumeIops"));
+        cluster.setEbsRootVolumeThroughput(
+                intOrNull(request.path("EbsRootVolumeThroughput"), "EbsRootVolumeThroughput"));
+        cluster.setOsReleaseLabel(string(request, "OSReleaseLabel"));
+        cluster.setLogEncryptionKmsKeyId(string(request, "LogEncryptionKmsKeyId"));
+        String repoUpgrade = string(request, "RepoUpgradeOnBoot");
+        if (repoUpgrade != null && !REPO_UPGRADES.contains(repoUpgrade)) {
+            violations.add(SmithyValidationErrors.notInEnum(repoUpgrade, "repoUpgradeOnBoot", REPO_UPGRADES));
+        }
+        cluster.setRepoUpgradeOnBoot(repoUpgrade == null && cluster.getCustomAmiId() != null
+                ? "SECURITY" : repoUpgrade);
+        cluster.setKerberosRealm(kerberosRealm(request.path("KerberosAttributes"), violations));
+        cluster.setPlacementGroups(placementGroups(request.path("PlacementGroupConfigs"), violations));
+        JsonNode monitoring = request.path("MonitoringConfiguration");
+        cluster.setMonitoringConfiguration(monitoringConfiguration(monitoring, CLUSTER_LOGGING));
+        JsonNode enabled = monitoring.path("CloudWatchLogConfiguration").path("Enabled");
+        if (monitoring.path("CloudWatchLogConfiguration").isObject() && (enabled.isMissingNode() || enabled.isNull())) {
+            violations.add(SmithyValidationErrors.notNull(
+                    "monitoringConfiguration.cloudWatchLogConfiguration.enabled"));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    // The realm of KerberosAttributes, whose Realm and KdcAdminPassword the model requires; null when none is given.
+    private static String kerberosRealm(JsonNode kerberos, List<String> violations) {
+        if (kerberos.isMissingNode() || kerberos.isNull()) {
+            return null;
+        }
+        requireStructure(kerberos, "KerberosAttributes");
+        for (String secret : List.of("CrossRealmTrustPrincipalPassword", "ADDomainJoinUser", "ADDomainJoinPassword")) {
+            string(kerberos, secret);
+        }
+        if (string(kerberos, "KdcAdminPassword") == null) {
+            violations.add(SmithyValidationErrors.notNull("kerberosAttributes.kdcAdminPassword"));
+        }
+        String realm = string(kerberos, "Realm");
+        if (realm == null) {
+            violations.add(SmithyValidationErrors.notNull("kerberosAttributes.realm"));
+        }
+        return realm;
+    }
+
+    /**
+     * PlacementGroupConfigs as DescribeCluster's PlacementGroups give them, null when none is given; each config's
+     * InstanceRole, which the model requires, and its PlacementStrategy must be in their enums. A config for the
+     * primary nodes without a strategy gets SPREAD, as "the MASTER instance role automatically uses SPREAD as the
+     * placement group strategy" (Management Guide, "Amazon EMR integration with EC2 placement groups").
+     */
+    private String placementGroups(JsonNode configs, List<String> violations) {
+        if (configs.isMissingNode() || configs.isNull()) {
+            return null;
+        }
+        if (!configs.isArray()) {
+            throw malformed("PlacementGroupConfigs must be a list of placement group configs");
+        }
+        ArrayNode placements = objectMapper.createArrayNode();
+        int position = 1;
+        for (JsonNode config : configs) {
+            if (!config.isObject()) {
+                throw malformed("PlacementGroupConfigs must be a list of placement group configs");
+            }
+            String path = "placementGroupConfigs." + position + ".member.";
+            String role = string(config, "InstanceRole");
+            if (role == null) {
+                violations.add(SmithyValidationErrors.notNull(path + "instanceRole"));
+            } else if (!INSTANCE_ROLES.contains(role)) {
+                violations.add(SmithyValidationErrors.notInEnum(role, path + "instanceRole", INSTANCE_ROLES));
+            }
+            String strategy = string(config, "PlacementStrategy");
+            if (strategy != null && !PLACEMENT_STRATEGIES.contains(strategy)) {
+                violations.add(SmithyValidationErrors.notInEnum(strategy, path + "placementStrategy",
+                        PLACEMENT_STRATEGIES));
+            }
+            ObjectNode placement = placements.addObject().put("InstanceRole", role);
+            if (strategy != null || PRIMARY_ROLE.equals(role)) {
+                placement.put("PlacementStrategy", strategy != null ? strategy : "SPREAD");
+            }
+            position++;
+        }
+        return placements.isEmpty() ? null : placements.toString();
+    }
+
+    /**
+     * Refuses PlacementGroupConfigs AWS refuses. Two for one instance role, and one for the primary nodes of a cluster
+     * without multiple primary nodes, are recorded from AWS, in its words. "Currently, only primary node types are
+     * supported by the placement group strategy, and the SPREAD strategy is applied to those primary nodes", NONE
+     * launching them "without placement group strategy", so another role or strategy is refused too, in Floci's words,
+     * as no source gives AWS's.
+     */
+    private static void checkPlacementGroups(JsonNode configs, EmrCluster cluster) {
+        List<String> roles = new ArrayList<>();
+        for (JsonNode config : configs) {
+            String role = config.path("InstanceRole").asText();
+            if (roles.contains(role)) {
+                throw new AwsException("ValidationException", "Placement group supports single placement strategy "
+                        + "for an instance role. Found multiple strategy for the following instance role: " + role,
+                        400);
+            }
+            roles.add(role);
+        }
+        for (JsonNode config : configs) {
+            String role = config.path("InstanceRole").asText();
+            if (!PRIMARY_ROLE.equals(role)) {
+                throw new AwsException("ValidationException",
+                        "Placement groups are supported only for the MASTER instance role, not " + role + ".", 400);
+            }
+            String strategy = config.path("PlacementStrategy").asText("SPREAD");
+            if (!"SPREAD".equals(strategy) && !"NONE".equals(strategy)) {
+                throw new AwsException("ValidationException", "The MASTER instance role supports only the SPREAD "
+                        + "or NONE placement strategy, not " + strategy + ".", 400);
+            }
+        }
+        if (roles.contains(PRIMARY_ROLE) && !multiplePrimaryNodes(cluster)) {
+            throw new AwsException("ValidationException", "Placement group support for master node is available "
+                    + "only for multi-master cluster and not for single-master cluster.", 400);
+        }
+    }
+
+    /**
+     * Whether the cluster has multiple primary nodes: "an instance count value of 3 for the primary node instance
+     * group", or "the TargetOnDemandCapacity of 3, TargetSpotCapacity of 0 for the primary instance fleet"
+     * (Management Guide, "Launch an Amazon EMR Cluster with multiple primary nodes").
+     */
+    private static boolean multiplePrimaryNodes(EmrCluster cluster) {
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            if (PRIMARY_ROLE.equals(group.getInstanceGroupType())) {
+                return group.getRequestedInstanceCount() == 3;
+            }
+        }
+        for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+            if (PRIMARY_ROLE.equals(fleet.getInstanceFleetType())) {
+                return fleet.getTargetOnDemandCapacity() == 3 && fleet.getTargetSpotCapacity() == 0;
+            }
+        }
+        return false;
     }
 
     private Response handleDescribeCluster(JsonNode request) {
@@ -300,8 +476,8 @@ public class EmrHandler {
 
     private Response handleCancelSteps(JsonNode request) {
         requireMembers(request, "StepIds");
-        List<EmrService.CancelStepInfo> infos = service.cancelSteps(
-                text(request, "ClusterId"), stringList(request.path("StepIds")));
+        List<EmrService.CancelStepInfo> infos = service.cancelSteps(text(request, "ClusterId"),
+                stringList(request.path("StepIds")), text(request, "StepCancellationOption"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("CancelStepsInfoList");
         for (EmrService.CancelStepInfo info : infos) {
@@ -321,7 +497,8 @@ public class EmrHandler {
     private Response handleStartSession(JsonNode request) {
         EmrSessions.Request start = new EmrSessions.Request(string(request, "Name"),
                 string(request, "ExecutionRoleArn"), configurationList(request.path("EngineConfigurations"),
-                "EngineConfigurations"), monitoringConfiguration(request.path("MonitoringConfiguration")),
+                "EngineConfigurations"),
+                monitoringConfiguration(request.path("MonitoringConfiguration"), SESSION_LOGGING),
                 longOrNull(request.path("SessionIdleTimeoutInMinutes"), "SessionIdleTimeoutInMinutes"),
                 string(request, "ClientRequestToken"), tagList(request.path("Tags"), "Tags"));
         EmrSession session = service.startSession(string(request, "ClusterId"), start);
@@ -398,6 +575,7 @@ public class EmrHandler {
         setRawJson(node, "EngineConfigurations", session.getEngineConfigurations());
         setRawJson(node, "MonitoringConfiguration", session.getMonitoringConfiguration());
         node.put("SessionIdleTimeoutInMinutes", session.getSessionIdleTimeoutInMinutes());
+        putIfSet(node, "ServerUrl", session.getServerUrl());
         node.set("Tags", tagArray(session.getTags()));
         return node;
     }
@@ -417,6 +595,33 @@ public class EmrHandler {
         return value.asText();
     }
 
+    // EC2InstanceIdsToTerminate, a list of strings in the model; another JSON type is refused as string() refuses one.
+    private static List<String> instanceIds(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        List<String> ids = new ArrayList<>();
+        if (value.isArray()) {
+            for (JsonNode id : value) {
+                if (!id.isTextual()) {
+                    throw malformed("EC2InstanceIdsToTerminate must be a list of strings");
+                }
+                ids.add(id.asText());
+            }
+            return ids;
+        }
+        throw malformed("EC2InstanceIdsToTerminate must be a list of strings");
+    }
+
+    // An Integer member, read as longOrNull reads a Long one; a number past an Integer's range is refused as well.
+    private static Integer intOrNull(JsonNode value, String member) {
+        Long number = longOrNull(value, member);
+        if (number != null && !value.canConvertToInt()) {
+            throw malformed(member + " must be an integer");
+        }
+        return number == null ? null : number.intValue();
+    }
+
     private static Long longOrNull(JsonNode value, String member) {
         if (value.isMissingNode() || value.isNull()) {
             return null;
@@ -428,18 +633,17 @@ public class EmrHandler {
     }
 
     /**
-     * StartSession's SessionMonitoringConfiguration, kept as its raw JSON; null when it is not there or empty. Each of
-     * its S3, CloudWatch and managed logging configurations is a structure of an {@code Enabled} boolean, strings, and
-     * {@code LogTypes}, a map of lists of strings.
+     * A MonitoringConfiguration, RunJobFlow's or StartSession's, kept as its raw JSON; null when it is not there or
+     * empty. Each of its {@code loggings} configurations is a structure of an {@code Enabled} boolean, strings,
+     * {@code LogTypes}, a map of lists of strings, and {@code LogTypeUploadPolicy}, a map of strings.
      */
-    private static String monitoringConfiguration(JsonNode value) {
+    private static String monitoringConfiguration(JsonNode value, List<String> loggings) {
         String member = "MonitoringConfiguration";
         if (value.isMissingNode() || value.isNull()) {
             return null;
         }
         requireStructure(value, member);
-        for (String logging : List.of("S3LoggingConfiguration", "CloudWatchLoggingConfiguration",
-                "ManagedLoggingConfiguration")) {
+        for (String logging : loggings) {
             JsonNode configuration = value.path(logging);
             if (configuration.isMissingNode() || configuration.isNull()) {
                 continue;
@@ -459,6 +663,8 @@ public class EmrHandler {
                 } else if ("LogTypes".equals(entry.getKey())) {
                     requireStructure(field, path + ".LogTypes");
                     field.forEach(types -> strings(types, path + ".LogTypes"));
+                } else if ("LogTypeUploadPolicy".equals(entry.getKey())) {
+                    stringMap(field, path + ".LogTypeUploadPolicy");
                 } else if (!field.isTextual()) {
                     throw malformed(path + "." + entry.getKey() + " must be a string");
                 }
@@ -795,6 +1001,7 @@ public class EmrHandler {
         putS3Location(node, "OutputNotebookS3Location", execution.getOutputNotebookS3Bucket(),
                 execution.getOutputNotebookS3Key());
         putIfSet(node, "OutputNotebookFormat", execution.getOutputNotebookFormat());
+        putIfSet(node, "OutputNotebookURI", execution.getOutputNotebookUri());
         if (execution.getEnvironmentVariables() != null) {
             ObjectNode variables = node.putObject("EnvironmentVariables");
             execution.getEnvironmentVariables().forEach(variables::put);
@@ -908,11 +1115,11 @@ public class EmrHandler {
                 string(request, "ApplicationId"), Boolean.TRUE.equals(dryRun)));
     }
 
-    // A presigned URL's answer: ready at once, and the URL, none for a dry run.
-    private Response presignedUrl(String url) {
+    // A presigned URL's answer: whether it is ready, and the URL, none for a dry run.
+    private Response presignedUrl(EmrAppUiService.Presigned presigned) {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("PresignedURLReady", true);
-        putIfSet(response, "PresignedURL", url);
+        response.put("PresignedURLReady", presigned.ready());
+        putIfSet(response, "PresignedURL", presigned.url());
         return Response.ok(response).build();
     }
 
@@ -950,17 +1157,42 @@ public class EmrHandler {
     }
 
     private Response handleAddInstanceFleet(JsonNode request) {
-        List<String> violations = new ArrayList<>();
-        EmrInstanceFleet fleet = parseInstanceFleet(request.path("InstanceFleet"), "instanceFleet", violations);
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.validationException(violations);
-        }
-        requireEbsVolumeLimit(request.path("InstanceFleet"));
-        String id = service.addInstanceFleet(text(request, "ClusterId"), fleet);
+        String id = service.addInstanceFleet(text(request, "ClusterId"),
+                instanceFleetFrom(request.path("InstanceFleet")));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ClusterId", text(request, "ClusterId"));
         response.put("InstanceFleetId", id);
         return Response.ok(response).build();
+    }
+
+    /**
+     * The instance fleet an AddInstanceFleet request's {@code InstanceFleet} describes, read and checked as
+     * AddInstanceFleet reads it, for this handler and for CloudFormation's {@code AWS::EMR::InstanceFleetConfig}.
+     */
+    public EmrInstanceFleet instanceFleetFrom(JsonNode fleetNode) {
+        List<String> violations = new ArrayList<>();
+        EmrInstanceFleet fleet = parseInstanceFleet(fleetNode, "instanceFleet", violations);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+        requireFleetEbsVolumeLimit(fleetNode);
+        return fleet;
+    }
+
+    /**
+     * The instance groups an AddInstanceGroups request's {@code InstanceGroups} describe, read as AddInstanceGroups
+     * reads them, for this handler and for CloudFormation's {@code AWS::EMR::InstanceGroupConfig}.
+     */
+    public List<EmrInstanceGroup> instanceGroupsFrom(JsonNode groupsNode) {
+        return parseInstanceGroups(groupsNode);
+    }
+
+    /**
+     * The steps an AddJobFlowSteps request's {@code Steps} describe, read as AddJobFlowSteps reads them, for this
+     * handler and for CloudFormation's {@code AWS::EMR::Step}.
+     */
+    public List<EmrStep> stepsFrom(JsonNode stepsNode, String executionRoleArn) {
+        return parseSteps(stepsNode, executionRoleArn);
     }
 
     private Response handleListInstanceFleets(JsonNode request) {
@@ -994,13 +1226,7 @@ public class EmrHandler {
         long start = skip;
         int page = 0;
         List<ListedInstances> listed = listedInstances(cluster, terminated);
-        ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
-        long next = primary == null ? 1 : 1 + primary.count();
         for (ListedInstances set : listed) {
-            long first = set == primary ? 1 : next;
-            if (set != primary) {
-                next += set.count();
-            }
             if (!set.matches(groupId, groupTypes, fleetId, fleetType)
                     || !states.isEmpty() && !states.contains(set.state())) {
                 continue;
@@ -1009,12 +1235,16 @@ public class EmrHandler {
                 skip -= set.count();
                 continue;
             }
-            for (long ordinal = skip + 1; ordinal <= set.count(); ordinal++) {
+            long first = EmrService.firstIndex(listed, set);
+            PrimitiveIterator.OfLong ordinals = set.ordinalsFrom(skip + 1);
+            ArrayNode devices = ebsBlockDevices(ebsConfigurationOf(cluster, set));
+            for (long k = skip + 1; k <= set.count(); k++) {
                 if (page == INSTANCES_PER_PAGE) {
                     response.put("Marker", String.valueOf(start + page));
                     return Response.ok(response).build();
                 }
-                arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated));
+                long ordinal = ordinals.nextLong();
+                arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated, devices));
                 page++;
             }
             skip = 0;
@@ -1047,9 +1277,11 @@ public class EmrHandler {
         List<EmrInstanceGroup> groups = cluster.getInstanceGroups();
         for (EmrInstanceGroup group : groups) {
             int count = listedInstanceCount(group, terminated);
+            // All on the group's market, whatever their ordinals.
             listed.add(new ListedInstances(group.getId(), null, group.getInstanceGroupType(), group.getInstanceType(),
-                    EmrService.groupNumber(groups, group), count, group.getMarket(), count,
-                    instanceState(group.getState(), beingProvisioned(group), terminated)));
+                    EmrService.groupNumber(groups, group), count, group.getMarket(), Long.MAX_VALUE,
+                    instanceState(group.getState(), beingProvisioned(group), terminated),
+                    List.copyOf(group.getTerminatedOrdinals())));
         }
         List<EmrInstanceFleet> fleets = cluster.getInstanceFleets();
         for (EmrInstanceFleet fleet : fleets) {
@@ -1062,7 +1294,7 @@ public class EmrHandler {
             listed.add(new ListedInstances(null, fleet.getId(), fleet.getInstanceFleetType(),
                     fleet.getInstanceTypes().isEmpty() ? null : fleet.getInstanceTypes().getFirst(),
                     EmrService.fleetNumber(fleets, fleet), onDemand + spot, "ON_DEMAND", onDemand,
-                    instanceState(fleet.getState(), provisioning, terminated)));
+                    instanceState(fleet.getState(), provisioning, terminated), List.of()));
         }
         return listed;
     }
@@ -1099,13 +1331,34 @@ public class EmrHandler {
     /**
      * The instances ListInstances lists for one instance group or fleet: {@code count} of them, with addresses numbered
      * {@code number}, those after the first {@code spotAfter} on the spot market and the others on {@code market}, each
-     * in {@code state}.
+     * in {@code state}, none of them at the ordinals {@code terminated} (ascending), which EC2InstanceIdsToTerminate
+     * ended.
      */
     record ListedInstances(String groupId, String fleetId, String type, String instanceType, int number, long count,
-                           String market, long spotAfter, String state) {
+                           String market, long spotAfter, String state, List<Integer> terminated) {
 
         String marketOf(long ordinal) {
             return ordinal <= spotAfter ? market : "SPOT";
+        }
+
+        /** The ordinal of their {@code k}-th instance, counted from 1 ({@link EmrService#ordinalAt}). */
+        long ordinalAt(long k) {
+            return EmrService.ordinalAt(terminated, k);
+        }
+
+        /** Their ordinals from their {@code k}-th instance's on ({@link EmrService#ordinalsFrom}). */
+        PrimitiveIterator.OfLong ordinalsFrom(long k) {
+            return EmrService.ordinalsFrom(terminated, k);
+        }
+
+        /**
+         * How many places they take in the cluster's instance numbering: up to their last instance's ordinal, or a
+         * terminated instance's above it, which keeps its place, so that ending a group's last instance moves no other
+         * group's ids onto it.
+         */
+        long span() {
+            long live = count == 0 ? 0 : ordinalAt(count);
+            return terminated.isEmpty() ? live : Math.max(live, terminated.getLast());
         }
 
         /** Whether ListInstances' filters keep them: the group ones keep groups' instances, the fleet ones fleets'. */
@@ -1268,10 +1521,13 @@ public class EmrHandler {
             for (JsonNode g : groups) {
                 JsonNode count = g.path("InstanceCount");
                 JsonNode configurations = g.path("Configurations");
+                JsonNode shrink = g.path("ShrinkPolicy");
                 modifications.add(new EmrService.InstanceGroupModification(
                         g.path("InstanceGroupId").asText(null),
                         count.isMissingNode() || count.isNull() ? null : count.asInt(),
-                        configurations.isArray() ? configurations.toString() : null));
+                        configurations.isArray() ? configurations.toString() : null,
+                        g.path("ReconfigurationType").asText(null), instanceIds(g.path("EC2InstanceIdsToTerminate")),
+                        shrink.isObject() ? shrink : null));
             }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
@@ -1280,12 +1536,38 @@ public class EmrHandler {
 
     private Response handleModifyInstanceFleet(JsonNode request) {
         JsonNode fleet = request.path("InstanceFleet");
+        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+                instanceFleetModificationFrom(fleet));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * The change a ModifyInstanceFleet request's {@code InstanceFleet} describes, read and checked as
+     * ModifyInstanceFleet reads it, for this handler and for CloudFormation's {@code AWS::EMR::InstanceFleetConfig}:
+     * its configs' required InstanceType and their volume limit, as AddInstanceFleet checks them, and its members'
+     * JSON types.
+     */
+    public static EmrService.InstanceFleetModification instanceFleetModificationFrom(JsonNode fleet) {
         JsonNode onDemand = fleet.path("TargetOnDemandCapacity");
         JsonNode spot = fleet.path("TargetSpotCapacity");
-        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+        JsonNode configs = fleet.path("InstanceTypeConfigs");
+        List<String> instanceTypes = null;
+        if (!configs.isMissingNode() && !configs.isNull()) {
+            if (!configs.isArray()) {
+                throw malformed("InstanceTypeConfigs must be a list");
+            }
+            List<String> violations = new ArrayList<>();
+            instanceTypes = instanceTypes(configs, "instanceFleet", violations);
+            if (!violations.isEmpty()) {
+                throw SmithyValidationErrors.validationException(violations);
+            }
+            requireFleetEbsVolumeLimit(fleet);
+        }
+        return new EmrService.InstanceFleetModification(
                 onDemand.isMissingNode() || onDemand.isNull() ? null : onDemand.asInt(),
-                spot.isMissingNode() || spot.isNull() ? null : spot.asInt());
-        return Response.ok(objectMapper.createObjectNode()).build();
+                spot.isMissingNode() || spot.isNull() ? null : spot.asInt(),
+                object(fleet, "ResizeSpecifications"), instanceTypes == null ? null : configs.toString(),
+                instanceTypes, string(fleet, "Context"));
     }
 
     /** Each BootstrapActionConfig given to RunJobFlow, as the Command shape: Name, ScriptPath and Args. */
@@ -1417,6 +1699,28 @@ public class EmrHandler {
             node.put("CustomAmiId", c.getCustomAmiId());
         }
         node.put("EbsRootVolumeSize", c.getEbsRootVolumeSize());
+        if (c.getEbsRootVolumeIops() != null) {
+            node.put("EbsRootVolumeIops", c.getEbsRootVolumeIops());
+        }
+        if (c.getEbsRootVolumeThroughput() != null) {
+            node.put("EbsRootVolumeThroughput", c.getEbsRootVolumeThroughput());
+        }
+        if (c.getOsReleaseLabel() != null) {
+            node.put("OSReleaseLabel", c.getOsReleaseLabel());
+        }
+        if (c.getLogEncryptionKmsKeyId() != null) {
+            node.put("LogEncryptionKmsKeyId", c.getLogEncryptionKmsKeyId());
+        }
+        if (c.getRepoUpgradeOnBoot() != null) {
+            node.put("RepoUpgradeOnBoot", c.getRepoUpgradeOnBoot());
+        }
+        // An empty structure where the cluster has none, as AWS answers one.
+        ObjectNode kerberos = node.putObject("KerberosAttributes");
+        if (c.getKerberosRealm() != null) {
+            kerberos.put("Realm", c.getKerberosRealm());
+        }
+        setRawJson(node, "PlacementGroups", c.getPlacementGroups());
+        setRawJson(node, "MonitoringConfiguration", c.getMonitoringConfiguration());
         node.put("StepConcurrencyLevel", c.getStepConcurrencyLevel());
         node.put("ClusterArn", c.getClusterArn());
         node.put("SessionEnabled", c.isSessionEnabled());
@@ -1482,6 +1786,9 @@ public class EmrHandler {
         if (includeExecutionRole && step.getExecutionRoleArn() != null) {
             node.put("ExecutionRoleArn", step.getExecutionRoleArn());
         }
+        // Its own log destination and key, the StepMonitoringConfiguration it was given.
+        putIfSet(node, "LogUri", step.getLogUri());
+        putIfSet(node, "EncryptionKeyArn", step.getEncryptionKeyArn());
         ObjectNode status = node.putObject("Status");
         status.put("State", step.getState());
         if (step.getStateChangeReason() != null) {
@@ -1527,7 +1834,44 @@ public class EmrHandler {
             setRawJson(node, "LastSuccessfullyAppliedConfigurations", g.getConfigurations());
             node.put("LastSuccessfullyAppliedConfigurationsVersion", g.getConfigurationsVersion());
         }
+        JsonNode ebs = readRawObject(g.getEbsConfiguration());
+        if (ebs != null) {
+            ArrayNode devices = ebsBlockDevices(ebs);
+            if (!devices.isEmpty()) {
+                node.set("EbsBlockDevices", devices);
+            }
+            if (ebs.hasNonNull("EbsOptimized")) {
+                node.put("EbsOptimized", ebs.path("EbsOptimized").asBoolean());
+            }
+        }
+        if (g.getCustomAmiId() != null) {
+            node.put("CustomAmiId", g.getCustomAmiId());
+        }
+        if (g.getShrinkPolicy() != null) {
+            setRawJson(node, "ShrinkPolicy", g.getShrinkPolicy());
+        }
         return node;
+    }
+
+    /**
+     * An EbsConfiguration as the EbsBlockDevices it gives each instance: one per volume, the way VolumesPerInstance
+     * counts them, with its VolumeSpecification, named {@code /dev/sdb} on, as the reference gives no device names.
+     */
+    private ArrayNode ebsBlockDevices(JsonNode ebs) {
+        ArrayNode devices = objectMapper.createArrayNode();
+        for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
+            // Bounded for a config stored before the limit was held at create.
+            int volumes = Math.min(device.path("VolumesPerInstance").asInt(1),
+                    EBS_VOLUMES_PER_INSTANCE - devices.size());
+            for (int volume = 0; volume < volumes; volume++) {
+                ObjectNode blockDevice = devices.addObject();
+                if (device.hasNonNull("VolumeSpecification")) {
+                    blockDevice.set("VolumeSpecification", device.get("VolumeSpecification"));
+                }
+                blockDevice.put("Device", deviceName(devices.size() - 1));
+            }
+        }
+        return devices;
     }
 
     /** An AutoScalingPolicyDescription: the stored Constraints and Rules with an ATTACHED status. */
@@ -1557,6 +1901,15 @@ public class EmrHandler {
         node.put("ProvisionedSpotCapacity", f.getProvisionedSpotCapacity());
         node.set("InstanceTypeSpecifications", instanceTypeSpecifications(f));
         node.putObject("Status").put("State", f.getState());
+        if (f.getLaunchSpecifications() != null) {
+            setRawJson(node, "LaunchSpecifications", f.getLaunchSpecifications());
+        }
+        if (f.getResizeSpecifications() != null) {
+            setRawJson(node, "ResizeSpecifications", f.getResizeSpecifications());
+        }
+        if (f.getContext() != null) {
+            node.put("Context", f.getContext());
+        }
         return node;
     }
 
@@ -1593,19 +1946,7 @@ public class EmrHandler {
                 specification.set("Configurations", config.get("Configurations"));
             }
             JsonNode ebs = config.path("EbsConfiguration");
-            ArrayNode devices = objectMapper.createArrayNode();
-            for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
-                // Bounded for a config stored before the limit was held at create.
-                int volumes = Math.min(device.path("VolumesPerInstance").asInt(1),
-                        EBS_VOLUMES_PER_INSTANCE - devices.size());
-                for (int volume = 0; volume < volumes; volume++) {
-                    ObjectNode blockDevice = devices.addObject();
-                    if (device.hasNonNull("VolumeSpecification")) {
-                        blockDevice.set("VolumeSpecification", device.get("VolumeSpecification"));
-                    }
-                    blockDevice.put("Device", deviceName(devices.size() - 1));
-                }
-            }
+            ArrayNode devices = ebsBlockDevices(ebs);
             if (!devices.isEmpty()) {
                 specification.set("EbsBlockDevices", devices);
             }
@@ -1631,13 +1972,15 @@ public class EmrHandler {
         return "/dev/sd" + letters;
     }
 
+    /** An instance of {@code set}, whose EBS block {@code devices} each instance of the set has. */
     private ObjectNode syntheticInstanceNode(EmrCluster cluster, ListedInstances set, long index, long ordinal,
-                                             boolean terminated) {
+                                             boolean terminated, ArrayNode devices) {
         String privateIp = EmrService.privateIpAddress(set.number(), ordinal);
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", EmrService.publicDnsName(index, cluster.getRegion()));
+        node.put("PublicIpAddress", EmrService.publicIpAddress(index));
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
         node.put("PrivateIpAddress", privateIp);
         if (set.groupId() != null) {
@@ -1653,7 +1996,42 @@ public class EmrHandler {
             node.put("InstanceType", set.instanceType());
         }
         node.putObject("Status").put("State", set.state());
+        if (!devices.isEmpty()) {
+            ArrayNode volumes = node.putArray("EbsVolumes");
+            for (int device = 0; device < devices.size(); device++) {
+                volumes.addObject().put("Device", devices.get(device).path("Device").asText())
+                        .put("VolumeId", EmrService.ebsVolumeId(cluster.getId(), index, device));
+            }
+        }
         return node;
+    }
+
+    /**
+     * The EbsConfiguration an instance of {@code set} was given: its group's, or, in a fleet, that of the
+     * InstanceTypeConfig of its instance type. An empty one for none.
+     */
+    private JsonNode ebsConfigurationOf(EmrCluster cluster, ListedInstances set) {
+        if (set.groupId() != null) {
+            for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+                if (set.groupId().equals(group.getId())) {
+                    JsonNode ebs = readRawObject(group.getEbsConfiguration());
+                    return ebs == null ? objectMapper.createObjectNode() : ebs;
+                }
+            }
+        }
+        if (set.fleetId() != null) {
+            for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+                if (set.fleetId().equals(fleet.getId())) {
+                    JsonNode configs = readRawArray(fleet.getInstanceTypeConfigs());
+                    for (JsonNode config : configs == null ? objectMapper.createArrayNode() : configs) {
+                        if (config.path("InstanceType").asText("").equals(set.instanceType())) {
+                            return config.path("EbsConfiguration");
+                        }
+                    }
+                }
+            }
+        }
+        return objectMapper.createObjectNode();
     }
 
     private ArrayNode tagArray(Map<String, String> tags) {
@@ -1689,6 +2067,9 @@ public class EmrHandler {
                 props.forEach(p -> map.put(p.path("Key").asText(), p.path("Value").asText()));
                 step.setProperties(map);
             }
+            JsonNode s3Logs = s.path("StepMonitoringConfiguration").path("S3MonitoringConfiguration");
+            step.setLogUri(s3Logs.path("LogUri").asText(null));
+            step.setEncryptionKeyArn(s3Logs.path("EncryptionKeyArn").asText(null));
             steps.add(step);
         }
         return steps;
@@ -1715,9 +2096,54 @@ public class EmrHandler {
                 EmrService.validateAutoScalingPolicy(autoScaling, group.getInstanceGroupType());
                 group.setAutoScalingPolicy(autoScaling.toString());
             }
+            JsonNode ebs = g.path("EbsConfiguration");
+            if (ebs.isObject()) {
+                requireEbsVolumeLimit(ebs);
+                group.setEbsConfiguration(ebs.toString());
+            }
+            group.setCustomAmiId(g.path("CustomAmiId").asText(null));
             groups.add(group);
         }
         return groups;
+    }
+
+    /**
+     * The instance groups of RunJobFlow's uniform form, a cluster given as its MasterInstanceType, SlaveInstanceType
+     * and InstanceCount: "If the value is 1, the same instance serves as both the master and core and task node. If the
+     * value is greater than 1, one instance is the master node and all others are core and task nodes." None without a
+     * MasterInstanceType. The master group's name is the one DescribeJobFlows' sample response gives it; no source
+     * names the core group, so its name follows the master's.
+     *
+     * <p>A single instance needs no SlaveInstanceType, as AWS runs one without it, but core nodes do, as "all three
+     * must be present": a request for more without it is refused with a ValidationException, whose wording, AWS's not
+     * being documented, is Floci's.
+     */
+    static List<EmrInstanceGroup> uniformInstanceGroups(JsonNode instances) {
+        List<EmrInstanceGroup> groups = new ArrayList<>();
+        String masterType = instances.path("MasterInstanceType").asText(null);
+        if (masterType == null) {
+            return groups;
+        }
+        groups.add(uniformInstanceGroup(UNIFORM_MASTER_GROUP, "MASTER", masterType, 1));
+        int count = instances.path("InstanceCount").asInt(1);
+        if (count > 1) {
+            String coreType = instances.path("SlaveInstanceType").asText(null);
+            if (coreType == null || coreType.isBlank()) {
+                throw new AwsException("ValidationException", NO_CORE_INSTANCE_TYPE, 400);
+            }
+            groups.add(uniformInstanceGroup(UNIFORM_CORE_GROUP, "CORE", coreType, count - 1));
+        }
+        return groups;
+    }
+
+    private static EmrInstanceGroup uniformInstanceGroup(String name, String role, String instanceType, int count) {
+        EmrInstanceGroup group = new EmrInstanceGroup();
+        group.setName(name);
+        group.setInstanceGroupType(role);
+        group.setInstanceType(instanceType);
+        group.setMarket("ON_DEMAND");
+        group.setRequestedInstanceCount(count);
+        return group;
     }
 
     private List<EmrInstanceFleet> parseInstanceFleets(JsonNode fleetsNode) {
@@ -1733,7 +2159,7 @@ public class EmrHandler {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
-        fleetsNode.forEach(EmrHandler::requireEbsVolumeLimit);
+        fleetsNode.forEach(EmrHandler::requireFleetEbsVolumeLimit);
         return fleets;
     }
 
@@ -1742,15 +2168,20 @@ public class EmrHandler {
      * Guide allows: "There is a limit of 25 volumes per instance." AWS's error for it is not documented, so the
      * ValidationException carrying that sentence is Floci's.
      */
-    private static void requireEbsVolumeLimit(JsonNode fleet) {
+    private static void requireFleetEbsVolumeLimit(JsonNode fleet) {
         for (JsonNode config : fleet.path("InstanceTypeConfigs")) {
-            long volumes = 0;
-            for (JsonNode device : config.path("EbsConfiguration").path("EbsBlockDeviceConfigs")) {
-                volumes += device.path("VolumesPerInstance").asLong(1);
-            }
-            if (volumes > EBS_VOLUMES_PER_INSTANCE) {
-                throw new AwsException("ValidationException", "There is a limit of 25 volumes per instance.", 400);
-            }
+            requireEbsVolumeLimit(config.path("EbsConfiguration"));
+        }
+    }
+
+    /** An EbsConfiguration's volumes, counted as VolumesPerInstance counts them, hold to AWS's limit per instance. */
+    private static void requireEbsVolumeLimit(JsonNode ebs) {
+        long volumes = 0;
+        for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
+            volumes += device.path("VolumesPerInstance").asLong(1);
+        }
+        if (volumes > EBS_VOLUMES_PER_INSTANCE) {
+            throw new AwsException("ValidationException", "There is a limit of 25 volumes per instance.", 400);
         }
     }
 
@@ -1766,9 +2197,24 @@ public class EmrHandler {
         if (fleet.getInstanceFleetType() == null) {
             violations.add(SmithyValidationErrors.notNull(path + ".instanceFleetType"));
         }
+        fleet.setInstanceTypes(instanceTypes(f.path("InstanceTypeConfigs"), path, violations));
+        fleet.setInstanceTypeConfigs(rawArray(f.path("InstanceTypeConfigs")));
+        fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
+        fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
+        fleet.setLaunchSpecifications(object(f, "LaunchSpecifications"));
+        fleet.setResizeSpecifications(object(f, "ResizeSpecifications"));
+        fleet.setContext(string(f, "Context"));
+        return fleet;
+    }
+
+    /**
+     * The instance types of a fleet's InstanceTypeConfigs at {@code path}; a config without its required InstanceType
+     * adds to {@code violations}, as the framework refuses such a request.
+     */
+    private static List<String> instanceTypes(JsonNode configs, String path, List<String> violations) {
         List<String> instanceTypes = new ArrayList<>();
         int position = 1;
-        for (JsonNode config : f.path("InstanceTypeConfigs")) {
+        for (JsonNode config : configs) {
             String instanceType = config.path("InstanceType").asText(null);
             if (instanceType == null) {
                 violations.add(SmithyValidationErrors.notNull(
@@ -1777,28 +2223,66 @@ public class EmrHandler {
             instanceTypes.add(instanceType);
             position++;
         }
-        fleet.setInstanceTypes(instanceTypes);
-        fleet.setInstanceTypeConfigs(rawArray(f.path("InstanceTypeConfigs")));
-        fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
-        fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
-        return fleet;
+        return instanceTypes;
     }
 
-    // The cluster's EC2 attributes, its availability zone among them: the one Placement names, the first of its
-    // AvailabilityZones, else the Region's first, as its instances' metadata gives it too.
-    private String buildEc2Attributes(JsonNode instances, String region) {
+    /**
+     * A member an object where the model has one, as raw JSON; another JSON type is refused with
+     * SerializationException, as {@link #string} refuses one.
+     */
+    private static String object(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isObject()) {
+            throw malformed(member + " must be an object");
+        }
+        return value.toString();
+    }
+
+    /**
+     * The cluster's EC2 attributes, as DescribeCluster gives them. Its availability zone is the one Placement names,
+     * the first of its AvailabilityZones, else the Region's first, as its instances' metadata gives it too. Its subnet
+     * is the one Ec2SubnetId names, else the first of the instance fleets' Ec2SubnetIds, from which EMR "chooses the
+     * Amazon EC2 subnet with the best fit". The subnets and zones requested come back as such, an empty list when none
+     * was, as AWS gives them; "RequestedEc2SubnetIDs and RequestedEc2AvailabilityZones cannot be specified together",
+     * and AWS's refusal is not documented, so its wording is Floci's. The JobFlowRole is its IamInstanceProfile, "The
+     * IAM role that was specified when the cluster was launched", and the additional security groups are kept.
+     */
+    private String buildEc2Attributes(JsonNode request, JsonNode instances, String region) {
         ObjectNode ec2 = objectMapper.createObjectNode();
         JsonNode placement = instances.path("Placement");
+        List<String> zones = Objects.requireNonNullElse(
+                strings(placement.path("AvailabilityZones"), "Placement.AvailabilityZones"), List.of());
+        List<String> subnets = Objects.requireNonNullElse(
+                strings(instances.path("Ec2SubnetIds"), "Ec2SubnetIds"), List.of());
+        if (!zones.isEmpty() && !subnets.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Ec2SubnetIds and Placement.AvailabilityZones cannot be specified together.", 400);
+        }
         String zone = placement.path("AvailabilityZone").asText("");
-        if (zone.isEmpty()) {
-            zone = placement.path("AvailabilityZones").path(0).asText("");
+        if (zone.isEmpty() && !zones.isEmpty()) {
+            zone = zones.getFirst();
         }
         ec2.put("Ec2AvailabilityZone", zone.isEmpty() ? region + "a" : zone);
         copyText(instances, "Ec2KeyName", ec2, "Ec2KeyName");
         copyText(instances, "Ec2SubnetId", ec2, "Ec2SubnetId");
+        if (!ec2.has("Ec2SubnetId") && !subnets.isEmpty()) {
+            ec2.put("Ec2SubnetId", subnets.getFirst());
+        }
+        subnets.forEach(ec2.putArray("RequestedEc2SubnetIds")::add);
+        zones.forEach(ec2.putArray("RequestedEc2AvailabilityZones")::add);
+        copyText(request, "JobFlowRole", ec2, "IamInstanceProfile");
         copyText(instances, "EmrManagedMasterSecurityGroup", ec2, "EmrManagedMasterSecurityGroup");
         copyText(instances, "EmrManagedSlaveSecurityGroup", ec2, "EmrManagedSlaveSecurityGroup");
         copyText(instances, "ServiceAccessSecurityGroup", ec2, "ServiceAccessSecurityGroup");
+        for (String member : List.of("AdditionalMasterSecurityGroups", "AdditionalSlaveSecurityGroups")) {
+            List<String> groups = strings(instances.path(member), member);
+            if (groups != null && !groups.isEmpty()) {
+                groups.forEach(ec2.putArray(member)::add);
+            }
+        }
         return ec2.toString();
     }
 
@@ -1868,6 +2352,20 @@ public class EmrHandler {
             return node.isArray() ? node : null;
         } catch (JsonProcessingException e) {
             LOG.warnv(e, "Failed to parse stored JSON array; ignored. Value: {0}", rawJson);
+            return null;
+        }
+    }
+
+    /** A stored raw JSON object, or null when there is none or it cannot be read. */
+    private JsonNode readRawObject(String rawJson) {
+        if (rawJson == null) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(rawJson);
+            return node.isObject() ? node : null;
+        } catch (JsonProcessingException e) {
+            LOG.warnv(e, "Failed to parse stored JSON object; ignored. Value: {0}", rawJson);
             return null;
         }
     }

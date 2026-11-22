@@ -28,6 +28,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -127,7 +128,7 @@ public class CloudWatchMetricsJsonHandler {
      * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
      * were unset, and a top-level {@code null} member is dropped. {@code PutMetricData} also checks
      * the complete batch for supported scalar or statistic-set shapes before storing any metrics;
-     * {@code Values} and {@code Counts} are refused because this handler does not parse them.
+     * {@code Values} and {@code Counts} remain outside this compatibility subset.
      * Other operations pass nested members on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
      * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
      * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
@@ -334,6 +335,7 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setMetricName(request.path("MetricName").asText(null));
         alarm.setNamespace(request.path("Namespace").asText(null));
         alarm.setStatistic(request.path("Statistic").asText(null));
+        alarm.setExtendedStatistic(request.path("ExtendedStatistic").asText(null));
         JsonNode metrics = request.path("Metrics");
         if (metrics.isArray()) {
             for (JsonNode query : metrics) {
@@ -350,8 +352,20 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
         alarm.setDimensions(parseDimensionsJson(request.path("Dimensions")));
 
-        metricsService.putMetricAlarm(alarm, region);
+        metricsService.putMetricAlarm(alarm, region, evaluationInterval(request));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** The EvaluationInterval of a PutMetricAlarm request: null when absent or null, an integer otherwise. */
+    private static BigInteger evaluationInterval(JsonNode request) {
+        JsonNode node = request.get("EvaluationInterval");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("SerializationException", "EvaluationInterval must be an integer", 400);
+        }
+        return node.bigIntegerValue();
     }
 
     private Response handlePutCompositeAlarm(JsonNode request, String region) {
@@ -435,6 +449,9 @@ public class CloudWatchMetricsJsonHandler {
                 }
                 if (a.getStatistic() != null) {
                     node.put("Statistic", a.getStatistic());
+                }
+                if (a.getExtendedStatistic() != null) {
+                    node.put("ExtendedStatistic", a.getExtendedStatistic());
                 }
                 ArrayNode dimensions = node.putArray("Dimensions");
                 a.getDimensions().forEach(d -> {
@@ -951,7 +968,7 @@ public class CloudWatchMetricsJsonHandler {
                 datum.setMaximum(MetricNumberValidation.parse(statsValues.path("Maximum"), statsPath + ".Maximum"));
             }
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromJson(item, memberPath, datum));
         }
         return datums;
     }

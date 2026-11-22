@@ -77,10 +77,7 @@ class RabbitMqManagerTest {
     }
 
     private static RegionResolver regionResolver() {
-        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
-        return regionResolver;
+        return new RegionResolver("us-east-1", "000000000000");
     }
 
     private Broker broker(String brokerId) {
@@ -190,7 +187,7 @@ class RabbitMqManagerTest {
         manager.startContainer(broker);
 
         assertEquals("/aws/amazonmq/broker/b-1/general", broker.generalLogGroup());
-        verify(logStreamer).attach(eq("container-id"), eq(broker.generalLogGroup()),
+        verify(logStreamer).attachPolled(eq("container-id"), eq(broker.generalLogGroup()),
                 any(), any(), eq("amazonmq:b-1"));
     }
 

@@ -13,6 +13,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
@@ -26,8 +27,6 @@ import static org.hamcrest.Matchers.notNullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesBulkV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     // Senders of their own: an identity under example.com would outlive this class and reach the
     // other SES classes that share the application.
     private static final List<String> SENDERS =
@@ -42,7 +41,7 @@ class SesBulkV2IntegrationTest {
         for (String sender : SENDERS) {
             given()
                 .contentType("application/json")
-                .header("Authorization", AUTH_HEADER)
+                .header("Authorization", AUTH)
                 .body("{\"EmailIdentity\": \"" + sender + "\"}")
             .when()
                 .post("/v2/email/identities")
@@ -51,7 +50,7 @@ class SesBulkV2IntegrationTest {
         }
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "TemplateName": "v2-bulk-welcome",
@@ -73,7 +72,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_storedTemplate_perEntryReplacement() {
         String firstId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -116,7 +115,7 @@ class SesBulkV2IntegrationTest {
 
         String secondId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2-second@floci.test",
@@ -169,7 +168,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_inlineTemplateContent() {
         String messageId = given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2-inline@floci.test",
@@ -216,7 +215,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_unknownTemplate_returns404() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -240,7 +239,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_emptyEntries_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -263,7 +262,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_missingTemplate_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -285,7 +284,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_entriesExceeds50_returnsBadRequest() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -308,7 +307,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_perEntryMissingVariable_mapsToInvalidParameter() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -339,7 +338,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_malformedShape_returns400(String label, String body) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-bulk-emails")
@@ -354,7 +353,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_nonObjectBody_isASerializationException(String body, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-bulk-emails")
@@ -370,7 +369,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-bulk-emails")
@@ -492,7 +491,7 @@ class SesBulkV2IntegrationTest {
         }
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -516,7 +515,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_fiftyEntries_sendsEachEntry() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2@floci.test",
@@ -543,7 +542,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_missingEntries_isAModelViolation(String label, String entriesMember) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk@example.com",
@@ -575,7 +574,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_entryCountIsCheckedBeforeLookups(String label, String body) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-bulk-emails")
@@ -619,7 +618,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_earlierChecksWinOverEntryCount(String label, String body, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body(body)
         .when()
             .post("/v2/email/outbound-bulk-emails")
@@ -640,7 +639,7 @@ class SesBulkV2IntegrationTest {
                     {"FromEmailAddress": "bulk@example.com",
                      "DefaultContent": {"Template": {"TemplateContent": {}}},
                      "BulkEmailEntries": [%s]}
-                    """.formatted(entries(51)), "Template must have at least a subject, text, or html part."));
+                    """.formatted(entries(51)), "Template is missing required fields."));
     }
 
     // An entry with no recipient beside one with a recipient fails on its own (probed 2026-10-25).
@@ -649,7 +648,7 @@ class SesBulkV2IntegrationTest {
     void sendBulkEmail_emptyEntryBesideRecipients_failsOnlyThatEntry() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {
                   "FromEmailAddress": "bulk-v2-inline@floci.test",

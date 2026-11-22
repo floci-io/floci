@@ -247,6 +247,32 @@ class IamRestRouteEnforcementIntegrationTest {
                 "pipes:TagResource");
     }
 
+    /**
+     * A Pipes route is checked on the pipe its path names, from the generated table, and an {@code aws:ResourceTag}
+     * condition reads the tags Pipes holds on it, so an allow on one team's tag lets the caller describe that team's
+     * pipe and not another's.
+     */
+    @Test
+    void aPipesResourceTagConditionReadsTheTagsOfThePipe() {
+        String tagged = pipe("route-pipe-" + suffix(), "data");
+        String other = pipe("route-pipe-" + suffix(), "web");
+        String user = user("route-pipe-tags");
+
+        policy(user, onTeam("Allow", "pipes:DescribePipe", "data"));
+        request(user, "pipes", "GET", "/v1/pipes/" + tagged, null).statusCode(200);
+        refused(request(user, "pipes", "GET", "/v1/pipes/" + other, null), "pipes:DescribePipe");
+    }
+
+    /** A stopped pipe an administrator creates between two queue ARNs, tagged with {@code team}; its name. */
+    private String pipe(String name, String team) {
+        adminOf("pipes").body("{\"Source\":\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-source\",\"Target\":"
+                + "\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-target\",\"RoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/route-pipe\",\"DesiredState\":\"STOPPED\",\"Tags\":{\"team\":\"" + team + "\"}}")
+                .post("/v1/pipes/" + name).then().statusCode(200);
+        cleanup.register(() -> adminOf("pipes").delete("/v1/pipes/" + name).then().statusCode(200));
+        return name;
+    }
+
     @Test
     void sharedTaggingIsCheckedAsTheServiceItsArnNames() {
         // The shared tagging routes hand the request to the service its ARN names, whatever scope it is
@@ -289,17 +315,33 @@ class IamRestRouteEnforcementIntegrationTest {
         as(user, "eks").get(path).then().statusCode(200).body("nodegroup.nodegroupArn", equalTo(nodegroup));
     }
 
+    /** A resource-tag condition reads the tags EKS holds on the cluster a request names. */
+    @Test
+    void anEksResourceTagConditionReadsTheTagsOfTheCluster() {
+        String tagged = "route-eks-data-" + suffix();
+        String other = "route-eks-web-" + suffix();
+        eksCluster(tagged, "{\"team\":\"data\"}");
+        eksCluster(other, "{\"team\":\"web\"}");
+        String user = user("route-eks-tags");
+
+        policy(user, onTeam("Allow", "eks:DescribeCluster", "data"));
+        request(user, "eks", "GET", "/clusters/" + tagged, null).statusCode(200);
+        refused(request(user, "eks", "GET", "/clusters/" + other, null), "eks:DescribeCluster");
+    }
+
     @Test
     void deletedEksAddonRemainsAuthorizedForItsScopedDescribeWaiter() {
         String name = "addon-waiter-" + suffix();
-        eksCluster(name);
+        String cluster = eksCluster(name);
         String base = "/clusters/" + name + "/addons";
         String arn = eks().body("{\"addonName\":\"vpc-cni\"}").post(base).then().statusCode(200)
                 .extract().path("addon.addonArn");
         String user = "addon-waiter-user-" + suffix();
         EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
                 cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
-        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
+        // The Service Reference lists the cluster's Pod Identity associations for DeleteAddon, beside the add-on.
+        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn) + ","
+                + allow("eks:DeleteAddon", cluster.replace(":cluster/", ":podidentityassociation/") + "/*"));
         try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
                 credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
             assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
@@ -344,13 +386,15 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void eachResourceAnEksClusterHoldsIsCheckedAgainstTheArnEksHoldsItUnder() {
-        // Each is looked up as EKS looks it up, so a Deny on its own ARN applies where the action is allowed
-        // on every resource, and a grant on that ARN alone covers it.
+    void eachResourceAnEksClusterHoldsIsCheckedAsTheGeneratedTableReadsIt() {
+        // A Fargate profile and an add-on, whose ARNs end in an id EKS minted, are found as EKS finds them, so a Deny
+        // on their own ARN applies where the action is allowed on every resource, and a grant on that ARN alone
+        // covers them. An update is checked on its cluster, and an access entry or a Pod Identity association with the
+        // parts of its ARN the request does not give open, so a policy names those with a wildcard.
         String user = user("route-eks-held");
         String name = "route-held-" + suffix();
         String base = "/clusters/" + name;
-        eksCluster(name);
+        String cluster = eksCluster(name);
         String role = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", "route-held-" + suffix(),
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow("s3:*", "*") + "]}");
         String profile = eks().body("{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"" + role + "\"}")
@@ -361,20 +405,19 @@ class IamRestRouteEnforcementIntegrationTest {
                 .extract().path("addon.addonArn");
         String update = eks().body("{}").post(base + "/addons/vpc-cni/update").then().statusCode(200)
                 .extract().path("update.id");
-        String entry = eks().body("{\"principalArn\":\"" + role + "\"}").post(base + "/access-entries").then()
-                .statusCode(200).extract().path("accessEntry.accessEntryArn");
+        eks().body("{\"principalArn\":\"" + role + "\"}").post(base + "/access-entries").then().statusCode(200);
         String association = eks().body("{\"namespace\":\"default\",\"serviceAccount\":\"app\",\"roleArn\":\"" + role
                 + "\"}").post(base + "/pod-identity-associations").then().statusCode(200)
                 .extract().path("association.associationArn");
         String[][] routes = {
             {"eks:DescribeFargateProfile", base + "/fargate-profiles/fp", profile},
             {"eks:DescribeAddon", base + "/addons/vpc-cni", addon},
-            // EKS returns an add-on's update without its addonName, so the update is its add-on's.
-            {"eks:DescribeUpdate", base + "/updates/" + update, addon},
-            {"eks:DescribeAccessEntry", base + "/access-entries/" + encoded(role), entry},
+            {"eks:DescribeUpdate", base + "/updates/" + update, cluster},
+            {"eks:DescribeAccessEntry", base + "/access-entries/" + encoded(role),
+                cluster.replace(":cluster/", ":access-entry/") + "/*"},
             {"eks:DescribePodIdentityAssociation",
                 base + "/pod-identity-associations/" + association.substring(association.lastIndexOf('/') + 1),
-                association},
+                cluster.replace(":cluster/", ":podidentityassociation/") + "/*"},
         };
         for (String[] route : routes) {
             policy(user, allow(route[0], "*") + "," + deny(route[0], route[2]));
@@ -406,8 +449,9 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void anEksAccessEntrysPolicyRoutesAreCheckedAsTheirOwnActionsOnTheEntry() {
-        // Associating, listing and disassociating an entry's access policies act on that entry, so a grant on
-        // another entry does not cover them, and one on the entry's own ARN does.
+        // Associating, listing and disassociating an entry's access policies act on the cluster's entries, the parts
+        // of an entry's ARN the request does not give open, so a grant on another cluster's entries does not cover
+        // them, and one on this cluster's does.
         String user = user("route-eks-entry");
         String name = "route-entry-" + suffix();
         String base = "/clusters/" + name + "/access-entries";
@@ -419,8 +463,9 @@ class IamRestRouteEnforcementIntegrationTest {
                 "route-other-" + suffix(), trust);
         String entry = eks().body("{\"principalArn\":\"" + role + "\"}").post(base).then().statusCode(200)
                 .extract().path("accessEntry.accessEntryArn");
-        String other = eks().body("{\"principalArn\":\"" + otherRole + "\"}").post(base).then().statusCode(200)
-                .extract().path("accessEntry.accessEntryArn");
+        eks().body("{\"principalArn\":\"" + otherRole + "\"}").post(base).then().statusCode(200);
+        String entries = entry.substring(0, entry.indexOf(":access-entry/")) + ":access-entry/" + name + "/*";
+        String other = entries.replace("/" + name + "/", "/" + name + "-other/");
         String policies = base + "/" + encoded(role) + "/access-policies";
         String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
         String associate = "{\"policyArn\":\"" + admin + "\",\"accessScope\":{\"type\":\"cluster\"}}";
@@ -434,7 +479,7 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then(),
                 "eks:DisassociateAccessPolicy");
 
-        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entry + "\"}");
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entries + "\"}");
         as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then().statusCode(200);
         as(user, "eks").urlEncodingEnabled(false).get(policies).then().statusCode(200)
                 .body("associatedAccessPolicies[0].policyArn", equalTo(admin));
@@ -446,19 +491,24 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void eksTaggingIsCheckedAgainstTheCallersClusterOfThatName() {
-        // EKS tags the caller's own cluster named after the ARN's last /, whatever account the ARN names, so a
-        // grant on another account's cluster of that name does not cover it, and one on the caller's own does.
+    void eksTaggingIsCheckedOnTheArnItCarriesAndTagsOnlyThatResource() {
+        // A tagging request is checked on the ARN its modeled route carries, and on the caller's resource of that name
+        // when the ARN names another account; EKS tags only the resource whose ARN is the whole ARN, so another
+        // account's ARN tags nothing.
         String user = user("route-eks-tags");
         String cluster = eksCluster("route-tagged-" + suffix());
         String foreign = cluster.replace(ACCOUNT, "111122223333");
         String body = "{\"tags\":{\"team\":\"a\"}}";
 
         policy(user, allow("eks:TagResource", foreign));
-        refused(as(user, "eks").body(body).post("/tags/" + foreign).then(), "eks:TagResource");
+        refused(as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(foreign)).then(),
+                "eks:TagResource");
+        policy(user, allow("eks:TagResource", foreign) + "," + allow("eks:TagResource", cluster));
+        as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(foreign)).then().statusCode(404);
         policy(user, allow("eks:TagResource", cluster));
-        as(user, "eks").body(body).post("/tags/" + foreign).then().statusCode(not(403));
-        eks().get("/tags/" + cluster).then().statusCode(200).body("tags.team", equalTo("a"));
+        as(user, "eks").urlEncodingEnabled(false).body(body).post("/tags/" + encoded(cluster)).then().statusCode(200);
+        eks().urlEncodingEnabled(false).get("/tags/" + encoded(cluster)).then().statusCode(200)
+                .body("tags.team", equalTo("a"));
     }
 
     @Test
@@ -499,8 +549,13 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its ARN. */
     private String eksCluster(String name) {
+        return eksCluster(name, "{}");
+    }
+
+    /** A cluster an administrator creates with {@code tags}, a JSON map, removed afterwards; its ARN. */
+    private String eksCluster(String name, String tags) {
         String arn = eks().body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT
-                + ":role/route-cluster\",\"accessConfig\":{\"authenticationMode\":\"API\"}}")
+                + ":role/route-cluster\",\"accessConfig\":{\"authenticationMode\":\"API\"},\"tags\":" + tags + "}")
                 .post("/clusters").then().statusCode(200).extract().path("cluster.arn");
         cleanup.register(() -> eks().delete("/clusters/" + name));
         return arn;
@@ -814,6 +869,35 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags OpenSearch holds on the domain a request names in its path,
+     * as a tag call leaves them, so an allow on one team's tag lets the caller describe that team's domain and not
+     * another's.
+     */
+    @Test
+    void anOpenSearchResourceTagConditionReadsTheTagsOfTheDomain() {
+        String tagged = openSearchDomain("web");
+        String other = openSearchDomain("web");
+        adminOf("es").body("{\"ARN\":\"arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + tagged
+                + "\",\"TagList\":[{\"Key\":\"team\",\"Value\":\"data\"}]}").post("/2021-01-01/tags").then()
+                .statusCode(200);
+        String user = user("route-domain-tags");
+
+        policy(user, onTeam("Allow", "es:DescribeDomain", "data"));
+        request(user, "es", "GET", "/2021-01-01/opensearch/domain/" + tagged, null).statusCode(200);
+        refused(request(user, "es", "GET", "/2021-01-01/opensearch/domain/" + other, null), "es:DescribeDomain");
+    }
+
+    /** The name of an OpenSearch domain an administrator creates tagged with the team, deleted after the test. */
+    private String openSearchDomain(String team) {
+        String name = "route-tags-" + suffix();
+        adminOf("es").body("{\"DomainName\":\"" + name + "\",\"EngineVersion\":\"OpenSearch_2.11\",\"TagList\":"
+                + "[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}").post("/2021-01-01/opensearch/domain").then()
+                .statusCode(200);
+        cleanup.register(() -> adminOf("es").delete("/2021-01-01/opensearch/domain/" + name));
+        return name;
+    }
+
+    /**
      * An Access Analyzer request naming its analyzer, in its path or its body, is checked on that analyzer, the ARN
      * Access Analyzer gives it: a caller with no grant is refused, a grant scoped to the analyzer lets
      * {@code GetAnalyzer} read it and {@code CreateAnalyzer} reach its validation of the type, a request naming
@@ -849,6 +933,31 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Access Analyzer holds on the analyzer a request names in its
+     * path, the ones it was created with, so an allow on one team's tag lets the caller read that team's analyzer and
+     * not another's.
+     */
+    @Test
+    void anAccessAnalyzerResourceTagConditionReadsTheTagsOfTheAnalyzer() {
+        String tagged = analyzer("data");
+        String other = analyzer("web");
+        String user = user("route-analyzer-tags");
+
+        policy(user, onTeam("Allow", "access-analyzer:GetAnalyzer", "data"));
+        as(user, "access-analyzer").get("/analyzer/" + tagged).then().statusCode(200);
+        refused(as(user, "access-analyzer").get("/analyzer/" + other).then(), "access-analyzer:GetAnalyzer");
+    }
+
+    /** The name of an organization analyzer an administrator creates tagged with the team, deleted after the test. */
+    private String analyzer(String team) {
+        String name = "route-tags-" + suffix();
+        accessAnalyzer().body("{\"analyzerName\":\"" + name + "\",\"type\":\"ORGANIZATION\",\"tags\":{\"team\":\""
+                + team + "\"}}").put("/analyzer").then().statusCode(200);
+        cleanup.register(() -> accessAnalyzer().delete("/analyzer/" + name));
+        return name;
+    }
+
+    /**
      * A Security Hub request is checked on the caller's hub in the Region it is signed for, {@code hub/default}, the
      * ARN Security Hub gives it, or on the hub its {@code HubArn} names: a caller with no grant is refused, a grant
      * scoped to the hub lets {@code DescribeStandards} through and {@code DescribeHub} reach Security Hub, which is
@@ -880,6 +989,38 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Security Hub holds on the hub a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller describe that team's hub and not another's. An
+     * account has one hub a Region, so the two are in two Regions.
+     */
+    @Test
+    void aSecurityHubResourceTagConditionReadsTheTagsOfTheHub() {
+        String taggedRegion = "ca-central-1";
+        String otherRegion = "sa-east-1";
+        securityHub(taggedRegion, "web");
+        securityHub(otherRegion, "web");
+        String taggedHub = "arn:aws:securityhub:" + taggedRegion + ":" + ACCOUNT + ":hub/default";
+        given().header("Authorization", auth(ADMIN, taggedRegion, "securityhub")).contentType("application/json")
+                .body("{\"Tags\":{\"team\":\"data\"}}")
+                .post("/tags/{arn}", taggedHub).then().statusCode(200);
+        String user = user("route-hub-tags");
+
+        policy(user, onTeam("Allow", "securityhub:DescribeHub", "data"));
+        as(user, taggedRegion, "securityhub").get("/accounts").then().statusCode(200);
+        refused(as(user, otherRegion, "securityhub").get("/accounts").then(), "securityhub:DescribeHub");
+    }
+
+    /**
+     * Security Hub enabled for the administrator in {@code region}, its hub tagged with the team. Floci serves no
+     * DisableSecurityHub, so each Region a test enables it in is one no other test uses.
+     */
+    private void securityHub(String region, String team) {
+        given().header("Authorization", auth(ADMIN, region, "securityhub")).contentType("application/json")
+                .body("{\"EnableDefaultStandards\":false,\"Tags\":{\"team\":\"" + team + "\"}}").post("/accounts")
+                .then().statusCode(200);
+    }
+
+    /**
      * A GuardDuty request naming its detector in its path is checked on that detector, the ARN GuardDuty gives it,
      * and one naming none as its action on {@code *}: a caller with no grant is refused, a grant scoped to the
      * detector lets {@code GetDetector} read it, a request naming another detector is refused, and a deny on the
@@ -890,11 +1031,7 @@ class IamRestRouteEnforcementIntegrationTest {
         String user = user("route-detector");
         String region = "eu-west-3";
         refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
-        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
-                .contentType("application/json").body("{\"enable\":true}").post("/detector")
-                .then().statusCode(200).extract().path("detectorId");
-        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
-                .delete("/detector/" + detector));
+        String detector = guardDutyDetector(region, null);
         String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":detector/" + detector;
         refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
 
@@ -907,6 +1044,42 @@ class IamRestRouteEnforcementIntegrationTest {
         policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:GetDetector", arn));
         refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
         as(user, region, "guardduty").get("/detector").then().statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags GuardDuty holds on the detector a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's detector and not
+     * another's. An account has one detector a Region, so the two are in two Regions.
+     */
+    @Test
+    void aGuardDutyResourceTagConditionReadsTheTagsOfTheDetector() {
+        String taggedRegion = "eu-north-1";
+        String otherRegion = "eu-south-2";
+        String tagged = guardDutyDetector(taggedRegion, "web");
+        String other = guardDutyDetector(otherRegion, "web");
+        String taggedArn = "arn:aws:guardduty:" + taggedRegion + ":" + ACCOUNT + ":detector/" + tagged;
+        given().header("Authorization", auth(ADMIN, taggedRegion, "guardduty")).contentType("application/json")
+                .body("{\"tags\":{\"team\":\"data\"}}")
+                .post("/tags/{arn}", taggedArn).then().statusCode(204);
+        String user = user("route-detector-tags");
+
+        policy(user, onTeam("Allow", "guardduty:GetDetector", "data"));
+        as(user, taggedRegion, "guardduty").get("/detector/" + tagged).then().statusCode(200);
+        refused(as(user, otherRegion, "guardduty").get("/detector/" + other).then(), "guardduty:GetDetector");
+    }
+
+    /**
+     * The id of a detector an administrator creates in {@code region}, tagged with the team if one is given, deleted
+     * after the test.
+     */
+    private String guardDutyDetector(String region, String team) {
+        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json")
+                .body("{\"enable\":true" + (team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}") + "}")
+                .post("/detector").then().statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/detector/" + detector));
+        return detector;
     }
 
     /**
@@ -1087,19 +1260,48 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void fisIsCheckedOnTheTemplateItsPathNames() {
-        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
-                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
-                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
-        String id = adminOf("fis").body(template).post("/experimentTemplates")
-                .then().statusCode(200).extract().path("experimentTemplate.id");
-        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
-        String arn = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
+        String id = fisTemplate(null);
+        String arn = fisTemplateArn(id);
         String user = user("route-fis");
 
         policy(user, allow("fis:GetExperimentTemplate", arn));
         request(user, "fis", "GET", "/experimentTemplates/" + id, null)
                 .statusCode(200).body("experimentTemplate.arn", equalTo(arn));
         refused(request(user, "fis", "GET", "/experimentTemplates/EXTother", null), "fis:GetExperimentTemplate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AWS FIS holds on the experiment template a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's template and not
+     * another's.
+     */
+    @Test
+    void aFisResourceTagConditionReadsTheTagsOfTheTemplate() {
+        String tagged = fisTemplate("{\"team\":\"web\"}");
+        String other = fisTemplate("{\"team\":\"web\"}");
+        adminOf("fis").body("{\"tags\":{\"team\":\"data\"}}").post("/tags/" + fisTemplateArn(tagged))
+                .then().statusCode(200);
+        String user = user("route-fis-tags");
+
+        policy(user, onTeam("Allow", "fis:GetExperimentTemplate", "data"));
+        request(user, "fis", "GET", "/experimentTemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "fis", "GET", "/experimentTemplates/" + other, null), "fis:GetExperimentTemplate");
+    }
+
+    /** The id of an experiment template an administrator creates, with the {@code tags} JSON object if any. */
+    private String fisTemplate(String tags) {
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}"
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}";
+        String id = adminOf("fis").body(template).post("/experimentTemplates")
+                .then().statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+        return id;
+    }
+
+    private static String fisTemplateArn(String id) {
+        return "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
     }
 
     @Test
@@ -1131,6 +1333,35 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
         policy(user, allow("oam:GetSink", "*") + "," + onTeam("Deny", "oam:GetSink", "data"));
         refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR on EKS holds on the job template a request names, those
+     * it was created with (TagResource takes only virtual clusters, job runs and managed endpoints), so an allow on one
+     * team's tag lets the caller read that team's template and not another's.
+     */
+    @Test
+    void anEmrContainersResourceTagConditionReadsTheTagsOfTheJobTemplate() {
+        String tagged = emrContainersJobTemplate("data");
+        String other = emrContainersJobTemplate("web");
+        String user = user("route-emrc-tags");
+
+        policy(user, onTeam("Allow", "emr-containers:DescribeJobTemplate", "data"));
+        request(user, "emr-containers", "GET", "/jobtemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "emr-containers", "GET", "/jobtemplates/" + other, null),
+                "emr-containers:DescribeJobTemplate");
+    }
+
+    /** The id of an EMR on EKS job template an administrator creates, tagged with {@code team}, deleted after. */
+    private String emrContainersJobTemplate(String team) {
+        String body = "{\"name\":\"route-template-" + suffix() + "\",\"clientToken\":\"" + suffix()
+                + "\",\"tags\":{\"team\":\"" + team + "\"},\"jobTemplateData\":{\"executionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/emr-job\",\"releaseLabel\":\"emr-7.5.0-latest\",\"jobDriver\":"
+                + "{\"sparkSubmitJobDriver\":{\"entryPoint\":\"s3://bucket/pi.py\"}}}}";
+        String id = adminOf("emr-containers").body(body).post("/jobtemplates").then().statusCode(200).extract()
+                .path("id");
+        cleanup.register(() -> adminOf("emr-containers").delete("/jobtemplates/" + id).then().statusCode(200));
+        return id;
     }
 
     /** A statement with {@code effect} on {@code action} for every resource whose {@code team} tag is the one given. */
@@ -1359,13 +1590,17 @@ class IamRestRouteEnforcementIntegrationTest {
         String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
                 + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
 
+        String links = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/*";
+
         // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
-        // own is no grant on it.
-        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        // own is no grant on it. The link it makes is the caller's, and is checked too.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)) + "," + allow(action, links));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, "*") + "," + deny(action, sink));
         refused(request(user, "oam", "POST", "/CreateLink", body), action);
         policy(user, allow(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink) + "," + allow(action, links));
         String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
         cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
     }

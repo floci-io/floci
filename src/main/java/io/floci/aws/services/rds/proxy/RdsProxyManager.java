@@ -3,6 +3,7 @@ package io.floci.aws.services.rds.proxy;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.services.rds.container.RdsBackendGate;
+import io.floci.aws.services.rds.container.RdsContainerHandle;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,6 +15,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 /**
  * Registry of all active RDS auth proxies. One proxy per DB instance or cluster.
@@ -30,6 +32,7 @@ public class RdsProxyManager {
     private final RdsContainerManager containerManager;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RdsAuthProxy> pendingFailedStarts = new ConcurrentHashMap<>();
+    private volatile Predicate<String> forceSsl = instanceId -> false;
 
     @Inject
     public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
@@ -84,6 +87,18 @@ public class RdsProxyManager {
                 masterPassword, dbName, passwordValidator, binding, endpointKind);
     }
 
+    /**
+     * The rdsadmin login of the runtime's current PostgreSQL container, which an IAM session is handed over from,
+     * or null where the master user is the container's superuser.
+     */
+    private RdsAuthProxy.HandoverLoginResolver handoverLogin(String backendRuntimeId) {
+        return () -> {
+            RdsContainerHandle.PostgresSuperuser superuser = containerManager.postgresHandoverLogin(backendRuntimeId);
+            return superuser == null ? null
+                    : new PostgresProtocolHandler.BackendLogin(superuser.user(), superuser.password());
+        };
+    }
+
     private void startProxy(String instanceId, String backendRuntimeId,
                             DatabaseEngine engine, boolean iamEnabled,
                             int proxyPort, String backendHost, int backendPort,
@@ -107,7 +122,8 @@ public class RdsProxyManager {
                 engine, iamEnabled, masterUsername, masterPassword, dbName, sigV4Validator,
                 tlsCertificates, passwordValidator, rdsConfig.proxyHandshakeTimeoutMillis(),
                 rdsConfig.proxyBackendConnectTimeoutMillis(), rdsConfig.proxyMaxConnections(),
-                binding, username -> binding != null, backendGate, endpointKind);
+                binding, username -> binding != null, backendGate, endpointKind,
+                () -> forceSsl.test(instanceId), handoverLogin(backendRuntimeId));
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {
@@ -150,6 +166,10 @@ public class RdsProxyManager {
                 throw failure;
             }
         }
+    }
+
+    public void forceSslWhen(Predicate<String> forceSsl) {
+        this.forceSsl = forceSsl;
     }
 
     public synchronized void updateMasterPassword(String instanceId, String newPassword) {

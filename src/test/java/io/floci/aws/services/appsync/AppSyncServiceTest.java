@@ -527,6 +527,9 @@ class AppSyncServiceTest {
             "cn-north-1,     aws-cn",
             "us-isob-east-1, aws-iso-b"})
     void tagResourceAcceptsAnApiArnFromAnyPartition(String region, String partition) {
+        // The service answers for the Region of the API, as a request tagging it there does.
+        this.region = region;
+        service = newService(Clock.fixed(NOW, ZoneOffset.UTC));
         GraphqlApi api = service.createGraphqlApi(
                 Map.of("name", "p-" + region, "authenticationType", "API_KEY"), region);
         String apiArn = "arn:" + partition + ":appsync:" + region + ":000000000000:apis/" + api.getApiId();

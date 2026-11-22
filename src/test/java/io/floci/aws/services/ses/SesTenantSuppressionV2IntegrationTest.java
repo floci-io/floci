@@ -1,13 +1,12 @@
 package io.floci.aws.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -26,15 +25,9 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTenantSuppressionV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String TENANT = "floci-sup-tenant";
     private static final String TENANT_ADDR = "floci-sup-tenant@example.com";
     private static final String ACCOUNT_ADDR = "floci-sup-acct@example.com";
-
-    private static RequestSpecification v2() {
-        return given().contentType("application/json").header("Authorization", AUTH);
-    }
 
     @Test
     @Order(1)

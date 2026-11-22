@@ -102,7 +102,10 @@ class AccountPropertiesIntegrationTest {
     /**
      * These three satisfy the published pattern, which admits no slash, several, and a trailing
      * one, and fail only the Namespace/PropertyName rule. The service applies that after the
-     * format is already good, so it is {@code InvalidInput} rather than a constraint failure.
+     * format is already good, so it is {@code InvalidInput} rather than a constraint failure, and
+     * the sentence is the one AWS was recorded answering for the key that carries no separator,
+     * with the key as the request sent it. The other two spellings are this package's own rule
+     * under the same sentence, nothing recording what AWS answers for them.
      */
     @Test
     void aKeyThatIsNotNamespaceSlashPropertyIsInvalidInput() {
@@ -115,7 +118,7 @@ class AccountPropertiesIntegrationTest {
                 .body(not(containsString("ValidationError")))
                 // The wording matters as much as the code here: carrying the constraint phrasing
                 // on an InvalidInput is the mismatch this split exists to remove.
-                .body(containsString("is not Namespace/PropertyName"))
+                .body(containsString("Property key must be in format Namespace/PropertyName: " + key))
                 .body(not(containsString("failed to satisfy constraint")));
         }
     }

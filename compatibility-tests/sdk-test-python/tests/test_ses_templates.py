@@ -207,7 +207,8 @@ class TestSesV2SendTemplatedEmail:
     ):
         template_name = f"pytest-arn-tpl-{unique_name}"
         sender = f"pytest-arn-sender-{unique_name}@example.com"
-        arn = f"arn:aws:ses:us-east-1:000000000000:template/{template_name}"
+        meta = sesv2_client.meta
+        arn = f"arn:{meta.partition}:ses:{meta.region_name}:000000000000:template/{template_name}"
         try:
             sesv2_client.create_email_identity(EmailIdentity=sender)
             sesv2_client.create_email_template(
@@ -406,7 +407,8 @@ class TestSesV1SendTemplatedEmail:
         accepts both and resolves via the name."""
         template_name = f"pytest-v1-arn-tpl-{unique_name}"
         sender = f"pytest-v1-arn-sender-{unique_name}@example.com"
-        arn = f"arn:aws:ses:us-east-1:000000000000:template/{template_name}"
+        meta = ses_client.meta
+        arn = f"arn:{meta.partition}:ses:{meta.region_name}:000000000000:template/{template_name}"
         try:
             ses_client.verify_email_identity(EmailAddress=sender)
             ses_client.create_template(

@@ -30,6 +30,9 @@ import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.mqtt.messages.MqttPublishMessage;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
 import io.vertx.mqtt.messages.MqttUnsubscribeMessage;
+import io.vertx.mqtt.messages.codes.MqttDisconnectReasonCode;
+import io.vertx.mqtt.messages.codes.MqttPubAckReasonCode;
+import io.vertx.mqtt.messages.codes.MqttSubAckReasonCode;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -117,6 +120,9 @@ public class IotMqttBrokerService implements Resettable {
     /** AWS IoT Core's MQTT packet quota, counted as Netty's decoder counts: variable header plus payload. */
     private static final int MAX_PACKET_SIZE = 146 * 1024;
 
+    /** AWS IoT Core's default persistent session expiry period quota, which also bounds an MQTT 5 Session Expiry Interval. */
+    static final long PERSISTENT_SESSION_EXPIRY_SECONDS = 3600;
+
     private static final Pattern IPV4_LITERAL = Pattern.compile("\\d{1,3}(\\.\\d{1,3}){3}");
 
     static final int MAX_PENDING_RULE_EVALUATIONS = 1_000;
@@ -128,6 +134,7 @@ public class IotMqttBrokerService implements Resettable {
     static final String DUPLICATE_CLIENTID = "DUPLICATE_CLIENTID";
     static final String API_INITIATED_DISCONNECT = "API_INITIATED_DISCONNECT";
     private static final String CLIENT_ERROR = "CLIENT_ERROR";
+    private static final String AUTH_ERROR = "AUTH_ERROR";
     private static final long KEEP_ALIVE_SLACK_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
 
     private static final long RULES_RESETTING = 1;
@@ -143,6 +150,7 @@ public class IotMqttBrokerService implements Resettable {
     final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
+    private final Map<HistoryKey, StoredSession> storedSessions = new ConcurrentHashMap<>();
     /** Serializes admitting and ending sessions and the versionNumbers they take; never held across endpoint I/O. */
     private final Object sessionLock = new Object();
     /** The last lifecycle event versionNumber per client id; neither a state reset nor a broker restart clears it. */
@@ -223,13 +231,16 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended, and
-     * suspends rules in {@link #beforeReset()}. Live sessions stay connected.
+     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended and
+     * discards disconnected persistent sessions, and suspends rules in {@link #beforeReset()}.
+     * Live sessions stay connected.
      */
     @Override
     public void clear() {
         synchronized (sessionLock) {
             lastDisconnects.clear();
+            storedSessions.values().forEach(stored -> vertx.cancelTimer(stored.expiryTimer()));
+            storedSessions.clear();
         }
     }
 
@@ -344,6 +355,8 @@ public class IotMqttBrokerService implements Resettable {
         });
         sessionsByClient.clear();
         subscriptionsByClient.clear();
+        storedSessions.values().forEach(stored -> vertx.cancelTimer(stored.expiryTimer()));
+        storedSessions.clear();
         if (mqttServer != null) {
             mqttServer.close().toCompletionStage().toCompletableFuture().join();
         }
@@ -390,6 +403,7 @@ public class IotMqttBrokerService implements Resettable {
                 return false;
             }
             if (cleanSession) {
+                discardStoredSession(session.historyKey());
                 subscriptionsByClient.remove(clientId);
             }
         }
@@ -435,8 +449,16 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    List<String> listSubscriptions(String clientId) {
-        return subscriptionsByClient.getOrDefault(clientId, Map.of()).keySet().stream()
+    boolean hasSession(String accountId, String region, String clientId) {
+        return getConnection(clientId).isPresent() || storedSessions.containsKey(new HistoryKey(accountId, region, clientId));
+    }
+
+    List<String> listSubscriptions(String accountId, String region, String clientId) {
+        StoredSession stored = storedSessions.get(new HistoryKey(accountId, region, clientId));
+        Map<String, Subscription> subscriptions = sessionsByClient.containsKey(clientId) || stored == null
+                ? subscriptionsByClient.getOrDefault(clientId, Map.of())
+                : stored.subscriptions();
+        return subscriptions.keySet().stream()
                 .sorted()
                 .toList();
     }
@@ -446,8 +468,9 @@ public class IotMqttBrokerService implements Resettable {
      * has registered and whose attached policies allow {@code iot:Connect} for the client id;
      * anything else is answered with CONNACK not authorized (return code 5, reason code 0x87 on
      * MQTT 5) and never becomes a session, so a client already holding that client id keeps its
-     * connection. The plaintext listener, which the WebSocket bridge also lands on, stays open to
-     * every client except one that names a custom authorizer, see {@link #authorizeCustom}.
+     * connection. The plaintext listener stays open to every client except one that names a custom
+     * authorizer, see {@link #authorizeCustom}. A WebSocket client that names none goes through the
+     * default authorizer unless its upgrade carries a SigV4 signature, which is not verified.
      */
     void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
         long connectNanos = nanoTime.getAsLong();
@@ -456,6 +479,7 @@ public class IotMqttBrokerService implements Resettable {
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
         int sourcePort = remoteAddress == null ? -1 : remoteAddress.port();
         IotService.RegisteredDevice device = null;
+        IotService.ConnectionPolicies policies = null;
         if (verifyDevice) {
             device = admittedDevice(endpoint, clientId, sourceIp);
             if (device == null) {
@@ -464,6 +488,7 @@ public class IotMqttBrokerService implements Resettable {
                         : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED);
                 return;
             }
+            policies = iotService.get().devicePolicies(device, clientId, sourceIp, requestedServerName(endpoint.sslSession()));
         } else {
             IotCustomAuthorizer.WebSocketUpgrade upgrade = remoteAddress == null ? null : webSocketUpgrades.remove(remoteAddress);
             if (upgrade != null && upgrade.sourceIp() != null) {
@@ -472,19 +497,21 @@ public class IotMqttBrokerService implements Resettable {
             }
             String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
             String authorizerName = IotCustomAuthorizer.authorizerName(username, upgrade);
-            if (authorizerName != null) {
+            if (authorizerName != null || (upgrade != null && !upgrade.isSigV4Signed())) {
                 authorizeCustom(endpoint, authorizerName, upgrade, sourceIp, sourcePort, connectNanos);
                 return;
             }
         }
-        admit(endpoint, device, sourceIp, sourcePort, connectNanos);
+        admit(endpoint, device, policies, sourceIp, sourcePort, connectNanos);
     }
 
     /**
-     * A CONNECT naming a custom authorizer is admitted only when the authorizer's function allows
-     * it and the policies it returns allow {@code iot:Connect} for the client id. The function runs
-     * off the event loop. A refusal closes an MQTT 3.1.1 connection without a CONNACK and answers
-     * MQTT 5 with reason code 0x87, as AWS IoT does.
+     * A CONNECT through the named custom authorizer, or the default authorizer when
+     * {@code authorizerName} is null, is admitted only when the authorizer's function allows it and
+     * the policies it returns allow {@code iot:Connect} for the client id; with no default authorizer
+     * set it is refused. Those policies then decide the session's publish, subscribe and receive.
+     * The function runs off the event loop. A refusal closes an MQTT 3.1.1 connection without a
+     * CONNACK and answers MQTT 5 with reason code 0x87, as AWS IoT does.
      */
     private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
                                  String sourceIp, int sourcePort, long connectNanos) {
@@ -496,43 +523,61 @@ public class IotMqttBrokerService implements Resettable {
         endpoint.closeHandler(ignored -> closed.set(true));
         vertx.executeBlocking(() -> {
             List<String> policies = customAuthorizer.connectPolicies(authorizerName, clientId, username, password, upgrade);
-            return iotService.get().isConnectAllowedBy(policies, clientId, sourceIp, serverName);
+            return iotService.get().isConnectAllowedBy(policies, clientId, sourceIp, serverName) ? policies : null;
         }, false).onComplete(decision -> {
             if (closed.get()) {
                 return;
             }
-            if (decision.succeeded() && decision.result()) {
-                admit(endpoint, null, sourceIp, sourcePort, connectNanos);
+            if (decision.succeeded() && decision.result() != null) {
+                admit(endpoint, null, iotService.get().authorizerPolicies(decision.result(), clientId, sourceIp, serverName),
+                        sourceIp, sourcePort, connectNanos);
                 return;
             }
-            LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId, authorizerName,
+            LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId,
+                    authorizerName == null ? "(default)" : authorizerName,
                     decision.failed() ? decision.cause().getMessage() : "iot:Connect is not allowed");
             if (endpoint.protocolVersion() != 5) {
                 endpoint.close();
                 return;
             }
-            MqttProperties properties = new MqttProperties();
-            properties.add(new MqttProperties.StringProperty(MqttProperties.MqttPropertyType.REASON_STRING.value(),
-                    "CONNACK:Client is not authenticated/authorized to send the message:" + UUID.randomUUID()));
-            endpoint.reject(MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED_5, properties);
+            endpoint.reject(MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED_5, notAuthorizedReason("CONNACK"));
         });
+    }
+
+    private static MqttProperties notAuthorizedReason(String packet) {
+        MqttProperties properties = new MqttProperties();
+        properties.add(new MqttProperties.StringProperty(MqttProperties.MqttPropertyType.REASON_STRING.value(),
+                packet + ":Client is not authenticated/authorized to send the message:" + UUID.randomUUID()));
+        return properties;
     }
 
     /**
      * {@code device} is the registered device a TLS client was admitted as, null otherwise; its
      * certificate id is the session's principal, and its account and region the session's.
-     * {@code clientIp} and {@code clientPort} are the address the client connected from: the
-     * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
-     * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
-     * the keep-alive runs from.
+     * {@code policies} decide the session's publish, subscribe and receive, null for a session that
+     * went through no authorizer on the plaintext listener or the WebSocket bridge, which is
+     * unrestricted. {@code clientIp} and {@code clientPort} are the address the client connected
+     * from: the socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as
+     * the bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
+     * the keep-alive runs from. A CONNECT without a clean session resumes the client id's
+     * persistent session created in the same account and region over the same MQTT version: the
+     * CONNACK reports it present and its stored messages follow, each only if the new session's
+     * policies allow {@code iot:Receive} on its topic; any other CONNECT from that account and
+     * region discards it, and one from elsewhere leaves it stored.
      */
-    private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device, String clientIp, int clientPort,
-                       long connectNanos) {
+    private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device, IotService.ConnectionPolicies policies,
+                       String clientIp, int clientPort, long connectNanos) {
         String clientId = endpoint.clientIdentifier();
         boolean cleanSession = endpoint.isCleanSession();
+        int protocolVersion = endpoint.protocolVersion();
+        long requestedSessionExpiry = protocolVersion == 5
+                ? sessionExpiryInterval(endpoint.connectProperties(), 0)
+                : cleanSession ? 0 : PERSISTENT_SESSION_EXPIRY_SECONDS;
+        long sessionExpirySeconds = Math.min(requestedSessionExpiry, PERSISTENT_SESSION_EXPIRY_SECONDS);
         String principal = device == null ? null : device.certificate().getCertificateId();
         ClientSession session;
         ClientSession replaced = null;
+        boolean sessionPresent;
         synchronized (sessionLock) {
             long versionNumber = presenceVersions.merge(clientId, 0L, (last, unused) -> last + 1);
             session = new ClientSession(
@@ -541,6 +586,8 @@ public class IotMqttBrokerService implements Resettable {
                     clientIp,
                     clientPort,
                     cleanSession,
+                    protocolVersion,
+                    sessionExpirySeconds,
                     UUID.randomUUID().toString(),
                     principal,
                     versionNumber,
@@ -550,9 +597,22 @@ public class IotMqttBrokerService implements Resettable {
                     device == null ? config.defaultRegion() : device.region(),
                     System.currentTimeMillis(),
                     endpoint.keepAliveTimeSeconds(),
-                    new AtomicInteger());
+                    new AtomicInteger(),
+                    policies);
             ClientSession previous = sessionsByClient.put(clientId, session);
-            if (previous != null && previous.endpoint() != endpoint) {
+            boolean takeover = previous != null && previous.endpoint() != endpoint;
+            StoredSession stored = storedSessions.get(session.historyKey());
+            sessionPresent = !cleanSession && (takeover
+                    ? previous.sessionExpirySeconds() > 0 && previous.historyKey().equals(session.historyKey())
+                            && sameMqttVersion(previous.protocolVersion(), protocolVersion)
+                    : stored != null && sameMqttVersion(stored.protocolVersion(), protocolVersion));
+            if (!sessionPresent) {
+                discardStoredSession(session.historyKey());
+                subscriptionsByClient.remove(clientId);
+            } else if (!takeover) {
+                subscriptionsByClient.put(clientId, stored.subscriptions());
+            }
+            if (takeover) {
                 endSession(previous, DUPLICATE_CLIENTID);
                 replaced = previous;
             }
@@ -576,9 +636,30 @@ public class IotMqttBrokerService implements Resettable {
             endpoint.publishHandler(message -> handlePublish(session, message));
             endpoint.pingHandler(ignored -> received(session));
             endpoint.publishAcknowledgeHandler(ignored -> received(session));
-            endpoint.disconnectHandler(ignored -> endSession(session, CLIENT_INITIATED_DISCONNECT));
+            endpoint.disconnectMessageHandler(message -> endSession(session, CLIENT_INITIATED_DISCONNECT,
+                    session.sessionExpirySeconds() == 0 ? 0 : Math.min(PERSISTENT_SESSION_EXPIRY_SECONDS,
+                            sessionExpiryInterval(message.properties(), session.sessionExpirySeconds()))));
             endpoint.closeHandler(ignored -> endSession(session, keepAliveExpired(session) ? MQTT_KEEP_ALIVE_TIMEOUT : CONNECTION_LOST));
-            endpoint.accept();
+            MqttProperties connack = new MqttProperties();
+            if (requestedSessionExpiry > sessionExpirySeconds) {
+                connack.add(new MqttProperties.IntegerProperty(
+                        MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value(), (int) sessionExpirySeconds));
+            }
+            endpoint.accept(sessionPresent, connack);
+            List<QueuedMessage> resumed = List.of();
+            synchronized (sessionLock) {
+                if (sessionsByClient.get(clientId) == session) {
+                    StoredSession stored = discardStoredSession(session.historyKey());
+                    resumed = stored == null ? List.of() : stored.queued();
+                }
+            }
+            for (QueuedMessage message : resumed) {
+                if (!isAllowed(session, "iot:Receive", "topic/" + message.topic())) {
+                    continue;
+                }
+                endpoint.publish(message.topic(), Buffer.buffer(message.payload()), MqttQoS.AT_LEAST_ONCE, false, false,
+                        session.packetId(MqttQoS.AT_LEAST_ONCE), message.properties());
+            }
         } catch (IllegalStateException e) {
             // Only another thread closes the endpoint here: a takeover, DeleteConnection or stop,
             // each of which has already ended the session, so its connected event pairs with that.
@@ -588,6 +669,17 @@ public class IotMqttBrokerService implements Resettable {
             LOG.debugv("IoT MQTT TLS client {0} admitted as {1}", clientId, principal);
         }
         publishPresence(session, "connected", null);
+    }
+
+    private static long sessionExpiryInterval(MqttProperties properties, long absent) {
+        MqttProperties.MqttProperty<?> interval = properties == null ? null
+                : properties.getProperty(MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value());
+        return interval == null ? absent : Integer.toUnsignedLong((Integer) interval.value());
+    }
+
+    /** AWS IoT resumes an MQTT 3 session only over MQTT 3, and an MQTT 5 session only over MQTT 5. */
+    private static boolean sameMqttVersion(int stored, int connecting) {
+        return (stored == 5) == (connecting == 5);
     }
 
     /**
@@ -658,20 +750,29 @@ public class IotMqttBrokerService implements Resettable {
 
     private void handleSubscribe(ClientSession session, MqttSubscribeMessage message) {
         received(session);
-        List<MqttQoS> grantedQos = new ArrayList<>();
+        List<MqttSubAckReasonCode> reasonCodes = new ArrayList<>();
         List<Subscription> accepted = new ArrayList<>();
 
         for (MqttTopicSubscription requested : message.topicSubscriptions()) {
             String topicFilter = requested.topicName();
             MqttQoS qos = requested.qualityOfService();
             if (!isValidTopicFilter(topicFilter) || qos == MqttQoS.EXACTLY_ONCE) {
-                grantedQos.add(MqttQoS.FAILURE);
+                reasonCodes.add(MqttSubAckReasonCode.qosGranted(MqttQoS.FAILURE));
+                continue;
+            }
+            if (!isAllowed(session, "iot:Subscribe", "topicfilter/" + topicFilter)) {
+                if (session.endpoint().protocolVersion() != 5) {
+                    endSession(session, AUTH_ERROR);
+                    session.endpoint().close();
+                    return;
+                }
+                reasonCodes.add(MqttSubAckReasonCode.NOT_AUTHORIZED);
                 continue;
             }
 
             int granted = qos == MqttQoS.AT_LEAST_ONCE ? 1 : 0;
             accepted.add(new Subscription(topicFilter, granted));
-            grantedQos.add(granted == 1 ? MqttQoS.AT_LEAST_ONCE : MqttQoS.AT_MOST_ONCE);
+            reasonCodes.add(MqttSubAckReasonCode.qosGranted(MqttQoS.valueOf(granted)));
         }
         synchronized (sessionLock) {
             // An ended session no longer owns its client id's subscriptions; a newer connection may.
@@ -685,7 +786,7 @@ public class IotMqttBrokerService implements Resettable {
             }
         }
 
-        session.endpoint().subscribeAcknowledge(message.messageId(), grantedQos);
+        session.endpoint().subscribeAcknowledge(message.messageId(), reasonCodes, MqttProperties.NO_PROPERTIES);
         deliverRetained(session, accepted);
     }
 
@@ -723,11 +824,15 @@ public class IotMqttBrokerService implements Resettable {
             session.endpoint().close();
             return;
         }
+        String topic = message.topicName();
+        if (!isAllowed(session, "iot:Publish", "topic/" + topic)) {
+            refusePublish(session, message);
+            return;
+        }
         if (message.qosLevel() == MqttQoS.AT_LEAST_ONCE) {
             session.endpoint().publishAcknowledge(message.messageId());
         }
 
-        String topic = message.topicName();
         if (topic.startsWith("$aws/")) {
             iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules));
             return;
@@ -736,6 +841,23 @@ public class IotMqttBrokerService implements Resettable {
         iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
                 session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
         fanOut(topic, payload, message.qosLevel().value(), userProperties(message.properties()));
+    }
+
+    private void refusePublish(ClientSession session, MqttPublishMessage message) {
+        if (session.endpoint().protocolVersion() == 5 && message.qosLevel() == MqttQoS.AT_LEAST_ONCE) {
+            session.endpoint().publishAcknowledge(message.messageId(), MqttPubAckReasonCode.NOT_AUTHORIZED, MqttProperties.NO_PROPERTIES);
+            return;
+        }
+        endSession(session, AUTH_ERROR);
+        if (session.endpoint().protocolVersion() == 5) {
+            session.endpoint().disconnect(MqttDisconnectReasonCode.NOT_AUTHORIZED, notAuthorizedReason("DISCONNECT"));
+            return;
+        }
+        session.endpoint().close();
+    }
+
+    private boolean isAllowed(ClientSession session, String action, String resource) {
+        return session.policies() == null || iotService.get().isAllowed(session.policies(), action, resource);
     }
 
     /** A publish's user properties in the order sent, which AWS IoT forwards unchanged to an MQTT 5 subscriber. */
@@ -801,16 +923,31 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
-     * lower of {@code qos} and the highest QoS among its matching subscriptions. Netty encodes
-     * {@code properties} only for an MQTT 5 subscriber.
+     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription,
+     * unless the subscriber's policies deny {@code iot:Receive} on {@code topic}, at the lower of
+     * {@code qos} and the highest QoS among its matching subscriptions. Netty encodes
+     * {@code properties} only for an MQTT 5 subscriber. A QoS 1 publish matching a QoS 1
+     * subscription of a disconnected persistent session is stored for it instead, and its
+     * {@code iot:Receive} is checked when it is delivered on the reconnect.
      */
     private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
+        if (qos > 0) {
+            storedSessions.forEach((key, stored) -> {
+                if (grantedQos(stored.subscriptions().values(), topic) < 1) {
+                    return;
+                }
+                synchronized (sessionLock) {
+                    if (storedSessions.get(key) == stored) {
+                        stored.queued().add(new QueuedMessage(topic, safePayload, properties));
+                    }
+                }
+            });
+        }
         for (ClientSession session : sessionsByClient.values()) {
             Map<String, Subscription> subscriptions = subscriptionsByClient.get(session.clientId());
             int granted = subscriptions == null ? -1 : grantedQos(subscriptions.values(), topic);
-            if (!session.endpoint().isConnected() || granted < 0) {
+            if (!session.endpoint().isConnected() || granted < 0 || !isAllowed(session, "iot:Receive", "topic/" + topic)) {
                 continue;
             }
             MqttQoS delivered = MqttQoS.valueOf(Math.min(qos, granted));
@@ -842,7 +979,7 @@ public class IotMqttBrokerService implements Resettable {
                 continue;
             }
             int granted = grantedQos(subscriptions, retained.getTopic());
-            if (granted < 0) {
+            if (granted < 0 || !isAllowed(session, "iot:Receive", "topic/" + retained.getTopic())) {
                 continue;
             }
             byte[] payload = Base64.getDecoder().decode(retained.getPayload());
@@ -856,9 +993,14 @@ public class IotMqttBrokerService implements Resettable {
      * Ends the session once: the first reason reported wins, and only that one publishes the
      * disconnected event, records how the session ended for fleet indexing, and gets true. The
      * versionNumber counts up only while the session is still the client id's current one, so a
-     * session replaced by a newer connection leaves it alone.
+     * session replaced by a newer connection leaves it alone. A current session with a session
+     * expiry is stored for its reconnect with its subscriptions; one without drops them.
      */
     private boolean endSession(ClientSession session, String reason) {
+        return endSession(session, reason, session.sessionExpirySeconds());
+    }
+
+    private boolean endSession(ClientSession session, String reason, long sessionExpirySeconds) {
         synchronized (sessionLock) {
             if (!session.ended().compareAndSet(false, true)) {
                 return false;
@@ -866,13 +1008,44 @@ public class IotMqttBrokerService implements Resettable {
             lastDisconnects.put(session.historyKey(), session.disconnected(reason));
             if (sessionsByClient.remove(session.clientId(), session)) {
                 presenceVersions.computeIfPresent(session.clientId(), (id, version) -> version + 1);
+                if (sessionExpirySeconds > 0) {
+                    store(session, sessionExpirySeconds);
+                } else {
+                    discardStoredSession(session.historyKey());
+                }
             }
-            if (session.cleanSession()) {
+            if (sessionExpirySeconds == 0) {
                 subscriptionsByClient.remove(session.clientId());
             }
             publishPresence(session, "disconnected", reason);
             return true;
         }
+    }
+
+    private void store(ClientSession session, long sessionExpirySeconds) {
+        HistoryKey key = session.historyKey();
+        StoredSession unresumed = discardStoredSession(key);
+        long expiryTimer = vertx.setTimer(TimeUnit.SECONDS.toMillis(sessionExpirySeconds), timer -> {
+            synchronized (sessionLock) {
+                StoredSession stored = storedSessions.get(key);
+                ClientSession live = sessionsByClient.get(key.clientId());
+                if (stored != null && stored.expiryTimer() == timer && (live == null || !live.historyKey().equals(key))) {
+                    storedSessions.remove(key);
+                }
+            }
+        });
+        Map<String, Subscription> subscriptions = subscriptionsByClient.remove(key.clientId());
+        storedSessions.put(key, new StoredSession(session.protocolVersion(),
+                subscriptions == null ? new ConcurrentHashMap<>() : subscriptions,
+                unresumed == null ? new ArrayList<>() : unresumed.queued(), expiryTimer));
+    }
+
+    private StoredSession discardStoredSession(HistoryKey key) {
+        StoredSession stored = storedSessions.remove(key);
+        if (stored != null) {
+            vertx.cancelTimer(stored.expiryTimer());
+        }
+        return stored;
     }
 
     /**
@@ -974,6 +1147,8 @@ public class IotMqttBrokerService implements Resettable {
             String sourceIp,
             int sourcePort,
             boolean cleanSession,
+            int protocolVersion,
+            long sessionExpirySeconds,
             String sessionIdentifier,
             String principalIdentifier,
             long versionNumber,
@@ -983,7 +1158,8 @@ public class IotMqttBrokerService implements Resettable {
             String region,
             long connectedAt,
             int keepAliveDuration,
-            AtomicInteger packetIds) {
+            AtomicInteger packetIds,
+            IotService.ConnectionPolicies policies) {
 
         /**
          * The packet identifier of a copy sent at {@code qos}: none at QoS 0, otherwise the session's
@@ -1012,6 +1188,14 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     private record Subscription(String topicFilter, int qos) {
+    }
+
+    /** A disconnected persistent session; its queue is only touched under the session lock. */
+    private record StoredSession(int protocolVersion, Map<String, Subscription> subscriptions, List<QueuedMessage> queued,
+                                 long expiryTimer) {
+    }
+
+    private record QueuedMessage(String topic, byte[] payload, MqttProperties properties) {
     }
 
     record ConnectionInfo(String clientId, String address, int port) {

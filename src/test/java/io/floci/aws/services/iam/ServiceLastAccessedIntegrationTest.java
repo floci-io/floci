@@ -648,6 +648,12 @@ class ServiceLastAccessedIntegrationTest {
             .body(not(containsString(denyName)));
     }
 
+    /**
+     * An absent list is how an empty one arrives on this protocol, and the vendored request shape
+     * carries the member as the model declares it, required. So the required-member violation is
+     * what answers this, where this package used to answer `InvalidInput` and a sentence of its
+     * own that no recording carries.
+     */
     @Test
     void listPoliciesGrantingServiceAccessRequiresAtLeastOneServiceNamespace() {
         String arn = createUser("laa-nonamespace-" + suffix());
@@ -655,7 +661,10 @@ class ServiceLastAccessedIntegrationTest {
         iam("ListPoliciesGrantingServiceAccess").formParam("Arn", arn)
         .when().post("/").then()
             .statusCode(400)
-            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                    + " 'serviceNamespaces' failed to satisfy constraint: Member must not be"
+                    + " null"));
     }
 
 

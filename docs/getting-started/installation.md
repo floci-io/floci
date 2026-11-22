@@ -64,8 +64,7 @@ their own runners and are not in any image.
 | Linux x86_64 | `floci-aws-linux-amd64` |
 | Linux arm64 | `floci-aws-linux-arm64` |
 | Linux arm64 without LSE (Raspberry Pi 4 and older) | `floci-aws-linux-arm64-baseline` |
-| macOS Apple Silicon | `floci-aws-darwin-arm64` |
-| macOS Intel | `floci-aws-darwin-amd64` |
+| macOS (Apple Silicon and Intel) | `floci-aws-darwin-amd64` |
 | Windows x86_64 | `floci-aws-windows-amd64.exe` |
 
 ```bash
@@ -99,6 +98,8 @@ gh attestation verify "$ASSET" --repo floci-io/floci
 
 - **Linux:** glibc 2.34 or newer (RHEL 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023). Older distributions
   (RHEL 8, Amazon Linux 2) and musl-based ones such as Alpine cannot run it; use the image there.
+- **macOS on Apple Silicon:** there is no arm64 build yet, so the x86_64 binary runs under Rosetta 2.
+  Install it once with `softwareupdate --install-rosetta --agree-to-license` if macOS has not already.
 - **macOS:** a binary downloaded with a browser is quarantined by Gatekeeper. Clear it once with
   `xattr -d com.apple.quarantine floci-aws`. Downloads made with `curl` are not quarantined.
 - **Docker is optional.** Without it every service that does not run containers works as usual. The

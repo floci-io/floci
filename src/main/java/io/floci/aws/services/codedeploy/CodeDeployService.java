@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,6 +48,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -97,6 +99,10 @@ public class CodeDeployService {
     }
 
     // ---- Durable (persisted) ----
+    /** CreateApplication's constraints from the CodeDeploy API reference. */
+    private static final Pattern APPLICATION_NAME = Pattern.compile("[A-Za-z0-9+=,.@_-]{1,100}");
+    private static final Set<String> COMPUTE_PLATFORMS = Set.of("Server", "Lambda", "ECS", "Kubernetes");
+
     // key: region -> name -> application
     private Map<String, Map<String, Application>> applications = new ConcurrentHashMap<>();
     // key: region -> appName -> groupName -> group
@@ -332,6 +338,18 @@ public class CodeDeployService {
 
     public Application createApplication(String region, String name, String computePlatform,
                                           List<Map<String, String>> tags) {
+        if (name == null || name.isEmpty()) {
+            throw new AwsException("ApplicationNameRequiredException",
+                    "The minimum number of required characters for applicationName is 1.", 400);
+        }
+        if (!APPLICATION_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidApplicationNameException",
+                    "The application name was specified in an invalid format.", 400);
+        }
+        if (computePlatform != null && !COMPUTE_PLATFORMS.contains(computePlatform)) {
+            throw new AwsException("InvalidComputePlatformException",
+                    "The computePlatform is invalid. The computePlatform should be Lambda, Server, or ECS.", 400);
+        }
         Map<String, Application> store = applicationsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("ApplicationAlreadyExistsException",
@@ -395,6 +413,13 @@ public class CodeDeployService {
                     "Application does not exist: " + name, 400);
         }
         persistRegion(applications, region);
+        tags.remove(applicationArn(region, name));
+        // As on AWS, the application's deployment groups go with it.
+        Map<String, DeploymentGroup> groups = deploymentGroupsFor(region).remove(name);
+        if (groups != null) {
+            groups.keySet().forEach(group -> tags.remove(deploymentGroupArn(region, name, group)));
+            persistRegion(deploymentGroups, region);
+        }
     }
 
     public List<String> listApplications(String region) {

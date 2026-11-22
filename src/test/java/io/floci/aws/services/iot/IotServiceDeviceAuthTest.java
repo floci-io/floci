@@ -496,6 +496,44 @@ class IotServiceDeviceAuthTest {
         assertFalse(service.isConnectAllowedBy(List.of(policy), "sensor-1", "10.1.2.3", null));
     }
 
+    @Test
+    void topicActionsAreDecidedOnTheTopicAndTopicFilterArnsWithTheThingName() {
+        RegisteredDevice device = registeredDevice(true);
+        service.createThing("sensor-1", Map.of(), REGION);
+        service.attachThingPrincipal("sensor-1", device.certificate().getCertificateArn(), REGION);
+        createAndAttach("p", "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\",\"iot:Receive\"],"
+                + "\"Resource\":\"arn:aws:iot:*:*:topic/devices/${iot:Connection.Thing.ThingName}/*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Subscribe\","
+                + "\"Resource\":\"arn:aws:iot:*:*:topicfilter/devices/${iot:Connection.Thing.ThingName}/*\"}]}", device);
+
+        IotService.ConnectionPolicies policies = service.devicePolicies(device, "sensor-1", "127.0.0.1", null);
+
+        assertTrue(service.isAllowed(policies, "iot:Publish", "topic/devices/sensor-1/telemetry"));
+        assertTrue(service.isAllowed(policies, "iot:Receive", "topic/devices/sensor-1/telemetry"));
+        assertTrue(service.isAllowed(policies, "iot:Subscribe", "topicfilter/devices/sensor-1/#"));
+        assertFalse(service.isAllowed(policies, "iot:Publish", "topic/devices/sensor-2/telemetry"));
+        assertFalse(service.isAllowed(policies, "iot:Receive", "topic/devices/sensor-2/telemetry"));
+        assertFalse(service.isAllowed(policies, "iot:Subscribe", "topicfilter/devices/sensor-2/#"));
+        assertFalse(service.isAllowed(policies, "iot:Subscribe", "topicfilter/other/sensor-1/telemetry"));
+        assertFalse(service.isAllowed(service.devicePolicies(device, "sensor-2", "127.0.0.1", null),
+                "iot:Publish", "topic/devices/sensor-2/telemetry"), "the thing variable resolves only for the attached thing");
+    }
+
+    @Test
+    void customAuthorizerPoliciesDecideTopicActionsWithTheClientId() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":[\"iot:Publish\",\"iot:Receive\"],\"Resource\":\"arn:aws:iot:*:*:topic/clients/${iot:ClientId}/*\"}]}";
+
+        IotService.ConnectionPolicies policies = service.authorizerPolicies(List.of(policy), "browser-1", "127.0.0.1", null);
+
+        assertTrue(service.isAllowed(policies, "iot:Receive", "topic/clients/browser-1/events"));
+        assertFalse(service.isAllowed(policies, "iot:Receive", "topic/clients/browser-2/events"));
+        assertFalse(service.isAllowed(policies, "iot:Subscribe", "topicfilter/clients/browser-1/events"));
+        assertFalse(service.isAllowed(service.authorizerPolicies(List.of(), "browser-1", null, null),
+                "iot:Publish", "topic/clients/browser-1/events"), "no policy means deny");
+    }
+
     private RegisteredDevice registeredDevice(boolean active) {
         IotCertificate created = service.createKeysAndCertificate(active, REGION);
         return service.findRegisteredCertificate(parse(created)).orElseThrow();

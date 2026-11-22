@@ -3,7 +3,7 @@ package io.floci.aws.services.docdb;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.kms.KmsService;
-import io.floci.aws.testing.RdsAndDocDbMockProfile;
+import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -19,7 +19,7 @@ import static org.hamcrest.Matchers.containsString;
  * default subnet group, parameter group and security group.
  */
 @QuarkusTest
-@TestProfile(RdsAndDocDbMockProfile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class DocDbClusterSettingsIntegrationTest {
 
     private static final String ID = "settings-cluster";

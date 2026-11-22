@@ -44,6 +44,7 @@ import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaId;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -133,7 +134,7 @@ class GlueServiceTest {
                        StorageBackend<String, UserDefinedFunction> functions,
                        StorageBackend<String, Table> tables) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
-        StorageFactory storageFactory = new InMemoryStorageFactory();
+        StorageFactory storageFactory = new InMemoryStorageFactory(ACCOUNT_ID);
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
         kmsService = new KmsService(storageFactory, regionResolver);
         databaseStore = new InMemoryStorage<>();
@@ -1528,18 +1529,6 @@ class GlueServiceTest {
         return statistics;
     }
 
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                     String fileName,
-                                                     TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory("000000000000");
-        }
-    }
 
     private Job createValidJob(String name) {
         Job job = new Job();

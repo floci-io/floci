@@ -12,9 +12,9 @@ import java.time.Duration;
 
 /**
  * The links {@code GetDashboardForJobRun} gives, "a URL that you can use to access the application UIs for a job run",
- * and {@code GetResourceDashboard} gives for a session. Each "is valid for one hour after you generate it. To access
- * the application UI after that hour elapses, you must invoke the API again to generate a new URL." Floci keeps no
- * Spark UI or Spark History Server for a run or a session, so a link opens a page of Floci's own about it
+ * and {@code GetResourceDashboard} gives for a session, where they open no live Spark UI ({@link EmrServerlessAppUis}).
+ * Each "is valid for one hour after you generate it. To access the application UI after that hour elapses, you must
+ * invoke the API again to generate a new URL." Such a link opens a page of Floci's own about the run or the session
  * ({@link EmrServerlessDashboardController}). It names the account, Region, application, the run and its attempt or
  * the session, and when it expires, signed with a key this process makes: a link changed, or past its hour, opens
  * nothing, and the links given before a restart open nothing after it.

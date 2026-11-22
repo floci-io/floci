@@ -10,9 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * The response of a {@code RESPONSE_STREAM} function URL, as the function streams it.
@@ -26,7 +24,6 @@ final class LambdaUrlResponseStream implements ResponseStreamListener {
 
     static final String HTTP_INTEGRATION_RESPONSE = "application/vnd.awslambda.http-integration-response";
     private static final int PRELUDE_DELIMITER_LENGTH = 8;
-    private static final byte[] END = new byte[0];
 
     /** The prelude, or null for a stream without one, and the content type the runtime sent. */
     record Head(JsonNode prelude, String contentType) {
@@ -34,7 +31,7 @@ final class LambdaUrlResponseStream implements ResponseStreamListener {
 
     private final ObjectMapper objectMapper;
     private final CompletableFuture<Head> head = new CompletableFuture<>();
-    private final BlockingQueue<byte[]> body = new LinkedBlockingQueue<>();
+    private final ResponseChunkQueue body = new ResponseChunkQueue();
     private final ByteArrayOutputStream prelude = new ByteArrayOutputStream();
     private String contentType;
     private boolean expectsPrelude;
@@ -86,7 +83,7 @@ final class LambdaUrlResponseStream implements ResponseStreamListener {
 
     /** Ends the body; the function has returned, whether or not it streamed anything. */
     void end() {
-        body.add(END);
+        body.end();
     }
 
     CompletableFuture<Head> head() {
@@ -102,13 +99,6 @@ final class LambdaUrlResponseStream implements ResponseStreamListener {
     }
 
     private void write(OutputStream output) throws IOException {
-        try {
-            for (byte[] chunk = body.take(); chunk != END; chunk = body.take()) {
-                output.write(chunk);
-                output.flush();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        body.drainTo(output);
     }
 }

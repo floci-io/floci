@@ -272,6 +272,74 @@ final class PaymentCryptographyTr31 {
     }
 
     /**
+     * The version of the key a block carries, over two characters.
+     *
+     * <p>The version is in the header, so it is read from there and not carried separately.
+     */
+    static String versionOf(String block) {
+        return block.substring(9, 11);
+    }
+
+    /**
+     * The optional blocks a block carries, each its identifier and its value.
+     *
+     * <p>The padding block is not one of them: it is the block that keeps the optional
+     * blocks aligned, and the block that goes out is padded for its own protection, so the
+     * padding of the block that came in is dropped.
+     *
+     * @param block the block
+     * @return the optional blocks, without the padding block
+     */
+    static List<String[]> optionalBlocksOf(String block) {
+        int count = parseInt(block.substring(12, 14), "the number of optional blocks");
+        List<String[]> blocks = new ArrayList<>();
+        int at = HEADER_LENGTH;
+        for (int i = 0; i < count; i++) {
+            if (block.length() < at + 4) {
+                throw new IllegalArgumentException("the key block says it has optional blocks, and "
+                        + "it is too short to hold them");
+            }
+            String id = block.substring(at, at + 2);
+            int length = parseInt(block.substring(at + 2, at + 4),
+                    "the length of an optional block", 16);
+            int valueStart;
+            int valueLength;
+            int total;
+            if (length != 0) {
+                valueStart = at + 4;
+                valueLength = length - 4;
+                total = length;
+            } else {
+                // The length did not fit in its field, so the field says so and the length
+                // follows the number of characters it takes.
+                if (block.length() < at + 6) {
+                    throw new IllegalArgumentException("the key block says it has optional blocks, "
+                            + "and it is too short to hold them");
+                }
+                int digits = parseInt(block.substring(at + 4, at + 6),
+                        "the length of the length of an optional block", 16);
+                if (digits == 0 || block.length() < at + 6 + digits) {
+                    throw new IllegalArgumentException("the key block says it has optional blocks, "
+                            + "and it is too short to hold them");
+                }
+                valueLength = parseInt(block.substring(at + 6, at + 6 + digits),
+                        "the length of an optional block", 16);
+                valueStart = at + 6 + digits;
+                total = 6 + digits + valueLength;
+            }
+            if (valueLength < 0 || block.length() < at + total) {
+                throw new IllegalArgumentException("the key block says it has optional blocks, and "
+                        + "it is too short to hold them");
+            }
+            if (!"PB".equals(id)) {
+                blocks.add(new String[] {id, block.substring(valueStart, valueStart + valueLength)});
+            }
+            at += total;
+        }
+        return blocks;
+    }
+
+    /**
      * Whether a block is a type D one, which is derived with AES.
      *
      * <p>The type is in the block's own header, so it is read from there and not from the

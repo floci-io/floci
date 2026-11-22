@@ -11,8 +11,11 @@ import io.floci.aws.services.ec2.model.LaunchTemplate;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksTestNode;
 import io.floci.aws.testing.PartitionCleanup;
-import io.floci.aws.testing.RealEksProfile;
+import io.floci.aws.testing.RdsMockProfile;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -30,6 +33,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
@@ -39,9 +43,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Docker-gated integration test proving containerd registry host configuration via node group launch
@@ -52,18 +56,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * user data works unchanged. A pod scheduled in the cluster pulls its image through the configured
  * host, with the custom header that registries.yaml could not express.
  *
- * <p>The real cluster comes from {@link RealEksProfile}, which this class shares with the other
+ * <p>The real cluster comes from {@link RdsMockProfile}, which this class shares with the other
  * classes that run a k3s cluster, so it removes the cluster, node group and launch template it
  * creates.
  */
 @QuarkusTest
-@TestProfile(RealEksProfile.class)
+@TestProfile(RdsMockProfile.class)
 // Bounded cluster/workload waits total 285 s; allow Docker setup and cleanup as well.
 @Timeout(value = 6, unit = TimeUnit.MINUTES)
 class EksRegistryHostsDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksRegistryHostsDockerIntegrationTest.class);
     private static final String JSON = "application/json";
+    private static final String POD = "registry-hosts-pod";
+    // Not "000000000000": the generated ECR mirror only covers the default account, so this account's
+    // registry host is only reachable at all because of the registry-hosts configuration below.
+    private static final String IMAGE_ACCOUNT = "111122223333";
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -88,7 +96,7 @@ class EksRegistryHostsDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        boolean dockerAvailable = isDockerAvailable();
+        boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
             LOG.warn("Docker daemon is not available; skipping EksRegistryHostsDockerIntegrationTest");
         }
@@ -101,11 +109,14 @@ class EksRegistryHostsDockerIntegrationTest {
         String clusterName = "reg-hosts-dock-" + suffix;
         String nodegroupName = "ng-" + suffix;
         String repo = "reg-hosts-it-" + suffix;
-        // Not "000000000000": the generated ECR mirror only covers the default account, so this
-        // hostname is only reachable at all because of the registry-hosts configuration below.
-        String host = "111122223333.dkr.ecr.us-east-1.localhost:" + httpPort;
+        String host = IMAGE_ACCOUNT + ".dkr.ecr.us-east-1.localhost:" + httpPort;
         String imageRef = host + "/" + repo + ":v1";
 
+        // ECR answers a push to a repository nobody created with NAME_UNKNOWN, so the account creates it first.
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        ecrAsImageAccount("CreateRepository", "{\"repositoryName\":\"" + repo + "\"}");
+        cleanup.register(() -> ecrAsImageAccount("DeleteRepository",
+                "{\"repositoryName\":\"" + repo + "\",\"force\":true}"));
         pushMinimalImage(host, repo);
 
         given().contentType(JSON)
@@ -119,16 +130,21 @@ class EksRegistryHostsDockerIntegrationTest {
         assertNotNull(cluster.getContainerId(), "Container ID must not be null");
         waitUntilReady(cluster);
         eksClusterManager.finalizeCluster(cluster);
-        String containerId = cluster.getContainerId();
 
         // Verify symlink was created before container started
-        ContainerExec.Result linkResult = execInContainerWithExitCode(containerId,
-                new String[]{"readlink", "/etc/containerd/certs.d"});
-        assertEquals(0, linkResult.exitCode(), "readlink /etc/containerd/certs.d must succeed");
-        assertEquals(EksClusterManager.CONTAINERD_CERTS_TARGET, linkResult.stdout().trim());
+        assertEquals(EksClusterManager.CONTAINERD_CERTS_TARGET, EksTestNode.of(dockerClient, eksClusterManager, cluster)
+                .execOutput("readlink", "/etc/containerd/certs.d"));
 
         // Configure registry host via node group launch template user data
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + httpPort;
+        String hostsToml = """
+                server = "https://%s"
+
+                [host."%s"]
+                  capabilities = ["pull", "resolve"]
+                  [host."%s".header]
+                    "X-Floci-Test" = "registry-hosts"
+                """.formatted(host, endpoint, endpoint).stripTrailing();
         String userDataScript = """
                 MIME-Version: 1.0
                 Content-Type: multipart/mixed; boundary="==MYBOUNDARY=="
@@ -139,16 +155,11 @@ class EksRegistryHostsDockerIntegrationTest {
                 #!/bin/sh
                 mkdir -p /etc/containerd/certs.d/%s
                 cat << 'EOF' > /etc/containerd/certs.d/%s/hosts.toml
-                server = "https://%s"
-
-                [host."%s"]
-                  capabilities = ["pull", "resolve"]
-                  [host."%s".header]
-                    "X-Floci-Test" = "registry-hosts"
+                %s
                 EOF
 
                 --==MYBOUNDARY==--
-                """.formatted(host, host, host, endpoint, endpoint);
+                """.formatted(host, host, hostsToml);
 
         LaunchTemplateData ltData = new LaunchTemplateData();
         ltData.setUserData(Base64.getEncoder().encodeToString(userDataScript.getBytes(StandardCharsets.UTF_8)));
@@ -176,92 +187,62 @@ class EksRegistryHostsDockerIntegrationTest {
         cluster = eksService.describeCluster(clusterName);
         assertNotNull(cluster.getContainerId(), "Container ID must not be null after node group creation");
         waitUntilReady(cluster);
-        containerId = cluster.getContainerId();
+        EksTestNode node = EksTestNode.of(dockerClient, eksClusterManager, cluster);
 
         // Verify user data script wrote hosts.toml into k3s certs.d through the symlink
-        String hostsToml = execInContainer(containerId, new String[]{"cat",
-                EksClusterManager.CONTAINERD_CERTS_TARGET + "/" + host + "/hosts.toml"});
-        assertTrue(hostsToml.contains("\"X-Floci-Test\" = \"registry-hosts\""),
-                "the configured header must be present in the container's hosts.toml via the certs.d symlink");
+        String hostsTomlPath = EksClusterManager.CONTAINERD_CERTS_TARGET + "/" + host + "/hosts.toml";
+        assertEquals(hostsToml, node.execOutput("cat", hostsTomlPath),
+                "the user data's hosts.toml must be in the container's certs.d via the symlink");
 
         // Verify hosts.toml survives container restart
-        dockerClient.restartContainerCmd(containerId).exec();
+        dockerClient.restartContainerCmd(node.containerId()).exec();
         Instant restartCompletedAt = Instant.now();
         waitUntilReady(cluster);
-        String hostsTomlAfterRestart = null;
-        long restartDeadline = System.currentTimeMillis() + 30000;
-        while (System.currentTimeMillis() < restartDeadline) {
-            try {
-                hostsTomlAfterRestart = execInContainer(containerId, new String[]{"cat",
-                        EksClusterManager.CONTAINERD_CERTS_TARGET + "/" + host + "/hosts.toml"});
-                break;
-            } catch (Exception ignored) {
-                Thread.sleep(1000);
-            }
-        }
-        assertNotNull(hostsTomlAfterRestart, "hosts.toml must survive container restart");
-        assertTrue(hostsTomlAfterRestart.contains("\"X-Floci-Test\" = \"registry-hosts\""),
-                "the configured header must survive container restart");
+        await("hosts.toml after the restart").atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1))
+                .ignoreExceptions()
+                .untilAsserted(() -> assertEquals(hostsToml, node.execOutput("cat", hostsTomlPath),
+                        "hosts.toml must survive container restart"));
 
-        long saDeadline = System.currentTimeMillis() + 30000;
-        boolean ready = false;
-        while (System.currentTimeMillis() < saDeadline) {
-            ContainerExec.Result saResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "--request-timeout=2s", "get", "serviceaccount", "default"});
-            ContainerExec.Result nodeReady = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "--request-timeout=2s", "wait",
-                            "--for=condition=Ready", "nodes", "--all", "--timeout=1s"});
-            ContainerExec.Result leases = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "--request-timeout=2s", "get", "leases", "-n", "kube-node-lease",
-                            "-o", "jsonpath={.items[*].spec.renewTime}"});
-            String renewals = leases.stdout().trim();
-            boolean freshHeartbeat = leases.exitCode() == 0 && !renewals.isEmpty()
-                    && Arrays.stream(renewals.split("\\s+"))
-                            .allMatch(renewal -> Instant.parse(renewal).isAfter(restartCompletedAt));
-            if (saResult.exitCode() == 0 && nodeReady.exitCode() == 0 && freshHeartbeat) {
-                ready = true;
-                break;
-            }
-            Thread.sleep(1000);
-        }
-        assertTrue(ready, "serviceaccount and Ready nodes with renewed Leases must be available within 30 seconds");
+        await("serviceaccount and Ready nodes with renewed Leases").atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofSeconds(1))
+                .until(() -> node.kubectl("--request-timeout=2s", "get", "serviceaccount", "default").exitCode() == 0
+                        && node.kubectl("--request-timeout=2s", "wait", "--for=condition=Ready", "nodes", "--all",
+                                "--timeout=1s").exitCode() == 0
+                        && leasesRenewedAfter(node, restartCompletedAt));
 
-        String podYaml = """
+        node.apply("""
                 apiVersion: v1
                 kind: Pod
                 metadata:
-                  name: registry-hosts-pod
+                  name: %s
                 spec:
                   containers:
                   - name: workload
                     image: %s
                     command: ["/bin/sleep", "3600"]
-                """.formatted(imageRef);
-        execInContainer(containerId, new String[]{"sh", "-c",
-                "cat << 'EOF' | kubectl apply -f -\n" + podYaml + "\nEOF"});
+                """.formatted(POD, imageRef));
+        try {
+            node.awaitPodRunning(POD, Duration.ofSeconds(45));
+        } catch (RuntimeException e) {
+            logPodDiagnostics(node.containerId());
+            throw e;
+        }
+        node.kubectl("delete", "pod", POD, "--now");
+    }
 
-        long deadline = System.currentTimeMillis() + 45000;
-        boolean running = false;
-        while (System.currentTimeMillis() < deadline) {
-            ContainerExec.Result status = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "get", "pod", "registry-hosts-pod", "-o", "jsonpath={.status.phase}"});
-            if ("Running".equalsIgnoreCase(status.stdout().trim())) {
-                running = true;
-                break;
-            }
-            Thread.sleep(2000);
-        }
-        if (!running) {
-            logPodDiagnostics(containerId);
-        }
-        assertTrue(running, "registry-hosts-pod must reach Running, pulling its image through the configured host");
-        execInContainerWithExitCode(containerId, new String[]{"kubectl", "delete", "pod", "registry-hosts-pod", "--now"});
+    /** Whether every node's Lease was renewed after {@code restart}. */
+    private static boolean leasesRenewedAfter(EksTestNode node, Instant restart) {
+        ContainerExec.Result leases = node.kubectl("--request-timeout=2s", "get", "leases", "-n", "kube-node-lease",
+                "-o", "jsonpath={.items[*].spec.renewTime}");
+        String renewals = leases.stdout().trim();
+        return leases.exitCode() == 0 && !renewals.isEmpty()
+                && Arrays.stream(renewals.split("\\s+")).allMatch(renewal -> Instant.parse(renewal).isAfter(restart));
     }
 
     /** Cleanup removes the k3s container, and kubelet's output reaches nothing else. */
     private void logPodDiagnostics(String containerId) {
         String[][] commands = {
-                {"kubectl", "describe", "pod", "registry-hosts-pod"},
+                {"kubectl", "describe", "pod", POD},
                 {"kubectl", "describe", "nodes"},
                 {"kubectl", "get", "pods", "-A", "-o", "wide"},
                 {"crictl", "images"},
@@ -441,6 +422,16 @@ class EksRegistryHostsDockerIntegrationTest {
         return buf.array();
     }
 
+    private static void ecrAsImageAccount(String action, String body) {
+        given().header("X-Amz-Target", "AmazonEC2ContainerRegistry_V20150921." + action)
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + IMAGE_ACCOUNT
+                        + "/20260923/us-east-1/ecr/aws4_request")
+                .contentType("application/x-amz-json-1.1")
+                .body(body)
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
     private void uploadBlob(String host, String repo, String digest, byte[] content) {
         String location = given().header("Host", host)
                 .when().post("/v2/" + repo + "/blobs/uploads/")
@@ -458,36 +449,11 @@ class EksRegistryHostsDockerIntegrationTest {
                 .then().statusCode(201);
     }
 
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private void waitUntilReady(Cluster cluster) throws Exception {
-        long deadline = System.currentTimeMillis() + 60000;
-        while (System.currentTimeMillis() < deadline) {
-            Cluster c = eksService.describeCluster(cluster.getName());
-            if (c.getStatus() == ClusterStatus.ACTIVE && !c.isFinalizePending()) {
-                return;
-            }
-            Thread.sleep(1000);
-        }
-        throw new IllegalStateException("Cluster did not become ACTIVE within timeout");
-    }
-
-    private String execInContainer(String containerId, String[] cmd) {
-        ContainerExec.Result result = execInContainerWithExitCode(containerId, cmd);
-        if (result.exitCode() != 0) {
-            throw new IllegalStateException("Command failed with exit code " + result.exitCode() + ": " + result.summary());
-        }
-        return result.stdout();
-    }
-
-    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
-        return ContainerExec.run(dockerClient, containerId, cmd, 30);
+    private void waitUntilReady(Cluster cluster) {
+        await("cluster ACTIVE").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> {
+                    Cluster c = eksService.describeCluster(cluster.getName());
+                    return c.getStatus() == ClusterStatus.ACTIVE && !c.isFinalizePending();
+                });
     }
 }

@@ -176,16 +176,16 @@ public class RabbitMqManager {
         String logGroup = broker.generalLogGroup();
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = brokerRegion(broker);
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "amazonmq:" + broker.getBrokerId());
         if (logHandle != null) {
             logStreams.put(broker.getBrokerId(), logHandle);
         }
     }
 
-    /** The broker's Region, {@link Broker#region} with the configured default Region. */
+    /** The Region the broker's ARN names, and the default Region for a broker recorded without one. */
     private String brokerRegion(Broker broker) {
-        return broker.region(regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(broker.getBrokerArn());
     }
 
     /**

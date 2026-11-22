@@ -14,6 +14,9 @@
 | `ListPipes` | List all pipes with optional filtering by state and prefix |
 | `StartPipe` | Start a stopped pipe |
 | `StopPipe` | Stop a running pipe |
+| `TagResource` | Add tags to a pipe |
+| `UntagResource` | Remove tags from a pipe |
+| `ListTagsForResource` | List the tags of a pipe |
 
 ## Configuration
 
@@ -213,6 +216,22 @@ target input.
   pipe has an enrichment, before the `InputTemplate` renders. A value that is not wholly a JSON path
   stays as written. A path that names nothing fails the delivery, which is retried or sent to the
   dead-letter queue like any other failure.
+- An SQS queue target sends `SqsQueueParameters` `MessageGroupId` and `MessageDeduplicationId`. Each is
+  a literal or a JSON path read off the event before the `InputTemplate` renders. A number becomes its
+  text and an object becomes its compact JSON. A path that names nothing fails the delivery.
+- CreatePipe and UpdatePipe refuse an SQS target whose queue name ends in `.fifo` when it has no
+  `SqsQueueParameters` or no `MessageGroupId`. They refuse a `MessageDeduplicationId` on a standard
+  queue. They refuse a `MessageGroupId` or `MessageDeduplicationId` that starts with `$.` but is not a
+  valid JSON path. The errors are reported together in `fieldList`.
+- A Kinesis stream target writes one record per event, with the event JSON, or the rendered
+  `InputTemplate`, as its data. `KinesisStreamParameters` `PartitionKey` is a literal or a JSON path read
+  off the event before the `InputTemplate` renders. A number becomes its text. A path that names
+  nothing fails the delivery. An empty key, or one longer than 256 characters, also fails the delivery.
+- CreatePipe and UpdatePipe refuse a Kinesis target that is not a plain `stream/<name>` ARN or is in another
+  account, one that has no `KinesisStreamParameters`, and a `PartitionKey` that starts with `$.` but is not a
+  valid JSON path. The errors are reported together in `fieldList`. A `PartitionKey` that is missing, not a
+  string, or longer than 256 characters is refused alone with a schema message. An empty `PartitionKey` is
+  accepted.
 - An `InputTemplate` that is exactly one placeholder, such as `<$.Detail>`, renders a string as its
   own text with no quotes added, so a serialized object reaches an event bus as that object. A
   placeholder inside a larger template renders a string with quotes where the template gives none:

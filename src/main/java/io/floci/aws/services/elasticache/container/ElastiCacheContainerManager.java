@@ -115,7 +115,7 @@ public class ElastiCacheContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
-                        + "operations keep working and replication groups still reach 'available', "
+                        + "operations keep working and replication groups still reach ''available'', "
                         + "but they have no backing Valkey container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }
@@ -128,13 +128,7 @@ public class ElastiCacheContainerManager {
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image, String region) {
@@ -157,9 +151,10 @@ public class ElastiCacheContainerManager {
     }
 
     /**
-     * {@link #start(String, String, List, String)} that also loads a snapshot at startup, for the
-     * shell-less path only: the RDB file is placed in the container's data directory before the
-     * server process starts, so it loads the dataset itself and no {@code DEBUG} command is needed.
+     * {@link #start(String, String, List, String)} that also loads a snapshot at startup: the RDB
+     * file is placed in the container's data directory before the server process starts, so it loads
+     * the dataset itself. No {@code DEBUG} command is needed, nor {@code --enable-debug-command},
+     * which a server before Redis 7 refuses to start with.
      * A container that cannot be seeded is removed and reported as a {@link SnapshotRestoreException}.
      *
      * @param seedRdbBase64 a {@link #snapshot} archive to start from, or {@code null} for an empty cache
@@ -168,10 +163,6 @@ public class ElastiCacheContainerManager {
                                             String region, String seedRdbBase64) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
         boolean shellLess = isShellLessBackend();
-        if (seedRdbBase64 != null && !shellLess) {
-            throw new IllegalArgumentException(
-                    "A snapshot is loaded at startup only with floci.services.elasticache.shell-less-backend");
-        }
 
         String containerName = containerName(groupId);
 
@@ -197,9 +188,9 @@ public class ElastiCacheContainerManager {
             arguments.addAll(extraServerFlags);
             specBuilder.withCmd(arguments);
         } else {
-            // DEBUG is enabled for connections from inside the container only, so a snapshot restore
-            // can reload the dataset (DEBUG RELOAD NOSAVE); clients reach the server through the proxy.
-            StringBuilder serverFlags = new StringBuilder("--loglevel verbose --enable-debug-command local");
+            // No --enable-debug-command, which a server before Redis 7 refuses to start with: a
+            // snapshot is restored by file, before start, here too.
+            StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
             for (String flag : extraServerFlags) {
                 serverFlags.append(' ').append(flag);
             }
@@ -246,7 +237,7 @@ public class ElastiCacheContainerManager {
         String logGroup = "/aws/elasticache/cluster/" + groupId + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
 
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "elasticache:" + groupId);
         handle.setLogStream(logHandle);
 
@@ -446,21 +437,6 @@ public class ElastiCacheContainerManager {
             return Base64.getEncoder().encodeToString(entries.readAllBytes());
         } catch (IOException e) {
             throw new IllegalStateException("could not read the snapshot file " + path + ": " + e.getMessage(), e);
-        }
-    }
-
-    /** Replaces the dataset with a {@link #snapshot} RDB file and reloads it without saving first. */
-    public void restore(String containerId, String rdbBase64) {
-        byte[] rdb = Base64.getDecoder().decode(rdbBase64);
-        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
-                "floci-restore.rdb", rdb, 0644);
-        String[] cmd = {"sh", "-c", CLI + "D=$($C CONFIG GET dir | sed -n 2p); F=$($C CONFIG GET dbfilename | sed -n 2p);"
-                + " cp /tmp/floci-restore.rdb \"$D/$F\" && rm -f /tmp/floci-restore.rdb"
-                + " && $C DEBUG RELOAD NOSAVE | grep -q OK"};
-        ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 300);
-        if (result.exitCode() != 0) {
-            throw new IllegalStateException("restore failed with exit code " + result.exitCode() + ": "
-                    + result.stderr() + result.stdout());
         }
     }
 

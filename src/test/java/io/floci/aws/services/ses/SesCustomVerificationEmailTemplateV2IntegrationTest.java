@@ -1,11 +1,13 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -22,8 +24,6 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesCustomVerificationEmailTemplateV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String FROM = "cvet-sender@floci.test";
     private static final String BASE = "/v2/email/custom-verification-email-templates";
     private static final String NAME = "cvet-v2-a";
@@ -118,7 +118,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body(body("nope", FROM, "x", "https://example.com/ok"))
         .when().put(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test
@@ -135,7 +136,8 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void deleteMissing_throwsNotFound() {
         given().header("Authorization", AUTH)
         .when().delete(BASE + "/nope").then().statusCode(404)
-                .body("__type", equalTo("NotFoundException"));
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Custom verification email template <nope> does not exist"));
     }
 
     @Test
@@ -163,7 +165,7 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
     void sendWithTemplateCarryingTheTestSignature_isRecordedWithoutItsBodyAndNotRelayed() {
         // The signature comes from the scanner so it never appears in test source; the JSON needs
         // its one backslash escaped.
-        String content = SesContentScan.signature().replace("\\", "\\\\");
+        String content = SesTestSignature.value().replace("\\", "\\\\");
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
                     {"TemplateName": "cvet-v2-scan", "FromEmailAddress": "%s", "TemplateSubject": "scan",

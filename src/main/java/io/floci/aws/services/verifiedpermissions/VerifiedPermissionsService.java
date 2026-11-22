@@ -383,6 +383,21 @@ public class VerifiedPermissionsService implements Resettable {
                 .orElseThrow(() -> notFound("Policy not found: " + policyIdentifier));
     }
 
+    /**
+     * The id of the store in {@code region} holding the policy whose id is {@code policyId}, or null when
+     * none does. Floci generates policy ids unique, so one names its store; CloudFormation's {@code Ref}
+     * for a policy is the policy id alone.
+     */
+    public String policyStoreIdOf(String policyId, String region) {
+        String prefix = region + ":";
+        String suffix = ":" + policyId;
+        return policies.keys().stream()
+                .filter(key -> key.startsWith(prefix) && key.endsWith(suffix))
+                .map(key -> key.substring(prefix.length(), key.length() - suffix.length()))
+                .findFirst()
+                .orElse(null);
+    }
+
     public synchronized Policy updatePolicy(JsonNode request, String region) {
         Policy current = getPolicy(requiredText(request, "policyStoreId"), requiredText(request, "policyId"), region);
         if (!"STATIC".equals(current.policyType())) {

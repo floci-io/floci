@@ -61,8 +61,8 @@ class IotMqttTlsIntegrationTest {
     static final int TLS_PORT = IotMqttTlsProfile.TLS_PORT;
     static final String LEARNED_HOST = "iot.dev.localhost.floci.io";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final String CONNECT_ANY_CLIENT =
-            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:*:*:client/*\"}]}";
+    private static final String ALLOW_ALL_MQTT = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Action\":[\"iot:Connect\",\"iot:Publish\",\"iot:Subscribe\",\"iot:Receive\"],\"Resource\":\"*\"}]}";
 
     @Inject
     TlsCertificateManager certificateManager;
@@ -76,14 +76,14 @@ class IotMqttTlsIntegrationTest {
     private IotDeviceIdentity device;
 
     /**
-     * One registered device with a policy allowing iot:Connect for any client id, shared by the
+     * One registered device with a policy allowing every MQTT action on any resource, shared by the
      * TLS clients of a test and removed after it. Provisioned on first use, since the plaintext
      * tests need none.
      */
     private IotDeviceIdentity device() {
         if (device == null) {
             device = IotDeviceIdentity.provision(true, cleanup);
-            device.attachNewPolicy(CONNECT_ANY_CLIENT, cleanup);
+            device.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
         }
         return device;
     }

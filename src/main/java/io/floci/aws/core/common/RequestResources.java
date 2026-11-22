@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.services.iam.IamActionRegistry;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -13,6 +14,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -50,6 +52,8 @@ public final class RequestResources {
     /** An ARN without its leading {@code arn:<partition>:<service>:}, its Region optional: {@code 123456789012:function:f}. */
     private static final Pattern PARTIAL_ARN = Pattern.compile("(?:([a-z]{2}(?:-[a-z0-9]+)+-\\d+):)?(\\d{12}):(.+)");
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
+    /** A variable whose value the format holds URL-encoded: API Gateway's {@code /tags/${UrlEncodedResourceARN}}. */
+    private static final String URL_ENCODED = "UrlEncoded";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
     private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
@@ -64,9 +68,18 @@ public final class RequestResources {
     private RequestResources() {
     }
 
-    /** Whether the generated table owns this operation, including those of hand-built namespaces it reads. */
+    /**
+     * Whether the generated table owns this operation, including those of hand-built namespaces it reads. An operation
+     * naming what it acts on in a body the reader does not read ({@code unread}: S3's DeleteObjects, its keys in an XML
+     * body) is not read, as checked on the rest of its request it would be checked on none of what it names.
+     */
     public static boolean reads(String operation) {
-        return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
+        return readable(RequestResourceMembers.table(), operation);
+    }
+
+    /** Whether {@code table} reads the operation's requests: it has an entry for it, and not an unread one. */
+    static boolean readable(RequestResourceMembers.Table table, String operation) {
+        return operation != null && table.operations().containsKey(operation) && !table.unread().contains(operation);
     }
 
     /** Whether {@code ResourceArnBuilder} builds the resources of this namespace's requests itself. */
@@ -81,6 +94,61 @@ public final class RequestResources {
     public static boolean readsNamespace(String namespace) {
         return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace)
                 && !builtByHand(namespace);
+    }
+
+    /**
+     * The ARN formats AWS publishes for the resource types an operation acts on, as
+     * {@code <namespace>:<Operation>}, with the variables the published formats carry
+     * ({@code arn:${Partition}:ssm:${Region}:${Account}:parameter/${FullName}}), each once and in the order the
+     * table lists the types: empty for an operation the table does not read, and for one AWS publishes no resource
+     * type for. A type the table reads without a format of its own is left out, there being no format to name.
+     *
+     * <p>The name is read whatever case it is written in, an action naming an operation being case-insensitive
+     * where a dispatched request names its own operation exactly, which is what {@link #reads} answers for.
+     */
+    public static List<String> arnFormatsOf(String operation) {
+        String named = operationNamed(operation);
+        if (named == null) {
+            return List.of();
+        }
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, named);
+        List<String> published = new ArrayList<>();
+        for (String type : table.types().getOrDefault(named, List.of())) {
+            RequestResourceMembers.ArnFormat format = formats.get(type);
+            if (format != null && !published.contains(format.format())) {
+                published.add(format.format());
+            }
+        }
+        return List.copyOf(published);
+    }
+
+    /** The table's own spelling of an operation named in any case, or null for one it does not read. */
+    private static String operationNamed(String operation) {
+        if (operation == null) {
+            return null;
+        }
+        if (reads(operation)) {
+            return operation;
+        }
+        return OperationNames.INDEX.get(operation.toLowerCase(Locale.ROOT));
+    }
+
+    /** Every operation the table reads, under its own name lowercased, built once on first use. */
+    private static final class OperationNames {
+
+        private static final Map<String, String> INDEX = index();
+
+        private static Map<String, String> index() {
+            Map<String, String> index = new HashMap<>();
+            for (String operation : RequestResourceMembers.table().operations().keySet()) {
+                index.putIfAbsent(operation.toLowerCase(Locale.ROOT), operation);
+            }
+            return Map.copyOf(index);
+        }
+
+        private OperationNames() {
+        }
     }
 
     /**
@@ -119,7 +187,8 @@ public final class RequestResources {
             return targetArns(targets, formats(table, operation), form,
                     form.isEmpty() ? PassedRoles.jsonBody(ctx) : null, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null
+        // An operation the table does not read, an unread one among them, names nothing from it.
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
                 : served(table.operations().get(operation), ctx);
         if (resources == null) {
             return List.of();
@@ -143,7 +212,8 @@ public final class RequestResources {
         if (targets != null) {
             return targetArns(targets, formats(table, operation), Map.of(), body, partition, region, accountId);
         }
-        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
+                : table.operations().get(operation);
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
@@ -272,7 +342,8 @@ public final class RequestResources {
         for (String id : ids) {
             String arn = "*";
             for (Map.Entry<String, String> prefix : targets.prefixes().entrySet()) {
-                if (id.startsWith(prefix.getValue())) {
+                // A longer, uncovered resource prefix must not borrow a shorter covered type's ARN.
+                if (id.startsWith(prefix.getValue()) && id.indexOf('-', prefix.getValue().length()) < 0) {
                     arn = idArn(formats.get(prefix.getKey()).format(), id, partition, region, accountId);
                     break;
                 }
@@ -452,12 +523,26 @@ public final class RequestResources {
 
     private static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation,
                                                        ContainerRequestContext ctx) {
+        IamActionRegistry.RouteMembers route = IamActionRegistry.routeMembers(operation, ctx);
+        return locatedMembers(table, operation, route.model(), route.located());
+    }
+
+    /**
+     * The members the table locates for a request of the operation whose route is the {@code model}'s: those every
+     * client locates alike, those it locates apart for that model ({@code locatedApart}: S3 Control's CreateBucket
+     * carries its {@code Bucket} as {@code {name}}, S3's as {@code {Bucket}}), and those a generated alternative route
+     * locates ({@code alternatives}), {@code body} for one its body carries there.
+     */
+    static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation, String model,
+                                              Map<String, String> alternatives) {
         Map<String, String> located = table.located().getOrDefault(operation, Map.of());
-        Map<String, String> alternatives = IamActionRegistry.routeMemberLocations(operation, ctx);
-        if (alternatives.isEmpty()) {
+        Map<String, String> apart = model == null ? Map.of()
+                : table.locatedApart().getOrDefault(operation, Map.of()).getOrDefault(model, Map.of());
+        if (alternatives.isEmpty() && apart.isEmpty()) {
             return located;
         }
         Map<String, String> merged = new HashMap<>(located);
+        merged.putAll(apart);
         alternatives.forEach((member, source) -> {
             if ("body".equals(source)) {
                 merged.remove(member);
@@ -952,17 +1037,38 @@ public final class RequestResources {
     private static String render(String format, Map<String, String> filling, String partition, String region,
                                  String accountId) {
         Matcher variable = VARIABLE.matcher(format);
+        boolean path = isPath(format);
         StringBuilder arn = new StringBuilder();
         while (variable.find()) {
             String value = switch (variable.group(1)) {
                 case "Partition" -> partition;
                 case "Region" -> region;
                 case "Account" -> accountId;
-                default -> filling.getOrDefault(variable.group(1), "*");
+                default -> filling.containsKey(variable.group(1))
+                        ? spelled(variable.group(1), filling.get(variable.group(1)), path) : "*";
             };
             variable.appendReplacement(arn, Matcher.quoteReplacement(value));
         }
         return variable.appendTail(arn).toString();
+    }
+
+    /** Whether a format's resource is a path, as API Gateway's are: {@code ::/restapis/${RestApiId}}. */
+    private static boolean isPath(String format) {
+        String[] parts = format.split(":", 6);
+        return parts.length == 6 && parts[5].startsWith("/");
+    }
+
+    /**
+     * A value as its variable holds it: URL-encoded, in SigV4 canonical form, for a variable the format names
+     * {@code UrlEncoded...}, as AWS names a tagged API Gateway resource {@code /tags/<UrlEncodedResourceARN>}; with its
+     * {@code %} and {@code /} escaped in a path, so a value given as one segment of it cannot pass for more than one;
+     * as given otherwise.
+     */
+    private static String spelled(String variable, String value, boolean path) {
+        if (variable.startsWith(URL_ENCODED)) {
+            return SigV4Canonicalization.uriEncode(value);
+        }
+        return path ? value.replace("%", "%25").replace("/", "%2F") : value;
     }
 
     /**

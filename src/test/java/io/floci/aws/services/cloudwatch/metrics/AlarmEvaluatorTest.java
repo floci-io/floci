@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudwatch.metrics;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
+import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -79,6 +80,37 @@ class AlarmEvaluatorTest {
     }
 
     @Test
+    void includesFinalSecondOfCompletedPeriodButExcludesCurrentPeriod() {
+        MetricAlarm alarm = alarm();
+        alarm.setEvaluationPeriods(1);
+        when(handlers.iterator()).thenAnswer(invocation -> List.<AlarmActionHandler>of().iterator());
+        doAnswer(invocation -> {
+            Instant end = invocation.getArgument(4);
+            int period = invocation.getArgument(5);
+            long boundary = ((end.getEpochSecond() + period - 1) / period) * period;
+            MetricDatum completed = new MetricDatum();
+            completed.setMetricName(alarm.getMetricName());
+            completed.setTimestamp(boundary - 1);
+            completed.setValue(90.0);
+            MetricDatum current = new MetricDatum();
+            current.setMetricName(alarm.getMetricName());
+            current.setTimestamp(boundary);
+            current.setValue(0.0);
+            metricsService.putMetricData(alarm.getNamespace(), List.of(completed, current), REGION);
+            Object result = invocation.callRealMethod();
+            assertEquals(List.of(new CloudWatchMetricsService.Datapoint(
+                    Instant.ofEpochSecond(boundary - period), 1, 90.0, 90.0, 90.0, 90.0, "None")), result);
+            return result;
+        }).when(metricsService).getMetricStatistics(
+                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString());
+
+        evaluator.evaluate(alarm);
+
+        verify(metricsService).setAlarmState(
+                eq(alarm.getAlarmName()), eq("ALARM"), anyString(), any(), eq(REGION));
+    }
+
+    @Test
     void transitionsToAlarmAndDispatchesWhenThresholdBreachedForAllPeriods() {
         stubMetrics(datapoints(80, 85, 90));
         when(handlers.iterator()).thenAnswer(inv -> List.of(handler).iterator());
@@ -148,6 +180,25 @@ class AlarmEvaluatorTest {
     }
 
     @Test
+    void skipsAlarmsConfiguredWithExtendedStatisticOnly() {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("p99-only-alarm");
+        alarm.setRegion(REGION);
+        alarm.setNamespace("AWS/ApplicationELB");
+        alarm.setMetricName("TargetResponseTime");
+        alarm.setExtendedStatistic("p99");
+        alarm.setPeriod(300);
+        alarm.setEvaluationPeriods(1);
+        alarm.setThreshold(1.0);
+        alarm.setComparisonOperator("GreaterThanThreshold");
+
+        assertDoesNotThrow(() -> evaluator.evaluate(alarm));
+
+        verify(metricsService, never()).getMetricStatistics(
+                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString());
+    }
+
+    @Test
     void evaluateAllSurvivesAllAlarmsThrowing() {
         when(metricsService.allAlarms()).thenThrow(new RuntimeException("storage hiccup"));
 
@@ -179,7 +230,7 @@ class AlarmEvaluatorTest {
             List<CloudWatchMetricsService.Datapoint> points = new ArrayList<>();
             for (int i = 0; i < 3; i++) {
                 points.add(new CloudWatchMetricsService.Datapoint(
-                        end.minusSeconds(60L * i), 1, 80, 80, 80, 80, "Percent"));
+                        end.minusSeconds(60L * (i + 1)), 1, 80, 80, 80, 80, "Percent"));
             }
             return points;
         }).when(metricsService).getMetricStatistics(

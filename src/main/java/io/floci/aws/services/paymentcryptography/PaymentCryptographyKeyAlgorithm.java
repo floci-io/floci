@@ -20,6 +20,20 @@ enum PaymentCryptographyKeyAlgorithm {
     AES_192(24, true, false, false),
     AES_256(32, true, false, false),
     /**
+     * A keyed hash key of SHA-224.
+     *
+     * <p>The reference names these four algorithms for the hash based message
+     * authentication code, and the hash a key carries is fixed at its creation, so the
+     * algorithm is the hash. The length is the length of the hash's own output.
+     */
+    HMAC_SHA224(28, false, false, false, "SHA-224"),
+    /** A keyed hash key of SHA-256. */
+    HMAC_SHA256(32, false, false, false, "SHA-256"),
+    /** A keyed hash key of SHA-384. */
+    HMAC_SHA384(48, false, false, false, "SHA-384"),
+    /** A keyed hash key of SHA-512. */
+    HMAC_SHA512(64, false, false, false, "SHA-512"),
+    /**
      * An EC key agreement key on NIST P-256, the curve the cardholder-device flow uses.
      * The length is the size of the curve, not of a key block.
      */
@@ -52,11 +66,28 @@ enum PaymentCryptographyKeyAlgorithm {
     /** Whether the key is an RSA key, which has a key pair and no symmetric material. */
     final boolean rsa;
 
+    /** The hash the key carries, for a keyed hash key, and null for the others. */
+    final String hash;
+
     PaymentCryptographyKeyAlgorithm(int bytes, boolean aes, boolean ecc, boolean rsa) {
+        this(bytes, aes, ecc, rsa, null);
+    }
+
+    PaymentCryptographyKeyAlgorithm(int bytes, boolean aes, boolean ecc, boolean rsa, String hash) {
         this.bytes = bytes;
         this.aes = aes;
         this.ecc = ecc;
         this.rsa = rsa;
+        this.hash = hash;
+    }
+
+    /**
+     * Whether the key is a keyed hash key, whose algorithm is the hash it carries.
+     *
+     * @return whether the key is a keyed hash key
+     */
+    boolean hmac() {
+        return hash != null;
     }
 
     /** Whether the key holds material a symmetric cipher can use. */
@@ -75,6 +106,11 @@ enum PaymentCryptographyKeyAlgorithm {
      * never refused for a kind the service would have answered with.
      */
     String checkValueAlgorithm() {
+        if (hmac()) {
+            // The reference's model names the hash as a kind of check value, so the value of
+            // a keyed hash key is computed with the hash the key carries.
+            return "HMAC";
+        }
         return aes ? "CMAC" : "ANSI_X9_24";
     }
 
@@ -92,10 +128,10 @@ enum PaymentCryptographyKeyAlgorithm {
      * Whether the key is a Triple DES key rather than an AES one.
      *
      * <p>A symmetric key is an AES one or a Triple DES one, so the family follows from the
-     * two.
+     * two. A keyed hash key is neither: the hash is what runs under it.
      */
     boolean isTdes() {
-        return symmetric() && !aes;
+        return symmetric() && !aes && !hmac();
     }
 
     /** Whether the key is an EC key, which has a key pair rather than key material. */
@@ -148,6 +184,9 @@ enum PaymentCryptographyKeyAlgorithm {
         return sb.toString();
     }
 
+    /** The usage of the keyed hash keys. */
+    static final String HMAC_USAGE = "TR31_M7_HMAC_KEY";
+
     /** The usages a key pair is made of, and the symmetric ones are the rest. */
     private static final List<String> ASYMMETRIC_USAGES = List.of(
             "TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
@@ -178,7 +217,15 @@ enum PaymentCryptographyKeyAlgorithm {
             // The ISO 9797 MACs are defined over Triple DES.
             return List.of(TDES_2KEY, TDES_3KEY);
         }
-        // Every other usage takes every symmetric algorithm.
+        if (HMAC_USAGE.equals(usage)) {
+            // The reference's guide: the hash usage takes the keyed hash keys, whose
+            // algorithm is the hash they carry, and the Triple DES and AES keys a request
+            // may ask for a hash of by name.
+            return List.of(TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256,
+                    HMAC_SHA224, HMAC_SHA256, HMAC_SHA384, HMAC_SHA512);
+        }
+        // Every other usage takes every symmetric algorithm but the keyed hash ones, which
+        // are for the hash usage alone.
         return List.of(TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256);
     }
 

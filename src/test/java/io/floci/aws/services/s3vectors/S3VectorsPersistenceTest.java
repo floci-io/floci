@@ -11,6 +11,7 @@ import io.floci.aws.testing.StorageTestBackends;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,6 +31,35 @@ class S3VectorsPersistenceTest {
     private static final Map<String, String> DEFAULT_ENCRYPTION = Map.of("sseType", "AES256");
     private static final Instant KNOWN_TIME = Instant.parse("2026-01-01T00:00:00Z");
     private static final Instant MIGRATION_TIME = Instant.parse("2026-02-01T00:00:00Z");
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void resourceTagChangesSurviveStorageReload(String mode, @TempDir Path directory) {
+        Path snapshot = directory.resolve("s3vectors.json");
+        String bucketArn;
+        String indexArn;
+        StorageBackend<String, VectorBucket> first = open(mode, snapshot);
+        try {
+            S3VectorsService service = service(first, Clock.fixed(KNOWN_TIME, ZoneOffset.UTC));
+            bucketArn = service.createVectorBucket("bucket", null, Map.of("remove", "old"), REGION).getVectorBucketArn();
+            indexArn = service.createIndex("bucket", "index", 2, "float32", "euclidean", List.of(),
+                    null, Map.of("remove", "old"), REGION).getIndexArn();
+            for (String arn : List.of(bucketArn, indexArn)) {
+                service.tagResource(arn, Map.of("persisted", "value"), REGION);
+                service.untagResource(arn, List.of("remove"), REGION);
+            }
+        } finally {
+            StorageTestBackends.close(first);
+        }
+        StorageBackend<String, VectorBucket> second = open(mode, snapshot);
+        try {
+            S3VectorsService restarted = service(second, Clock.fixed(MIGRATION_TIME, ZoneOffset.UTC));
+            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(bucketArn, REGION));
+            assertEquals(Map.of("persisted", "value"), restarted.listTagsForResource(indexArn, REGION));
+        } finally {
+            StorageTestBackends.close(second);
+        }
+    }
 
     @ParameterizedTest
     @CsvSource({"persistent,false", "persistent,true", "hybrid,false", "hybrid,true", "wal,false", "wal,true"})

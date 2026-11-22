@@ -6,6 +6,7 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -288,7 +289,109 @@ class IotCustomAuthorizerIntegrationTest {
         assertEquals(base64("deny"), takeEvent().path("protocolData").path("mqtt").path("password").asText());
     }
 
+    @Test
+    void aWebSocketClientReceivesOnlyTheTopicsTheAuthorizerPoliciesAllow() throws Exception {
+        String clientId = "cauth-receive-" + System.nanoTime();
+        String prefix = "cauth/" + System.nanoTime();
+        answerWithTopicPolicy(clientId, prefix);
+        MqttClient subscriber = connectV3(ws(""), clientId, clientId + "?" + NAME_PARAM + authorizer, "allow", Map.of());
+        MqttClient publisher = new MqttClient(tcp(), "cauth-publisher-" + System.nanoTime(), new MemoryPersistence());
+        publisher.connect();
+        try {
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.subscribe(prefix + "/#", 1, (topic, message) -> received.add(topic));
+
+            publisher.publish(prefix + "/someone-else/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+            publisher.publish(prefix + "/" + clientId + "/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertEquals(prefix + "/" + clientId + "/events", received.poll(10, TimeUnit.SECONDS));
+        } finally {
+            publisher.disconnect();
+            publisher.close();
+            subscriber.disconnect();
+            subscriber.close();
+        }
+    }
+
+    @Test
+    void mqtt3PublishOutsideTheAuthorizerPoliciesClosesTheWebSocketConnection() throws Exception {
+        String clientId = "cauth-publish-" + System.nanoTime();
+        String prefix = "cauth/" + System.nanoTime();
+        answerWithTopicPolicy(clientId, prefix);
+        MqttClient client = connectV3(ws(""), clientId, clientId + "?" + NAME_PARAM + authorizer, "allow", Map.of());
+        try {
+            client.publish(prefix + "/" + clientId + "/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertThrows(MqttException.class,
+                    () -> client.publish(prefix + "/someone-else/events", "x".getBytes(StandardCharsets.UTF_8), 1, false));
+            assertFalse(client.isConnected());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void mqtt3UnsignedConnectNamingNoAuthorizerWithoutADefaultIsRefused() {
+        String clientId = "cauth-v3-none-" + System.nanoTime();
+
+        MqttException refused = assertThrows(MqttException.class,
+                () -> connectV3(ws(""), clientId, clientId, "allow", Map.of()));
+
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+        verify(lambdaService, never()).invokeArn(anyString(), any(byte[].class), any(InvocationType.class));
+    }
+
+    @Test
+    void mqtt5UnsignedConnectNamingNoAuthorizerWithoutADefaultGetsReasonCode135() {
+        String clientId = "cauth-v5-none-" + System.nanoTime();
+
+        org.eclipse.paho.mqttv5.common.MqttException refused = assertThrows(org.eclipse.paho.mqttv5.common.MqttException.class,
+                () -> connectV5(ws(""), clientId, clientId, "allow"));
+
+        assertEquals(135, refused.getReasonCode());
+    }
+
+    @Test
+    void anUnsignedConnectNamingNoAuthorizerGoesThroughTheDefaultAuthorizer() throws Exception {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-" + System.nanoTime();
+
+        connectV3(ws(""), clientId, clientId, "allow", Map.of()).disconnect();
+
+        JsonNode event = takeEvent();
+        assertEquals(clientId, event.path("protocolData").path("mqtt").path("username").asText());
+        assertEquals(base64("allow"), event.path("protocolData").path("mqtt").path("password").asText());
+    }
+
+    @Test
+    void theDefaultAuthorizerRefusesAConnectItDenies() {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-deny-" + System.nanoTime();
+
+        MqttException refused = assertThrows(MqttException.class,
+                () -> connectV3(ws(""), clientId, clientId, "deny", Map.of()));
+
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+    }
+
+    @Test
+    void aSigV4SignedConnectNamingNoAuthorizerSkipsTheDefaultAuthorizer() throws Exception {
+        setDefaultAuthorizer();
+        String clientId = "cauth-default-sigv4-" + System.nanoTime();
+
+        connectV3(ws(IotWebSocketSigV4.QUERY), clientId, clientId, "deny", Map.of()).disconnect();
+
+        verify(lambdaService, never()).invokeArn(anyString(), any(byte[].class), any(InvocationType.class));
+    }
+
     // Helpers
+
+    private void setDefaultAuthorizer() {
+        given().contentType("application/json").body("{\"authorizerName\": \"" + authorizer + "\"}")
+        .when().post("/default-authorizer")
+        .then().statusCode(200);
+        cleanup.register(() -> given().when().delete("/default-authorizer").then().statusCode(200));
+    }
 
     private MqttClient connectV3(String url, String clientId, String username, String password, Map<String, String> headers)
             throws Exception {
@@ -354,9 +457,23 @@ class IotCustomAuthorizerIntegrationTest {
         return protocols;
     }
 
+    private void answerWithTopicPolicy(String clientId, String prefix) {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:us-east-1:000000000000:client/" + clientId + "\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Subscribe\",\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topicfilter/" + prefix + "/*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\",\"iot:Receive\"],"
+                + "\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topic/" + prefix + "/${iot:ClientId}/*\"}]}";
+        when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, allowWith(policy).getBytes(StandardCharsets.UTF_8), null, "id"));
+    }
+
     private static String allow(String clientId) {
+        return allowWith(policy(clientId));
+    }
+
+    private static String allowWith(String policyDocument) {
         return "{\"isAuthenticated\": true, \"principalId\": \"itprincipal\", \"policyDocuments\": ["
-                + MAPPER.valueToTree(policy(clientId)) + "]}";
+                + MAPPER.valueToTree(policyDocument) + "]}";
     }
 
     private static String policy(String clientId) {

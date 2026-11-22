@@ -15,7 +15,7 @@ import java.util.concurrent.TimeoutException;
 /**
  * Stands in for the Lambda container in protocol tests: functions resolve for real, but each
  * invocation is handed to the test, which plays the SDK over the REST API and then answers.
- * Enabled per test class through {@link LambdaDurableScriptedProfile}.
+ * Enabled for its test class through {@code S3EnforceAuthProfile}.
  */
 @Alternative
 @ApplicationScoped

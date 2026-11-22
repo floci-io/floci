@@ -9,4 +9,15 @@ interface SchemaBinding {
     String databaseName();
 
     String schemaName();
+
+    /** The name the registry keys the binding by; a binding of something inside a schema names it too. */
+    default String bindingName() {
+        return schemaName();
+    }
+
+    static void require(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+    }
 }

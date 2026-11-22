@@ -679,7 +679,8 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateGetStackOutputPlacement(resolvedTemplate);
+        validateGetStackOutputPlacement(resolvedTemplate, parameters, preflightStackName, preflightStackId,
+                region, accountId);
         validateResourceDependencies(resolvedTemplate, parameters, preflightStackName, preflightStackId,
                 region, accountId);
 
@@ -857,7 +858,8 @@ public class CloudFormationService implements ResourceProvider {
             // Compared as execution stores it: AWS::Include fragments read again and merged, then
             // the SAM transform applied with the stack's parameter values, which it can resolve
             // into the expansion. A fragment that changed in S3 is a change.
-            JsonNode template = awsIncludeProcessor.mergeIncludes(submittedTemplate);
+            JsonNode template = mergeAwsIncludes(submittedTemplate, given, region, ownerAccount(stack),
+                    stack.getStackName(), stack.getStackId());
             if (samTransformProcessor.hasSamTransform(template)) {
                 template = samTransformProcessor.expandSamTemplate(template,
                         samTransformParameters(template, given, region));
@@ -1108,7 +1110,8 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
             // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
             // an included fragment may itself carry SAM resources.
-            newTemplate = awsIncludeProcessor.mergeIncludes(newTemplate);
+            newTemplate = mergeAwsIncludes(newTemplate, cs.getParameters(), region, accountId,
+                    stack.getStackName(), stack.getStackId());
             if (samTransformProcessor.hasSamTransform(newTemplate)) {
                 // The deployed stack's template is always the SAM-expanded form (see
                 // executeTemplate); comparing the change set's raw SAM source against it would
@@ -1263,9 +1266,17 @@ public class CloudFormationService implements ResourceProvider {
                                 compared[0].path(logicalId).path("Properties"),
                                 compared[1].path(logicalId).path("Properties")});
                     }
+                    JsonNode comparedOld = compared[0] != null ? compared[0].path(logicalId) : null;
+                    JsonNode comparedNew = compared[0] != null ? compared[1].path(logicalId) : null;
+                    // Details are descriptive and only DescribeChangeSet reads them: execution (which passes
+                    // comparedProperties) must not be able to fail on them.
+                    List<ChangeDetail> details = comparedProperties != null ? List.of()
+                            : changeDetails(resourceType, logicalId, oldDef, newDef, comparedOld, comparedNew,
+                                    changedParams, changedConditions, replacementDecider);
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
-                            replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE));
+                            replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE,
+                            details.stream().map(ChangeDetail::attribute).distinct().toList(), details));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -1400,7 +1411,8 @@ public class CloudFormationService implements ResourceProvider {
             if (change.logicalResourceId().equals(logicalId)
                     && replacementRank(replacement) > replacementRank(change.replacement())) {
                 changes.set(i, new ResourceChange(change.action(), change.logicalResourceId(),
-                        change.physicalResourceId(), change.resourceType(), replacement));
+                        change.physicalResourceId(), change.resourceType(), replacement,
+                        change.scope(), change.details()));
             }
         }
     }
@@ -1520,10 +1532,9 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldBlock = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
-            JsonNode newBlock = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
-            JsonNode oldProps = withoutNoValue(logicalId, oldBlock, oldParams, oldConditions, oldTemplate);
-            JsonNode newProps = withoutNoValue(logicalId, newBlock, newParams, newConditions, newTemplate);
+            JsonNode[] props = writtenProperties(logicalId, oldDef, newDef);
+            JsonNode oldProps = props[0];
+            JsonNode newProps = props[1];
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1540,6 +1551,36 @@ public class CloudFormationService implements ResourceProvider {
                         ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
+        }
+
+        /** The old and the new Properties as {@link #decide} reads them: as written, without AWS::NoValue. */
+        private JsonNode[] writtenProperties(String logicalId, JsonNode oldDef, JsonNode newDef) {
+            JsonNode oldBlock = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
+            JsonNode newBlock = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
+            return new JsonNode[] {
+                    withoutNoValue(logicalId, oldBlock, oldParams, oldConditions, oldTemplate),
+                    withoutNoValue(logicalId, newBlock, newParams, newConditions, newTemplate)};
+        }
+
+        /**
+         * Whether the update of one top-level property recreates the resource: {@link #decide}'s rule for
+         * the create-only pointers at and under that property, between the compared forms when there are any,
+         * by the template text otherwise.
+         */
+        boolean recreates(String resourceType, String logicalId, String property, JsonNode oldDef,
+                          JsonNode newDef) {
+            JsonNode[] props = writtenProperties(logicalId, oldDef, newDef);
+            if (compared != null && compared[0] != null && compared[1] != null
+                    && CfnCreateOnlyProperties.hasSchema(resourceType)) {
+                return comparedChanged(resourceType, logicalId, props[0], props[1], property);
+            }
+            return CfnCreateOnlyProperties.replacementPointers(resourceType).stream()
+                    .filter(pointer -> under(pointer, property))
+                    .anyMatch(pointer -> writtenPointerChanged(pointer, props[0], props[1]));
+        }
+
+        private static boolean under(String pointer, String property) {
+            return property == null || pointer.equals(property) || pointer.startsWith(property + "/");
         }
 
         /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
@@ -1577,6 +1618,12 @@ public class CloudFormationService implements ResourceProvider {
          */
         private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
                                         JsonNode newProps) {
+            return comparedChanged(resourceType, logicalId, oldProps, newProps, null);
+        }
+
+        /** {@link #comparedChanged} for the pointers at and under one top-level property; all when null. */
+        private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
+                                        JsonNode newProps, String property) {
             if (compared == null || compared[0] == null || compared[1] == null
                     || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
                 return false;
@@ -1592,6 +1639,9 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
             for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
+                if (!under(pointer, property)) {
+                    continue;
+                }
                 boolean changed = noEvidence(pointer, before)
                         ? writtenPointerChanged(pointer, oldProps, newProps)
                         : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
@@ -1681,7 +1731,7 @@ public class CloudFormationService implements ResourceProvider {
                                                         Map<String, Boolean> conditions, JsonNode template) {
             return new CloudFormationTemplateEngine(accountId, region, stack.getStackName(), stack.getStackId(),
                     params, physicalIds, attributes, conditions, templateMappings(template), objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))), value -> value);
+                    exportResolver(accountId, region), value -> value);
         }
     }
 
@@ -1714,7 +1764,7 @@ public class CloudFormationService implements ResourceProvider {
                     current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
-                    + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
+                    + "replacement beyond the engine''s own decision: {2}", logicalId, resourceType, e.getMessage());
             return false;
         }
     }
@@ -1760,8 +1810,94 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
+    /**
+     * One change of a resource. {@code scope} and {@code details} are those of {@code
+     * DescribeChangeSet}: filled for a Modify that the template diff found, empty for an Add, a Remove, a nested
+     * stack and a resource that changes only because it reads a replaced resource or a changed attribute.
+     */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
-                                 String resourceType, String replacement) {}
+                                 String resourceType, String replacement,
+                                 List<String> scope, List<ChangeDetail> details) {
+        public ResourceChange(String action, String logicalResourceId, String physicalResourceId,
+                              String resourceType, String replacement) {
+            this(action, logicalResourceId, physicalResourceId, resourceType, replacement, List.of(), List.of());
+        }
+    }
+
+    /**
+     * An AWS {@code ResourceChangeDetail}: {@code attribute} and {@code name} are its Target (no name
+     * unless the attribute is Properties), {@code requiresRecreation} is set for Properties and Tags
+     * only, {@code causingEntity} is the parameter of a ParameterReference.
+     */
+    public record ChangeDetail(String attribute, String name, String requiresRecreation, String evaluation,
+                               String changeSource, String causingEntity) {}
+
+    private static final List<String> RESOURCE_ATTRIBUTES = List.of(
+            "Metadata", "DeletionPolicy", "UpdateReplacePolicy", "UpdatePolicy");
+
+    /**
+     * The details of a modified resource: one entry per property and per resource-level attribute that
+     * differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
+     * template did not resolve and the definitions as written were diffed). See {@link #addDetails}.
+     * {@code RequiresRecreation} is {@code Always} when the replacement decision's rule for the create-only
+     * pointers at and under the property says the update recreates, and {@code Never} otherwise.
+     * {@code Conditionally} is not produced: floci's create-only table records no conditional replacement,
+     * which AWS has.
+     */
+    private List<ChangeDetail> changeDetails(String resourceType, String logicalId, JsonNode oldDef,
+                                             JsonNode newDef, JsonNode comparedOld, JsonNode comparedNew,
+                                             Set<String> changedParams, Set<String> changedConditions,
+                                             ReplacementDecider decider) {
+        List<ChangeDetail> details = new ArrayList<>();
+        PropertyChanges.between(resourceType, true, oldDef.path("Properties"), newDef.path("Properties"),
+                comparedOld != null ? comparedOld.path("Properties") : null,
+                comparedNew != null ? comparedNew.path("Properties") : null)
+                .byName().values().stream()
+                .filter(c -> comparedOld != null
+                        ? !comparedOld.path("Properties").path(c.name())
+                                .equals(comparedNew.path("Properties").path(c.name()))
+                        : c.kind() != PropertyChanges.Kind.UNCHANGED
+                                || readsChange(c.current(), changedParams, changedConditions))
+                .forEach(c -> {
+                    boolean tags = "Tags".equals(c.name());
+                    addDetails(details, tags ? "Tags" : "Properties", tags ? null : c.name(),
+                            decider.recreates(resourceType, logicalId, c.name(), oldDef, newDef)
+                                    ? "Always" : "Never", c.prior(), c.current(), changedParams);
+                });
+        for (String attribute : RESOURCE_ATTRIBUTES) {
+            JsonNode before = (comparedOld != null ? comparedOld : oldDef).path(attribute);
+            JsonNode after = (comparedNew != null ? comparedNew : newDef).path(attribute);
+            if (!before.equals(after)
+                    || comparedOld == null && readsChange(newDef.path(attribute), changedParams, changedConditions)) {
+                addDetails(details, attribute, null, null, oldDef.path(attribute), newDef.path(attribute),
+                        changedParams);
+            }
+        }
+        return details;
+    }
+
+    private boolean readsChange(JsonNode written, Set<String> changedParams, Set<String> changedConditions) {
+        return written != null && (referencesAnyParameter(written, changedParams)
+                || referencesAnyCondition(written, changedConditions));
+    }
+
+    /**
+     * A difference in the written values is a static DirectModification, one that shows only after the
+     * parameters or conditions are applied a dynamic one. Each changed parameter the written value reads
+     * adds a static ParameterReference either way, as AWS reports a Ref of a changed parameter.
+     */
+    private void addDetails(List<ChangeDetail> details, String attribute, String name, String recreation,
+                            JsonNode writtenBefore, JsonNode writtenAfter, Set<String> changedParams) {
+        boolean written = !Objects.equals(writtenBefore, writtenAfter);
+        details.add(new ChangeDetail(attribute, name, recreation, written ? "Static" : "Dynamic",
+                "DirectModification", null));
+        for (String parameter : new TreeSet<>(changedParams)) {
+            if (writtenAfter != null && referencesAnyParameter(writtenAfter, Set.of(parameter))) {
+                details.add(new ChangeDetail(attribute, name, recreation, "Static", "ParameterReference",
+                        parameter));
+            }
+        }
+    }
 
     private String resourcePhysicalId(Stack stack, String logicalId) {
         StackResource resource = stack.getResources().get(logicalId);
@@ -1847,7 +1983,7 @@ public class CloudFormationService implements ResourceProvider {
                                          List<StackEvent> events,
                                          Map<String, ChangeSet> changeSets,
                                          Map<ChangeSet, ChangeSetState> changeSetStates,
-                                         String stackPolicyBody) {}
+                                         String stackPolicyBody, String originalTemplateBody) {}
 
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
@@ -1897,6 +2033,11 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (isCreate && cs.getStackPolicyBody() != null) {
                 existing.setStackPolicyBody(cs.getStackPolicyBody());
+            }
+            if (isCreate) {
+                // The stack has its template once CreateStack answers, as GetTemplate and GetTemplateSummary read
+                // it on AWS, not only once its creation starts, which waits for a free operation thread.
+                existing.setOriginalTemplateBody(cs.getTemplateBody());
             }
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
@@ -2260,7 +2401,8 @@ public class CloudFormationService implements ResourceProvider {
             states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
         }
         return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
-                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody());
+                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody(),
+                stack.getOriginalTemplateBody());
     }
 
     private void restore(Stack stack, StackMutationSnapshot snapshot) {
@@ -2270,6 +2412,7 @@ public class CloudFormationService implements ResourceProvider {
         stack.setStatus(snapshot.status());
         stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
         stack.setStackPolicyBody(snapshot.stackPolicyBody());
+        stack.setOriginalTemplateBody(snapshot.originalTemplateBody());
         stack.setEvents(new ArrayList<>(snapshot.events()));
         stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
         snapshot.changeSetStates().forEach((changeSet, state) -> {
@@ -2671,7 +2814,7 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
+    static Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
         Map<String, String> resolved = new HashMap<>(callerParams != null ? callerParams : Map.of());
         JsonNode paramDefs = template.path("Parameters");
         if (paramDefs.isObject()) {
@@ -2683,6 +2826,48 @@ public class CloudFormationService implements ResourceProvider {
                 }
             });
         }
+        return resolved;
+    }
+
+    private JsonNode mergeAwsIncludes(JsonNode template, Map<String, String> params, String region,
+                                      String accountId, String stackName, String stackId) {
+        if (!awsIncludeProcessor.containsAwsInclude(template)) {
+            return template;
+        }
+        return awsIncludeProcessor.mergeIncludes(template, includeParameters(template, params, region),
+                region, accountId, stackName, stackId, exportResolver(accountId, region));
+    }
+
+    /**
+     * The parameter values {@code AWS::Include} sees: the given ones over each {@code Default}, with
+     * readable {@code AWS::SSM::Parameter::Value<String>} parameters read from Parameter Store and
+     * unreadable ones omitted so an include that does not reference them still expands (for example
+     * during {@code DescribeChangeSet}) while a {@code Location} that does reference one is rejected
+     * as unresolved.
+     */
+    private Map<String, String> includeParameters(JsonNode template, Map<String, String> params, String region) {
+        Map<String, String> resolved = resolveDefaultParameters(template, params);
+        JsonNode paramDefs = template.path("Parameters");
+        if (!paramDefs.isObject()) {
+            return resolved;
+        }
+        paramDefs.fields().forEachRemaining(e -> {
+            if (!"AWS::SSM::Parameter::Value<String>".equals(e.getValue().path("Type").asText())) {
+                return;
+            }
+            String parameterName = resolved.get(e.getKey());
+            if (parameterName == null || parameterName.isBlank()) {
+                resolved.remove(e.getKey());
+                return;
+            }
+            try {
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, false, region).getValue());
+            } catch (AwsException ex) {
+                LOG.debugv("Omitting unreadable SSM parameter {0} from AWS::Include context: {1}",
+                        e.getKey(), ex.getMessage());
+                resolved.remove(e.getKey());
+            }
+        });
         return resolved;
     }
 
@@ -2777,7 +2962,8 @@ public class CloudFormationService implements ResourceProvider {
             // reference, unchanged, when the template carries no AWS::Include, which is what lets
             // the check below tell a real merge apart from a no-op one.
             JsonNode beforeInclude = template;
-            template = awsIncludeProcessor.mergeIncludes(template);
+            template = mergeAwsIncludes(template, params, region, accountId,
+                    stack.getStackName(), stack.getStackId());
             boolean includeMerged = template != beforeInclude;
 
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
@@ -2942,7 +3128,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn(), previousEngine);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
@@ -3061,7 +3247,7 @@ public class CloudFormationService implements ResourceProvider {
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                    exportResolver(accountId, region),
                     value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                     (name, output, outputRegion, roleArn) ->
                             resolveStackOutput(accountId, name, output, outputRegion, roleArn),
@@ -3946,12 +4132,16 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private static Map<String, JsonNode> templateMappings(JsonNode template) {
+    static Map<String, JsonNode> templateMappings(JsonNode template) {
         Map<String, JsonNode> mappings = new HashMap<>();
         if (template != null) {
             template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
         }
         return mappings;
+    }
+
+    private Function<String, String> exportResolver(String accountId, String region) {
+        return name -> exports.get(accountExportKey(accountId, exportKey(region, name)));
     }
 
     /** An engine for one deployment's template: its parameters, conditions, mappings and resource types. */
@@ -3964,7 +4154,7 @@ public class CloudFormationService implements ResourceProvider {
         return new CloudFormationTemplateEngine(
                 accountId, region, stack.getStackName(),
                 stack.getStackId(), params, ids, attributes, conditions, mappings, objectMapper,
-                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                exportResolver(accountId, region),
                 value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                 (name, output, outputRegion, roleArn) ->
                         resolveStackOutput(accountId, name, output, outputRegion, roleArn),
@@ -5236,9 +5426,11 @@ public class CloudFormationService implements ResourceProvider {
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
         // without a value, or a Fn::GetStackOutput where the child's template may not hold one
         // (measured: the Child resource fails with the template error, and the parent rolls back).
+        String childStackId = childCreate ? newStackId(childStackName, region, accountId) : childStack.getStackId();
         try {
             requireParameterValues(childTemplate, childParams);
-            validateGetStackOutputPlacement(childTemplate);
+            validateGetStackOutputPlacement(childTemplate, childParams, childStackName,
+                    childStackId, region, accountId);
         } catch (AwsException e) {
             resource.setStatus("CREATE_FAILED");
             resource.setStatusReason(e.getMessage());
@@ -5246,7 +5438,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         if (childCreate) {
-            childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
+            childStack = newStack(childStackName, childStackId, region, accountId);
             childStack.setParentId(parentStack.getStackId());
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
@@ -5695,7 +5887,9 @@ public class CloudFormationService implements ResourceProvider {
      * {@code Export.Name}, neither of which may depend on another stack. A nested stack's template
      * is checked when the child is created, and the child's resource fails with the same message.
      */
-    private void validateGetStackOutputPlacement(String templateBody) {
+    private void validateGetStackOutputPlacement(String templateBody, Map<String, String> params,
+                                                 String stackName, String stackId, String region,
+                                                 String accountId) {
         JsonNode parsed;
         try {
             parsed = parseTemplate(templateBody);
@@ -5709,7 +5903,7 @@ public class CloudFormationService implements ResourceProvider {
         JsonNode template;
         try {
             // The rules hold for the template as processed: an AWS::Include fragment can carry it.
-            template = awsIncludeProcessor.mergeIncludes(parsed);
+            template = mergeAwsIncludes(parsed, params, region, accountId, stackName, stackId);
         } catch (AwsException e) {
             // A fragment that cannot be read fails the operation as the transform does, where the
             // includes are processed; the request itself is not refused for it on AWS.

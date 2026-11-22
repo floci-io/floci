@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
@@ -493,8 +492,7 @@ public class FirehoseParquetConverter {
         catalogTable.put("tableName", schemaConfig.getTableName());
         catalogTable.put("region", schemaConfig.getRegion() != null
                 ? schemaConfig.getRegion()
-                : AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
-                        regionResolver.getDefaultRegion()));
+                : regionResolver.regionOf(stream.getDeliveryStreamARN()));
         catalogTable.put("versionId", schemaConfig.getVersionId() != null
                 ? schemaConfig.getVersionId() : "LATEST");
         catalogTable.put("roleArn", schemaConfig.getRoleArn());
