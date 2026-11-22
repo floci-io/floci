@@ -21,8 +21,8 @@ public final class DockerCapacityExceededException extends AwsException {
             Map.entry("sagemaker", new Error("ResourceLimitExceeded", 400)),
             Map.entry("glue", new Error("ConcurrentRunsExceededException", 400)),
             Map.entry("rds", new Error("InsufficientDBInstanceCapacity", 400)),
-            Map.entry("docdb", new Error("DBClusterQuotaExceededFault", 400)),
-            Map.entry("neptune", new Error("DBClusterQuotaExceededFault", 400)),
+            Map.entry("docdb", new Error("DBClusterQuotaExceededFault", 403)),
+            Map.entry("neptune", new Error("DBClusterQuotaExceededFault", 403)),
             Map.entry("elasticache", new Error("InsufficientCacheClusterCapacity", 400)),
             Map.entry("redshift", new Error("InsufficientClusterCapacity", 400)),
             Map.entry("memorydb", new Error("InsufficientClusterCapacityFault", 400)));
@@ -41,6 +41,16 @@ public final class DockerCapacityExceededException extends AwsException {
 
     public String service() {
         return service;
+    }
+
+    /** The refusal {@code failure} is or carries as a cause, or null; a failed launch can wrap it. */
+    public static DockerCapacityExceededException findIn(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause() == cause ? null : cause.getCause()) {
+            if (cause instanceof DockerCapacityExceededException exceeded) {
+                return exceeded;
+            }
+        }
+        return null;
     }
 
     private static Error errorFor(String service) {

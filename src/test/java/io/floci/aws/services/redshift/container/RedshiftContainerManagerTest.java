@@ -52,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.clearInvocations;
@@ -242,6 +243,21 @@ class RedshiftContainerManagerTest {
                 manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    // Catches: a Redshift cluster's container without its io.floci.service label, which leaves it outside
+    // floci.docker.service-max-containers.redshift and its InsufficientClusterCapacity error.
+    @Test
+    void theClusterContainerCarriesTheRedshiftServiceLabel() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
+                new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432))));
+
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        verify(specBuilder).withLabels(argThat(labels -> "redshift".equals(labels.get("io.floci.service"))
+                && "test-cluster".equals(labels.get("io.floci.resource-id"))));
     }
 
     @Test

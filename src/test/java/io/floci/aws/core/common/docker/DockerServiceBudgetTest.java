@@ -47,6 +47,10 @@ class DockerServiceBudgetTest {
         assertEquals(400, rds.getHttpStatus());
         assertTrue(rds.getMessage().contains("floci.docker.service-max-containers.rds"), rds.getMessage());
 
+        // botocore models DBClusterQuotaExceededFault as a 403 for both DocumentDB and Neptune.
+        assertEquals(403, new DockerCapacityExceededException("docdb", 1).getHttpStatus());
+        assertEquals(403, new DockerCapacityExceededException("neptune", 1).getHttpStatus());
+
         assertEquals("ThrottlingException", new DockerCapacityExceededException("ecs", 1).getErrorCode());
     }
 

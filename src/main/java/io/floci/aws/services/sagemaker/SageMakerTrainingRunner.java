@@ -101,7 +101,9 @@ public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
                     .withDockerNetwork(config.services().sagemaker().dockerNetwork())
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLogRotation();
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "sagemaker", job.trainingJobName, job.accountId, job.region));
             SageMakerEndpointManager.applyEntrypoint(builder, job.algorithmSpecification, "train");
             // Throws when the requested instance type asks for hardware this host cannot
             // stand in for, so the job fails with a reason rather than quietly training

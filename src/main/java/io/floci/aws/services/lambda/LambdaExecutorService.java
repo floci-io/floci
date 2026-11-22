@@ -423,16 +423,6 @@ public class LambdaExecutorService implements Resettable {
                 event.invokedQualifier());
     }
 
-    /** The budget refusal {@code e} carries, or null; a failed launch can wrap it. */
-    private static DockerCapacityExceededException capacityExceeded(Throwable e) {
-        for (Throwable c = e; c != null; c = c.getCause() == c ? null : c.getCause()) {
-            if (c instanceof DockerCapacityExceededException exceeded) {
-                return exceeded;
-            }
-        }
-        return null;
-    }
-
     /**
      * A container that could not start because Docker is unreachable says so, rather than surfacing
      * the raw socket error ("No such file or directory") a native binary without Docker would get.
@@ -478,7 +468,7 @@ public class LambdaExecutorService implements Resettable {
                 handle = warmPool.acquire(fn);
             }
         } catch (Exception e) {
-            DockerCapacityExceededException overBudget = capacityExceeded(e);
+            DockerCapacityExceededException overBudget = DockerCapacityExceededException.findIn(e);
             if (overBudget != null) {
                 // Out of Floci's Docker budget for Lambda is AWS's throttle, not a function error.
                 throw overBudget;
