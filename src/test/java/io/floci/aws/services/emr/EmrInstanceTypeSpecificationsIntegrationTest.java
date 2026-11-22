@@ -97,6 +97,88 @@ class EmrInstanceTypeSpecificationsIntegrationTest {
                 .body(specifications + "[0].WeightedCapacity", equalTo(1));
     }
 
+    @Test
+    void aFleetsLaunchAndResizeSpecificationsAndContextAreKeptAndModifyInstanceFleetChangesThem() {
+        String id = cluster("""
+                [{"InstanceFleetType": "MASTER", "TargetOnDemandCapacity": 1,
+                  "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]},
+                 {"InstanceFleetType": "CORE", "TargetOnDemandCapacity": 1, "TargetSpotCapacity": 2,
+                  "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}], "Context": "etl",
+                  "LaunchSpecifications": {"OnDemandSpecification": {"AllocationStrategy": "lowest-price"},
+                    "SpotSpecification": {"TimeoutDurationMinutes": 10, "TimeoutAction": "SWITCH_TO_ON_DEMAND",
+                      "AllocationStrategy": "capacity-optimized"}},
+                  "ResizeSpecifications": {"SpotResizeSpecification": {"TimeoutDurationMinutes": 20},
+                    "OnDemandResizeSpecification": {"TimeoutDurationMinutes": 30}}}]""");
+        String core = "InstanceFleets.find { it.InstanceFleetType == 'CORE' }";
+        String coreId = emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body(core + ".Context", equalTo("etl"))
+                .body(core + ".LaunchSpecifications.SpotSpecification.TimeoutAction", equalTo("SWITCH_TO_ON_DEMAND"))
+                .body(core + ".LaunchSpecifications.OnDemandSpecification.AllocationStrategy", equalTo("lowest-price"))
+                .body(core + ".ResizeSpecifications.OnDemandResizeSpecification.TimeoutDurationMinutes", equalTo(30))
+                .extract().path(core + ".Id");
+
+        emr("ModifyInstanceFleet", """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetId": "%s", "TargetSpotCapacity": 3,
+                  "Context": "nightly", "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge", "WeightedCapacity": 2,
+                    "Configurations": [{"Classification": "spark",
+                      "Properties": {"maximizeResourceAllocation": "true"}}]}],
+                  "ResizeSpecifications": {"SpotResizeSpecification": {"TimeoutDurationMinutes": 45}}}}
+                """.formatted(id, coreId)).then().statusCode(200);
+
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body(core + ".TargetSpotCapacity", equalTo(3))
+                .body(core + ".Context", equalTo("nightly"))
+                .body(core + ".InstanceTypeSpecifications.InstanceType", equalTo(List.of("m5.xlarge")))
+                .body(core + ".InstanceTypeSpecifications[0].WeightedCapacity", equalTo(2))
+                .body(core + ".InstanceTypeSpecifications[0].Configurations[0].Classification", equalTo("spark"))
+                .body(core + ".ResizeSpecifications.SpotResizeSpecification.TimeoutDurationMinutes", equalTo(45))
+                .body(core + ".LaunchSpecifications.SpotSpecification.TimeoutDurationMinutes", equalTo(10));
+        emr("ModifyInstanceFleet", """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetId": "%s",
+                  "InstanceTypeConfigs": [{"WeightedCapacity": 2}]}}
+                """.formatted(id, coreId)).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        // The Management Guide: "You must include all instance types that are part of your instance fleet".
+        emr("ModifyInstanceFleet", """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetId": "%s",
+                  "InstanceTypeConfigs": [{"InstanceType": "r5.2xlarge"}]}}
+                """.formatted(id, coreId)).then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("The instance type configs must include every instance type of instance "
+                        + "fleet " + coreId + "; missing m5.xlarge."));
+    }
+
+    @Test
+    void aFleetMemberOfTheWrongJsonTypeIsRefusedAndLeavesTheFleetAsItWas() {
+        String id = cluster("""
+                [{"InstanceFleetType": "MASTER", "TargetOnDemandCapacity": 1,
+                  "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}]""");
+        String fleet = """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetType": "TASK", "TargetSpotCapacity": 1,
+                  "InstanceTypeConfigs": [{"InstanceType": "c5.xlarge"}], %s}}""";
+        emr("AddInstanceFleet", fleet.formatted(id, "\"LaunchSpecifications\": \"fast\""))
+                .then().statusCode(400).body("__type", equalTo("SerializationException"));
+        emr("AddInstanceFleet", fleet.formatted(id, "\"Context\": 7"))
+                .then().statusCode(400).body("__type", equalTo("SerializationException"));
+        String task = emr("AddInstanceFleet", fleet.formatted(id, "\"Context\": \"etl\""))
+                .then().statusCode(200).extract().path("InstanceFleetId");
+
+        emr("ModifyInstanceFleet", """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetId": "%s", "TargetSpotCapacity": 2,
+                  "ResizeSpecifications": "slow"}}""".formatted(id, task))
+                .then().statusCode(400).body("__type", equalTo("SerializationException"));
+        emr("ModifyInstanceFleet", """
+                {"ClusterId": "%s", "InstanceFleet": {"InstanceFleetId": "%s", "InstanceTypeConfigs": "c5.xlarge"}}
+                """.formatted(id, task))
+                .then().statusCode(400).body("__type", equalTo("SerializationException"));
+
+        String added = "InstanceFleets.find { it.Id == '" + task + "' }";
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body(added + ".TargetSpotCapacity", equalTo(1))
+                .body(added + ".Context", equalTo("etl"))
+                .body("InstanceFleets", hasSize(2));
+    }
+
     /** The Management Guide: "There is a limit of 25 volumes per instance." */
     @Test
     void aConfigAttachingMoreThan25VolumesPerInstanceIsRefused() {

@@ -1364,12 +1364,38 @@ public class EmrHandler {
 
     private Response handleModifyInstanceFleet(JsonNode request) {
         JsonNode fleet = request.path("InstanceFleet");
+        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+                instanceFleetModificationFrom(fleet));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * The change a ModifyInstanceFleet request's {@code InstanceFleet} describes, read and checked as
+     * ModifyInstanceFleet reads it, for this handler and for CloudFormation's {@code AWS::EMR::InstanceFleetConfig}:
+     * its configs' required InstanceType and their volume limit, as AddInstanceFleet checks them, and its members'
+     * JSON types.
+     */
+    public static EmrService.InstanceFleetModification instanceFleetModificationFrom(JsonNode fleet) {
         JsonNode onDemand = fleet.path("TargetOnDemandCapacity");
         JsonNode spot = fleet.path("TargetSpotCapacity");
-        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+        JsonNode configs = fleet.path("InstanceTypeConfigs");
+        List<String> instanceTypes = null;
+        if (!configs.isMissingNode() && !configs.isNull()) {
+            if (!configs.isArray()) {
+                throw malformed("InstanceTypeConfigs must be a list");
+            }
+            List<String> violations = new ArrayList<>();
+            instanceTypes = instanceTypes(configs, "instanceFleet", violations);
+            if (!violations.isEmpty()) {
+                throw SmithyValidationErrors.validationException(violations);
+            }
+            requireFleetEbsVolumeLimit(fleet);
+        }
+        return new EmrService.InstanceFleetModification(
                 onDemand.isMissingNode() || onDemand.isNull() ? null : onDemand.asInt(),
-                spot.isMissingNode() || spot.isNull() ? null : spot.asInt());
-        return Response.ok(objectMapper.createObjectNode()).build();
+                spot.isMissingNode() || spot.isNull() ? null : spot.asInt(),
+                object(fleet, "ResizeSpecifications"), instanceTypes == null ? null : configs.toString(),
+                instanceTypes, string(fleet, "Context"));
     }
 
     /** Each BootstrapActionConfig given to RunJobFlow, as the Command shape: Name, ScriptPath and Args. */
@@ -1681,6 +1707,15 @@ public class EmrHandler {
         node.put("ProvisionedSpotCapacity", f.getProvisionedSpotCapacity());
         node.set("InstanceTypeSpecifications", instanceTypeSpecifications(f));
         node.putObject("Status").put("State", f.getState());
+        if (f.getLaunchSpecifications() != null) {
+            setRawJson(node, "LaunchSpecifications", f.getLaunchSpecifications());
+        }
+        if (f.getResizeSpecifications() != null) {
+            setRawJson(node, "ResizeSpecifications", f.getResizeSpecifications());
+        }
+        if (f.getContext() != null) {
+            node.put("Context", f.getContext());
+        }
         return node;
     }
 
@@ -1968,9 +2003,24 @@ public class EmrHandler {
         if (fleet.getInstanceFleetType() == null) {
             violations.add(SmithyValidationErrors.notNull(path + ".instanceFleetType"));
         }
+        fleet.setInstanceTypes(instanceTypes(f.path("InstanceTypeConfigs"), path, violations));
+        fleet.setInstanceTypeConfigs(rawArray(f.path("InstanceTypeConfigs")));
+        fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
+        fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
+        fleet.setLaunchSpecifications(object(f, "LaunchSpecifications"));
+        fleet.setResizeSpecifications(object(f, "ResizeSpecifications"));
+        fleet.setContext(string(f, "Context"));
+        return fleet;
+    }
+
+    /**
+     * The instance types of a fleet's InstanceTypeConfigs at {@code path}; a config without its required InstanceType
+     * adds to {@code violations}, as the framework refuses such a request.
+     */
+    private static List<String> instanceTypes(JsonNode configs, String path, List<String> violations) {
         List<String> instanceTypes = new ArrayList<>();
         int position = 1;
-        for (JsonNode config : f.path("InstanceTypeConfigs")) {
+        for (JsonNode config : configs) {
             String instanceType = config.path("InstanceType").asText(null);
             if (instanceType == null) {
                 violations.add(SmithyValidationErrors.notNull(
@@ -1979,11 +2029,22 @@ public class EmrHandler {
             instanceTypes.add(instanceType);
             position++;
         }
-        fleet.setInstanceTypes(instanceTypes);
-        fleet.setInstanceTypeConfigs(rawArray(f.path("InstanceTypeConfigs")));
-        fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
-        fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
-        return fleet;
+        return instanceTypes;
+    }
+
+    /**
+     * A member an object where the model has one, as raw JSON; another JSON type is refused with
+     * SerializationException, as {@link #string} refuses one.
+     */
+    private static String object(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isObject()) {
+            throw malformed(member + " must be an object");
+        }
+        return value.toString();
     }
 
     // The cluster's EC2 attributes, its availability zone among them: the one Placement names, the first of its

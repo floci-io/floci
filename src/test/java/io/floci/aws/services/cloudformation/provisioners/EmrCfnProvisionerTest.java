@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.emr.EmrHandler;
 import io.floci.aws.services.emr.EmrService;
+import io.floci.aws.services.emr.EmrService.InstanceFleetModification;
 import io.floci.aws.services.emr.EmrService.InstanceGroupModification;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
@@ -14,6 +15,7 @@ import io.floci.aws.services.emr.model.SecurityConfiguration;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,7 @@ import static io.floci.aws.services.cloudformation.provisioners.ProvisionContext
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -424,9 +428,60 @@ class EmrCfnProvisionerTest {
         provisioner.provision(r, json(fleetProps(4)), ctx("if-TASK", fleetProps(1)));
         provisioner.rollbackUpdate(r);
 
-        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 4, 0);
-        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 1, 0);
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK",
+                new InstanceFleetModification(4, 0, null, null, null, null));
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK",
+                new InstanceFleetModification(1, 0, null, null, null, null));
         assertEquals("if-TASK", r.getAttributes().get("InstanceFleetId"));
+    }
+
+    @Test
+    void anInstanceFleetsConfigsAndResizeSpecificationsChangeInPlaceAndARollbackKeepsAnAddedType() {
+        String before = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}
+                """.formatted(CLUSTER_ID);
+        String after = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge", "WeightedCapacity": 2,
+                   "Configurations": [{"Classification": "spark", "ConfigurationProperties": {"a": "b"}}]},
+                  {"InstanceType": "r5.xlarge"}],
+                 "ResizeSpecifications": {"SpotResizeSpecification": {"TimeoutDurationMinutes": 20}}}
+                """.formatted(CLUSTER_ID);
+        StackResource r = typed("AWS::EMR::InstanceFleetConfig", "if-TASK");
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceFleet live = new EmrInstanceFleet();
+        live.setId("if-TASK");
+        live.setTargetOnDemandCapacity(1);
+        live.setInstanceTypeConfigs("[{\"InstanceType\":\"m5.xlarge\"}]");
+        EmrInstanceFleet updated = new EmrInstanceFleet();
+        updated.setId("if-TASK");
+        updated.setInstanceTypeConfigs("[{\"InstanceType\":\"m5.xlarge\",\"WeightedCapacity\":2},"
+                + "{\"InstanceType\":\"r5.xlarge\"}]");
+        updated.setInstanceTypes(new ArrayList<>(List.of("m5.xlarge", "r5.xlarge")));
+        when(emr.listInstanceFleets(CLUSTER_ID)).thenReturn(List.of(live), List.of(updated));
+
+        provisioner.provision(r, json(after), ctx("if-TASK", before));
+        provisioner.rollbackUpdate(r);
+
+        ArgumentCaptor<InstanceFleetModification> modifications =
+                ArgumentCaptor.forClass(InstanceFleetModification.class);
+        verify(emr, times(2)).modifyInstanceFleet(eq(CLUSTER_ID), eq("if-TASK"), modifications.capture());
+        InstanceFleetModification update = modifications.getAllValues().get(0);
+        assertEquals(json("{\"SpotResizeSpecification\":{\"TimeoutDurationMinutes\":20}}"),
+                json(update.resizeSpecifications()));
+        assertEquals(json("""
+                [{"InstanceType": "m5.xlarge", "WeightedCapacity": 2,
+                  "Configurations": [{"Classification": "spark", "Properties": {"a": "b"}}]},
+                 {"InstanceType": "r5.xlarge"}]"""), json(update.instanceTypeConfigs()));
+        assertEquals(List.of("m5.xlarge", "r5.xlarge"), update.instanceTypes());
+        // The configs go back, but r5.xlarge stays: ModifyInstanceFleet refuses configs that leave a type out. The
+        // fleet had no resize specifications, which no request can clear, so they stay too.
+        InstanceFleetModification restore = modifications.getAllValues().get(1);
+        assertNull(restore.resizeSpecifications());
+        assertEquals(json("[{\"InstanceType\":\"m5.xlarge\"},{\"InstanceType\":\"r5.xlarge\"}]"),
+                json(restore.instanceTypeConfigs()));
+        assertEquals(List.of("m5.xlarge", "r5.xlarge"), restore.instanceTypes());
     }
 
     @Test
@@ -480,5 +535,67 @@ class EmrCfnProvisionerTest {
         provisioner.delete(fleet, "us-east-1");
 
         verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK", 0, 0);
+    }
+
+    @Test
+    void droppedFleetConfigsAreKeptAndAFleetStoredWithItsTypesAloneGetsThemBackOnRollback() {
+        String before = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}
+                """.formatted(CLUSTER_ID);
+        String dropped = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 2}
+                """.formatted(CLUSTER_ID);
+        String weighted = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge", "WeightedCapacity": 4}]}
+                """.formatted(CLUSTER_ID);
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceFleet live = new EmrInstanceFleet();
+        live.setId("if-TASK");
+        live.setTargetOnDemandCapacity(1);
+        live.setInstanceTypes(new ArrayList<>(List.of("m5.xlarge")));
+        when(emr.listInstanceFleets(CLUSTER_ID)).thenReturn(List.of(live));
+
+        // Dropping the configs resizes the fleet and leaves its configs as they are.
+        provisioner.provision(typed("AWS::EMR::InstanceFleetConfig", "if-TASK"), json(dropped),
+                ctx("if-TASK", before));
+        verify(emr).modifyInstanceFleet(CLUSTER_ID, "if-TASK",
+                new InstanceFleetModification(2, 0, null, null, null, null));
+
+        // A fleet stored with its instance types alone gets a config naming each back, not the update's weight.
+        StackResource r = typed("AWS::EMR::InstanceFleetConfig", "if-TASK");
+        provisioner.provision(r, json(weighted), ctx("if-TASK", before));
+        provisioner.rollbackUpdate(r);
+        ArgumentCaptor<InstanceFleetModification> modifications =
+                ArgumentCaptor.forClass(InstanceFleetModification.class);
+        verify(emr, times(3)).modifyInstanceFleet(eq(CLUSTER_ID), eq("if-TASK"), modifications.capture());
+        assertEquals(json("[{\"InstanceType\":\"m5.xlarge\"}]"),
+                json(modifications.getAllValues().get(2).instanceTypeConfigs()));
+    }
+
+    @Test
+    void aFleetUpdateWhoseConfigsBreakTheVolumeLimitIsRefusedBeforeAnythingChanges() {
+        String before = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}
+                """.formatted(CLUSTER_ID);
+        String tooMany = """
+                {"ClusterId": "%s", "InstanceFleetType": "TASK", "Name": "tasks", "TargetOnDemandCapacity": 3,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge", "EbsConfiguration": {"EbsBlockDeviceConfigs": [
+                   {"VolumeSpecification": {"VolumeType": "gp3", "SizeInGB": 10}, "VolumesPerInstance": 26}]}}]}
+                """.formatted(CLUSTER_ID);
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        EmrInstanceFleet live = new EmrInstanceFleet();
+        live.setId("if-TASK");
+        live.setTargetOnDemandCapacity(1);
+        live.setInstanceTypeConfigs("[{\"InstanceType\":\"m5.xlarge\"}]");
+        when(emr.listInstanceFleets(CLUSTER_ID)).thenReturn(List.of(live));
+
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(
+                typed("AWS::EMR::InstanceFleetConfig", "if-TASK"), json(tooMany), ctx("if-TASK", before)));
+
+        assertEquals("There is a limit of 25 volumes per instance.", refused.getMessage());
+        verify(emr, never()).modifyInstanceFleet(eq(CLUSTER_ID), eq("if-TASK"), any(InstanceFleetModification.class));
     }
 }

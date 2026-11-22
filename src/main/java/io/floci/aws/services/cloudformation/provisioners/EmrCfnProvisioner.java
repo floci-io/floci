@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -8,6 +9,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.emr.EmrHandler;
 import io.floci.aws.services.emr.EmrService;
+import io.floci.aws.services.emr.EmrService.InstanceFleetModification;
 import io.floci.aws.services.emr.EmrService.InstanceGroupModification;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
@@ -109,8 +111,6 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     /** The members of {@code Instances} Floci's RunJobFlow keeps nothing of, accepted with a warning. */
     private static final List<String> INSTANCES_NOT_STORED = List.of("Ec2SubnetIds", "AdditionalMasterSecurityGroups",
             "AdditionalSlaveSecurityGroups", "HadoopVersion");
-    /** The members of an instance fleet Floci's RunJobFlow keeps nothing of. */
-    private static final List<String> FLEET_NOT_STORED = List.of("LaunchSpecifications", "ResizeSpecifications");
     private static final String GROUPS = "groups";
     private static final String FLEETS = "fleets";
     private static final Duration READY_TIMEOUT = Duration.ofMinutes(15);
@@ -298,7 +298,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** Warns of each property, or member of {@code Instances} or its fleets, RunJobFlow keeps nothing of. */
+    /** Warns of each property, or member of {@code Instances}, RunJobFlow keeps nothing of. */
     private static void warnNotStored(String logicalId, JsonNode template) {
         List<String> ignored = new ArrayList<>();
         for (String name : CLUSTER_NOT_STORED) {
@@ -310,14 +310,6 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         for (String name : INSTANCES_NOT_STORED) {
             if (instances.has(name)) {
                 ignored.add("Instances." + name);
-            }
-        }
-        List<JsonNode> fleets = new ArrayList<>(List.of(instances.path("MasterInstanceFleet"),
-                instances.path("CoreInstanceFleet")));
-        instances.path("TaskInstanceFleets").forEach(fleets::add);
-        for (String name : FLEET_NOT_STORED) {
-            if (fleets.stream().anyMatch(fleet -> fleet.has(name))) {
-                ignored.add("an instance fleet's " + name);
             }
         }
         if (!ignored.isEmpty()) {
@@ -380,11 +372,9 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         if (copy.has("Configurations")) {
             copy.set("Configurations", configurations(copy.get("Configurations")));
         }
-        copy.path("InstanceTypeConfigs").forEach(type -> {
-            if (type instanceof ObjectNode typeConfig && typeConfig.has("Configurations")) {
-                typeConfig.set("Configurations", configurations(typeConfig.get("Configurations")));
-            }
-        });
+        if (copy.has("InstanceTypeConfigs")) {
+            copy.set("InstanceTypeConfigs", apiInstanceTypeConfigs(copy.get("InstanceTypeConfigs")));
+        }
         into.add(copy);
     }
 
@@ -807,10 +797,11 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * An instance fleet is added through AddInstanceFleet; its target capacities change in place through
-     * ModifyInstanceFleet, and any create-only change adds a new fleet. Floci's ModifyInstanceFleet changes the
-     * capacities alone, so a change to {@code InstanceTypeConfigs} or {@code ResizeSpecifications} is accepted with a
-     * warning and not applied. A rollback puts back the capacities it had changed.
+     * An instance fleet is added through AddInstanceFleet; its target capacities, {@code InstanceTypeConfigs} and
+     * {@code ResizeSpecifications} change in place through ModifyInstanceFleet, and any create-only change adds a new
+     * fleet. A rollback puts back what the update had changed, but not what ModifyInstanceFleet cannot take away: an
+     * instance type the update added, which every later request must include, and resize specifications where the
+     * fleet had none. Dropped resize specifications are kept for the same reason.
      */
     private void provisionInstanceFleet(StackResource r, JsonNode props, ProvisionContext ctx, boolean stub) {
         JsonNode template = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(INSTANCE_FLEET, props);
@@ -824,28 +815,39 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
             EmrInstanceFleet live = emrService.listInstanceFleets(clusterId).stream()
                     .filter(fleet -> id.equals(fleet.getId())).findFirst()
                     .orElseThrow(() -> notFound(INSTANCE_FLEET, id));
+            ArrayNode configs = changed(changes, "InstanceTypeConfigs") && template.has("InstanceTypeConfigs")
+                    ? apiInstanceTypeConfigs(template.get("InstanceTypeConfigs")) : null;
+            JsonNode resize = changed(changes, "ResizeSpecifications") ? template.get("ResizeSpecifications") : null;
             for (String name : List.of("InstanceTypeConfigs", "ResizeSpecifications")) {
-                PropertyChanges.Kind kind = changes.kindOf(name);
-                if (kind != null && kind != PropertyChanges.Kind.UNCHANGED) {
-                    LOG.warnv("EMR instance fleet {0}: {1} is not applied, as ModifyInstanceFleet changes the "
-                            + "target capacities alone", id, name);
+                if (changed(changes, name) && !template.has(name)) {
+                    LOG.warnv("EMR instance fleet {0}: the dropped {1} are kept, as ModifyInstanceFleet cannot take "
+                            + "them away", id, name);
                 }
             }
             int onDemand = template.path("TargetOnDemandCapacity").asInt(0);
             int spot = template.path("TargetSpotCapacity").asInt(0);
+            // Checked before anything changes, as ModifyInstanceFleet checks its request.
+            InstanceFleetModification modification = fleetModification(onDemand, spot, configs, resize);
             ObjectNode snapshot = MAPPER.createObjectNode();
             snapshot.put("clusterId", clusterId);
             snapshot.put("fleetId", id);
             snapshot.put("region", ctx.region());
             snapshot.put("onDemand", live.getTargetOnDemandCapacity());
             snapshot.put("spot", live.getTargetSpotCapacity());
+            if (configs != null) {
+                snapshot.set("configs", configsOf(live));
+            }
+            if (resize != null && live.getResizeSpecifications() != null) {
+                snapshot.set("resize", rawJson(live.getResizeSpecifications(), null));
+            }
             publishCapacity(r, id, clusterId);
             r.getAttributes().put("InstanceFleetId", id);
             r.getAttributes().put(CAPACITY_SNAPSHOT_ATTR, snapshot.toString());
             AtomicBoolean changed = new AtomicBoolean();
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreCapacity(snapshot, changed.get(), false), () -> {
-                if (onDemand != live.getTargetOnDemandCapacity() || spot != live.getTargetSpotCapacity()) {
-                    emrService.modifyInstanceFleet(clusterId, id, onDemand, spot);
+                if (onDemand != live.getTargetOnDemandCapacity() || spot != live.getTargetSpotCapacity()
+                        || configs != null || resize != null) {
+                    emrService.modifyInstanceFleet(clusterId, id, modification);
                     changed.set(true);
                 }
             });
@@ -857,14 +859,85 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
                 fleet.set(name, template.get(name).deepCopy());
             }
         }
-        fleet.path("InstanceTypeConfigs").forEach(type -> {
-            if (type instanceof ObjectNode typeConfig && typeConfig.has("Configurations")) {
-                typeConfig.set("Configurations", configurations(typeConfig.get("Configurations")));
-            }
-        });
+        if (fleet.has("InstanceTypeConfigs")) {
+            fleet.set("InstanceTypeConfigs", apiInstanceTypeConfigs(fleet.get("InstanceTypeConfigs")));
+        }
         String id = emrService.addInstanceFleet(clusterId, emrHandler.instanceFleetFrom(fleet));
         publishCapacity(r, id, clusterId);
         r.getAttributes().put("InstanceFleetId", id);
+    }
+
+    private static boolean changed(PropertyChanges changes, String name) {
+        PropertyChanges.Kind kind = changes.kindOf(name);
+        return kind != null && kind != PropertyChanges.Kind.UNCHANGED;
+    }
+
+    /** A template's InstanceTypeConfigs as the API takes them: their ConfigurationProperties as Properties. */
+    private static ArrayNode apiInstanceTypeConfigs(JsonNode templateConfigs) {
+        ArrayNode configs = MAPPER.createArrayNode();
+        for (JsonNode type : templateConfigs) {
+            JsonNode config = type.deepCopy();
+            if (config instanceof ObjectNode typeConfig && typeConfig.has("Configurations")) {
+                typeConfig.set("Configurations", configurations(typeConfig.get("Configurations")));
+            }
+            configs.add(config);
+        }
+        return configs;
+    }
+
+    /** The ModifyInstanceFleet change, read and checked as ModifyInstanceFleet reads its request. */
+    private static InstanceFleetModification fleetModification(int onDemand, int spot, ArrayNode configs,
+                                                               JsonNode resize) {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("TargetOnDemandCapacity", onDemand);
+        request.put("TargetSpotCapacity", spot);
+        if (configs != null) {
+            request.set("InstanceTypeConfigs", configs);
+        }
+        if (resize != null) {
+            request.set("ResizeSpecifications", resize);
+        }
+        return EmrHandler.instanceFleetModificationFrom(request);
+    }
+
+    /**
+     * A fleet's InstanceTypeConfigs as stored, or, for one stored with its instance types alone, a config naming each,
+     * so a rollback puts back what the fleet had rather than keeping the update's.
+     */
+    private static ArrayNode configsOf(EmrInstanceFleet fleet) {
+        if (fleet.getInstanceTypeConfigs() != null) {
+            return (ArrayNode) rawJson(fleet.getInstanceTypeConfigs(), null);
+        }
+        ArrayNode configs = MAPPER.createArrayNode();
+        fleet.getInstanceTypes().forEach(type -> configs.addObject().put("InstanceType", type));
+        return configs;
+    }
+
+    /** Adds to {@code configs} the live fleet's configs of the types they lack: ModifyInstanceFleet needs them all. */
+    private void keepAddedInstanceTypes(String clusterId, String fleetId, ArrayNode configs) {
+        List<String> named = new ArrayList<>();
+        configs.forEach(config -> named.add(config.path("InstanceType").asText()));
+        for (EmrInstanceFleet fleet : emrService.listInstanceFleets(clusterId)) {
+            if (fleetId.equals(fleet.getId())) {
+                List<String> added = EmrService.instanceTypesLeftOut(fleet.getInstanceTypes(), named);
+                for (JsonNode config : configsOf(fleet)) {
+                    if (added.contains(config.path("InstanceType").asText())) {
+                        configs.add(config);
+                    }
+                }
+            }
+        }
+    }
+
+    private static JsonNode rawJson(String text, JsonNode none) {
+        if (text == null) {
+            return none;
+        }
+        try {
+            return MAPPER.readTree(text);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unreadable stored EMR JSON", e);
+        }
     }
 
     private void applyGroupPolicy(String clusterId, String groupId, JsonNode policy) {
@@ -880,8 +953,13 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
         String clusterId = snapshot.path("clusterId").asText();
         if (snapshot.has("fleetId")) {
             if (first) {
-                emrService.modifyInstanceFleet(clusterId, snapshot.path("fleetId").asText(),
-                        snapshot.path("onDemand").asInt(), snapshot.path("spot").asInt());
+                String fleetId = snapshot.path("fleetId").asText();
+                ArrayNode configs = snapshot.get("configs") instanceof ArrayNode prior ? prior.deepCopy() : null;
+                if (configs != null) {
+                    keepAddedInstanceTypes(clusterId, fleetId, configs);
+                }
+                emrService.modifyInstanceFleet(clusterId, fleetId, fleetModification(snapshot.path("onDemand").asInt(),
+                        snapshot.path("spot").asInt(), configs, snapshot.get("resize")));
             }
             return;
         }

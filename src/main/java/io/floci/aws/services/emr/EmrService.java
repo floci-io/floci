@@ -1803,9 +1803,40 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
+    /**
+     * What a ModifyInstanceFleet request changes, each member null when it leaves it as it is: the target capacities,
+     * the ResizeSpecifications, the InstanceTypeConfigs (raw JSON) with their instance types, and the Context.
+     */
+    public record InstanceFleetModification(Integer targetOnDemandCapacity, Integer targetSpotCapacity,
+                                            String resizeSpecifications, String instanceTypeConfigs,
+                                            List<String> instanceTypes, String context) {
+    }
+
+    /**
+     * The instance types of {@code types} that {@code named} leaves out, each once, in their order: those a
+     * ModifyInstanceFleet request must still name, or that it adds to a fleet's own.
+     */
+    public static List<String> instanceTypesLeftOut(List<String> types, List<String> named) {
+        return types.stream().filter(type -> !named.contains(type)).distinct().toList();
+    }
+
     /** Resizes an instance fleet; a null target leaves that capacity as it is. */
     public void modifyInstanceFleet(String clusterId, String instanceFleetId,
                                     Integer targetOnDemandCapacity, Integer targetSpotCapacity) {
+        modifyInstanceFleet(clusterId, instanceFleetId, new InstanceFleetModification(targetOnDemandCapacity,
+                targetSpotCapacity, null, null, null, null));
+    }
+
+    /**
+     * Changes a fleet's target capacities, and the ResizeSpecifications, InstanceTypeConfigs and Context the request
+     * gives, which ListInstanceFleets gives back. The configs replace the fleet's own, as the Management Guide's
+     * "Reconfiguring instance fleets" has it: "Not including fields can result in overwriting specifications you
+     * declared at launch". They must name every instance type the fleet has: "You must include all instance types
+     * that are part of your instance fleet in the modify request". A type they add joins the fleet's after its own.
+     */
+    public void modifyInstanceFleet(String clusterId, String instanceFleetId, InstanceFleetModification modification) {
+        Integer targetOnDemandCapacity = modification.targetOnDemandCapacity();
+        Integer targetSpotCapacity = modification.targetSpotCapacity();
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             if (instanceFleetId == null) {
@@ -1837,10 +1868,30 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     && (onDemand != fleet.getTargetOnDemandCapacity() || spot != fleet.getTargetSpotCapacity())) {
                 throw invalid("The target capacity of a master instance fleet cannot be modified.");
             }
+            List<String> instanceTypes = null;
+            if (modification.instanceTypes() != null) {
+                List<String> missing = instanceTypesLeftOut(fleet.getInstanceTypes(), modification.instanceTypes());
+                if (!missing.isEmpty()) {
+                    throw invalid("The instance type configs must include every instance type of instance fleet "
+                            + instanceFleetId + "; missing " + String.join(", ", missing) + ".");
+                }
+                instanceTypes = new ArrayList<>(fleet.getInstanceTypes());
+                instanceTypes.addAll(instanceTypesLeftOut(modification.instanceTypes(), fleet.getInstanceTypes()));
+            }
             fleet.setTargetOnDemandCapacity(onDemand);
             fleet.setTargetSpotCapacity(spot);
             fleet.setProvisionedOnDemandCapacity(onDemand);
             fleet.setProvisionedSpotCapacity(spot);
+            if (modification.resizeSpecifications() != null) {
+                fleet.setResizeSpecifications(modification.resizeSpecifications());
+            }
+            if (instanceTypes != null) {
+                fleet.setInstanceTypeConfigs(modification.instanceTypeConfigs());
+                fleet.setInstanceTypes(instanceTypes);
+            }
+            if (modification.context() != null) {
+                fleet.setContext(modification.context());
+            }
             clusterStore.put(clusterId, cluster);
             resizeNodes(cluster);
         });
