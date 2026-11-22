@@ -14,7 +14,6 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
 class PipesKinesisTargetIntegrationTest {
@@ -29,7 +28,7 @@ class PipesKinesisTargetIntegrationTest {
     }
 
     @Test
-    void streamTargetReceivesTheRenderedTemplateUnderThePartitionKeyReadOffTheEvent() throws Exception {
+    void streamTargetReceivesTheRenderedTemplateUnderThePartitionKeyReadOffTheEvent() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceName = "pipe-kin-src-" + suffix;
         String streamName = "pipe-kin-stream-" + suffix;
@@ -68,9 +67,6 @@ class PipesKinesisTargetIntegrationTest {
                 .statusCode(200);
 
             JsonPath record = readFirstRecord(streamName);
-            if (record == null) {
-                fail("The Kinesis target stream never received the record");
-            }
             assertEquals("key1", record.getString("Records[0].PartitionKey"));
             assertEquals("{\"t\": \"key1\"}", new String(
                     Base64.getDecoder().decode(record.getString("Records[0].Data")), StandardCharsets.UTF_8));
@@ -123,20 +119,14 @@ class PipesKinesisTargetIntegrationTest {
                 .post("/");
     }
 
-    private static JsonPath readFirstRecord(String streamName) throws InterruptedException {
-        String iterator = kinesis("GetShardIterator", "{\"StreamName\": \"" + streamName
-                + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
-                .then().statusCode(200).extract().jsonPath().getString("ShardIterator");
-        for (int i = 0; i < 20; i++) {
-            Thread.sleep(500);
-            JsonPath result = kinesis("GetRecords", "{\"ShardIterator\": \"" + iterator + "\"}")
+    private static JsonPath readFirstRecord(String streamName) {
+        return PipesTargetWaits.awaitTarget("a record in stream " + streamName, () -> {
+            String iterator = kinesis("GetShardIterator", "{\"StreamName\": \"" + streamName
+                    + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+                    .then().statusCode(200).extract().jsonPath().getString("ShardIterator");
+            return kinesis("GetRecords", "{\"ShardIterator\": \"" + iterator + "\"}")
                     .then().statusCode(200).extract().jsonPath();
-            if (!result.getList("Records").isEmpty()) {
-                return result;
-            }
-            iterator = result.getString("NextShardIterator");
-        }
-        return null;
+        }, result -> !result.getList("Records").isEmpty());
     }
 
     private static String createQueue(String name) {
