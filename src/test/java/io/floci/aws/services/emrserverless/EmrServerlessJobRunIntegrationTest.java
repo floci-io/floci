@@ -741,4 +741,31 @@ class EmrServerlessJobRunIntegrationTest {
         EmrServerlessRequests.emrServerless("eu-west-1").when().get("/applications/" + applicationId + "/jobruns")
                 .then().statusCode(200).body("jobRuns", empty());
     }
+
+    @Test
+    void aRunKeepsItsFlexExecutionAndCancelJobRunChecksItsGracePeriod() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(),
+                ", \"mode\": \"STREAMING\", \"flexExecution\": {\"enabled\": true}"));
+        String run = "/applications/" + applicationId + "/jobruns/" + jobRunId;
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.flexExecution.enabled", equalTo(true));
+        givenReq().when().get("/applications/" + applicationId + "/jobruns").then().statusCode(200)
+                .body("jobRuns.find { it.id == '" + jobRunId + "' }.flexExecution.enabled", equalTo(true));
+        startJobRun(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"flexExecution\": {\"enabled\": \"yes\"}"))
+                .then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+
+        givenReq().queryParam("shutdownGracePeriodInSeconds", "soon").when().delete(run)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("shutdownGracePeriodInSeconds must be an integer."));
+        givenReq().queryParam("shutdownGracePeriodInSeconds", 10).when().delete(run)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("shutdownGracePeriodInSeconds must be 0, or from 15 to 1800 seconds."));
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.state", equalTo("RUNNING"));
+        givenReq().queryParam("shutdownGracePeriodInSeconds", 30).when().delete(run).then().statusCode(200);
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.state", equalTo("CANCELLED"));
+    }
 }

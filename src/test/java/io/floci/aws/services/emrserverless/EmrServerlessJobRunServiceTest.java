@@ -1036,6 +1036,113 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void aRunCancelledWithAGracePeriodGetsSigtermAndMayEndByItselfUntilThePeriodEnds() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String graceful = application("graceful", "emr-7.9.0", null);
+        String ended = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        List<String> cancelling = new ArrayList<>();
+        runner.whileRunning = () -> {
+            cancelling.add(service.cancelJobRun(graceful, ended, 60).getState());
+            // A second cancel while it is CANCELLING changes nothing.
+            service.cancelJobRun(graceful, ended, 0);
+            clock.advance(Duration.ofSeconds(59));
+        };
+        runNext();
+        runNext();
+
+        assertEquals(List.of("CANCELLING"), cancelling);
+        assertEquals(List.of(false, false), runner.cancelledAsRunning, "its driver may run on within the period");
+        assertEquals(Set.of(ended), runner.interrupted);
+        assertTrue(runner.stopped.isEmpty());
+        assertTrue(tasks.isEmpty());
+        assertTrue(runner.jobs.get(0).interruptible(), "its driver gets the SIGTERM through an init process");
+        assertEquals("CANCELLED", service.getJobRun(graceful, ended, null).getState());
+
+        String outlasted = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        runner.cancelledAsRunning.clear();
+        runner.whileRunning = () -> {
+            service.cancelJobRun(graceful, outlasted, 15);
+            clock.advance(Duration.ofSeconds(15));
+        };
+        runNext();
+        runNext();
+
+        assertEquals(List.of(false, true), runner.cancelledAsRunning, "its driver is stopped when the period ends");
+        assertEquals("CANCELLED", service.getJobRun(graceful, outlasted, null).getState());
+    }
+
+    @Test
+    void aStreamingRunHasAGracePeriodByDefaultAndABatchRunOrAnEarlierReleaseNone() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String graceful = application("graceful", "emr-7.9.0", null);
+        String earlier = application("earlier", "emr-7.8.0", null);
+        String streaming = service.startJobRun(graceful, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> {
+            service.cancelJobRun(graceful, streaming);
+            clock.advance(Duration.ofSeconds(119));
+        };
+        runNext();
+        runNext();
+        String batch = service.startJobRun(graceful, request(null, null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(graceful, batch);
+        runNext();
+        runNext();
+        String immediate = service.startJobRun(graceful, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(graceful, immediate, 0);
+        runNext();
+        runNext();
+        String older = service.startJobRun(earlier, request("STREAMING", null)).getJobRunId();
+        runner.whileRunning = () -> service.cancelJobRun(earlier, older, 60);
+        runNext();
+        runNext();
+
+        assertEquals(Set.of(streaming), runner.interrupted);
+        assertEquals(Set.of(batch, immediate, older), runner.stopped);
+        assertEquals(List.of(false, false, false, true, false, true, false, true), runner.cancelledAsRunning);
+        assertFalse(runner.jobs.get(3).interruptible(), "an earlier release's driver needs no init process");
+        for (String run : List.of(streaming, batch, immediate)) {
+            assertEquals("CANCELLED", service.getJobRun(graceful, run, null).getState());
+        }
+        assertEquals("CANCELLED", service.getJobRun(earlier, older, null).getState());
+    }
+
+    @Test
+    void aGracePeriodOutsideItsRangeIsRefused() {
+        EmrServerlessJobRunService service = service(60);
+        String running = service.startJobRun(applicationId, request(null, null)).getJobRunId();
+        for (int seconds : List.of(14, 1801, -1)) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> service.cancelJobRun(applicationId, running, seconds));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals("shutdownGracePeriodInSeconds must be 0, or from 15 to 1800 seconds.", refused.getMessage());
+        }
+        assertEquals("CANCELLED", service.cancelJobRun(applicationId, running, 1800).getState());
+    }
+
+    @Test
+    void aRunKeepsItsFlexExecutionAndANonBooleanEnabledIsRefused() {
+        EmrServerlessJobRunService service = service(0);
+        StartJobRunRequest flex = request(null, null);
+        // A member FlexExecution does not have is not kept.
+        flex.setFlexExecution(Map.of("enabled", true, "capacity", "spare"));
+        String jobRunId = service.startJobRun(applicationId, flex).getJobRunId();
+
+        assertEquals(Map.of("enabled", true), service.getJobRun(applicationId, jobRunId, null).getFlexExecution());
+        JobRunSummary listed = service.listJobRuns(applicationId, null, null, null, null, null, null).items().stream()
+                .filter(summary -> jobRunId.equals(summary.getId())).findFirst().orElseThrow();
+        assertEquals(Map.of("enabled", true), listed.getFlexExecution());
+        assertEquals(Map.of("enabled", true),
+                service.listJobRunAttempts(applicationId, jobRunId, null, null).items().get(0).getFlexExecution());
+
+        StartJobRunRequest notBoolean = request(null, null);
+        notBoolean.setFlexExecution(Map.of("enabled", "yes"));
+        AwsException refused = assertThrows(AwsException.class, () -> service.startJobRun(applicationId, notBoolean));
+        assertEquals("SerializationException", refused.getErrorCode());
+    }
+
+    @Test
     void eachAttemptIsLaunchedWhileItsApplicationCannotBeDeleted() {
         FakeRunner runner = new FakeRunner();
         runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
@@ -1739,6 +1846,7 @@ class EmrServerlessJobRunServiceTest {
     private static final class FakeRunner implements SparkJobRunner {
         final List<Job> jobs = new ArrayList<>();
         final Set<String> stopped = new HashSet<>();
+        final Set<String> interrupted = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
         // What progress.cancelled() said once the driver ran, and again after whileRunning.
         final List<Boolean> cancelledAsRunning = new ArrayList<>();
@@ -1787,6 +1895,11 @@ class EmrServerlessJobRunServiceTest {
         @Override
         public void stop(String runId) {
             stopped.add(runId);
+        }
+
+        @Override
+        public void interrupt(String runId) {
+            interrupted.add(runId);
         }
 
         @Override

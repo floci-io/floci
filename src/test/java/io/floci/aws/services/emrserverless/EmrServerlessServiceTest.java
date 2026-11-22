@@ -401,7 +401,9 @@ class EmrServerlessServiceTest {
             }
             UpdateApplicationRequest other = new UpdateApplicationRequest();
             other.setMaximumCapacity(capacity("200 vCPU"));
-            setter.invoke(other, someValue(setter.getParameterTypes()[0]));
+            // An architecture in the model's enum, which a value outside it would be refused for first.
+            setter.invoke(other, "setArchitecture".equals(setter.getName()) ? "ARM64"
+                    : someValue(setter.getParameterTypes()[0]));
             AwsException refusal = assertThrows(AwsException.class,
                     () -> service.updateApplication(applicationId, other), setter.getName());
             assertEquals("ValidationException", refusal.getErrorCode());

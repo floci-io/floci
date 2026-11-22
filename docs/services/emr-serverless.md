@@ -132,7 +132,19 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   Apache Spark's releases, `emr-spark-8.0.0` on, hold their `BATCH` runs to it too: the notes apply it "from this
   release onwards", and the release list puts them after EMR Serverless 7.14.0.
 * **CancelJobRun** moves a run that has not finished to `CANCELLED`. A finished run answers
-  `ValidationException` "Job run is not in a cancellable state".
+  `ValidationException` "Job run is not in a cancellable state". In the `docker` mode, from release
+  `emr-7.9.0` on, a `RUNNING` run gets the `shutdownGracePeriodInSeconds` it is cancelled with, "during which
+  the job can perform cleanup operations prior to final termination": its driver gets SIGTERM, which runs its
+  JVM shutdown hooks, the run is `CANCELLING` until the driver ends, and a driver still running when the period
+  ends is stopped. "The default behavior for shutdown is to have no grace period" for a `BATCH` run, and a
+  `STREAMING` run has a "120-second grace period enabled by default"; 0 is "Immediate termination". "Grace period
+  shutdown is only available for jobs in RUNNING state", so a run that has not started yet, or one on an earlier
+  release, is stopped at once, and "Subsequent cancel requests during the CANCELLING state are ignored". A value
+  other than 0 or 15 to 1800, the user guide's "Valid Range for Shutdown Grace period", is refused with
+  `ValidationException`, in Floci's own wording.
+* **StartJobRun** keeps the run's `flexExecution` ("The Amazon EMR Serverless Flex settings for the job run"),
+  which `GetJobRun`, `ListJobRuns` and `ListJobRunAttempts` give back; an `enabled` that is not a boolean is
+  refused with `SerializationException`. Floci has no Flex capacity to run it on, so it changes nothing else.
 * **StopApplication** refuses an application with a run that has not finished, a `STREAMING` run or
   a `CANCELLING` one included, as the API reference says "All scheduled and running jobs must be
   completed or cancelled before stopping an application." It answers `ValidationException`, the one
@@ -342,7 +354,8 @@ worker of its own on EMR Serverless (see **Executors** below).
   image first, or the run is `FAILED` with "Could not pull image"), and `RUNNING` once the Spark driver runs, which sets `startedAt`. It
   is `SUCCESS` when the driver exits with code 0 and `FAILED` otherwise, with the exit code in
   `stateDetails`. `CancelJobRun`, or a `BATCH` run passing its `executionTimeoutMinutes`, makes it
-  `CANCELLING` until the driver is stopped, then `CANCELLED`, as the job run states describe. A run
+  `CANCELLING` until the driver is stopped, or ends within its grace period (see **CancelJobRun** above), then
+  `CANCELLED`, as the job run states describe. A run
   Floci was running when it stopped is `FAILED` once it is read again. Floci's shutdown and a state
   reset stop every driver, one whose image is still being pulled included, and a driver a hard stop
   left running is removed the first time job runs are used after Floci restarts, unless
@@ -435,6 +448,8 @@ worker of its own on EMR Serverless (see **Executors** below).
   move every run to emulation. A host of another architecture runs the image under emulation, which Docker Desktop
   has and a Linux host gets from QEMU's `binfmt_misc` handlers; without it the driver cannot start
   ("exec format error") and the run fails. Floci does not fall back to the host's platform when the setting is on.
+  `CreateApplication` and `UpdateApplication` refuse an `architecture` other than `ARM64` or `X86_64`, the
+  model's enum, with the framework's `ValidationException`.
 
 ## Running Hive job runs
 
@@ -479,6 +494,6 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
-* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, the account's limit of 2000 `QUEUED` runs, `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
+* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, the account's limit of 2000 `QUEUED` runs, `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and Flex capacity (`flexExecution` is kept and given back only).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Sessions in the `immediate` mode run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and a Spark Connect call to it is refused; the `docker` mode runs one (see [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)).

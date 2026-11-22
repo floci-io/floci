@@ -528,4 +528,48 @@ public class EmrServerlessIntegrationTest {
             .body("application.releaseLabel", equalTo("emr-7.5.0"))
             .body("application.maximumCapacity.cpu", equalTo("100 vCPU"));
     }
+
+    @Test
+    @Order(14)
+    void anArchitectureOutsideItsEnumIsRefusedOnCreateAndUpdate() {
+        givenReq()
+            .body("""
+                {"releaseLabel": "emr-7.5.0", "type": "SPARK", "clientToken": "%s", "architecture": "x86"}
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value 'x86' at 'architecture' failed to satisfy constraint"));
+        String graviton = givenReq()
+            .body("""
+                {"releaseLabel": "emr-7.5.0", "type": "SPARK", "clientToken": "%s", "architecture": "ARM64"}
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200)
+            .extract().path("applicationId");
+        try {
+            givenReq()
+                .body("""
+                    {"clientToken": "%s", "architecture": "ARM"}
+                    """.formatted(UUID.randomUUID()))
+            .when()
+                .patch("/applications/" + graviton)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("Value 'ARM' at 'architecture' failed to satisfy constraint"));
+            givenReq()
+            .when()
+                .get("/applications/" + graviton)
+            .then()
+                .statusCode(200)
+                .body("application.architecture", equalTo("ARM64"));
+        } finally {
+            EmrServerlessRequests.deleteApplication("us-east-1", graviton);
+        }
+    }
 }
