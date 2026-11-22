@@ -51,7 +51,8 @@ class AwsIncludeProcessor {
      * treat an untouched template as changed.
      */
     JsonNode mergeIncludes(JsonNode template) {
-        return mergeIncludes(template, Map.of(), "", "", "", "");
+        return mergeIncludes(template, CloudFormationService.resolveDefaultParameters(template, Map.of()),
+                "", "", "", "", name -> null);
     }
 
     JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
@@ -107,7 +108,7 @@ class AwsIncludeProcessor {
                                Function<String, String> importValueResolver) {
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, stackName, stackId,
-                CloudFormationService.resolveDefaultParameters(root, parameters),
+                parameters,
                 Map.of(), Map.of(), Map.of(), CloudFormationService.templateMappings(root),
                 objectMapper, importValueResolver);
         String location = describeLocation(transform, engine);
@@ -129,10 +130,9 @@ class AwsIncludeProcessor {
 
     /**
      * Resolves or renders {@code transform.Parameters.Location}. A well-formed {@code Location} is
-     * a plain string or an {@code Fn::Sub} expression, while a node such as
-     * {@code {Ref: InputValue}}, the form AWS's own {@code Fn::Transform} documentation uses in its
-     * {@code AWS::Include} example, is a mapping whose resolution is not implemented here, so that
-     * mapping is serialized instead and the rejection message names it. A {@code Parameters} that
+     * a plain string, a {@code Ref}, or an {@code Fn::Sub} expression. An unresolvable mapping
+     * (such as a {@code Ref} or {@code Fn::Sub} naming an unknown parameter, or another intrinsic)
+     * is serialized instead, and the rejection message names it. A {@code Parameters} that
      * is not an object (missing, explicitly {@code null}, a scalar, or a list) names the whole
      * {@code Fn::Transform} node instead, so the message never presents an unrelated value as the
      * rejected {@code Location}. A {@code Location} missing from an object {@code Parameters} names
@@ -149,7 +149,7 @@ class AwsIncludeProcessor {
         if (locationNode.isTextual() && !locationNode.asText().isBlank()) {
             return locationNode.asText();
         }
-        if (isResolvableSub(locationNode)) {
+        if (isResolvableLocation(locationNode)) {
             String resolved = engine.resolve(locationNode);
             if (!engine.hasUnresolvedIntrinsics() && !resolved.isBlank()) {
                 return resolved;
@@ -159,8 +159,15 @@ class AwsIncludeProcessor {
         return described.toString();
     }
 
-    private static boolean isResolvableSub(JsonNode locationNode) {
-        if (!locationNode.isObject() || locationNode.size() != 1 || !locationNode.has("Fn::Sub")) {
+    private static boolean isResolvableLocation(JsonNode locationNode) {
+        if (!locationNode.isObject() || locationNode.size() != 1) {
+            return false;
+        }
+        if (locationNode.has("Ref")) {
+            JsonNode ref = locationNode.get("Ref");
+            return ref.isTextual() && !ref.asText().isBlank();
+        }
+        if (!locationNode.has("Fn::Sub")) {
             return false;
         }
         JsonNode sub = locationNode.get("Fn::Sub");

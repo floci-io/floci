@@ -1684,7 +1684,7 @@ public class CloudFormationService implements ResourceProvider {
                                                         Map<String, Boolean> conditions, JsonNode template) {
             return new CloudFormationTemplateEngine(accountId, region, stack.getStackName(), stack.getStackId(),
                     params, physicalIds, attributes, conditions, templateMappings(template), objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))), value -> value);
+                    exportResolver(accountId, region), value -> value);
         }
     }
 
@@ -2694,11 +2694,41 @@ public class CloudFormationService implements ResourceProvider {
         if (!awsIncludeProcessor.containsAwsInclude(template)) {
             return template;
         }
-        Map<String, String> resolvedParams = resolveSsmParameters(template,
-                resolveDefaultParameters(template, params), region);
-        return awsIncludeProcessor.mergeIncludes(template, resolvedParams, region, accountId,
-                stackName, stackId,
-                name -> exports.get(accountExportKey(accountId, exportKey(region, name))));
+        return awsIncludeProcessor.mergeIncludes(template, includeParameters(template, params, region),
+                region, accountId, stackName, stackId, exportResolver(accountId, region));
+    }
+
+    /**
+     * The parameter values {@code AWS::Include} sees: the given ones over each {@code Default}, with
+     * readable {@code AWS::SSM::Parameter::Value<String>} parameters read from Parameter Store and
+     * unreadable ones omitted so an include that does not reference them still expands (for example
+     * during {@code DescribeChangeSet}) while a {@code Location} that does reference one is rejected
+     * as unresolved.
+     */
+    private Map<String, String> includeParameters(JsonNode template, Map<String, String> params, String region) {
+        Map<String, String> resolved = resolveDefaultParameters(template, params);
+        JsonNode paramDefs = template.path("Parameters");
+        if (!paramDefs.isObject()) {
+            return resolved;
+        }
+        paramDefs.fields().forEachRemaining(e -> {
+            if (!"AWS::SSM::Parameter::Value<String>".equals(e.getValue().path("Type").asText())) {
+                return;
+            }
+            String parameterName = resolved.get(e.getKey());
+            if (parameterName == null || parameterName.isBlank()) {
+                resolved.remove(e.getKey());
+                return;
+            }
+            try {
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, false, region).getValue());
+            } catch (AwsException ex) {
+                LOG.debugv("Omitting unreadable SSM parameter {0} from AWS::Include context: {1}",
+                        e.getKey(), ex.getMessage());
+                resolved.remove(e.getKey());
+            }
+        });
+        return resolved;
     }
 
     /**
@@ -3077,7 +3107,7 @@ public class CloudFormationService implements ResourceProvider {
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                    exportResolver(accountId, region),
                     value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                     (name, output, outputRegion, roleArn) ->
                             resolveStackOutput(accountId, name, output, outputRegion, roleArn),
@@ -3970,6 +4000,10 @@ public class CloudFormationService implements ResourceProvider {
         return mappings;
     }
 
+    private Function<String, String> exportResolver(String accountId, String region) {
+        return name -> exports.get(accountExportKey(accountId, exportKey(region, name)));
+    }
+
     /** An engine for one deployment's template: its parameters, conditions, mappings and resource types. */
     private CloudFormationTemplateEngine deploymentEngine(Stack stack, String region, String accountId,
                                                           Map<String, String> params, Map<String, String> ids,
@@ -3980,7 +4014,7 @@ public class CloudFormationService implements ResourceProvider {
         return new CloudFormationTemplateEngine(
                 accountId, region, stack.getStackName(),
                 stack.getStackId(), params, ids, attributes, conditions, mappings, objectMapper,
-                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                exportResolver(accountId, region),
                 value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                 (name, output, outputRegion, roleArn) ->
                         resolveStackOutput(accountId, name, output, outputRegion, roleArn),

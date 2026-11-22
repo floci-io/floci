@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -88,8 +89,16 @@ class AwsIncludeProcessorTest {
     }
 
     private JsonNode mergedSubstitutions(String templateYaml) throws Exception {
+        return mergedSubstitutions(templateYaml, Map.of(), "us-east-1", "000000000000", "", "", name -> null);
+    }
+
+    private JsonNode mergedSubstitutions(String templateYaml, Map<String, String> parameters,
+                                         String region, String accountId, String stackName, String stackId,
+                                         Function<String, String> importValueResolver) throws Exception {
         JsonNode template = new CloudFormationYamlParser(mapper).parse(templateYaml);
-        JsonNode merged = processor.mergeIncludes(template, Map.of(), "us-east-1", "000000000000", "", "");
+        JsonNode merged = processor.mergeIncludes(template,
+                CloudFormationService.resolveDefaultParameters(template, parameters),
+                region, accountId, stackName, stackId, importValueResolver);
         return merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
     }
 
@@ -234,10 +243,9 @@ class AwsIncludeProcessorTest {
                         Location: !Sub s3://snippets-${AWS::Region}/${Env}/names.yaml
             """;
 
-        JsonNode parsed = new CloudFormationYamlParser(mapper).parse(template);
-        JsonNode merged = processor.mergeIncludes(parsed, Map.of("Env", "prod"),
-                "eu-west-1", "123456789012", "orders-stack", "arn:aws:cloudformation:eu-west-1:123456789012:stack/orders-stack/1");
-        JsonNode substitutions = merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
+        JsonNode substitutions = mergedSubstitutions(template, Map.of("Env", "prod"),
+                "eu-west-1", "123456789012", "orders-stack",
+                "arn:aws:cloudformation:eu-west-1:123456789012:stack/orders-stack/1", name -> null);
 
         assertEquals("orders-eu", substitutions.get("orderTableName").asText());
         assertFalse(substitutions.has("Fn::Transform"));
@@ -309,19 +317,43 @@ class AwsIncludeProcessorTest {
                             - Bucket: { Fn::ImportValue: SharedSnippetBucket }
             """;
 
-        JsonNode parsed = new CloudFormationYamlParser(mapper).parse(template);
-        JsonNode merged = processor.mergeIncludes(parsed, Map.of(), "us-east-1", "000000000000", "", "",
+        JsonNode substitutions = mergedSubstitutions(template, Map.of(), "us-east-1", "000000000000", "", "",
                 exportName -> "SharedSnippetBucket".equals(exportName) ? "exported-snippets" : null);
-        JsonNode substitutions = merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
 
         assertEquals("orders-exported", substitutions.get("orderTableName").asText());
         assertFalse(substitutions.has("Fn::Transform"));
     }
 
     @Test
+    void refLocationResolvesTemplateParameter() throws Exception {
+        stubMeasuredFragment();
+        String template = """
+            Parameters:
+              InputValue:
+                Type: String
+                Default: %s
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: { Ref: InputValue }
+            """.formatted(LOCATION);
+
+        JsonNode substitutions = mergedSubstitutions(template);
+
+        assertEquals(EXPAND_ITEMS, substitutions.path("expandItems").asText());
+        assertEquals("orders", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
     void locationAsAMappingNamesTheNodeInTheRejectionMessage() {
         // Location: {Ref: InputValue} is the form AWS's own Fn::Transform documentation uses in its
-        // only AWS::Include example. Ref resolution is not implemented; the node must still be named.
+        // AWS::Include example. When InputValue is not declared, the unresolved node is named.
         String template = """
             Resources:
               OrdersStateMachine:

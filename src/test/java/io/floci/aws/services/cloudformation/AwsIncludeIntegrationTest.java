@@ -736,6 +736,61 @@ class AwsIncludeIntegrationTest {
             .body(containsString("<PhysicalResourceId>" + expectedParamName + "</PhysicalResourceId>"));
     }
 
+    @Test
+    void describeChangeSetWithIncludeToleratesUnrelatedMissingSsmParameter() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "aws-include-cs-ssm-" + suffix;
+        String key = "meta.yaml";
+        String stackName = "aws-include-cs-ssm-stack-" + suffix;
+        String location = putSnippet(bucket, key, "mergedFlag: merged-value\n");
+        stacksToDelete.add(stackName);
+
+        String template = """
+            Parameters:
+              IncludeLocation:
+                Type: String
+                Default: %s
+              MissingSsm:
+                Type: AWS::SSM::Parameter::Value<String>
+                Default: /aws-include-it/does-not-exist-%s
+            Resources:
+              IncludedParam:
+                Type: AWS::SSM::Parameter
+                Metadata:
+                  Fn::Transform:
+                    Name: AWS::Include
+                    Parameters:
+                      Location: !Ref IncludeLocation
+                Properties:
+                  Name: !Ref MissingSsm
+                  Type: String
+                  Value: preview-value
+            """.formatted(location, suffix);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "preview-cs")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "preview-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>IncludedParam</LogicalResourceId>"));
+    }
+
     private static String stateMachineTemplate(String stateMachineName, String location) {
         return """
             Resources:
