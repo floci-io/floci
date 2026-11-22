@@ -906,7 +906,9 @@ class BedrockAgentCoreToolsIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"))
-                .body("message", equalTo("tag value does not satisfy AgentCore constraints"));
+                .body("message", equalTo("1 validation error detected: Value 'has*star' at 'tags.value' "
+                        + "failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                        + "[a-zA-Z0-9\\s._:/=+@-]*"));
 
         given()
                 .contentType("application/json")
