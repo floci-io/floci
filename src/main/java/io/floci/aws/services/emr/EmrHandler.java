@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PrimitiveIterator;
 
 /**
@@ -216,7 +217,7 @@ public class EmrHandler {
         cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
         cluster.setSessionEnabled(request.path("SessionEnabled").asBoolean(false));
-        cluster.setEc2Attributes(buildEc2Attributes(instances, region));
+        cluster.setEc2Attributes(buildEc2Attributes(request, instances, region));
         List<EmrInstanceGroup> groups = parseInstanceGroups(instances.path("InstanceGroups"));
         List<EmrInstanceFleet> fleets = parseInstanceFleets(instances.path("InstanceFleets"));
         cluster.setInstanceGroups(groups.isEmpty() && fleets.isEmpty() ? uniformInstanceGroups(instances) : groups);
@@ -2047,21 +2048,48 @@ public class EmrHandler {
         return value.toString();
     }
 
-    // The cluster's EC2 attributes, its availability zone among them: the one Placement names, the first of its
-    // AvailabilityZones, else the Region's first, as its instances' metadata gives it too.
-    private String buildEc2Attributes(JsonNode instances, String region) {
+    /**
+     * The cluster's EC2 attributes, as DescribeCluster gives them. Its availability zone is the one Placement names,
+     * the first of its AvailabilityZones, else the Region's first, as its instances' metadata gives it too. Its subnet
+     * is the one Ec2SubnetId names, else the first of the instance fleets' Ec2SubnetIds, from which EMR "chooses the
+     * Amazon EC2 subnet with the best fit". The subnets and zones requested come back as such, an empty list when none
+     * was, as AWS gives them; "RequestedEc2SubnetIDs and RequestedEc2AvailabilityZones cannot be specified together",
+     * and AWS's refusal is not documented, so its wording is Floci's. The JobFlowRole is its IamInstanceProfile, "The
+     * IAM role that was specified when the cluster was launched", and the additional security groups are kept.
+     */
+    private String buildEc2Attributes(JsonNode request, JsonNode instances, String region) {
         ObjectNode ec2 = objectMapper.createObjectNode();
         JsonNode placement = instances.path("Placement");
+        List<String> zones = Objects.requireNonNullElse(
+                strings(placement.path("AvailabilityZones"), "Placement.AvailabilityZones"), List.of());
+        List<String> subnets = Objects.requireNonNullElse(
+                strings(instances.path("Ec2SubnetIds"), "Ec2SubnetIds"), List.of());
+        if (!zones.isEmpty() && !subnets.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Ec2SubnetIds and Placement.AvailabilityZones cannot be specified together.", 400);
+        }
         String zone = placement.path("AvailabilityZone").asText("");
-        if (zone.isEmpty()) {
-            zone = placement.path("AvailabilityZones").path(0).asText("");
+        if (zone.isEmpty() && !zones.isEmpty()) {
+            zone = zones.getFirst();
         }
         ec2.put("Ec2AvailabilityZone", zone.isEmpty() ? region + "a" : zone);
         copyText(instances, "Ec2KeyName", ec2, "Ec2KeyName");
         copyText(instances, "Ec2SubnetId", ec2, "Ec2SubnetId");
+        if (!ec2.has("Ec2SubnetId") && !subnets.isEmpty()) {
+            ec2.put("Ec2SubnetId", subnets.getFirst());
+        }
+        subnets.forEach(ec2.putArray("RequestedEc2SubnetIds")::add);
+        zones.forEach(ec2.putArray("RequestedEc2AvailabilityZones")::add);
+        copyText(request, "JobFlowRole", ec2, "IamInstanceProfile");
         copyText(instances, "EmrManagedMasterSecurityGroup", ec2, "EmrManagedMasterSecurityGroup");
         copyText(instances, "EmrManagedSlaveSecurityGroup", ec2, "EmrManagedSlaveSecurityGroup");
         copyText(instances, "ServiceAccessSecurityGroup", ec2, "ServiceAccessSecurityGroup");
+        for (String member : List.of("AdditionalMasterSecurityGroups", "AdditionalSlaveSecurityGroups")) {
+            List<String> groups = strings(instances.path(member), member);
+            if (groups != null && !groups.isEmpty()) {
+                groups.forEach(ec2.putArray(member)::add);
+            }
+        }
         return ec2.toString();
     }
 

@@ -109,8 +109,7 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
             "OSReleaseLabel", "EbsRootVolumeIops", "EbsRootVolumeThroughput", "PlacementGroupConfigs",
             "LogEncryptionKmsKeyId", "MonitoringConfiguration");
     /** The members of {@code Instances} Floci's RunJobFlow keeps nothing of, accepted with a warning. */
-    private static final List<String> INSTANCES_NOT_STORED = List.of("Ec2SubnetIds", "AdditionalMasterSecurityGroups",
-            "AdditionalSlaveSecurityGroups", "HadoopVersion");
+    private static final List<String> INSTANCES_NOT_STORED = List.of("HadoopVersion");
     private static final String GROUPS = "groups";
     private static final String FLEETS = "fleets";
     private static final Duration READY_TIMEOUT = Duration.ofMinutes(15);
