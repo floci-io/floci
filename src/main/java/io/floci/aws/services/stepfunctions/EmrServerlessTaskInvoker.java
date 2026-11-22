@@ -114,7 +114,13 @@ public class EmrServerlessTaskInvoker {
             case "cancelJobRun" -> {
                 String applicationId = requiredId(request, "ApplicationId");
                 String jobRunId = requiredId(request, "JobRunId");
-                ObjectNode response = toStates(call(region, () -> emrServerless.cancelJobRun(applicationId, jobRunId)),
+                // Read in either case, as the other members are; a value of another JSON type than a number is passed
+                // on as its JSON, for the cancel to refuse as it refuses one in the query string.
+                JsonNode grace = field(request, "ShutdownGracePeriodInSeconds");
+                String gracePeriod = grace.isMissingNode() || grace.isNull() ? null
+                        : grace.isValueNode() ? grace.asText() : grace.toString();
+                ObjectNode response = toStates(call(region,
+                        () -> emrServerless.cancelJobRun(applicationId, jobRunId, gracePeriod)),
                         "CancelJobRunResponse");
                 yield new Job(api, applicationId, jobRunId, response);
             }
@@ -157,7 +163,7 @@ public class EmrServerlessTaskInvoker {
         Supplier<Object> undo = switch (job.api()) {
             case "createApplication" -> () -> emrServerless.deleteApplication(job.applicationId());
             case "startApplication" -> () -> emrServerless.stopApplication(job.applicationId());
-            case "startJobRun" -> () -> emrServerless.cancelJobRun(job.applicationId(), job.jobRunId());
+            case "startJobRun" -> () -> emrServerless.cancelJobRun(job.applicationId(), job.jobRunId(), null);
             default -> null;
         };
         if (undo == null) {

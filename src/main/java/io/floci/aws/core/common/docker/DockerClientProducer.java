@@ -593,8 +593,19 @@ public class DockerClientProducer {
         }
         Duration launchWait = Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds());
         usePingTransport(clientConfig);
-        return DockerClientImpl.getInstance(clientConfig,
+        return newDockerClient(clientConfig,
                 wrapForRole(transport, role, apiTimeout, breaker, launchSlots, launchWait));
+    }
+
+    /**
+     * A DockerClient over {@code httpClient} whose stream callbacks run on virtual threads
+     * ({@link FlociDockerCmdExecFactory}). docker-java offers no other way to give its streams a thread of
+     * Floci's choosing than its deprecated exec-factory hook.
+     */
+    @SuppressWarnings("deprecation")
+    static DockerClient newDockerClient(DefaultDockerClientConfig clientConfig, DockerHttpClient httpClient) {
+        return DockerClientImpl.getInstance(clientConfig)
+                .withDockerCmdExecFactory(new FlociDockerCmdExecFactory(httpClient, clientConfig.getObjectMapper()));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,

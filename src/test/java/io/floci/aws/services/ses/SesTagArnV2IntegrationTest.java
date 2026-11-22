@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -17,8 +18,6 @@ import static org.hamcrest.Matchers.hasSize;
 @QuarkusTest
 class SesTagArnV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String PREFIX = "arn:aws:ses:us-east-1:000000000000:";
     private static final String BARE_VALIDATION = "{\"__type\":\"ValidationException\",\"message\":null}";
 
@@ -118,7 +117,7 @@ class SesTagArnV2IntegrationTest {
     void omittedResourceArn_onTagAndUntag_isMessagelessValidation() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("{\"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]}")
         .when()
             .post("/v2/email/tags")
@@ -127,7 +126,7 @@ class SesTagArnV2IntegrationTest {
             .body(equalTo(BARE_VALIDATION));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("TagKeys", "k")
         .when()
             .delete("/v2/email/tags")
@@ -140,7 +139,7 @@ class SesTagArnV2IntegrationTest {
     void omittedResourceArn_onList_staysAClientError() {
         // AWS answers this with a 500 InternalFailure; Floci keeps a 400 on purpose.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/tags")
         .then()
@@ -160,7 +159,7 @@ class SesTagArnV2IntegrationTest {
         String name = prefix + "-" + System.nanoTime();
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ConfigurationSetName": "%s", "Tags": [{"Key": "%s", "Value": "%s"}]}
                 """.formatted(name, key, value))
@@ -173,7 +172,7 @@ class SesTagArnV2IntegrationTest {
 
     private static Response listTags(String arn) {
         return given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
         .when()
             .get("/v2/email/tags");
@@ -186,7 +185,7 @@ class SesTagArnV2IntegrationTest {
     private static Response tagWith(String arn, String key, String value) {
         return given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"ResourceArn": "%s", "Tags": [{"Key": "%s", "Value": "%s"}]}
                 """.formatted(arn, key, value))
@@ -196,7 +195,7 @@ class SesTagArnV2IntegrationTest {
 
     private static Response untag(String arn) {
         return given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("ResourceArn", arn)
             .queryParam("TagKeys", "probe")
         .when()

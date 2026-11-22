@@ -240,7 +240,7 @@ class ExternalStatementParserTest {
     @Test
     void otherCreateExternalStatementsAreReportedAsUnsupported() {
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
-                () -> parser.parse("CREATE EXTERNAL FUNCTION f(int) RETURNS int LAMBDA 'x' IAM_ROLE 'r'"));
+                () -> parser.parse("CREATE EXTERNAL MODEL m FROM 's3://bucket/model'"));
         assertThat(error.sqlState(), equalTo("0A000"));
         assertThat(error.getMessage().contains("unsupported"), equalTo(true));
     }

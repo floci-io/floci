@@ -72,6 +72,8 @@ public class EmrServerlessService {
             UpdateApplicationRequest::getIdentityCenterConfiguration,
             UpdateApplicationRequest::getJobLevelCostAllocationConfiguration);
     private static final int MAX_TAGS = 50;
+    /** The model's Architecture enum, which an application's architecture must be in. */
+    public static final List<String> ARCHITECTURES = List.of("ARM64", "X86_64");
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
     // ResourceArn's resource: an application, or one of its job runs or sessions.
@@ -126,6 +128,7 @@ public class EmrServerlessService {
         if (request.getClientToken() == null || request.getClientToken().isBlank()) {
             throw new AwsException("ValidationException", "clientToken is required", 400);
         }
+        validateArchitecture(request.getArchitecture());
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), true);
         SchedulerConfiguration scheduler = request.getSchedulerConfiguration() != null
                 ? EmrServerlessScheduler.merged(null, request.getSchedulerConfiguration()) : null;
@@ -210,6 +213,7 @@ public class EmrServerlessService {
     }
 
     public synchronized Application updateApplication(String applicationId, UpdateApplicationRequest request) {
+        validateArchitecture(request.getArchitecture());
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), false);
         Application app = getApplication(applicationId);
 
@@ -716,6 +720,14 @@ public class EmrServerlessService {
             violations.add(SmithyValidationErrors.notAllInEnum(states, "states", allowed));
         }
         return violations;
+    }
+
+    /** An architecture outside the model's enum, refused as the framework refuses one. */
+    private static void validateArchitecture(String architecture) {
+        if (architecture != null && !ARCHITECTURES.contains(architecture)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(architecture, "architecture", ARCHITECTURES));
+        }
     }
 
     /**

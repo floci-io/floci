@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
@@ -18,15 +19,12 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesSuppressionV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
-
     @Test
     @Order(1)
     void putSuppressedDestination_bounce() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "bounce-1@example.com", "Reason": "BOUNCE"}
                 """)
@@ -41,7 +39,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_complaint() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "complaint-1@example.com", "Reason": "COMPLAINT"}
                 """)
@@ -56,7 +54,7 @@ class SesSuppressionV2IntegrationTest {
     void getSuppressedDestination_returnsStoredEntry() {
         given()
             .config(DECIMAL_NUMBERS)
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/bounce-1@example.com")
         .then()
@@ -70,7 +68,7 @@ class SesSuppressionV2IntegrationTest {
     @Order(4)
     void getSuppressedDestination_unknown_returns404() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/missing@example.com")
         .then()
@@ -83,7 +81,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_updatesExistingReason() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "bounce-1@example.com", "Reason": "COMPLAINT"}
                 """)
@@ -93,7 +91,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/bounce-1@example.com")
         .then()
@@ -106,7 +104,7 @@ class SesSuppressionV2IntegrationTest {
     void listSuppressedDestinations_returnsAll() {
         given()
             .config(DECIMAL_NUMBERS)
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses")
         .then()
@@ -125,7 +123,7 @@ class SesSuppressionV2IntegrationTest {
         // and the assertion would pass even if the server ignored the filter.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "filter-bounce@example.com", "Reason": "BOUNCE"}
                 """)
@@ -135,7 +133,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("Reason", "COMPLAINT")
         .when()
             .get("/v2/email/suppression/addresses")
@@ -147,7 +145,7 @@ class SesSuppressionV2IntegrationTest {
 
         // Clean up so the BOUNCE seed does not leak into later assertions
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/suppression/addresses/filter-bounce@example.com")
         .then()
@@ -158,14 +156,14 @@ class SesSuppressionV2IntegrationTest {
     @Order(8)
     void deleteSuppressedDestination_removesEntry() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/suppression/addresses/bounce-1@example.com")
         .then()
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/bounce-1@example.com")
         .then()
@@ -178,7 +176,7 @@ class SesSuppressionV2IntegrationTest {
         // AWS DeleteSuppressedDestination is not idempotent — an unknown email
         // surfaces as NotFoundException with the same wording as GetSuppressedDestination.
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/suppression/addresses/already-gone@example.com")
         .then()
@@ -192,7 +190,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_invalidReason_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "bad@example.com", "Reason": "OTHER"}
                 """)
@@ -208,7 +206,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_missingEmailAddress_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"Reason": "BOUNCE"}
                 """)
@@ -224,7 +222,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_missingBody_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .put("/v2/email/suppression/addresses")
         .then()
@@ -237,7 +235,7 @@ class SesSuppressionV2IntegrationTest {
         // JSON null for EmailAddress must not coerce into the literal string "null".
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": null, "Reason": "BOUNCE"}
                 """)
@@ -253,7 +251,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_nullReason_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "null-reason@example.com", "Reason": null}
                 """)
@@ -269,7 +267,7 @@ class SesSuppressionV2IntegrationTest {
     void putSuppressedDestination_nonObjectBody_returns400() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("[\"not\", \"an\", \"object\"]")
         .when()
             .put("/v2/email/suppression/addresses")
@@ -285,7 +283,7 @@ class SesSuppressionV2IntegrationTest {
         // AWS silently trims leading/trailing whitespace from EmailAddress on Put.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "  padded@example.com  ", "Reason": "BOUNCE"}
                 """)
@@ -295,7 +293,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/padded@example.com")
         .then()
@@ -307,7 +305,7 @@ class SesSuppressionV2IntegrationTest {
     @Order(14)
     void listSuppressedDestinations_unknownReasonFilter_returns400() {
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("Reason", "OTHER")
         .when()
             .get("/v2/email/suppression/addresses")
@@ -322,7 +320,7 @@ class SesSuppressionV2IntegrationTest {
         // Seed a BOUNCE entry alongside the surviving complaint-1 COMPLAINT entry
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "multi-bounce@example.com", "Reason": "BOUNCE"}
                 """)
@@ -332,7 +330,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .queryParam("Reason", "BOUNCE")
             .queryParam("Reason", "COMPLAINT")
         .when()
@@ -351,7 +349,7 @@ class SesSuppressionV2IntegrationTest {
         // is stored and read back as MixedCase@example.com.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "MixedCase@Example.COM", "Reason": "BOUNCE"}
                 """)
@@ -361,7 +359,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/MixedCase@Example.COM")
         .then()
@@ -378,7 +376,7 @@ class SesSuppressionV2IntegrationTest {
         // does not (it is a different key).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "CaseProbe@Example.COM", "Reason": "BOUNCE"}
                 """)
@@ -388,7 +386,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/CaseProbe@EXAMPLE.com")
         .then()
@@ -396,7 +394,7 @@ class SesSuppressionV2IntegrationTest {
             .body("SuppressedDestination.EmailAddress", equalTo("CaseProbe@example.com"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/caseprobe@example.com")
         .then()
@@ -409,7 +407,7 @@ class SesSuppressionV2IntegrationTest {
         // PUT one domain case, DELETE a different domain case (same local-part), GET 404.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "DeleteMe@Example.com", "Reason": "COMPLAINT"}
                 """)
@@ -419,14 +417,14 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/suppression/addresses/DeleteMe@EXAMPLE.com")
         .then()
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/DeleteMe@example.com")
         .then()
@@ -439,7 +437,7 @@ class SesSuppressionV2IntegrationTest {
         // Same local-part, domain differing only in case: one entry, latest Reason wins.
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "UpdateTarget@example.com", "Reason": "BOUNCE"}
                 """)
@@ -450,7 +448,7 @@ class SesSuppressionV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "UpdateTarget@EXAMPLE.com", "Reason": "COMPLAINT"}
                 """)
@@ -460,7 +458,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/UpdateTarget@example.com")
         .then()
@@ -476,7 +474,7 @@ class SesSuppressionV2IntegrationTest {
         // its own Reason. Verified against real AWS SES V2 (2026-06-15).
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "LocalCase@distinct.example.com", "Reason": "BOUNCE"}
                 """)
@@ -487,7 +485,7 @@ class SesSuppressionV2IntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
             .body("""
                 {"EmailAddress": "localcase@distinct.example.com", "Reason": "COMPLAINT"}
                 """)
@@ -497,7 +495,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/LocalCase@distinct.example.com")
         .then()
@@ -505,7 +503,7 @@ class SesSuppressionV2IntegrationTest {
             .body("SuppressedDestination.Reason", equalTo("BOUNCE"));
 
         given()
-            .header("Authorization", AUTH_HEADER)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/suppression/addresses/localcase@distinct.example.com")
         .then()

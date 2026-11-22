@@ -26,8 +26,6 @@ class SesConfigurationSetTrackingOptionsV1IntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String AUTH_V2 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String DOMAIN = "track-v1.floci.test";
     private static final String CS = "v1-cs-tracking";
 
@@ -41,7 +39,7 @@ class SesConfigurationSetTrackingOptionsV1IntegrationTest {
     @Test
     @Order(1)
     void setup_verifyDomain_andCreateConfigSet() {
-        SesDomainIdentityTestHelper.createVerified(DOMAIN, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(DOMAIN, SesV2Requests.AUTH);
         query("CreateConfigurationSet").formParam("ConfigurationSet.Name", CS)
             .when().post("/").then().statusCode(200);
     }
@@ -101,7 +99,7 @@ class SesConfigurationSetTrackingOptionsV1IntegrationTest {
     @Test
     @Order(6)
     void updateTrackingOptions_changesDomain() {
-        SesDomainIdentityTestHelper.createVerified("other." + DOMAIN, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified("other." + DOMAIN, SesV2Requests.AUTH);
         query("UpdateConfigurationSetTrackingOptions")
             .formParam("ConfigurationSetName", CS)
             .formParam("TrackingOptions.CustomRedirectDomain", "other." + DOMAIN)

@@ -2332,26 +2332,38 @@ class ResourceArnBuilderTest {
         return builder.buildResources("dsql", operation, ctx, region, "000000000000", partition);
     }
 
+    /**
+     * Bedrock's requests are read from the generated table on the route they match: a resource-policy route acts on
+     * the resource whose ARN it carries, in its path or in its body's {@code resourceArn} for PutResourcePolicy, and a
+     * guardrail route on the guardrail its path names.
+     */
     @Test
-    void bedrockResourcePolicyRoutesResolveTheArnTheyCarry() {
+    void aBedrockRequestIsCheckedOnTheResourceItsRouteNames() {
         String guardrail = "arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456";
-        for (String method : List.of("GET", "DELETE")) {
-            when(ctx.getMethod()).thenReturn(method);
-            when(uriInfo.getPath()).thenReturn("/resource-policy/" + guardrail);
-            assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT), method);
+        // An SDK escapes a label's slashes, so the ARN is one segment of the path.
+        String encoded = "arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aguardrail%2Fabc123def456";
+        for (String[] call : List.of(new String[] {"GET", "GetResourcePolicy"},
+                new String[] {"DELETE", "DeleteResourcePolicy"})) {
+            when(ctx.getMethod()).thenReturn(call[0]);
+            request("/resource-policy/" + encoded);
+            assertEquals(List.of(guardrail), bedrock(call[1]), call[1]);
         }
         when(ctx.getMethod()).thenReturn("POST");
-        when(uriInfo.getPath()).thenReturn("/resource-policy");
+        request("/resource-policy");
         setJsonBody("{\"resourceArn\":\"" + guardrail + "\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        // A value that is not an ARN, and every other Bedrock route, name no resource.
+        assertEquals(List.of(guardrail), bedrock("PutResourcePolicy"));
+        // A value that is not an ARN names no resource.
         setJsonBody("{\"resourceArn\":\"abc123def456\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("*"), bedrock("PutResourcePolicy"));
         when(ctx.getMethod()).thenReturn("GET");
-        when(uriInfo.getPath()).thenReturn("/resource-policy/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        when(uriInfo.getPath()).thenReturn("/guardrails/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        request("/resource-policy/abc123def456");
+        assertEquals(List.of("*"), bedrock("GetResourcePolicy"));
+        request("/guardrails/abc123def456");
+        assertEquals(List.of(guardrail), bedrock("GetGuardrail"));
+    }
+
+    private List<String> bedrock(String operation) {
+        return builder.buildResources("bedrock", "bedrock:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     @Test

@@ -2160,6 +2160,10 @@ def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
     assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
         "bus-v2", "subscriber", "source-v2"}
     assert r.pattern_words("(arn:aws[\\w-]*:svc:[a-z]+:[0-9]{12}:bus\\/)?[A-Za-z]+") == {"bus"}
+    # An optional account gives each type word in an alternative of its own (Bedrock's taggable ARNs).
+    assert r.pattern_words("(^arn:aws:svc:[a-z0-9-]{1,20}:[0-9]{12}:model/(imported)/[a-z0-9]{12}$)|"
+                           "(^arn:aws:svc:[a-z0-9-]{1,20}:([0-9]{12}|)((:(job|model)/[a-z0-9]+$)|(:guardrail/[a-z0-9]+$)|"
+                           "(:(profile|app-profile)/[a-z0-9]+$)))") == {"model", "job", "guardrail", "profile", "app-profile"}
     formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}",
                "busv2": "arn:${Partition}:svc:${Region}:${Account}:busv2/${BusName}/${OpaqueId}"}
     model_ = documented("CreateBus", {"Name": ("String", "The name of the bus.")})

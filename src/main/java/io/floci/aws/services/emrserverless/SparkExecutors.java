@@ -211,6 +211,9 @@ final class SparkExecutors {
     private final List<Worker> workers = new ArrayList<>();
     // Containers that ended or were removed while Docker would not remove them, to try again at the run's end.
     private final List<String> leftovers = new ArrayList<>();
+    // When each running executor's worker started, by its container, and how long each that has ended ran.
+    private final Map<String, Long> started = new HashMap<>();
+    private final List<Duration> lifetimes = new ArrayList<>();
     private int nextIndex = 1;
     private boolean looked;
     private long nextLook;
@@ -251,6 +254,7 @@ final class SparkExecutors {
                 if (!containers.running(worker.containerId())) {
                     each.remove();
                     capacity.release(size.executor());
+                    ended(worker.containerId());
                     remove(worker.containerId());
                 }
             }
@@ -275,6 +279,7 @@ final class SparkExecutors {
                     throw e;
                 }
                 workers.add(worker);
+                started.put(worker.containerId(), nanoTime.getAsLong());
             }
             if (workers.size() > wanted) {
                 removeIdle(workers.size() - wanted);
@@ -284,10 +289,27 @@ final class SparkExecutors {
         }
     }
 
+    /**
+     * How long each executor's worker ran, from its start to its removal, for those that have ended: every one, once
+     * {@link #removeAll} has run.
+     */
+    List<Duration> lifetimes() {
+        return List.copyOf(lifetimes);
+    }
+
+    // An executor's worker has ended: how long it ran is kept.
+    private void ended(String containerId) {
+        Long since = started.remove(containerId);
+        if (since != null) {
+            lifetimes.add(Duration.ofNanos(Math.max(0, nanoTime.getAsLong() - since)));
+        }
+    }
+
     /** Removes every executor's container, and gives back what its workers held, as the run has ended. */
     void removeAll() {
         for (Worker worker : workers) {
             capacity.release(size.executor());
+            ended(worker.containerId());
             remove(worker.containerId());
         }
         workers.clear();
@@ -376,12 +398,12 @@ final class SparkExecutors {
     // 1 GB. The overhead is the role's memoryOverhead when set, else its share of the heap, by the role's
     // memoryOverheadFactor, else EMR Serverless's, else 10%, and at least 384 MB, as "The overhead has a default
     // value of 10% of container memory, with a minimum of 384 MB".
-    private static long workerGb(long heapMib, Map<String, String> settings, String role) {
+    static long workerGb(long heapMib, Map<String, String> settings, String role) {
         String overhead = settings.get(role + ".memoryOverhead");
         String factor = settings.getOrDefault(role + ".memoryOverheadFactor", settings.get(EMR_OVERHEAD_FACTOR));
         long overheadMib = overhead != null ? mebibytes(overhead, MINIMUM_OVERHEAD_MIB)
                 : Math.max(MINIMUM_OVERHEAD_MIB, (long) (heapMib * fraction(factor)));
-        return (heapMib + overheadMib + 1023) / 1024;
+        return Math.ceilDiv(heapMib > Long.MAX_VALUE - overheadMib ? Long.MAX_VALUE : heapMib + overheadMib, 1024);
     }
 
     private static double fraction(String value) {
@@ -432,6 +454,7 @@ final class SparkExecutors {
             Worker worker = workers.get(i);
             if (Integer.valueOf(0).equals(coresUsed.get(worker.address()))) {
                 containers.remove(worker.containerId());
+                ended(worker.containerId());
                 workers.remove(i);
                 capacity.release(size.executor());
                 count--;
@@ -458,24 +481,32 @@ final class SparkExecutors {
         }
     }
 
-    // A size as Spark takes it, "14G" or "1024m", in MiB, a bare number being MiB, as spark.executor.memory has it.
+    /**
+     * A size as Spark takes it, "14G" or "1024m", in MiB, a bare number being MiB, as spark.executor.memory has it;
+     * {@code otherwise} for one that is not a size, or too large for a long.
+     */
     static long mebibytes(String value, long otherwise) {
         Matcher size = value != null ? SIZE.matcher(value.trim()) : null;
         if (size == null || !size.matches()) {
             return otherwise;
         }
-        long amount = Long.parseLong(size.group(1));
-        return switch (size.group(2).toLowerCase(Locale.ROOT)) {
-            case "k" -> Math.max(1, amount / 1024);
-            case "g" -> amount * 1024;
-            case "t" -> amount * 1024 * 1024;
-            case "p" -> amount * 1024 * 1024 * 1024;
-            default -> amount;
-        };
+        try {
+            long amount = Long.parseLong(size.group(1));
+            return switch (size.group(2).toLowerCase(Locale.ROOT)) {
+                case "k" -> Math.max(1, amount / 1024);
+                case "g" -> Math.multiplyExact(amount, 1024L);
+                case "t" -> Math.multiplyExact(amount, 1024L * 1024);
+                case "p" -> Math.multiplyExact(amount, 1024L * 1024 * 1024);
+                default -> amount;
+            };
+        } catch (NumberFormatException | ArithmeticException e) {
+            return otherwise;
+        }
     }
 
     // A disk size in GB, as "20G" gives it, EMR Serverless's 20 GB when not set.
     static long gigabytes(String value) {
-        return value != null ? Math.max(1, (mebibytes(value, DEFAULT_DISK_GB * 1024) + 1023) / 1024) : DEFAULT_DISK_GB;
+        return value != null ? Math.max(1, Math.ceilDiv(mebibytes(value, DEFAULT_DISK_GB * 1024), 1024))
+                : DEFAULT_DISK_GB;
     }
 }

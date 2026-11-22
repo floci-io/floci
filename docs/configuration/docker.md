@@ -112,6 +112,8 @@ Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming l
 
 A stream is `unattributed` when it follows no container (an exec, an image pull or build, daemon events), or a container this Floci process did not start with a service label: one started before a restart, by a tool other than Floci, or by a Floci helper that labels no service.
 
+Each open stream is read on a virtual thread of its own, so `stream threads` counts the streams being read and costs no platform thread each. Virtual threads do not appear in a plain `jstack`; `jcmd <pid> Thread.dump_to_file -format=json <file>` lists them.
+
 A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. To turn the lines off, set the interval to 0:
 
 ```yaml

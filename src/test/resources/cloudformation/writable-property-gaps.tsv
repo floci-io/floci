@@ -320,13 +320,6 @@ AWS::EKS::Nodegroup	UpdateConfig	accepted and ignored
 AWS::EKS::Nodegroup	Version	accepted and ignored
 AWS::EKS::Nodegroup	WarmPoolConfig	accepted and ignored
 AWS::EMR::Cluster	AdditionalInfo	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	EbsRootVolumeIops	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	EbsRootVolumeThroughput	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	KerberosAttributes	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	LogEncryptionKmsKeyId	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	MonitoringConfiguration	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	OSReleaseLabel	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
-AWS::EMR::Cluster	PlacementGroupConfigs	accepted with a warning and not stored, as Floci's RunJobFlow keeps none of it
 AWS::ElastiCache::CacheCluster	AZMode	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	AutoMinorVersionUpgrade	accepted and ignored
 AWS::ElastiCache::CacheCluster	LogDeliveryConfigurations	accepted and ignored, a warning is logged
