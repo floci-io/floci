@@ -135,16 +135,29 @@ public class Ec2PortForwardManager {
     /**
      * Reconciles the instance's live forwards against the desired port set: publishes ports
      * that are newly opened and unpublishes ports that no longer have an ingress rule. Runs
-     * synchronously under enforcement so revocation closes the listener before returning.
+     * listener closure synchronously under enforcement and queues new publications.
      */
     public void reconcile(Instance instance, DesiredPorts desiredPorts) {
         if (!enabled() || instance == null || instance.getDockerContainerId() == null) {
             return;
         }
         if (enforced()) {
-            reconcileNow(instance, desiredPorts);
-        } else {
-            executor.submit(() -> reconcileNow(instance, desiredPorts));
+            synchronized (instance) {
+                closeRevoked(instance, currentPorts(instance, desiredPorts));
+            }
+        }
+        executor.submit(() -> reconcileNow(instance, desiredPorts));
+    }
+
+    private DesiredPorts currentPorts(Instance instance, DesiredPorts snapshot) {
+        return currentEnforcedPorts != null && enforced() ? currentEnforcedPorts.apply(instance) : snapshot;
+    }
+
+    private void closeRevoked(Instance instance, DesiredPorts desired) {
+        for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
+            if (desired.ports().get(port) != family(instance, port)) {
+                revoke(instance, port);
+            }
         }
     }
 
@@ -158,22 +171,12 @@ public class Ec2PortForwardManager {
             if (!"running".equals(state)) {
                 return;
             }
-            if (currentEnforcedPorts != null && enforced()) {
-                desiredPorts = currentEnforcedPorts.apply(instance);
-            }
+            desiredPorts = currentPorts(instance, desiredPorts);
+            closeRevoked(instance, desiredPorts);
             for (Map.Entry<Integer, PublishedPortFamily> desired : desiredPorts.ports().entrySet()) {
                 int port = desired.getKey();
-                // The rules opening the port changed family: its sidecar binds or dials the wrong addresses.
-                if (instance.getPublishedPorts().containsKey(port) && desired.getValue() != family(instance, port)) {
-                    revoke(instance, port);
-                }
                 if (!instance.getPublishedPorts().containsKey(port)) {
                     publish(instance, port, desired.getValue());
-                }
-            }
-            for (Integer port : new ArrayList<>(instance.getPublishedPorts().keySet())) {
-                if (!desiredPorts.ports().containsKey(port)) {
-                    revoke(instance, port);
                 }
             }
         }
@@ -346,15 +349,18 @@ public class Ec2PortForwardManager {
                 try {
                     ContainerExec.Result closed = ContainerExec.run(dockerClient, id, new String[]{"sh", "-ec", """
                             listener=$(cat /tmp/floci-listener)
-                            kill -KILL "$listener"
+                            if kill -0 "$listener" 2>/dev/null; then kill -KILL "$listener"; fi
                             while kill -0 "$listener" 2>/dev/null; do sleep 0.01; done
                             """}, 5);
                     if (closed.exitCode() != 0) {
                         throw new IllegalStateException(closed.summary());
                     }
                 } catch (RuntimeException e) {
-                    LOG.debugv(e, "Confirming removal of EC2 relay {0} after listener close", id);
-                    lifecycleManager.removeIfExistsStrict(id);
+                    // An idle auto-removing relay may exit before Docker reports the exec result.
+                    if (Boolean.TRUE.equals(dockerClient.inspectContainerCmd(id).exec().getState().getRunning())) {
+                        LOG.warnv(e, "Could not confirm listener closure for EC2 relay {0}, retaining its binding", id);
+                        throw e;
+                    }
                     forget(instance, appPort);
                     return;
                 }

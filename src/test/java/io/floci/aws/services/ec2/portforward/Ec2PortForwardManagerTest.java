@@ -31,6 +31,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -350,6 +351,25 @@ class Ec2PortForwardManagerTest {
         assertTrue(forwarding.created().isEmpty());
         assertTrue(instance.getPublishedPorts().isEmpty());
         verify(forwarding.portAllocator()).release(30000);
+    }
+
+    @Test
+    void failedCloseOfRunningRelayRetainsBindingForRetry() {
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        Forwarding forwarding = forwarding(docker);
+        when(forwarding.config().network().securityGroupEnforcement().enabled()).thenReturn(true);
+        Instance instance = running();
+        instance.getPublishedPorts().put(8080, 30000);
+        InspectContainerResponse relay = docker.inspectContainerCmd("floci-aws-ec2-fwd-i-1-8080").exec();
+        when(relay.getId()).thenReturn("relay");
+        when(relay.getHostConfig().getAutoRemove()).thenReturn(true);
+        when(docker.execCreateCmd("relay")).thenThrow(new IllegalStateException("Docker unavailable"));
+        when(docker.inspectContainerCmd("relay").exec().getState().getRunning()).thenReturn(true);
+
+        assertThrows(IllegalStateException.class,
+                () -> forwarding.manager().reconcileNow(instance, Ec2PortForwardManager.DesiredPorts.NONE));
+        assertEquals(Map.of(8080, 30000), instance.getPublishedPorts());
+        verifyNoInteractions(forwarding.lifecycle(), forwarding.portAllocator());
     }
 
     /** A manager that builds real sidecar specs, allocating host port 30000 for every forward. */

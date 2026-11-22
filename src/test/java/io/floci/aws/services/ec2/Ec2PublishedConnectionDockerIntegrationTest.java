@@ -19,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 import static org.awaitility.Awaitility.await;
@@ -58,7 +59,9 @@ class Ec2PublishedConnectionDockerIntegrationTest {
                     IpPermission rule = IpPermission.builder().ipProtocol("tcp").fromPort(8080).toPort(8080)
                             .ipRanges(r -> r.cidrIp("0.0.0.0/0")).build();
                     ec2.authorizeSecurityGroupIngress(r -> r.groupId(group).ipPermissions(rule));
-                    int port = service.getInstance("us-east-1", id).orElseThrow().getPublishedPorts().get(8080);
+                    int port = await().atMost(Duration.ofSeconds(30)).until(
+                            () -> service.getInstance("us-east-1", id).orElseThrow().getPublishedPorts().get(8080),
+                            Objects::nonNull);
                     try (Socket tracked = new Socket()) {
                         tracked.connect(new InetSocketAddress("127.0.0.1", port), 3000);
                         tracked.setSoTimeout(3000);
