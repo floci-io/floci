@@ -9,6 +9,7 @@ import io.floci.aws.services.cloudfront.ResponseHeadersPolicyConfigCodec;
 import io.floci.aws.services.cloudfront.model.CacheBehavior;
 import io.floci.aws.services.cloudfront.model.CachePolicy;
 import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
+import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.DefaultCacheBehavior;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.DistributionConfig;
@@ -68,6 +69,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     static final String PUBLIC_KEY = "AWS::CloudFront::PublicKey";
     static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
     static final String FUNCTION = "AWS::CloudFront::Function";
+    static final String CONNECTION_GROUP = "AWS::CloudFront::ConnectionGroup";
 
     static final String NO_SUCH_RESPONSE_HEADERS_POLICY = "NoSuchResponseHeadersPolicy";
     static final String NO_SUCH_CACHE_POLICY = "NoSuchCachePolicy";
@@ -76,6 +78,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     static final String NO_SUCH_PUBLIC_KEY = "NoSuchPublicKey";
     static final String NO_SUCH_KEY_GROUP = "NoSuchResource";
     static final String NO_SUCH_FUNCTION = "NoSuchFunctionExists";
+    static final String ENTITY_NOT_FOUND = "EntityNotFound";
 
     private static final Set<String> MODEL_FIELDS = Set.of("Name", "Comment");
 
@@ -88,7 +91,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
-                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION);
+                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION, CONNECTION_GROUP);
     }
 
     @Override
@@ -103,6 +106,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             case PUBLIC_KEY -> provisionPublicKey(r, props, ctx);
             case KEY_GROUP -> provisionKeyGroup(r, props, ctx);
             case FUNCTION -> provisionFunction(r, props, ctx);
+            case CONNECTION_GROUP -> provisionConnectionGroup(r, props, ctx);
             default -> throw new IllegalArgumentException("Unsupported resource type: " + r.getResourceType());
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -186,8 +190,61 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                     id -> cloudFrontService.getKeyGroup(id).getEtag(),
                     cloudFrontService::deleteKeyGroup, NO_SUCH_KEY_GROUP);
             case FUNCTION -> deleteFunction(physicalId);
+            case CONNECTION_GROUP -> deleteWithEtag("connection group", physicalId,
+                    id -> cloudFrontService.getConnectionGroup(id).getEtag(),
+                    cloudFrontService::deleteConnectionGroup, ENTITY_NOT_FOUND);
             default -> { }
         }
+    }
+
+    /**
+     * The group the template names is created on first use and updated in place afterwards:
+     * {@code Name} is the only create-only property the registry schema declares, and an update
+     * keeps the id, so the physical id only changes when the prior group is already gone. The
+     * registry schema's read-only members ({@code Id}, {@code Arn}, {@code RoutingEndpoint},
+     * {@code Status}, {@code IsDefault}, {@code ETag} and the two timestamps) travel to
+     * {@code Fn::GetAtt} from the provisioned object.
+     */
+    private void provisionConnectionGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String name = text(props, "Name");
+        String anycastIpListId = text(props, "AnycastIpListId");
+        Boolean enabled = text(props, "Enabled") == null ? null
+                : Boolean.parseBoolean(text(props, "Enabled"));
+        Boolean ipv6Enabled = text(props, "Ipv6Enabled") == null ? null
+                : Boolean.parseBoolean(text(props, "Ipv6Enabled"));
+        JsonNode viewerFallback = props.get("ViewerFallback");
+        String viewerFallbackDistributionId =
+                viewerFallback == null || viewerFallback.isNull() ? null
+                        : text(ctx.engine().resolveNode(viewerFallback), "DistributionId");
+
+        ConnectionGroup provisioned;
+        ConnectionGroup prior = prior(ctx, "connection group",
+                cloudFrontService::getConnectionGroup, ENTITY_NOT_FOUND);
+        if (prior == null) {
+            if (name == null || name.isBlank()) {
+                throw new AwsException("ValidationError", CONNECTION_GROUP + " requires Name", 400);
+            }
+            provisioned = cloudFrontService.createConnectionGroup(name, anycastIpListId,
+                    enabled, ipv6Enabled, viewerFallbackDistributionId, ctx.resolveTags(props, "Tags"));
+        } else {
+            provisioned = cloudFrontService.updateConnectionGroup(prior.getId(), prior.getEtag(),
+                    anycastIpListId != null ? anycastIpListId : prior.getAnycastIpListId(),
+                    enabled != null ? enabled : prior.getEnabled(),
+                    ipv6Enabled != null ? ipv6Enabled : prior.getIpv6Enabled(),
+                    viewerFallback == null ? prior.getViewerFallbackDistributionId()
+                            : viewerFallbackDistributionId);
+        }
+        r.setPhysicalId(provisioned.getId());
+        r.getAttributes().put("Id", provisioned.getId());
+        r.getAttributes().put("Arn", provisioned.getArn());
+        r.getAttributes().put("RoutingEndpoint", provisioned.getRoutingEndpoint());
+        r.getAttributes().put("Status", provisioned.getStatus());
+        r.getAttributes().put("IsDefault", String.valueOf(provisioned.getIsDefault()));
+        r.getAttributes().put("ETag", provisioned.getEtag());
+        r.getAttributes().put("CreatedTime",
+                provisioned.getCreatedTime() == null ? "" : provisioned.getCreatedTime().toString());
+        r.getAttributes().put("LastModifiedTime",
+                provisioned.getLastModifiedTime() == null ? "" : provisioned.getLastModifiedTime().toString());
     }
 
     private void provisionResponseHeadersPolicy(StackResource r, JsonNode props, ProvisionContext ctx) {

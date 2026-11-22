@@ -18,6 +18,7 @@ import io.floci.aws.services.cloudfront.model.CacheBehavior;
 import io.floci.aws.services.cloudfront.model.CachePolicy;
 import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
 import io.floci.aws.services.cloudfront.model.CloudFrontOriginAccessIdentity;
+import io.floci.aws.services.cloudfront.model.ConnectionGroup;
 import io.floci.aws.services.cloudfront.model.ContinuousDeploymentPolicy;
 import io.floci.aws.services.cloudfront.model.DefaultCacheBehavior;
 import io.floci.aws.services.cloudfront.model.Distribution;
@@ -92,6 +93,10 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final Set<String> SSL_SUPPORT_METHODS = Set.of("sni-only", "vip", "static-ip");
     /** The values {@code ConnectionMode} admits, the enumeration its shape declares. */
     private static final Set<String> CONNECTION_MODES = Set.of("direct", "tenant-only");
+    /** AWS names the account's automatically created connection group "default". */
+    private static final String DEFAULT_CONNECTION_GROUP_NAME = "default";
+    /** The documented maximum a connection group's Name may reach (AWS's own limit). */
+    private static final int CONNECTION_GROUP_NAME_MAX_LENGTH = 256;
     /**
      * The forms a member declared {@code boolean} can carry, XML giving such a value as
      * {@code true}, {@code false}, {@code 1} or {@code 0}.
@@ -151,6 +156,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
 
     private final AccountAwareStorageBackend<Distribution> distStore;
+    private final StorageBackend<String, ConnectionGroup> connectionGroupStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
     private final StorageBackend<String, CachePolicy> cachePolicyStore;
     private final StorageBackend<String, OriginRequestPolicy> orpStore;
@@ -199,6 +205,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         this.keyValueStores = keyValueStores;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
+        this.connectionGroupStore = factory.create("cloudfront", "cloudfront-connection-groups.json",
+                new TypeReference<Map<String, ConnectionGroup>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
                 new TypeReference<Map<String, List<Invalidation>>>() {});
         this.cachePolicyStore = factory.create("cloudfront", "cloudfront-cache-policies.json",
@@ -264,6 +272,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 tagStore.put(dist.getArn(), tags);
             }
             distStore.put(id, dist);
+            if (dist.getConfig() != null && "tenant-only".equals(dist.getConfig().getConnectionMode())) {
+                ensureDefaultConnectionGroup();
+            }
             return dist;
         });
     }
@@ -918,6 +929,230 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             }
         }
         return host;
+    }
+
+    // ── Connection groups ─────────────────────────────────────────────────────
+
+    /**
+     * {@code tenant-only} distributions are served through a connection group, so the first one an
+     * account creates mints the account's default group (AWS documents this: "CloudFront creates
+     * the default connection group for you when you create a multi-tenant distribution"). It comes
+     * out enabled and {@code Deployed} like the AWS CLI example of a real account's default group,
+     * and it can never be deleted.
+     */
+    public synchronized ConnectionGroup ensureDefaultConnectionGroup() {
+        for (ConnectionGroup group : connectionGroupStore.scan(k -> true)) {
+            if (Boolean.TRUE.equals(group.getIsDefault())) {
+                return group;
+            }
+        }
+        ConnectionGroup group = new ConnectionGroup();
+        fillNewConnectionGroup(group, DEFAULT_CONNECTION_GROUP_NAME, null, true, true, null);
+        group.setIsDefault(true);
+        connectionGroupStore.put(group.getId(), group);
+        return group;
+    }
+
+    public synchronized ConnectionGroup createConnectionGroup(String name, String anycastIpListId,
+                                                              Boolean enabled, Boolean ipv6Enabled,
+                                                              String viewerFallbackDistributionId,
+                                                              Map<String, String> tags) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidArgument", "The Name specified is not valid.", 400);
+        }
+        if (name.length() > CONNECTION_GROUP_NAME_MAX_LENGTH) {
+            throw new AwsException("InvalidArgument", "The Name specified is not valid.", 400);
+        }
+        for (ConnectionGroup group : connectionGroupStore.scan(k -> true)) {
+            if (name.equals(group.getName())) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The connection group " + name + " already exists.", 409);
+            }
+        }
+        requireDistributionExists(viewerFallbackDistributionId);
+        ConnectionGroup group = new ConnectionGroup();
+        fillNewConnectionGroup(group, name, anycastIpListId, enabled, ipv6Enabled, viewerFallbackDistributionId);
+        if (tags != null && !tags.isEmpty()) {
+            group.setTags(tags);
+            tagStore.put(group.getArn(), tags);
+        }
+        connectionGroupStore.put(group.getId(), group);
+        return group;
+    }
+
+    /** AWS issues connection group ids as cg_ + 24 characters (see the AWS CLI examples). */
+    private void fillNewConnectionGroup(ConnectionGroup group, String name, String anycastIpListId,
+                                        Boolean enabled, Boolean ipv6Enabled,
+                                        String viewerFallbackDistributionId) {
+        String id = "cg_" + randomIdSuffix(24);
+        group.setId(id);
+        group.setArn(arn("connection-group/" + id));
+        group.setName(name);
+        group.setAnycastIpListId(anycastIpListId);
+        group.setEnabled(enabled != null && enabled);
+        group.setIpv6Enabled(ipv6Enabled == null || ipv6Enabled);
+        group.setIsDefault(false);
+        group.setStatus("Deployed");
+        group.setRoutingEndpoint(routingEndpointFor());
+        group.setCreatedTime(Instant.now());
+        group.setLastModifiedTime(group.getCreatedTime());
+        group.setEtag("E" + randomIdSuffix(12));
+        group.setViewerFallbackDistributionId(viewerFallbackDistributionId);
+    }
+
+    private ConnectionGroup requireConnectionGroup(String id) {
+        ConnectionGroup group = connectionGroupStore.get(id).orElse(null);
+        if (group == null) {
+            throw new AwsException("EntityNotFound", "The connection group " + id + " does not exist.", 404);
+        }
+        return group;
+    }
+
+    /**
+     * A connection group is addressed by its id, name or ARN everywhere the API documents
+     * {@code Identifier}, and by its routing endpoint in the one lookup that takes it.
+     */
+    public ConnectionGroup getConnectionGroup(String identifier) {
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidArgument", "The Identifier specified is not valid.", 400);
+        }
+        if (AwsArnUtils.looksLikeArn(identifier)) {
+            for (ConnectionGroup group : connectionGroupStore.scan(k -> true)) {
+                if (identifier.equals(group.getArn())) {
+                    return group;
+                }
+            }
+            throw notFound(identifier);
+        }
+        ConnectionGroup group = connectionGroupStore.get(identifier).orElse(null);
+        if (group != null) {
+            return group;
+        }
+        for (ConnectionGroup candidate : connectionGroupStore.scan(k -> true)) {
+            if (identifier.equals(candidate.getName())) {
+                return candidate;
+            }
+        }
+        throw notFound(identifier);
+    }
+
+    public ConnectionGroup getConnectionGroupByRoutingEndpoint(String routingEndpoint) {
+        if (routingEndpoint == null || routingEndpoint.isBlank()) {
+            throw new AwsException("InvalidArgument", "The RoutingEndpoint specified is not valid.", 400);
+        }
+        for (ConnectionGroup group : connectionGroupStore.scan(k -> true)) {
+            if (routingEndpoint.equalsIgnoreCase(group.getRoutingEndpoint())) {
+                return group;
+            }
+        }
+        throw new AwsException("EntityNotFound",
+                "No connection group was found for routing endpoint " + routingEndpoint + ".", 404);
+    }
+
+    public synchronized ConnectionGroup updateConnectionGroup(String id, String ifMatch,
+                                                              String anycastIpListId, Boolean enabled,
+                                                              Boolean ipv6Enabled,
+                                                              String viewerFallbackDistributionId) {
+        requireIfMatch(ifMatch);
+        ConnectionGroup group = requireConnectionGroup(id);
+        if (!group.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The specified If-Match didn't match the ETag header.", 412);
+        }
+        requireDistributionExists(viewerFallbackDistributionId);
+        if (anycastIpListId != null) {
+            group.setAnycastIpListId(anycastIpListId);
+        }
+        if (enabled != null) {
+            group.setEnabled(enabled);
+        }
+        if (ipv6Enabled != null) {
+            group.setIpv6Enabled(ipv6Enabled);
+        }
+        if (viewerFallbackDistributionId != null) {
+            group.setViewerFallbackDistributionId(viewerFallbackDistributionId);
+        }
+        group.setLastModifiedTime(Instant.now());
+        group.setEtag("E" + randomIdSuffix(12));
+        connectionGroupStore.put(id, group);
+        return group;
+    }
+
+    public synchronized void deleteConnectionGroup(String id, String ifMatch) {
+        requireIfMatch(ifMatch);
+        ConnectionGroup group = requireConnectionGroup(id);
+        if (!group.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The specified If-Match didn't match the ETag header.", 412);
+        }
+        if (Boolean.TRUE.equals(group.getIsDefault())) {
+            throw new AwsException("CannotDeleteEntityWhileInUse",
+                    "The default connection group cannot be deleted.", 409);
+        }
+        if (Boolean.TRUE.equals(group.getEnabled())) {
+            throw new AwsException("ResourceNotDisabled",
+                    "The connection group has not been disabled.", 409);
+        }
+        connectionGroupStore.delete(id);
+        if (group.getTags() != null) {
+            tagStore.delete(group.getArn());
+        }
+    }
+
+    public List<ConnectionGroup> listConnectionGroups(String marker, int maxItems,
+                                                      String anycastIpListIdFilter) {
+        List<ConnectionGroup> all = new ArrayList<>(connectionGroupStore.scan(k -> true));
+        all.removeIf(group -> anycastIpListIdFilter != null
+                && !anycastIpListIdFilter.equals(group.getAnycastIpListId()));
+        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        return paginate(all, marker, maxItems, ConnectionGroup::getName);
+    }
+
+    /**
+     * The distributions whose configuration selects one connection mode, listed like
+     * {@link #listDistributions(String, int)} lists all of them.
+     */
+    public List<Distribution> listDistributionsByConnectionMode(String connectionMode, String marker,
+                                                                int maxItems) {
+        List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
+        all.removeIf(dist -> dist.getConfig() == null
+                || !connectionMode.equals(dist.getConfig().getConnectionMode()));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, Distribution::getId);
+    }
+
+    /** A connection group's routing endpoint reads like a distribution's domain name. */
+    private String routingEndpointFor() {
+        return "d" + randomIdSuffix(13).toLowerCase(Locale.ROOT) + "."
+                + CloudFrontEdgeDomain.domainSuffix(configuredDomainSuffix, regionResolver.getPartition());
+    }
+
+    private void requireDistributionExists(String distributionId) {
+        if (distributionId == null) {
+            return;
+        }
+        getDistribution(distributionId);
+    }
+
+    private static void requireIfMatch(String ifMatch) {
+        if (ifMatch == null || ifMatch.isEmpty()) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+    }
+
+    private static AwsException notFound(String identifier) {
+        return new AwsException("EntityNotFound",
+                "The connection group " + identifier + " does not exist.", 404);
+    }
+
+    /** Distributions section shared characters, reused for ids and etags. */
+    private static String randomIdSuffix(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
