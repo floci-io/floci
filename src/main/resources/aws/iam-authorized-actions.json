@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-21",
+    "retrieved": "2026-11-22",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -368,6 +368,12 @@
     ],
     "account": [],
     "apigateway": [],
+    "aps": [
+      "CreateWorkspace",
+      "GetDefaultScraperConfiguration",
+      "ListScrapers",
+      "ListWorkspaces"
+    ],
     "bedrock": [
       "AgenticRetrieveStream",
       "AssociateThirdPartyKnowledgeBase",
