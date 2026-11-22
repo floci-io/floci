@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -31,8 +32,6 @@ class SesSendVerifiedSenderIntegrationTest {
 
     private static final String AUTH_V1 =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String AUTH_V2 =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String UNVERIFIED = "never-verified@unverified-sender.floci.test";
     private static final String VERIFIED = "verified@verified-sender.floci.test";
     private static final String NOT_VERIFIED_MESSAGE =
@@ -210,14 +209,14 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v2SendEmail_simple_unverifiedFrom_returnsMessageRejected() {
-        assertMessageRejectedV2(v2(AUTH_V2).body(simpleBody(UNVERIFIED)), UNVERIFIED);
+        assertMessageRejectedV2(v2(AUTH).body(simpleBody(UNVERIFIED)), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }
 
     @Test
     void v2SendEmail_raw_unverifiedMimeFrom_returnsMessageRejected() {
-        assertMessageRejectedV2(v2(AUTH_V2).body("""
+        assertMessageRejectedV2(v2(AUTH).body("""
                 {
                     "Destination": {"ToAddresses": ["to@example.com"]},
                     "Content": {"Raw": {"Data": "%s"}}
@@ -227,19 +226,19 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v2SendEmail_verifiedEmailIdentity_succeeds() {
-        v2(AUTH_V2).body("{\"EmailIdentity\": \"v2-" + VERIFIED + "\"}")
+        v2(AUTH).body("{\"EmailIdentity\": \"v2-" + VERIFIED + "\"}")
         .when()
             .post("/v2/email/identities");
 
-        assertSentV2(v2(AUTH_V2).body(simpleBody("v2-" + VERIFIED)));
+        assertSentV2(v2(AUTH).body(simpleBody("v2-" + VERIFIED)));
     }
 
     @Test
     void v2SendEmail_addressUnderVerifiedDomain_succeeds() {
         String domain = "verified-domain.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, AUTH);
 
-        assertSentV2(v2(AUTH_V2).body(simpleBody("anyone@" + domain)));
+        assertSentV2(v2(AUTH).body(simpleBody("anyone@" + domain)));
     }
 
     @Test
@@ -247,15 +246,15 @@ class SesSendVerifiedSenderIntegrationTest {
         // "if you create and verify an identity for example.com, you don't need to create separate
         // identities for a.example.com, a.b.example.com, user@example.com, user@a.example.com".
         String domain = "verified-parent.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, AUTH);
 
-        assertSentV2(v2(AUTH_V2).body(simpleBody("anyone@a.b." + domain)));
+        assertSentV2(v2(AUTH).body(simpleBody("anyone@a.b." + domain)));
     }
 
     @Test
     void v1SendEmail_addressUnderADomainThatOnlyEndsLikeAVerifiedOne_returnsMessageRejected() {
         String domain = "verified-suffix.floci.test";
-        SesDomainIdentityTestHelper.createVerified(domain, AUTH_V2);
+        SesDomainIdentityTestHelper.createVerified(domain, AUTH);
         String lookalike = "anyone@not-" + domain;
 
         assertMessageRejected(sendEmail(AUTH_V1, lookalike), lookalike);
@@ -322,7 +321,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "v2-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertMessageRejectedV2(v2(AUTH_V2).body("""
+        assertMessageRejectedV2(v2(AUTH).body("""
                 {
                     "FromEmailAddress": "%s",
                     "FeedbackForwardingEmailAddress": "%s",
@@ -340,7 +339,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "v2-raw-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertMessageRejectedV2(v2(AUTH_V2).body("""
+        assertMessageRejectedV2(v2(AUTH).body("""
                 {
                     "FeedbackForwardingEmailAddress": "%s",
                     "Destination": {"ToAddresses": ["to@example.com"]},
@@ -367,7 +366,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "raw-v2-source-" + VERIFIED;
         verifyEmailIdentity(source);
 
-        assertSentV2(v2(AUTH_V2).body("""
+        assertSentV2(v2(AUTH).body("""
                 {
                     "FromEmailAddress": "%s",
                     "Destination": {"ToAddresses": ["to@example.com"]},
@@ -587,7 +586,7 @@ class SesSendVerifiedSenderIntegrationTest {
 
     @Test
     void v2SendBulkEmail_unverifiedFrom_rejectsTheWholeCall() {
-        assertBulkMessageRejectedV2(v2(AUTH_V2).body(bulkBody(UNVERIFIED)), UNVERIFIED);
+        assertBulkMessageRejectedV2(v2(AUTH).body(bulkBody(UNVERIFIED)), UNVERIFIED);
 
         assertNothingCapturedFrom(UNVERIFIED);
     }
@@ -598,7 +597,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String feedback = "bulk-bounces@unverified-sender.floci.test";
         verifyEmailIdentity(source);
 
-        assertBulkMessageRejectedV2(v2(AUTH_V2).body(bulkBody(source,
+        assertBulkMessageRejectedV2(v2(AUTH).body(bulkBody(source,
                 "\"FeedbackForwardingEmailAddress\": \"" + feedback + "\",",
                 "[{\"Destination\": {\"ToAddresses\": [\"to@example.com\"]}}]")), feedback);
 
@@ -608,7 +607,7 @@ class SesSendVerifiedSenderIntegrationTest {
     @Test
     void v2SendBulkEmail_noEntryHasARecipient_senderIsNotChecked() {
         // AWS fails each entry on its missing destination and never reaches the sender check.
-        v2(AUTH_V2).body(bulkBody(UNVERIFIED, "", "[{\"Destination\": {}}]"))
+        v2(AUTH).body(bulkBody(UNVERIFIED, "", "[{\"Destination\": {}}]"))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()
@@ -621,7 +620,7 @@ class SesSendVerifiedSenderIntegrationTest {
         String source = "bulk-" + VERIFIED;
         verifyEmailIdentity(source);
 
-        v2(AUTH_V2).body(bulkBody(source))
+        v2(AUTH).body(bulkBody(source))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()

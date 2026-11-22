@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIdentityNotificationTopicPublishV1IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SNS_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sns/aws4_request";
     private static final String SQS_AUTH =
@@ -222,7 +221,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
         String rawB64 = Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendRawEmail"
                         + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
                         + "&Version=2010-12-01")
@@ -254,7 +253,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
         setIdentityNotificationTopic(gone, "Complaint", goneTopic);
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SetIdentityFeedbackForwardingEnabled&Identity="
                         + URLEncoder.encode(gone, StandardCharsets.UTF_8)
                         + "&ForwardingEnabled=false&Version=2010-12-01")
@@ -268,7 +267,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
 
         String attributes = given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=GetIdentityNotificationAttributes&Identities.member.1="
                         + URLEncoder.encode(gone, StandardCharsets.UTF_8) + "&Version=2010-12-01")
         .when()
@@ -362,7 +361,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     void theMissingMembersAreReportedTogether() {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SetIdentityNotificationTopic&SnsTopic=not-an-arn&Version=2010-12-01")
         .when()
                 .post("/")
@@ -404,7 +403,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                                                                 String topicParam) {
         return given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SetIdentityNotificationTopic"
                         + "&Identity=" + URLEncoder.encode(identity, StandardCharsets.UTF_8)
                         + "&NotificationType=" + notificationType
@@ -418,7 +417,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private ValidatableResponse notificationAttributes(String identity) {
         return given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=GetIdentityNotificationAttributes&Identities.member.1="
                         + URLEncoder.encode(identity, StandardCharsets.UTF_8) + "&Version=2010-12-01")
         .when()
@@ -430,7 +429,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private void verifyEmailIdentity(String email) {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=VerifyEmailIdentity&EmailAddress="
                         + URLEncoder.encode(email, StandardCharsets.UTF_8) + "&Version=2010-12-01")
         .when()
@@ -442,7 +441,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private void verifyDomainIdentity(String domain) {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=VerifyDomainIdentity&Domain="
                         + URLEncoder.encode(domain, StandardCharsets.UTF_8) + "&Version=2010-12-01")
         .when()
@@ -454,7 +453,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private void setIdentityNotificationTopic(String identity, String notificationType, String snsTopic) {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SetIdentityNotificationTopic"
                         + "&Identity=" + URLEncoder.encode(identity, StandardCharsets.UTF_8)
                         + "&NotificationType=" + notificationType
@@ -469,7 +468,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private void setHeadersInNotificationsEnabled(String identity, String notificationType, boolean enabled) {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SetIdentityHeadersInNotificationsEnabled"
                         + "&Identity=" + URLEncoder.encode(identity, StandardCharsets.UTF_8)
                         + "&NotificationType=" + notificationType
@@ -484,7 +483,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     private void sendEmail(String source, String to, String subject) {
         given()
                 .contentType(FORM)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("Action=SendEmail"
                         + "&Source=" + URLEncoder.encode(source, StandardCharsets.UTF_8)
                         + "&Destination.ToAddresses.member.1="

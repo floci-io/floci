@@ -8,6 +8,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -22,8 +23,6 @@ class SesTemplateRequiredPartsIntegrationTest {
 
     private static final String V1_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String NO_SUBJECT = "The subject must be specified.";
     private static final String NO_PART = "Template must specify at least one of the parts.";
 
@@ -41,7 +40,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v2Create_refusesTheContent(String content, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", AUTH)
             .body("{\"TemplateName\": \"required-parts-refused\", \"TemplateContent\": " + content + "}")
         .when()
             .post("/v2/email/templates")
@@ -56,7 +55,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v2Update_refusesTheContentOfAnUnknownTemplate(String content, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", AUTH)
             .body("{\"TemplateContent\": " + content + "}")
         .when()
             .put("/v2/email/templates/required-parts-ghost")
@@ -70,7 +69,7 @@ class SesTemplateRequiredPartsIntegrationTest {
     void v2Create_readsAnEmptyPartBackAsNoPart() {
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", AUTH)
             .body("""
                 {"TemplateName": "required-parts-html-only",
                  "TemplateContent": {"Subject": "S", "Text": "", "Html": "<p>h</p>"}}
@@ -81,7 +80,7 @@ class SesTemplateRequiredPartsIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", AUTH)
         .when()
             .get("/v2/email/templates/required-parts-html-only")
         .then()
@@ -90,7 +89,7 @@ class SesTemplateRequiredPartsIntegrationTest {
             .body("TemplateContent.Text", nullValue());
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", AUTH)
         .when()
             .delete("/v2/email/templates/required-parts-html-only")
         .then()

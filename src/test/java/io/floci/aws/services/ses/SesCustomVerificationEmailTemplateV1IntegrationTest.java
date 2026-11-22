@@ -21,8 +21,6 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String FROM = "cvet-v1-sender@floci.test";
     private static final String NAME = "cvet-v1-a";
     private static final String MISSING_MESSAGE =
@@ -191,7 +189,7 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     void v1Template_isVisibleViaV2() {
         create("cvet-v1-shared", "Shared").when().post("/").then().statusCode(200);
 
-        given().header("Authorization", V2_AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/custom-verification-email-templates/cvet-v1-shared")
         .then().statusCode(200)
                 .body("TemplateSubject", equalTo("Shared"))
