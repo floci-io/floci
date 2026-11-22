@@ -830,10 +830,18 @@ public class StsQueryHandler {
                 "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
         List<String> acceptedAudiences = List.of(STS_AUDIENCE);
+        // IAM stores a provider's URL without its scheme and accepts only https, so only an https
+        // issuer names one.
         Optional<OpenIDConnectProvider> provider = key.isPresent() || !config.services().iam().enforcementEnabled()
+                || !issuer.get().startsWith("https://")
                 ? Optional.empty() : iamService.findOpenIDConnectProvider(oidcProviderArn);
         if (provider.isPresent()) {
-            key = registeredIssuerKey(token, issuer.get());
+            Optional<String> keyId = tokenVerifier.peekKeyId(token);
+            if (keyId.isEmpty()) {
+                return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                        "The web identity token names no signing key.", AwsNamespaces.STS, 400));
+            }
+            key = registeredIssuerKey(issuer.get(), keyId.get());
             if (key.isEmpty()) {
                 return WebIdentityOutcome.deny(AwsQueryResponse.error("IDPCommunicationError",
                         "Couldn't retrieve verification key from your identity provider,  please reference "
@@ -896,17 +904,13 @@ public class StsQueryHandler {
     }
 
     /**
-     * The key an issuer registered with {@code CreateOpenIDConnectProvider} publishes under the
-     * token's {@code kid}, fetched from its {@code jwks_uri}. Empty when the keys cannot be fetched
-     * or none carries that id, which AWS answers as {@code IDPCommunicationError}.
+     * The key an issuer registered with {@code CreateOpenIDConnectProvider} publishes under
+     * {@code keyId}, fetched from its {@code jwks_uri}. Empty when the keys cannot be fetched or
+     * none carries that id, which AWS answers as {@code IDPCommunicationError}.
      */
-    private Optional<RSAPublicKey> registeredIssuerKey(String token, String issuer) {
-        Optional<String> keyId = tokenVerifier.peekKeyId(token);
-        if (keyId.isEmpty()) {
-            return Optional.empty();
-        }
+    private Optional<RSAPublicKey> registeredIssuerKey(String issuer, String keyId) {
         try {
-            return registeredIssuerKeys.signingKey(issuer, keyId.get());
+            return registeredIssuerKeys.signingKey(issuer, keyId);
         } catch (JwtSignatureVerifier.JwtVerificationException e) {
             LOG.debugv("Cannot fetch the keys of OIDC issuer {0}: {1}", issuer, e.getMessage());
             return Optional.empty();

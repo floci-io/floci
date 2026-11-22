@@ -1235,7 +1235,7 @@ When `sts:AssumeRoleWithWebIdentity` receives a token whose `iss` names an issue
 
 The response then carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. Failures return `InvalidIdentityToken` (400) for a bad token, `ExpiredTokenException` (400) for an expired one, or `AccessDenied` (403) when the trust policy does not permit the subject.
 
-A token whose issuer Floci does not host is treated as opaque and accepted, since Floci cannot adjudicate a third-party provider. Validation is therefore automatic for Floci-issued tokens and requires no configuration flag.
+With IAM enforcement off, a token whose issuer Floci does not host is treated as opaque and accepted. With it on, such a token is verified against the issuer's published keys when the role's account registered the issuer as an OIDC provider, and refused otherwise (see [STS](sts.md#issuers-registered-in-iam)). Validation is automatic for Floci-issued tokens and requires no configuration flag.
 
 ### OIDC discovery endpoints
 

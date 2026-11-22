@@ -110,14 +110,27 @@ class StsRegisteredOidcProviderIntegrationTest {
             for (String session : sessions) {
                 iamService.unregisterSession("000000000000", session);
             }
-            iam.deleteRole(b -> b.roleName(role.roleName()));
-            iam.deleteOpenIDConnectProvider(b -> b.openIDConnectProviderArn(providerArn));
+            if (role != null) {
+                iam.deleteRole(b -> b.roleName(role.roleName()));
+            }
         } finally {
             try {
-                sts.close();
-                iam.close();
+                if (providerArn != null) {
+                    iam.deleteOpenIDConnectProvider(b -> b.openIDConnectProviderArn(providerArn));
+                }
             } finally {
-                admin.close();
+                try {
+                    if (sts != null) {
+                        sts.close();
+                    }
+                    if (iam != null) {
+                        iam.close();
+                    }
+                } finally {
+                    if (admin != null) {
+                        admin.close();
+                    }
+                }
             }
         }
     }
@@ -163,6 +176,26 @@ class StsRegisteredOidcProviderIntegrationTest {
     }
 
     @Test
+    void tokenWithoutAKeyIdIsRefusedAsAnInvalidToken() throws Exception {
+        StsException error = assertThrows(StsException.class,
+                () -> assume(token(issuer, "sts.amazonaws.com", privateKey, null)));
+
+        assertEquals("InvalidIdentityToken", error.awsErrorDetails().errorCode());
+        assertEquals(400, error.statusCode());
+    }
+
+    @Test
+    void plainHttpIssuerDoesNotMatchTheHttpsProvider() throws Exception {
+        String plainIssuer = "http://" + issuer.substring("https://".length());
+        when(issuerKeys.signingKey(plainIssuer, KEY_ID)).thenReturn(Optional.of(publicKey));
+
+        StsException error = assertThrows(StsException.class,
+                () -> assume(token(plainIssuer, "sts.amazonaws.com", privateKey)));
+
+        assertEquals("InvalidIdentityToken", error.awsErrorDetails().errorCode());
+    }
+
+    @Test
     void issuerWhoseKeysCannotBeFetchedAnswersIdpCommunicationError() throws Exception {
         when(issuerKeys.signingKey(issuer, KEY_ID))
                 .thenThrow(new JwtSignatureVerifier.JwtVerificationException("connection refused"));
@@ -185,10 +218,17 @@ class StsRegisteredOidcProviderIntegrationTest {
 
     private String token(String tokenIssuer, String audience, RSAPrivateKey signingKey)
             throws GeneralSecurityException {
+        return token(tokenIssuer, audience, signingKey, KEY_ID);
+    }
+
+    private String token(String tokenIssuer, String audience, RSAPrivateKey signingKey, String keyId)
+            throws GeneralSecurityException {
         ObjectNode header = objectMapper.createObjectNode();
         header.put("alg", "RS256");
         header.put("typ", "JWT");
-        header.put("kid", KEY_ID);
+        if (keyId != null) {
+            header.put("kid", keyId);
+        }
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("iss", tokenIssuer);
         payload.put("sub", SUBJECT);
