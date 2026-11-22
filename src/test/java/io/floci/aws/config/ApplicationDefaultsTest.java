@@ -288,4 +288,16 @@ class ApplicationDefaultsTest {
         assertEquals("128", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
+
+    // Catches: the log-driver mode switched on by default, which breaks Docker-in-Docker and remote
+    // daemons, or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsTheLogDriverModeOff() throws IOException, NoSuchMethodException {
+        JsonNode mode = productionConfig().path("floci").path("docker").path("log-driver-mode");
+
+        assertFalse(mode.isMissingNode(), "log-driver-mode should be declared in application.yml");
+        assertFalse(mode.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("logDriverMode")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
 }

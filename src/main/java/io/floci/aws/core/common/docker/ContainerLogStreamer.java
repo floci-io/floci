@@ -9,6 +9,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -32,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -56,6 +58,10 @@ public class ContainerLogStreamer {
     private final DockerClient pollingDockerClient;
     private final CloudWatchLogsService cloudWatchLogsService;
     private final Duration pollInterval;
+
+    /** Resolved only in the opt-in log-driver mode; unset when the streamer is constructed by hand. */
+    @Inject
+    Instance<GelfLogListener> gelfLogListener;
 
     // Log-follow attaches hold their connection open for the whole container lifetime, so
     // this class is the primary consumer of the streaming pool: sharing the control-plane
@@ -182,12 +188,46 @@ public class ContainerLogStreamer {
     Closeable attachPolledForAccount(String accountId, String containerId, String logGroup, String logStream,
                                      String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
-        return new PolledLogHandle(pollingDockerClient, containerId, since, (stream, line) -> {
+        BiConsumer<StreamType, String> sink = (stream, line) -> {
             String logged = logToConsole(logPrefix, line);
             if (logged != null) {
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
             }
-        }).start(pollInterval);
+        };
+        Closeable pushed = attachPushed(containerId, sink);
+        if (pushed != null) {
+            return pushed;
+        }
+        return new PolledLogHandle(pollingDockerClient, containerId, since, sink).start(pollInterval);
+    }
+
+    /**
+     * In the log-driver mode, a container created with Floci's {@code gelf} log configuration pushes its
+     * log, so it is claimed by its tag instead of read; null when the mode is off or the container was not
+     * created for it (one started before the mode was turned on).
+     */
+    private Closeable attachPushed(String containerId, BiConsumer<StreamType, String> sink) {
+        if (gelfLogListener == null || !gelfLogListener.isResolvable() || !gelfLogListener.get().enabled()) {
+            return null;
+        }
+        GelfLogListener listener = gelfLogListener.get();
+        String token;
+        try {
+            Map<String, String> labels = pollingDockerClient.inspectContainerCmd(containerId).exec()
+                    .getConfig().getLabels();
+            token = labels == null ? null : labels.get(GelfLogListener.LOG_TOKEN_LABEL);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the log tag of container {0}; reading its log instead: {1}",
+                    containerId, e.getMessage());
+            return null;
+        }
+        if (token == null) {
+            return null;
+        }
+        listener.register(token, sink);
+        // The daemon may still be sending the last lines when the container's owner closes the handle.
+        return () -> CompletableFuture.delayedExecutor(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS,
+                TimeUnit.MILLISECONDS).execute(() -> listener.unregister(token));
     }
 
     /**

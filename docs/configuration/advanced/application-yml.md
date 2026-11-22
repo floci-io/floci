@@ -139,6 +139,7 @@ floci:
     max-concurrent-launches: 0               # Most container creates and starts at once; 0 = twice the CPUs, at least 4
     events-exit-detection: false             # Watch Lambda exits through one Docker events stream instead of a wait per container
     log-poll-interval-millis: 1000           # How often a long-lived service container's log is read (it is not followed)
+    log-driver-mode: false                   # Opt-in: service containers push their logs over GELF; needs a daemon that can reach Floci
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

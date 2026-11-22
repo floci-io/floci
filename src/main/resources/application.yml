@@ -454,6 +454,11 @@ floci:
     # for the container's life; at least 100. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.logPollIntervalMillis: a value set here WINS over the annotation.
     log-poll-interval-millis: 1000
+    # FLOCI_DOCKER_LOG_DRIVER_MODE: opt-in; long-lived service containers push their logs to Floci
+    # through Docker's gelf driver instead of being read on a timer. Needs a daemon that can reach
+    # Floci (Docker Desktop or the same host). FLOCI_DOCKER_LOG_DRIVER_HOST overrides the host the
+    # daemon dials. Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.logDriverMode.
+    log-driver-mode: false
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

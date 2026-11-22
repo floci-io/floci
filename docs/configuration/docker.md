@@ -252,6 +252,19 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` (at least 100)
 
+### Log-driver mode (opt-in)
+
+With `log-driver-mode` on, the long-lived service containers of RDS, DocumentDB, Neptune, ElastiCache, MemoryDB, MSK, Redshift, Amazon MQ, Managed Flink and the ECR registry are started with Docker's `gelf` log driver pointed at a listener in Floci, so the daemon pushes each line as it is written: no reads on a timer and no Docker connection held for the container's log. Docker opens that connection itself, from wherever the daemon runs, so the mode only works when the daemon can reach Floci: Docker Desktop, which dials `host.docker.internal`, or a daemon on Floci's own host, which dials `127.0.0.1`. It does not work with Docker-in-Docker, a remote daemon, or Floci running in a container whose port the daemon cannot reach, and when the daemon cannot connect, the container fails to start. `docker logs` on these containers keeps working only where the daemon keeps a local copy (dual logging, on by default since Docker Engine 20.10). `log-driver-host` overrides the host the daemon dials:
+
+```yaml
+floci:
+  docker:
+    log-driver-mode: true
+    log-driver-host: host.docker.internal
+```
+
+Environment variables: `FLOCI_DOCKER_LOG_DRIVER_MODE`, `FLOCI_DOCKER_LOG_DRIVER_HOST`
+
 
 Configure log rotation for all containers spawned by Floci:
 
@@ -442,6 +455,8 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
 | `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log (databases, caches, brokers, the ECR registry, the EKS API server), read on a timer instead of followed; at least 100 |
+| `FLOCI_DOCKER_LOG_DRIVER_MODE` | `false` | Long-lived service containers push their logs to Floci through Docker's `gelf` driver; needs a daemon that can reach Floci |
+| `FLOCI_DOCKER_LOG_DRIVER_HOST` | _(unset)_ | Host the daemon dials for the log-driver mode; `host.docker.internal` on Docker Desktop, `127.0.0.1` otherwise |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |

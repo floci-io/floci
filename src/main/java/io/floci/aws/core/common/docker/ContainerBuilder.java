@@ -14,6 +14,7 @@ import io.floci.aws.config.NetworkExposureGuard;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
@@ -54,6 +55,10 @@ public class ContainerBuilder {
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final ContainerEngineDetector containerEngineDetector;
 
+    /** Resolved only in the opt-in log-driver mode; unset when the builder is constructed by hand. */
+    @Inject
+    Instance<GelfLogListener> gelfLogListener;
+
     @Inject
     public ContainerBuilder(EmulatorConfig config, DockerHostResolver dockerHostResolver,
                             EmbeddedDnsServer embeddedDnsServer,
@@ -84,8 +89,18 @@ public class ContainerBuilder {
      * @return a new Builder instance
      */
     public Builder newContainer(String image) {
-        return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
+        Builder builder = new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
                 currentContainerNetworkResolver, containerEngineDetector);
+        builder.logDriver = logDriver();
+        return builder;
+    }
+
+    private GelfLogListener logDriver() {
+        if (gelfLogListener == null || config == null || config.docker() == null || !config.docker().logDriverMode()
+                || !gelfLogListener.isResolvable()) {
+            return null;
+        }
+        return gelfLogListener.get();
     }
 
     /**
@@ -251,6 +266,7 @@ public class ContainerBuilder {
         private boolean javaTrustStore;
         private String dnsName;
         private final List<String> joinedNetworks = new ArrayList<>();
+        private GelfLogListener logDriver;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -860,6 +876,17 @@ public class ContainerBuilder {
          * Builds the immutable ContainerSpec.
          */
         public ContainerSpec build() {
+            LogConfig effectiveLogConfig = logConfig;
+            Map<String, String> effectiveLabels = labels;
+            String service = labels.get(ContainerStorageHelper.SERVICE_LABEL);
+            if (logDriver != null && logConfig != null && logConfig.getType() == LogConfig.LoggingType.JSON_FILE
+                    && service != null && GelfLogListener.LONG_LIVED_SERVICES.contains(service)) {
+                // The opt-in log-driver mode: the daemon pushes this service container's log to Floci.
+                String token = GelfLogListener.newToken();
+                effectiveLabels = new HashMap<>(labels);
+                effectiveLabels.put(GelfLogListener.LOG_TOKEN_LABEL, token);
+                effectiveLogConfig = logDriver.logConfigFor(token);
+            }
             return new ContainerSpec(
                     image,
                     name,
@@ -875,8 +902,8 @@ public class ContainerBuilder {
                     List.copyOf(binds),
                     List.copyOf(volumesFrom),
                     List.copyOf(extraHosts),
-                    Map.copyOf(labels),
-                    logConfig,
+                    Map.copyOf(effectiveLabels),
+                    effectiveLogConfig,
                     privileged,
                     cgroupnsMode,
                     List.copyOf(dnsServers),
