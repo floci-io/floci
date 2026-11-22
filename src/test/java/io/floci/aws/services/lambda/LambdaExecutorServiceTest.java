@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DelayedTaskScheduler;
+import io.floci.aws.core.common.docker.DockerCapacityExceededException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
 import io.floci.aws.services.lambda.model.ContainerState;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
@@ -746,6 +747,44 @@ class LambdaExecutorServiceTest {
         assertTrue(new String(outcome.getValue().getPayload()).contains("TooManyRequestsException"));
         assertEquals(List.of(), retries.delays);
         verify(warmPool, never()).acquire(any());
+    }
+
+    // Catches: a launch refused by Lambda's Docker budget answered as an Unhandled function error
+    // instead of the throttle an SDK backs off from, or the refusal lost when the launch wraps it.
+    @Test
+    void syncInvocation_overTheDockerBudget_answersTooManyRequests() {
+        when(warmPool.acquire(fn)).thenThrow(
+                new IllegalStateException("launch failed", new DockerCapacityExceededException("lambda", 2)));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse));
+
+        assertEquals("TooManyRequestsException", ex.getErrorCode());
+        assertEquals(429, ex.getHttpStatus());
+    }
+
+    // Catches: an event refused by Lambda's Docker budget routed as a failure, or retried at once
+    // instead of backed off like a throttled one without spending an attempt.
+    @Test
+    void eventInvocation_overTheDockerBudget_backsOffWithoutSpendingAnAttempt() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        ManualRetries retries = new ManualRetries();
+        LambdaExecutorService retryExecutor = manualRetryExecutor(router, eventInvokeConfig(0, 21600), retries);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-over-budget"));
+        ContainerHandle handle = warmPool.acquire(fn);
+        when(warmPool.acquire(any()))
+                .thenThrow(new DockerCapacityExceededException("lambda", 2))
+                .thenReturn(handle);
+        CountDownLatch routed = countRoutes(router);
+
+        byte[] payload = "{}".getBytes();
+        retryExecutor.invoke(fn, payload, InvocationType.Event);
+        retries.runUntil(routed);
+
+        assertEquals(List.of(1000L), retries.delays);
+        assertEquals(1, enqueuedAt.size());
+        verify(router).route(eq(fn), eq(payload), any(InvokeResult.class), eq(1), eq(0), isNull());
     }
 
     @Test
