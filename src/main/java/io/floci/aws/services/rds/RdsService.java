@@ -40,6 +40,7 @@ import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
 import io.floci.aws.services.rds.model.DbClusterEndpoint;
+import io.floci.aws.services.rds.model.DbClusterMonitoringSettings;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
 import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbEndpoint;
@@ -4342,11 +4343,18 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The default security group of {@code instance}'s VPC, which describe reports for an instance that
-     * keeps no groups: an Aurora member, whose groups are its cluster's, or one stored before RDS gave
-     * one. No group when its VPC is unknown or gone.
+     * The groups describe reports for an instance that keeps none: an Aurora member reports its
+     * cluster's groups, and otherwise, or for one stored before RDS gave one, the default security
+     * group of its VPC. No group when its VPC is unknown or gone.
      */
     public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
+        if (!isBlank(instance.getDbClusterIdentifier())) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbClusterIdentifier());
+            if (cluster != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
+                return List.copyOf(cluster.getVpcSecurityGroupIds());
+            }
+        }
         try {
             return RdsSecurityGroups.vpcDefault(ec2Service, regionResolver.regionOf(instance.getDbInstanceArn()),
                     instance.getVpcId());
@@ -12053,6 +12061,85 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
                 AwsArnUtils.regionOrDefault(cluster.getDbClusterArn(), regionResolver.getDefaultRegion()), memberId);
         return member == null ? 1 : member.getPromotionTier();
+    }
+
+    /**
+     * Refuses {@code vpcSecurityGroupIds} unless each names a security group of the cluster's Region in
+     * the cluster's VPC, as CreateDBCluster and ModifyDBCluster do. A null or empty list passes.
+     */
+    public void requireClusterSecurityGroups(String region, String clusterId, List<String> vpcSecurityGroupIds) {
+        if (vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()) {
+            return;
+        }
+        String effectiveRegion = effectiveRegion(region);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds,
+                getDbCluster(clusterId, effectiveRegion).getVpcId());
+    }
+
+    /**
+     * Applies the Enhanced Monitoring, Performance Insights and Database Insights members of a
+     * CreateDBCluster ({@code create} true) or ModifyDBCluster request. On create a member left out
+     * takes the AWS default (no monitoring, Database Insights {@code standard}); on modify it keeps
+     * the cluster's value. The monitoring pair and the Database Insights mode are judged on the
+     * values in effect after the request.
+     */
+    public synchronized DbCluster setClusterMonitoringSettings(String region, String clusterId,
+                                                               DbClusterMonitoringSettings settings, boolean create) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        applyClusterMonitoringSettings(cluster, settings, create);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Runs the checks of {@link #setClusterMonitoringSettings} against the cluster as it stands, storing
+     * nothing, so a ModifyDBCluster can refuse the request before any of its other changes is stored.
+     */
+    public synchronized void validateClusterMonitoringSettings(String region, String clusterId,
+                                                               DbClusterMonitoringSettings settings) {
+        DbCluster copy = RESPONSE_COPIER.convertValue(getDbCluster(clusterId, effectiveRegion(region)),
+                DbCluster.class);
+        applyClusterMonitoringSettings(copy, settings, false);
+    }
+
+    private static void applyClusterMonitoringSettings(DbCluster cluster, DbClusterMonitoringSettings settings,
+                                                       boolean create) {
+        settings.validate();
+        int interval = settings.monitoringInterval() != null
+                ? settings.monitoringInterval() : cluster.getMonitoringInterval();
+        String role = settings.monitoringRoleArn() != null
+                ? settings.monitoringRoleArn() : cluster.getMonitoringRoleArn();
+        if (create) {
+            DbInstanceSettings.validateMonitoringPairOnCreate(interval, role);
+        } else if (interval != 0 && (role == null || role.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A MonitoringRoleArn value is required if you specify a MonitoringInterval value "
+                            + "other than 0.", 400);
+        }
+        boolean insightsEnabled = settings.performanceInsightsEnabled() != null
+                ? settings.performanceInsightsEnabled() : cluster.isPerformanceInsightsEnabled();
+        Integer retention = settings.performanceInsightsRetentionPeriod() != null
+                ? settings.performanceInsightsRetentionPeriod() : cluster.getPerformanceInsightsRetentionPeriod();
+        if (insightsEnabled && retention == null) {
+            retention = 7;
+        }
+        String mode = settings.databaseInsightsMode() != null
+                ? settings.databaseInsightsMode() : cluster.getDatabaseInsightsMode();
+        if (create && mode == null) {
+            mode = DbClusterMonitoringSettings.DATABASE_INSIGHTS_STANDARD;
+        }
+        if (DbClusterMonitoringSettings.DATABASE_INSIGHTS_ADVANCED.equals(mode)
+                && (!insightsEnabled || retention < 465)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Database Insights advanced mode requires Performance Insights to be enabled "
+                            + "with a retention period of at least 465 days.", 400);
+        }
+        cluster.setMonitoringInterval(interval);
+        cluster.setMonitoringRoleArn(role);
+        cluster.setPerformanceInsightsEnabled(insightsEnabled);
+        cluster.setPerformanceInsightsRetentionPeriod(insightsEnabled ? retention : null);
+        cluster.setDatabaseInsightsMode(mode);
     }
 
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */

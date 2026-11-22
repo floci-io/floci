@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.floci.aws.testing.Ec2Requests.ec2;
 import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
@@ -57,10 +58,33 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .when().post("/").then().statusCode(200).extract().asString());
     }
 
+    private final List<String> createdGroups = new ArrayList<>();
+
+    /**
+     * A new security group of the default VPC, which a cluster created without a DB subnet group is
+     * placed in: CreateDBCluster and ModifyDBCluster refuse a group EC2 does not know.
+     */
+    private String securityGroup(String name) {
+        String vpcId = ec2("DescribeVpcs", "test", "us-east-1")
+                .formParam("Filter.1.Name", "isDefault").formParam("Filter.1.Value.1", "true")
+                .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getString("DescribeVpcsResponse.vpcSet.item[0].vpcId");
+        String groupId = ec2("CreateSecurityGroup", "test", "us-east-1")
+                .formParam("GroupName", name + "-" + System.nanoTime()).formParam("GroupDescription", name)
+                .formParam("VpcId", vpcId)
+                .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getString("CreateSecurityGroupResponse.groupId");
+        createdGroups.add(groupId);
+        return groupId;
+    }
+
     @AfterEach
     void cleanUp() {
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
+        for (String groupId : createdGroups) {
+            ec2("DeleteSecurityGroup", "test", "us-east-1").formParam("GroupId", groupId).when().post("/");
+        }
         // after the cluster, which may reference it; absent in most tests
         rds("DeleteDBClusterParameterGroup").formParam("DBClusterParameterGroupName", "pg-rejected")
                 .when().post("/");
@@ -68,25 +92,28 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void createStoresRequestedGroupsAndModifyReplacesThem() {
+        String first = securityGroup("first");
+        String second = securityGroup("second");
+        String third = securityGroup("third");
         String created = createAuroraPostgresCluster(ID)
-                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-abcdef01")
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", first)
                 .when().post("/").then().statusCode(200).extract().asString();
-        assertEquals(List.of("sg-abcdef01"), groupIds(created));
-        assertEquals(List.of("sg-abcdef01"), describedGroupIds());
+        assertEquals(List.of(first), groupIds(created));
+        assertEquals(List.of(first), describedGroupIds());
 
         rds("ModifyDBCluster")
                 .formParam("DBClusterIdentifier", ID)
-                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-11111111")
-                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.2", "sg-22222222")
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", second)
+                .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.2", third)
                 .when().post("/").then().statusCode(200);
-        assertEquals(List.of("sg-11111111", "sg-22222222"), describedGroupIds());
+        assertEquals(List.of(second, third), describedGroupIds());
 
         // A modify that does not name VpcSecurityGroupIds leaves them alone.
         rds("ModifyDBCluster")
                 .formParam("DBClusterIdentifier", ID)
                 .formParam("EnableIAMDatabaseAuthentication", "true")
                 .when().post("/").then().statusCode(200);
-        assertEquals(List.of("sg-11111111", "sg-22222222"), describedGroupIds());
+        assertEquals(List.of(second, third), describedGroupIds());
     }
 
     @Test
@@ -271,21 +298,22 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         rds("CreateDBClusterParameterGroup").formParam("DBClusterParameterGroupName", "pg-rejected")
                 .formParam("DBParameterGroupFamily", "aurora-postgresql15").formParam("Description", "d")
                 .when().post("/").then().statusCode(200);
+        String old = securityGroup("old");
         createAuroraPostgresCluster(ID).formParam("MasterUserPassword", "original-password1")
-                .formParam("VpcSecurityGroupIds.member.1", "sg-old").when().post("/").then().statusCode(200);
+                .formParam("VpcSecurityGroupIds.member.1", old).when().post("/").then().statusCode(200);
         String groupBefore = described("DBClusterParameterGroup");
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("DeletionProtection", "garbage").formParam("BackupRetentionPeriod", "9")
                 .formParam("EnableIAMDatabaseAuthentication", "true")
                 .formParam("MasterUserPassword", "changed-password2")
-                .formParam("VpcSecurityGroupIds.member.1", "sg-new")
+                .formParam("VpcSecurityGroupIds.member.1", securityGroup("new"))
                 .formParam("DBClusterParameterGroupName", "pg-rejected")
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals("1", described("BackupRetentionPeriod"));
         assertEquals("false", described("IAMDatabaseAuthenticationEnabled"));
         assertEquals("false", described("DeletionProtection"));
-        assertEquals(List.of("sg-old"), describedGroupIds());
+        assertEquals(List.of(old), describedGroupIds());
         assertEquals(groupBefore, described("DBClusterParameterGroup"));
     }
 
@@ -298,12 +326,13 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @Test
     void modifyWithEmptySecurityGroupMemberChangesNothing() {
-        createAuroraPostgresCluster(ID).formParam("VpcSecurityGroupIds.member.1", "sg-old").when().post("/").then().statusCode(200);
+        String old = securityGroup("old");
+        createAuroraPostgresCluster(ID).formParam("VpcSecurityGroupIds.member.1", old).when().post("/").then().statusCode(200);
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("VpcSecurityGroupIds.member.1", "").formParam("BackupRetentionPeriod", "9")
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals("1", described("BackupRetentionPeriod"));
-        assertEquals(List.of("sg-old"), describedGroupIds());
+        assertEquals(List.of(old), describedGroupIds());
     }
 }
