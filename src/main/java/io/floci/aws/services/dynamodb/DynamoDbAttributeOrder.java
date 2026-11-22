@@ -5,9 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -30,21 +28,38 @@ final class DynamoDbAttributeOrder {
     }
 
     private static ObjectNode shuffleFields(ObjectNode node) {
-        List<Map.Entry<String, JsonNode>> entries = new ArrayList<>(node.size());
-        node.properties().forEach(entries::add);
-        Collections.shuffle(entries, ThreadLocalRandom.current());
-        ObjectNode copy = FACTORY.objectNode();
-        for (Map.Entry<String, JsonNode> entry : entries) {
-            copy.set(entry.getKey(), shuffleValue(entry.getValue()));
+        int n = node.size();
+        @SuppressWarnings("unchecked")
+        Map.Entry<String, JsonNode>[] entries = new Map.Entry[n];
+        int i = 0;
+        for (Map.Entry<String, JsonNode> entry : node.properties()) {
+            entries[i++] = entry;
         }
-        return copy;
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int j = n - 1; j > 0; j--) {
+            int k = random.nextInt(j + 1);
+            Map.Entry<String, JsonNode> swap = entries[j];
+            entries[j] = entries[k];
+            entries[k] = swap;
+        }
+        Map<String, JsonNode> map = new LinkedHashMap<>((int) (n / 0.75f) + 1);
+        for (Map.Entry<String, JsonNode> entry : entries) {
+            map.put(entry.getKey(), shuffleValue(entry.getValue()));
+        }
+        return new ObjectNode(FACTORY, map);
+    }
+
+    private static ObjectNode wrap(String key, JsonNode value) {
+        Map<String, JsonNode> map = new LinkedHashMap<>(2);
+        map.put(key, value);
+        return new ObjectNode(FACTORY, map);
     }
 
     private static JsonNode shuffleValue(JsonNode value) {
         if (value.isObject() && value.size() == 1) {
             JsonNode map = value.get("M");
             if (map != null && map.isObject()) {
-                return FACTORY.objectNode().set("M", shuffleFields((ObjectNode) map));
+                return wrap("M", shuffleFields((ObjectNode) map));
             }
             JsonNode list = value.get("L");
             if (list != null && list.isArray()) {
@@ -52,7 +67,7 @@ final class DynamoDbAttributeOrder {
                 for (JsonNode element : list) {
                     copy.add(shuffleValue(element));
                 }
-                return FACTORY.objectNode().set("L", copy);
+                return wrap("L", copy);
             }
         }
         return value;
