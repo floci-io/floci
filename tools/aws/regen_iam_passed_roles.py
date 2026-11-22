@@ -293,8 +293,8 @@ NOT_READ = {
     "ssm:StartChangeRequestExecution": RUNBOOK_PARAMETER,
     "ssm:UpdateDocument": NO_ROLE_MEMBER,
     "ssm:UpdateServiceSetting": "a role is only ever a setting's value, which the request names by SettingId",
-    "wafv2:CreateWebACL": NO_ROLE_MEMBER,
-    "wafv2:UpdateWebACL": NO_ROLE_MEMBER,
+    "wafv2:CreateWebACL": MEMBER_NOT_IN_BOTOCORE,
+    "wafv2:UpdateWebACL": MEMBER_NOT_IN_BOTOCORE,
 }
 
 # A member the rule reads that passes no role, by operation, or by namespace for all its operations.

@@ -1103,7 +1103,7 @@
     "translate:StartTextTranslationJob": {"passedTo": ["translate"], "roles": [
       {"member": "DataAccessRoleArn", "passedTo": "translate"}
     ]},
-    "wafv2:CreateWebACL": {"passedTo": ["wafv2"], "notRead": "no member of the request names a role"},
-    "wafv2:UpdateWebACL": {"passedTo": ["wafv2"], "notRead": "no member of the request names a role"}
+    "wafv2:CreateWebACL": {"passedTo": ["wafv2"], "notRead": "the pinned botocore does not have the member naming the role yet, so it cannot be read"},
+    "wafv2:UpdateWebACL": {"passedTo": ["wafv2"], "notRead": "the pinned botocore does not have the member naming the role yet, so it cannot be read"}
   }
 }
