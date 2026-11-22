@@ -32,6 +32,9 @@ import java.util.regex.Pattern;
 public class SpectrumQueryPreparation {
     private static final Logger LOG = Logger.getLogger(SpectrumQueryPreparation.class);
     private static final String DUPLICATE_SCHEMA = "42P06";
+    private static final String UNDEFINED_FUNCTION = "42883";
+    /** Where an unqualified function lands: the default search path of a Redshift database resolves to it. */
+    private static final String DEFAULT_FUNCTION_SCHEMA = "public";
     private static final Pattern JOIN = Pattern.compile("\\bJOIN\\b", Pattern.CASE_INSENSITIVE);
     // Each batch is inserted on its own, so a view that groups or aggregates would keep a partial row per batch.
     private static final Pattern AGGREGATE = Pattern.compile(
@@ -41,6 +44,7 @@ public class SpectrumQueryPreparation {
     private final ExternalCatalogRegistry registry;
     private final KinesisSchemaRegistry kinesisSchemas;
     private final MskSchemaRegistry mskSchemas;
+    private final ExternalFunctionRegistry functions;
     private final KinesisStreamingViews views;
     private final ExternalTableMaterializer materializer;
     private final ExternalStatementParser parser;
@@ -66,12 +70,13 @@ public class SpectrumQueryPreparation {
 
     @Inject
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
-                                    MskSchemaRegistry mskSchemas, ExternalTableMaterializer materializer,
-                                    ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                                    MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                                    ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                                    GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
                                     Instance<RedshiftService> redshift) {
-        this(registry, kinesisSchemas, mskSchemas, materializer, parser, glue, metadata, catalogLocks, views,
-                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+        this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
+                views, (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -107,6 +112,17 @@ public class SpectrumQueryPreparation {
                              ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
                              ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
                              BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas,
+                new ExternalFunctionRegistry(AccountAwareStorageBackend.<ExternalFunctionBinding>inMemory("000000000000")),
+                materializer, parser, glue, metadata, catalogLocks, views, clusterRegion);
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
+        this.functions = functions;
         this.views = views;
         this.clusterRegion = clusterRegion;
         this.registry = registry;
@@ -171,6 +187,10 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateSchema ignored -> true;
             case ExternalStatement.CreateKinesisSchema ignored -> true;
             case ExternalStatement.CreateMskSchema ignored -> true;
+            case ExternalStatement.CreateFunction ignored -> true;
+            case ExternalStatement.DropFunction function -> functions.findFunction(session,
+                    schemaOrDefault(function.schemaName()), function.functionName(),
+                    function.argumentTypes()).isPresent();
             case ExternalStatement.CreateTable table -> session.inTransaction()
                     || bindingsOf(registry, session).containsKey(table.schemaName())
                     || bindingsOf(kinesisSchemas, session).containsKey(table.schemaName())
@@ -199,6 +219,8 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateStreamingView ignored -> "CREATE MATERIALIZED VIEW";
             case ExternalStatement.RefreshView ignored -> "REFRESH MATERIALIZED VIEW";
             case ExternalStatement.DropView ignored -> "DROP MATERIALIZED VIEW";
+            case ExternalStatement.CreateFunction ignored -> "CREATE FUNCTION";
+            case ExternalStatement.DropFunction ignored -> "DROP FUNCTION";
             case null, default -> "CREATE EXTERNAL";
         };
     }
@@ -213,6 +235,12 @@ public class SpectrumQueryPreparation {
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateMskSchema schema) {
             return createMskSchema(schema, session, backend);
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.CreateFunction function) {
+            return createFunction(function, session, backend);
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.DropFunction function) {
+            return dropFunction(function, session, backend);
         }
         Map<String, KinesisSchemaBinding> kinesis = bindingsOf(kinesisSchemas, session);
         Map<String, MskSchemaBinding> msk = bindingsOf(mskSchemas, session);
@@ -527,6 +555,84 @@ public class SpectrumQueryPreparation {
         return true;
     }
 
+    /**
+     * Creates the stub function the backend holds and remembers what the statement declared. The stub refuses every
+     * call with {@code 0A000}: the backend cannot reach Lambda, so evaluating a call is not wired yet.
+     */
+    private boolean createFunction(ExternalStatement.CreateFunction function, SpectrumSession session,
+                                   BackendSql backend) {
+        rejectTransaction(session);
+        String schema = schemaOrDefault(function.schemaName());
+        ExternalFunctionBinding binding = new ExternalFunctionBinding(session.accountId(), session.clusterKey(),
+                session.databaseName(), schema, function.functionName(), function.argumentTypes(),
+                function.returnType(), function.volatility(), function.lambdaFunction(), function.iamRoleArn(),
+                function.retryTimeoutMillis(), function.maxBatchRows(), function.maxBatchSizeBytes());
+        // The backend decides whether the name is taken (42723) or the return type differs on OR REPLACE (42P13),
+        // so a function created some other way is never overwritten and a stale binding never blocks a create.
+        backend.execute(stubSql(function, schema));
+        try {
+            functions.replace(binding);
+        } catch (RuntimeException exception) {
+            if (!function.orReplace()) {
+                try {
+                    backend.execute(dropStubSql(schema, function.functionName(), function.argumentTypes(), false, false));
+                } catch (RuntimeException cleanupFailure) {
+                    LOG.warnv(cleanupFailure, "Could not clean up failed external function {0}", function.functionName());
+                }
+            }
+            throw exception;
+        }
+        return true;
+    }
+
+    private boolean dropFunction(ExternalStatement.DropFunction function, SpectrumSession session, BackendSql backend) {
+        rejectTransaction(session);
+        String schema = schemaOrDefault(function.schemaName());
+        Optional<ExternalFunctionBinding> binding = functions.findFunction(session, schema, function.functionName(),
+                function.argumentTypes());
+        if (binding.isEmpty()) {
+            return false;
+        }
+        try {
+            backend.execute(dropStubSql(schema, function.functionName(), function.argumentTypes(),
+                    function.ifExists(), function.cascade()));
+        } catch (SpectrumReadException exception) {
+            // The stub went with its schema, so the binding describes nothing and must not outlive the failure.
+            if (UNDEFINED_FUNCTION.equals(exception.sqlState())) {
+                functions.unbindFunction(binding.get());
+            }
+            throw exception;
+        }
+        functions.unbindFunction(binding.get());
+        return true;
+    }
+
+    private static String schemaOrDefault(String schemaName) {
+        return schemaName == null ? DEFAULT_FUNCTION_SCHEMA : schemaName;
+    }
+
+    private static String stubSql(ExternalStatement.CreateFunction function, String schema) {
+        String body = "BEGIN RAISE EXCEPTION "
+                + PostgresWire.quoteLiteral("External function " + schema + "." + function.functionName()
+                        + " cannot be called: invoking Lambda from SQL is not supported yet")
+                + " USING ERRCODE = '0A000'; END";
+        return "CREATE " + (function.orReplace() ? "OR REPLACE " : "") + "FUNCTION "
+                + signature(schema, function.functionName(), function.argumentTypes())
+                + " RETURNS " + function.returnType() + " LANGUAGE plpgsql " + function.volatility() + " AS "
+                + PostgresWire.quoteLiteral(body);
+    }
+
+    private static String dropStubSql(String schema, String functionName, List<String> argumentTypes,
+                                      boolean ifExists, boolean cascade) {
+        return "DROP FUNCTION " + (ifExists ? "IF EXISTS " : "") + signature(schema, functionName, argumentTypes)
+                + (cascade ? " CASCADE" : " RESTRICT");
+    }
+
+    private static String signature(String schema, String functionName, List<String> argumentTypes) {
+        return ExternalTableMaterializer.quote(schema) + "." + ExternalTableMaterializer.quote(functionName)
+                + "(" + String.join(", ", argumentTypes) + ")";
+    }
+
     /** A name is taken when any kind of external schema already holds it. */
     private boolean schemaExists(SpectrumSession session, String schemaName) {
         return registry.find(session.accountId(), session.clusterKey(), session.databaseName(), schemaName).isPresent()
@@ -655,6 +761,7 @@ public class SpectrumQueryPreparation {
         registry.removeCluster(accountId, clusterKey);
         kinesisSchemas.removeCluster(accountId, clusterKey);
         mskSchemas.removeCluster(accountId, clusterKey);
+        functions.removeCluster(accountId, clusterKey);
         views.forgetCluster(accountId, clusterKey);
         materializer.forgetCluster(clusterKey);
     }

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,6 +23,15 @@ public class ExternalStatementParser {
     private static final String NAME = "(\"(?:\"\"|[^\"])+\"|[^.;,\\s\"()]+)";
     private static final Pattern CREATE_MSK_SCHEMA_HEAD = Pattern.compile(
             "(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?" + NAME + "\\s+FROM\\s+MSK\\b(.*?)\\s*;?\\s*$");
+    private static final Pattern CREATE_FUNCTION_HEAD = Pattern.compile(
+            "(?is)^\\s*CREATE\\s+(OR\\s+REPLACE\\s+)?EXTERNAL\\s+FUNCTION\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*\\(");
+    private static final Pattern DROP_FUNCTION = Pattern.compile(
+            "(?is)^\\s*DROP\\s+FUNCTION\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*\\((.*)\\)"
+                    + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Set<String> FUNCTION_CLAUSES = Set.of("VOLATILE", "STABLE", "IMMUTABLE", "LAMBDA",
+            "IAM_ROLE", "RETRY_TIMEOUT", "MAX_BATCH_ROWS", "MAX_BATCH_SIZE");
+    private static final long DEFAULT_RETRY_TIMEOUT_MILLIS = 20_000L;
+    private static final long MAX_BATCH_SIZE_BYTES = 5L * 1024 * 1024;
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+" + NAME + "\\s*\\.\\s*" + NAME + "\\s*\\(");
     private static final Pattern CREATE_VIEW = Pattern.compile("(?is)^\\s*CREATE\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s+(?:BACKUP\\s+(?:YES|NO)\\s+)?(?:AUTO\\s+REFRESH\\s+(YES|NO)\\s+)?AS\\s+((?:SELECT|WITH)\\b.*?)\\s*;?\\s*$");
     private static final Pattern REFRESH_VIEW = Pattern.compile("(?is)^\\s*REFRESH\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*;?\\s*$");
@@ -64,6 +74,14 @@ public class ExternalStatementParser {
         Matcher msk = CREATE_MSK_SCHEMA_HEAD.matcher(viewText);
         if (msk.matches()) {
             return Optional.of(parseMskSchema(identifier(msk.group(2)), msk.group(1) != null, msk.group(3)));
+        }
+        Matcher createFunction = CREATE_FUNCTION_HEAD.matcher(viewText);
+        if (createFunction.find()) {
+            return Optional.of(parseFunction(createFunction, viewText));
+        }
+        Matcher dropFunction = DROP_FUNCTION.matcher(viewText);
+        if (dropFunction.matches()) {
+            return parseDropFunction(dropFunction);
         }
         Matcher createView = CREATE_VIEW.matcher(viewText);
         if (createView.matches()) {
@@ -257,6 +275,210 @@ public class ExternalStatementParser {
         }
         return new ExternalStatement.CreateMskSchema(schemaName, iamRoleArn, authentication,
                 clusterArn, ifNotExists);
+    }
+
+    private static ExternalStatement.CreateFunction parseFunction(Matcher head, String text) {
+        int open = head.end() - 1;
+        int close = matchingParenthesis(text, open);
+        if (close < 0) {
+            throw new SpectrumSqlException("42601", "Unbalanced parentheses in CREATE EXTERNAL FUNCTION");
+        }
+        List<String> argumentTypes = new ArrayList<>();
+        for (String argument : splitTopLevel(text.substring(open + 1, close))) {
+            argumentTypes.add(ExternalFunctionTypes.base(argument));
+        }
+        String tail = text.substring(close + 1).replaceFirst("[\\s;]+$", "");
+        int pos = skipWhitespace(tail, 0);
+        int keywordEnd = readKeywordEnd(tail, pos);
+        if (!tail.substring(pos, keywordEnd).equalsIgnoreCase("RETURNS")) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL FUNCTION requires RETURNS");
+        }
+        pos = skipWhitespace(tail, keywordEnd);
+        StringBuilder returnType = new StringBuilder();
+        while (pos < tail.length()) {
+            int tokenEnd = readKeywordEnd(tail, pos);
+            String token = tail.substring(pos, tokenEnd);
+            if (FUNCTION_CLAUSES.contains(token.toUpperCase(Locale.ROOT))) {
+                break;
+            }
+            returnType.append(returnType.isEmpty() ? "" : " ").append(token);
+            pos = skipWhitespace(tail, tokenEnd);
+        }
+        if (returnType.isEmpty()) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL FUNCTION requires a RETURNS data type");
+        }
+        String volatility = null;
+        String lambda = null;
+        String iamRoleArn = null;
+        Long retryTimeout = null;
+        Long maxBatchRows = null;
+        Long maxBatchSize = null;
+        while (true) {
+            pos = skipWhitespace(tail, pos);
+            if (pos >= tail.length()) {
+                break;
+            }
+            int end = readKeywordEnd(tail, pos);
+            String keyword = tail.substring(pos, end).toUpperCase(Locale.ROOT);
+            pos = skipWhitespace(tail, end);
+            switch (keyword) {
+                case "VOLATILE", "STABLE" -> {
+                    if (volatility != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate volatility clause");
+                    }
+                    volatility = keyword;
+                }
+                case "IMMUTABLE" -> throw new SpectrumSqlException("0A000",
+                        "IMMUTABLE is not supported for Lambda UDFs; use STABLE or VOLATILE");
+                case "LAMBDA" -> {
+                    if (lambda != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate LAMBDA clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "LAMBDA");
+                    pos = slice.end();
+                    lambda = requireQuotedLiteral(slice.text(), "LAMBDA must be a single quoted function name");
+                }
+                case "IAM_ROLE" -> {
+                    if (iamRoleArn != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate IAM_ROLE clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "IAM_ROLE");
+                    pos = slice.end();
+                    iamRoleArn = roleArn(slice.text());
+                }
+                case "RETRY_TIMEOUT" -> {
+                    if (retryTimeout != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate RETRY_TIMEOUT clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "RETRY_TIMEOUT");
+                    pos = slice.end();
+                    retryTimeout = wholeNumber(slice.text(), "RETRY_TIMEOUT");
+                    if (retryTimeout < 0) {
+                        throw new SpectrumSqlException("22023", "RETRY_TIMEOUT must not be negative");
+                    }
+                }
+                case "MAX_BATCH_ROWS" -> {
+                    if (maxBatchRows != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate MAX_BATCH_ROWS clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "MAX_BATCH_ROWS");
+                    pos = slice.end();
+                    maxBatchRows = wholeNumber(slice.text(), "MAX_BATCH_ROWS");
+                    if (maxBatchRows < 1 || maxBatchRows > Integer.MAX_VALUE) {
+                        throw new SpectrumSqlException("22023", "MAX_BATCH_ROWS must be between 1 and 2147483647");
+                    }
+                }
+                case "MAX_BATCH_SIZE" -> {
+                    if (maxBatchSize != null) {
+                        throw new SpectrumSqlException("42601", "Duplicate MAX_BATCH_SIZE clause");
+                    }
+                    TokenSlice slice = readValueToken(tail, pos, "MAX_BATCH_SIZE");
+                    pos = skipWhitespace(tail, slice.end());
+                    long unit = 1024L;
+                    int unitEnd = readKeywordEnd(tail, pos);
+                    String unitText = tail.substring(pos, unitEnd).toUpperCase(Locale.ROOT);
+                    if (unitText.equals("KB") || unitText.equals("MB")) {
+                        unit = unitText.equals("MB") ? 1024L * 1024 : 1024L;
+                        pos = skipWhitespace(tail, unitEnd);
+                    }
+                    long size = wholeNumber(slice.text(), "MAX_BATCH_SIZE");
+                    if (size < 1 || size > MAX_BATCH_SIZE_BYTES / unit || size * unit < 1024L) {
+                        throw new SpectrumSqlException("22023", "MAX_BATCH_SIZE must be between 1 KB and 5 MB");
+                    }
+                    maxBatchSize = size * unit;
+                }
+                default -> throw new SpectrumSqlException("42601",
+                        "Unexpected clause in CREATE EXTERNAL FUNCTION: " + keyword);
+            }
+        }
+        if (volatility == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL FUNCTION requires VOLATILE or STABLE");
+        }
+        if (lambda == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL FUNCTION requires LAMBDA");
+        }
+        if (iamRoleArn == null) {
+            throw new SpectrumSqlException("42601", "CREATE EXTERNAL FUNCTION requires IAM_ROLE");
+        }
+        return new ExternalStatement.CreateFunction(qualifier(head.group(2), head.group(3)),
+                objectName(head.group(2), head.group(3)), argumentTypes,
+                ExternalFunctionTypes.declared(returnType.toString()), volatility, lambda, iamRoleArn,
+                retryTimeout == null ? DEFAULT_RETRY_TIMEOUT_MILLIS : retryTimeout,
+                maxBatchRows == null ? Integer.MAX_VALUE : maxBatchRows.intValue(),
+                maxBatchSize == null ? MAX_BATCH_SIZE_BYTES : maxBatchSize, head.group(1) != null);
+    }
+
+    /**
+     * A {@code DROP FUNCTION} is only an external one when every argument is a Lambda UDF type. Any other signature
+     * names a function Floci does not track, so it is left to the backend rather than refused.
+     */
+    private static Optional<ExternalStatement> parseDropFunction(Matcher drop) {
+        List<String> argumentTypes = new ArrayList<>();
+        try {
+            for (String argument : splitTopLevel(drop.group(4))) {
+                argumentTypes.add(dropArgumentType(argument));
+            }
+        } catch (SpectrumSqlException notExternal) {
+            return Optional.empty();
+        }
+        return Optional.of(new ExternalStatement.DropFunction(qualifier(drop.group(2), drop.group(3)),
+                objectName(drop.group(2), drop.group(3)), argumentTypes, drop.group(1) != null,
+                "CASCADE".equalsIgnoreCase(drop.group(5))));
+    }
+
+    /** DROP FUNCTION lets an argument carry a name, which plays no part in the function's identity. */
+    private static String dropArgumentType(String argument) {
+        String trimmed = argument.trim();
+        if (ExternalFunctionTypes.isType(trimmed)) {
+            return ExternalFunctionTypes.base(trimmed);
+        }
+        int space = trimmed.indexOf(' ');
+        return ExternalFunctionTypes.base(space > 0 ? trimmed.substring(space + 1) : trimmed);
+    }
+
+    private static long wholeNumber(String token, String clause) {
+        try {
+            return Long.parseLong(token.trim());
+        } catch (NumberFormatException notANumber) {
+            throw new SpectrumSqlException("42601", clause + " must be a whole number");
+        }
+    }
+
+    /** The index of the parenthesis closing the one at {@code open}, or -1 when it never closes. */
+    private static int matchingParenthesis(String text, int open) {
+        int depth = 0;
+        for (int index = open; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '(') {
+                depth++;
+            } else if (current == ')' && --depth == 0) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /** The comma-separated items of an argument list; a comma inside a length or precision stays in its item. */
+    private static List<String> splitTopLevel(String list) {
+        List<String> items = new ArrayList<>();
+        if (list.isBlank()) {
+            return items;
+        }
+        int depth = 0;
+        int start = 0;
+        for (int index = 0; index < list.length(); index++) {
+            char current = list.charAt(index);
+            if (current == '(') {
+                depth++;
+            } else if (current == ')') {
+                depth--;
+            } else if (current == ',' && depth == 0) {
+                items.add(list.substring(start, index));
+                start = index + 1;
+            }
+        }
+        items.add(list.substring(start));
+        return items;
     }
 
     private record TokenSlice(String text, int end) { }
