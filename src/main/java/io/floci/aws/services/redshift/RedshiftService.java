@@ -3101,9 +3101,21 @@ public class RedshiftService implements ManagedSecretRotator {
         // resetClusterParameterGroup hold from their read to their write, so a delete can't land in between and be
         // undone by their write; the event is emitted after it.
         ClusterParameterGroup group = mutate(() -> {
-            ClusterParameterGroup found = parameterGroups.get(regionalKey(parameterGroupName))
-                    .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
-                            "Cluster parameter group " + parameterGroupName + " not found", 404));
+            // As Redshift answers (measured on AWS): the default group, which is answered for without being stored,
+            // can't be deleted (a custom group an older Floci stored under its name stays deletable, as it stays
+            // modifiable), and a group a cluster of the Region still uses is refused, checked under the lock cluster
+            // changes hold too.
+            Optional<ClusterParameterGroup> stored = parameterGroups.get(regionalKey(parameterGroupName));
+            if (stored.isEmpty() && DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The Cluster Parameter Group cannot be deleted: " + parameterGroupName, 400);
+            }
+            ClusterParameterGroup found = stored.orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
+                    "Cluster parameter group " + parameterGroupName + " not found", 404));
+            if (regionalClusters().stream().anyMatch(c -> parameterGroupName.equals(c.getClusterParameterGroupName()))) {
+                throw new AwsException("InvalidClusterParameterGroupState", "One or more Clusters are still members of "
+                        + "this parameter group " + parameterGroupName + ", so the group cannot be deleted", 400);
+            }
             parameterGroups.delete(regionalKey(parameterGroupName));
             parameterGroups.flush();
             return found;
@@ -3272,6 +3284,13 @@ public class RedshiftService implements ManagedSecretRotator {
             ClusterSubnetGroup group = subnetGroups.get(regionalKey(name))
                     .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault",
                             "Cluster subnet group " + name + " not found", 400));
+            // A group a cluster of the Region still uses is refused, naming one such cluster, as Redshift answers
+            // (measured on AWS).
+            regionalClusters().stream().filter(c -> name.equals(c.getClusterSubnetGroupName()))
+                    .map(Cluster::getClusterIdentifier).sorted().findFirst().ifPresent(cluster -> {
+                        throw new AwsException("InvalidClusterSubnetGroupStateFault", "Cannot delete the subnet group '"
+                                + name + "' because at least one Cluster: " + cluster + " is still using it.", 400);
+                    });
             subnetGroups.delete(regionalKey(name));
             subnetGroups.flush();
             return group;

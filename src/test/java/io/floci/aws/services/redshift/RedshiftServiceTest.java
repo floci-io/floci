@@ -590,6 +590,70 @@ class RedshiftServiceTest {
         verify(snapshotScheduleBackend, never()).delete(RedshiftService.regionalKey("eu-west-1", "nightly"));
     }
 
+    /** The default parameter group, which is answered for without being stored, can't be deleted, as on Redshift. */
+    @Test
+    void theDefaultParameterGroupIsNotDeleted() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.deleteClusterParameterGroup("default.redshift-1.0"));
+
+        assertEquals("InvalidParameterValue", refused.getErrorCode());
+        assertEquals("The Cluster Parameter Group cannot be deleted: default.redshift-1.0", refused.getMessage());
+        assertEquals(400, refused.getHttpStatus());
+        verify(parameterGroupBackend, never()).delete(any());
+    }
+
+    /**
+     * A parameter group a cluster of its Region uses is not deleted, with Redshift's fault; a cluster of another
+     * Region, which uses that Region's group of the same name, doesn't keep it.
+     */
+    @Test
+    void aParameterGroupAClusterOfItsRegionUsesIsNotDeleted() {
+        Cluster west = storedCluster("west", "eu-west-1");
+        west.setClusterParameterGroupName("etl");
+        when(clusterBackend.scan(any())).thenReturn(List.of(west));
+        ClusterParameterGroup group = new ClusterParameterGroup("etl", "redshift-1.0", "etl");
+        when(parameterGroupBackend.get(regionalKey("etl"))).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(RedshiftService.regionalKey("eu-west-1", "etl"))).thenReturn(Optional.of(group));
+        RedshiftService westService = serviceIn("eu-west-1");
+
+        AwsException refused = assertThrows(AwsException.class, () -> westService.deleteClusterParameterGroup("etl"));
+        assertEquals("InvalidClusterParameterGroupState", refused.getErrorCode());
+        assertEquals("One or more Clusters are still members of this parameter group etl, so the group cannot be deleted",
+                refused.getMessage());
+        assertEquals(400, refused.getHttpStatus());
+        verify(parameterGroupBackend, never()).delete(RedshiftService.regionalKey("eu-west-1", "etl"));
+
+        service.deleteClusterParameterGroup("etl");
+        verify(parameterGroupBackend).delete(regionalKey("etl"));
+    }
+
+    /**
+     * A subnet group a cluster of its Region uses is not deleted, with Redshift's fault naming one such cluster; a
+     * cluster of another Region doesn't keep it.
+     */
+    @Test
+    void aSubnetGroupAClusterOfItsRegionUsesIsNotDeleted() {
+        Cluster second = storedCluster("west-b", "eu-west-1");
+        second.setClusterSubnetGroupName("private");
+        Cluster first = storedCluster("west-a", "eu-west-1");
+        first.setClusterSubnetGroupName("private");
+        when(clusterBackend.scan(any())).thenReturn(List.of(second, first));
+        ClusterSubnetGroup group = new ClusterSubnetGroup("private", "d", "vpc-1", List.of("subnet-1"));
+        when(subnetGroupBackend.get(regionalKey("private"))).thenReturn(Optional.of(group));
+        when(subnetGroupBackend.get(RedshiftService.regionalKey("eu-west-1", "private"))).thenReturn(Optional.of(group));
+        RedshiftService westService = serviceIn("eu-west-1");
+
+        AwsException refused = assertThrows(AwsException.class, () -> westService.deleteClusterSubnetGroup("private"));
+        assertEquals("InvalidClusterSubnetGroupStateFault", refused.getErrorCode());
+        assertEquals("Cannot delete the subnet group 'private' because at least one Cluster: west-a is still using it.",
+                refused.getMessage());
+        assertEquals(400, refused.getHttpStatus());
+        verify(subnetGroupBackend, never()).delete(RedshiftService.regionalKey("eu-west-1", "private"));
+
+        service.deleteClusterSubnetGroup("private");
+        verify(subnetGroupBackend).delete(regionalKey("private"));
+    }
+
     @Test
     void recoveryProxyFailureDoesNotDestructivelyStopAnAdoptedContainer() {
         Cluster cluster = new Cluster();
