@@ -138,9 +138,13 @@ class CloudWatchAlarmExtendedStatisticIntegrationTest {
 
         Response refused = CloudWatchTestRequests.call(baseUri, SCOPE, json, "PutMetricAlarm", body);
         refused.then().statusCode(400);
-        assertEquals(json ? "InvalidParameterCombinationException" : "InvalidParameterCombination",
+        assertEquals("ValidationError",
                 json ? refused.jsonPath().getString("__type")
                         : refused.xmlPath().getString("ErrorResponse.Error.Code"));
+        assertEquals("PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                + "Only one of them should be present",
+                json ? refused.jsonPath().getString("message")
+                        : refused.xmlPath().getString("ErrorResponse.Error.Message"));
         assertEquals(0, cloudWatch.describeAlarms(r -> r.alarmNames(name)).metricAlarms().size());
     }
 }

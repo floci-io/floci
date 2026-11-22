@@ -462,8 +462,10 @@ class CloudWatchMetricsJsonHandlerTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> handler.handle("PutMetricAlarm", req, REGION));
 
-        assertEquals("InvalidParameterCombination", error.getErrorCode());
-        assertEquals("InvalidParameterCombinationException", error.jsonType());
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("ValidationError", error.jsonType());
+        assertEquals("PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                + "Only one of them should be present", error.getMessage());
         assertEquals(400, error.getHttpStatus());
         assertTrue(service.describeAlarms(List.of("BothStatsAlarm"), null, REGION).isEmpty());
     }

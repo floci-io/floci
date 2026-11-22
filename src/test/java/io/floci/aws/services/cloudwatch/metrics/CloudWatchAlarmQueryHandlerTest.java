@@ -175,7 +175,9 @@ class CloudWatchAlarmQueryHandlerTest {
 
         AwsException error = assertThrows(AwsException.class,
                 () -> handler.handle("PutMetricAlarm", put, region));
-        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("PutMetricAlarm request can not be made with both Statistic and ExtendedStatistic parameters. "
+                + "Only one of them should be present", error.getMessage());
         assertEquals(400, error.getHttpStatus());
         assertTrue(service.describeAlarms(List.of("both-stats-query"), null, region).isEmpty());
     }
