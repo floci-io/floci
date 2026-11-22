@@ -15,6 +15,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.floci.aws.testing.EmrRequests.emr;
@@ -668,6 +669,70 @@ class EmrIntegrationTest {
         } finally {
             emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + uniform + "\",\"" + single + "\",\"" + grouped
                     + "\"]}").then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(22)
+    void describeClusterGivesBackTheSubnetsZonesProfileAndSecurityGroupsRunJobFlowAskedFor() {
+        List<String> launched = new ArrayList<>();
+        String fleet = """
+                {"InstanceFleetType": "MASTER", "TargetOnDemandCapacity": 1,
+                 "InstanceTypeConfigs": [{"InstanceType": "m5.xlarge"}]}""";
+        try {
+            String grouped = emr("RunJobFlow", """
+                    {"Name": "attributes-grouped", "JobFlowRole": "EMR_EC2_DefaultRole", "Instances": {
+                      "KeepJobFlowAliveWhenNoSteps": true, "Ec2SubnetId": "subnet-0aaa",
+                      "AdditionalMasterSecurityGroups": ["sg-0m1", "sg-0m2"],
+                      "AdditionalSlaveSecurityGroups": ["sg-0s1"]}}
+                    """).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(grouped);
+            String inSubnets = emr("RunJobFlow", """
+                    {"Name": "attributes-subnets", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Ec2SubnetIds": ["subnet-0bbb", "subnet-0ccc"], "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(inSubnets);
+            String inZones = emr("RunJobFlow", """
+                    {"Name": "attributes-zones", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Placement": {"AvailabilityZones": ["us-east-1d", "us-east-1b"]}, "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(200).extract().path("JobFlowId");
+            launched.add(inZones);
+
+            String attributes = "Cluster.Ec2InstanceAttributes";
+            emr("DescribeCluster", "{\"ClusterId\":\"" + grouped + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2SubnetId", equalTo("subnet-0aaa"))
+                    .body(attributes + ".IamInstanceProfile", equalTo("EMR_EC2_DefaultRole"))
+                    .body(attributes + ".AdditionalMasterSecurityGroups", equalTo(List.of("sg-0m1", "sg-0m2")))
+                    .body(attributes + ".AdditionalSlaveSecurityGroups", equalTo(List.of("sg-0s1")))
+                    .body(attributes + ".RequestedEc2SubnetIds", equalTo(List.of()))
+                    .body(attributes + ".RequestedEc2AvailabilityZones", equalTo(List.of()));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + inSubnets + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2SubnetId", equalTo("subnet-0bbb"))
+                    .body(attributes + ".RequestedEc2SubnetIds", equalTo(List.of("subnet-0bbb", "subnet-0ccc")))
+                    .body(attributes, not(hasKey("IamInstanceProfile")))
+                    .body(attributes, not(hasKey("AdditionalMasterSecurityGroups")));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + inZones + "\"}").then().statusCode(200)
+                    .body(attributes + ".Ec2AvailabilityZone", equalTo("us-east-1d"))
+                    .body(attributes + ".RequestedEc2AvailabilityZones", equalTo(List.of("us-east-1d", "us-east-1b")));
+
+            emr("RunJobFlow", """
+                    {"Name": "attributes-both", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "Ec2SubnetIds": ["subnet-0bbb"], "Placement": {"AvailabilityZones": ["us-east-1d"]},
+                      "InstanceFleets": [%s]}}
+                    """.formatted(fleet)).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message",
+                            equalTo("Ec2SubnetIds and Placement.AvailabilityZones cannot be specified together."));
+            emr("RunJobFlow", """
+                    {"Name": "attributes-malformed", "Instances": {"KeepJobFlowAliveWhenNoSteps": true,
+                      "AdditionalMasterSecurityGroups": "sg-0m1"}}
+                    """).then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"));
+        } finally {
+            if (!launched.isEmpty()) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + String.join("\",\"", launched) + "\"]}")
+                        .then().statusCode(200);
+            }
         }
     }
 }

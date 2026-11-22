@@ -96,6 +96,15 @@ them returns.
 adding that it "is idempotent but asynchronous". On an earlier release a `RUNNING` step answers `FAILED` with "Step
 is not in a cancellable state: RUNNING".
 
+`DescribeCluster`'s `Ec2InstanceAttributes` give back what `RunJobFlow`'s `Instances` asked for. The subnet is the one
+`Ec2SubnetId` names, else the first of the instance fleets' `Ec2SubnetIds`, from which EMR "chooses the Amazon EC2
+subnet with the best fit"; the availability zone is the one `Placement` names, else the first of its
+`AvailabilityZones`. `RequestedEc2SubnetIds` and `RequestedEc2AvailabilityZones` are the ones requested, an empty
+list when none was, as AWS gives them, and a request naming both is refused with `ValidationException`, as
+"RequestedEc2SubnetIDs and RequestedEc2AvailabilityZones cannot be specified together"; AWS's wording for it is not
+documented, so it is Floci's. `IamInstanceProfile` is the `JobFlowRole`, "The IAM role that was specified when the
+cluster was launched", and `AdditionalMasterSecurityGroups` and `AdditionalSlaveSecurityGroups` are the ones given.
+
 The limits the API reference and the Management Guide give steps are checked, in each operation's own error code, in
 Floci's words, as no source gives AWS's: a `StepConcurrencyLevel` from 1 to 256 ("You can specify a minimum of 1 step
 and a maximum of 256 steps"), which `RunJobFlow` refuses with `ValidationException` and `ModifyCluster` with
