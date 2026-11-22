@@ -15,6 +15,7 @@ import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EksTestNode;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RdsMockProfile;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -68,6 +69,9 @@ class EksRegistryHostsDockerIntegrationTest {
     private static final Logger LOG = Logger.getLogger(EksRegistryHostsDockerIntegrationTest.class);
     private static final String JSON = "application/json";
     private static final String POD = "registry-hosts-pod";
+    // Not "000000000000": the generated ECR mirror only covers the default account, so this account's
+    // registry host is only reachable at all because of the registry-hosts configuration below.
+    private static final String IMAGE_ACCOUNT = "111122223333";
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -105,11 +109,14 @@ class EksRegistryHostsDockerIntegrationTest {
         String clusterName = "reg-hosts-dock-" + suffix;
         String nodegroupName = "ng-" + suffix;
         String repo = "reg-hosts-it-" + suffix;
-        // Not "000000000000": the generated ECR mirror only covers the default account, so this
-        // hostname is only reachable at all because of the registry-hosts configuration below.
-        String host = "111122223333.dkr.ecr.us-east-1.localhost:" + httpPort;
+        String host = IMAGE_ACCOUNT + ".dkr.ecr.us-east-1.localhost:" + httpPort;
         String imageRef = host + "/" + repo + ":v1";
 
+        // ECR answers a push to a repository nobody created with NAME_UNKNOWN, so the account creates it first.
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        ecrAsImageAccount("CreateRepository", "{\"repositoryName\":\"" + repo + "\"}");
+        cleanup.register(() -> ecrAsImageAccount("DeleteRepository",
+                "{\"repositoryName\":\"" + repo + "\",\"force\":true}"));
         pushMinimalImage(host, repo);
 
         given().contentType(JSON)
@@ -413,6 +420,16 @@ class EksRegistryHostsDockerIntegrationTest {
         // Code
         buf.put(code);
         return buf.array();
+    }
+
+    private static void ecrAsImageAccount(String action, String body) {
+        given().header("X-Amz-Target", "AmazonEC2ContainerRegistry_V20150921." + action)
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + IMAGE_ACCOUNT
+                        + "/20260923/us-east-1/ecr/aws4_request")
+                .contentType("application/x-amz-json-1.1")
+                .body(body)
+                .when().post("/")
+                .then().statusCode(200);
     }
 
     private void uploadBlob(String host, String repo, String digest, byte[] content) {

@@ -1787,17 +1787,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * KMS targets depend on the serving operation and the request's partition; API Gateway's path ARNs on the
-     * request's partition, which that service mints them in; and the targets of a namespace the table of request
-     * resources reads on {@code operation}, the one the request is dispatched as (see {@link RequestResources}).
+     * KMS targets depend on the serving operation and the request's partition, and the targets of a namespace the
+     * table of request resources reads on {@code operation}, the one the request is dispatched as (see
+     * {@link RequestResources}).
      */
     private List<String> targetResources(String credentialScope, String action, String operation,
                                          ContainerRequestContext ctx, String region, String accountId) {
         if ("kms".equals(credentialScope)) {
             return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
-        }
-        if ("apigateway".equals(credentialScope)) {
-            return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         // ARNs the table renders take the request's partition, which a Region Floci does not know cannot be mapped to.
         return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, requestPartition());

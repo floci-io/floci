@@ -11,6 +11,7 @@ import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.emrcontainers.EmrContainersService.ListQuery;
+import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,12 +19,17 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -679,5 +685,353 @@ class EmrContainersServiceTest {
         service.clear();
 
         assertThrows(AwsException.class, () -> service.describeVirtualCluster(clusterId));
+    }
+
+    // A docker runner mode service whose run threads the test runs, by runAll(), over these stores.
+    private EmrContainersService dockerService(FakeRunner runner, QueuedExecutor executor,
+                                               List<AccountAwareStorageBackend<ObjectNode>> stores) {
+        IamService iam = mock(IamService.class);
+        when(iam.resolveCallerArn(eq(null))).thenReturn(Optional.empty());
+        return new EmrContainersService(stores.get(0), stores.get(1), stores.get(2), stores.get(3), stores.get(4),
+                mapper, new RegionResolver(REGION, ACCOUNT_ID), eks, iam, null, clock, 0, runner, executor,
+                "registry.internal/emr-on-eks/spark/%s", "floci-net");
+    }
+
+    private EmrContainersService dockerService(FakeRunner runner, QueuedExecutor executor) {
+        return dockerService(runner, executor, stores());
+    }
+
+    private static List<AccountAwareStorageBackend<ObjectNode>> stores() {
+        return List.of(AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+    }
+
+    private static String state(JsonNode run) {
+        return run.get("state").textValue();
+    }
+
+    @Test
+    void dockerRunIsSubmittedThenRunningWhileItsDriverRunsThenCompleted() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals("SUBMITTED", state(jobRun(service, clusterId, id)), "submitted while its container starts");
+        List<String> whileRunning = new ArrayList<>();
+        runner.whileRunning = () -> whileRunning.add(state(jobRun(service, clusterId, id)));
+        clock.advance(Duration.ofSeconds(42));
+        executor.runAll();
+
+        assertEquals(List.of("RUNNING"), whileRunning);
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("COMPLETED", state(run));
+        assertEquals("2026-01-01T00:00:42Z", run.get("finishedAt").textValue());
+        assertFalse(run.has("failureReason"));
+        SparkJobRunner.Job job = runner.jobs.getFirst();
+        assertEquals(id, job.runId());
+        assertEquals("registry.internal/emr-on-eks/spark/emr-7.5.0:latest", job.imageTemplate());
+        assertEquals("floci-net", job.dockerNetwork());
+        assertEquals(ROLE, job.executionRole());
+        assertEquals(List.of("s3://bucket/pi.py"), job.application());
+    }
+
+    @Test
+    void dockerRunWhoseDriverExitsWithAnErrorFailsAsAUserError() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+
+        executor.runAll();
+
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("FAILED", state(run));
+        assertEquals("USER_ERROR", run.get("failureReason").textValue());
+        assertEquals("Jobrun failed. Main Spark container terminated with errors. Please refer logs uploaded to "
+                + "S3/CloudWatch based on your monitoring configuration.", run.get("stateDetails").textValue());
+    }
+
+    @Test
+    void dockerRunWhoseDriverCannotStartFailsAsAnInternalError() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.couldNotStart("Could not pull image");
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+
+        executor.runAll();
+
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("FAILED", state(run));
+        assertEquals("INTERNAL_ERROR", run.get("failureReason").textValue());
+        assertEquals("JobRun submission failed due to an internal error. Floci could not start its driver: "
+                + "Could not pull image", run.get("stateDetails").textValue());
+    }
+
+    @Test
+    void cancellingARunningDockerRunStopsItsDriverThenCancelsIt() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+        List<String> afterCancel = new ArrayList<>();
+        runner.whileRunning = () -> {
+            service.cancelJobRun(clusterId, id);
+            afterCancel.add(state(jobRun(service, clusterId, id)));
+            // The stop the cancel handed off, and the cancel again, which changes nothing.
+            executor.runAll();
+            service.cancelJobRun(clusterId, id);
+            afterCancel.add(state(jobRun(service, clusterId, id)));
+        };
+
+        executor.runAll();
+
+        assertEquals(List.of("CANCEL_PENDING", "CANCEL_PENDING"), afterCancel);
+        assertEquals(Set.of(id), runner.stopped);
+        assertEquals("CANCELLED", state(jobRun(service, clusterId, id)));
+        AwsException again = assertThrows(AwsException.class, () -> service.cancelJobRun(clusterId, id));
+        assertEquals("ValidationException", again.getErrorCode());
+    }
+
+    @Test
+    void dockerRunCancelledBeforeItsDriverStartsNeverStartsIt() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+
+        service.cancelJobRun(clusterId, id);
+        executor.runAll();
+
+        assertTrue(runner.driversStarted.isEmpty());
+        assertEquals("CANCELLED", state(jobRun(service, clusterId, id)));
+    }
+
+    @Test
+    void dockerRunHoldsItsRunningSlotFromSubmissionUntilItsDriverEnds() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        String first = startJobRun(service, clusterId).get("id").textValue();
+        String second = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals("SUBMITTED", state(jobRun(service, clusterId, first)));
+        assertEquals("PENDING", state(jobRun(service, clusterId, second)), "the submitted run holds the only slot");
+        assertEquals(1, executor.queued(), "only the first run's container starts");
+
+        executor.runNext();
+
+        assertEquals("COMPLETED", state(jobRun(service, clusterId, first)));
+        assertEquals("SUBMITTED", state(jobRun(service, clusterId, second)), "the freed slot goes to the queue");
+        executor.runAll();
+        assertEquals("COMPLETED", state(jobRun(service, clusterId, second)));
+        assertEquals(List.of(first, second), runner.driversStarted);
+    }
+
+    @Test
+    void cancellingAQueuedDockerRunCancelsItAtOnce() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        startJobRun(service, clusterId);
+        String queued = startJobRun(service, clusterId).get("id").textValue();
+
+        service.cancelJobRun(clusterId, queued);
+
+        assertEquals("CANCELLED", state(jobRun(service, clusterId, queued)));
+        assertTrue(runner.stopped.isEmpty());
+    }
+
+    @Test
+    void dockerRunAnEarlierProcessLeftRunningHasFailed() {
+        List<AccountAwareStorageBackend<ObjectNode>> stores = stores();
+        EmrContainersService earlier = dockerService(new FakeRunner(), new QueuedExecutor(), stores);
+        String clusterId = virtualCluster(earlier, EKS_CLUSTER);
+        String id = startJobRun(earlier, clusterId).get("id").textValue();
+
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService restarted = dockerService(runner, executor, stores);
+        JsonNode run = jobRun(restarted, clusterId, id);
+
+        assertEquals("FAILED", state(run));
+        assertEquals("INTERNAL_ERROR", run.get("failureReason").textValue());
+        assertEquals("Trouble monitoring your JobRun due to an internal error", run.get("stateDetails").textValue());
+        assertTrue(runner.leftoversRemoved.isEmpty(), "removed off the request's thread");
+        executor.runAll();
+        assertEquals(List.of(id), runner.leftoversRemoved, "a driver the startup's cleanup left goes");
+    }
+
+    @Test
+    void dockerRunsThreadFromBeforeAResetWritesNothingBack() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        startJobRun(service, clusterId);
+
+        service.beforeReset();
+        service.clear();
+        String after = virtualCluster(service, EKS_CLUSTER);
+        executor.runAll();
+
+        assertEquals(1, runner.jobs.size(), "its thread still ran");
+        assertTrue(service.listJobRuns(after, ListQuery.of(null, null, null, null, null), null)
+                .get("jobRuns").isEmpty());
+        assertThrows(AwsException.class, () -> service.describeVirtualCluster(clusterId));
+    }
+
+    @Test
+    void dockerRunWhoseJobDriverNamesNoEntryPointFailsItsSubmission() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+
+        String id = service.startJobRun(clusterId, json("""
+                {"clientToken": "sql", "executionRoleArn": "%s", "releaseLabel": "%s",
+                 "jobDriver": {"sparkSqlJobDriver": {"sparkSqlParameters": "--conf a=b"}}}
+                """.formatted(ROLE, RELEASE))).get("id").textValue();
+
+        JsonNode run = jobRun(service, clusterId, id);
+        assertEquals("FAILED", state(run));
+        assertEquals("VALIDATION_ERROR", run.get("failureReason").textValue());
+        assertEquals("JobRun submission failed.", run.get("stateDetails").textValue(),
+                "kept FAILED, as AWS's common errors page gives a run whose parameters are not valid, not refused");
+        assertEquals(0, executor.queued(), "no container starts");
+    }
+
+    @Test
+    void dockerRunWhoseContainerStartsCountsAsConcurrentNotQueued() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        // The model's least queue depth.
+        String clusterId = limitedVirtualCluster(service,
+                "{\"maxConcurrentJobRuns\": 1, \"maxInQueueJobRuns\": 100}");
+        String first = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals(1, schedulerStatus(service, clusterId).get("currentConcurrentJobRuns").intValue());
+        assertEquals(0, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+        String last = null;
+        for (int i = 0; i < 100; i++) {
+            last = startJobRun(service, clusterId).get("id").textValue();
+        }
+        assertEquals("PENDING", state(jobRun(service, clusterId, last)), "the queue's hundredth place is free");
+        assertEquals(100, schedulerStatus(service, clusterId).get("currentInQueueJobRuns").intValue());
+        AwsException full = assertThrows(AwsException.class, () -> startJobRun(service, clusterId));
+        assertEquals("ValidationException", full.getErrorCode());
+
+        service.cancelJobRun(clusterId, first);
+        assertEquals("CANCEL_PENDING", state(jobRun(service, clusterId, first)));
+        assertEquals(1, schedulerStatus(service, clusterId).get("currentConcurrentJobRuns").intValue(),
+                "its container still runs");
+    }
+
+    @Test
+    void dockerRunThatCannotBeHandedToAThreadFailsAndFreesItsSlot() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = limitedVirtualCluster(service, "{\"maxConcurrentJobRuns\": 1}");
+        String first = startJobRun(service, clusterId).get("id").textValue();
+        String second = startJobRun(service, clusterId).get("id").textValue();
+        String third = startJobRun(service, clusterId).get("id").textValue();
+
+        executor.rejecting = true;
+        executor.runNext();
+
+        assertEquals("COMPLETED", state(jobRun(service, clusterId, first)));
+        for (String refused : List.of(second, third)) {
+            JsonNode run = jobRun(service, clusterId, refused);
+            assertEquals("FAILED", state(run), "its slot then went to the next");
+            assertEquals("INTERNAL_ERROR", run.get("failureReason").textValue());
+            assertEquals("JobRun submission failed due to an internal error. Floci could not start its driver: "
+                    + "shutting down", run.get("stateDetails").textValue());
+        }
+    }
+
+    @Test
+    void immediateModeNeverStartsAContainer() {
+        EmrContainersService service = service(0);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = startJobRun(service, clusterId).get("id").textValue();
+
+        assertEquals("COMPLETED", state(jobRun(service, clusterId, id)));
+    }
+
+    /** Runs what the service hands its run threads only when the test says so, on the test's thread. */
+    private static final class QueuedExecutor implements Executor {
+        private final Deque<Runnable> tasks = new ArrayDeque<>();
+        // Refuses every task from then on, as an executor that is shut down does.
+        boolean rejecting;
+
+        @Override
+        public void execute(Runnable task) {
+            if (rejecting) {
+                throw new RejectedExecutionException("shutting down");
+            }
+            tasks.add(task);
+        }
+
+        int queued() {
+            return tasks.size();
+        }
+
+        void runNext() {
+            tasks.removeFirst().run();
+        }
+
+        void runAll() {
+            while (!tasks.isEmpty()) {
+                runNext();
+            }
+        }
+    }
+
+    /** A runner that starts the driver at once, runs {@code whileRunning}, and ends as {@code outcome} says. */
+    private static final class FakeRunner implements SparkJobRunner {
+        final List<Job> jobs = new ArrayList<>();
+        final List<String> driversStarted = new ArrayList<>();
+        final Set<String> stopped = new HashSet<>();
+        final List<String> leftoversRemoved = new ArrayList<>();
+        Outcome outcome = Outcome.exitedWith(0);
+        Runnable whileRunning = () -> { };
+
+        @Override
+        public Outcome run(Job job, Progress progress) {
+            jobs.add(job);
+            if (progress.cancelled()) {
+                return Outcome.halted();
+            }
+            driversStarted.add(job.runId());
+            progress.started();
+            whileRunning.run();
+            return stopped.contains(job.runId()) ? Outcome.halted() : outcome;
+        }
+
+        @Override
+        public void stop(String runId) {
+            stopped.add(runId);
+        }
+
+        @Override
+        public void removeLeftoverDrivers(String service) {
+        }
+
+        @Override
+        public void removeLeftoverDriver(String service, String runId) {
+            leftoversRemoved.add(runId);
+        }
     }
 }

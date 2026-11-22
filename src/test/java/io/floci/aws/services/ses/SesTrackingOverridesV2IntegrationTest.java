@@ -10,7 +10,7 @@ import org.junit.jupiter.api.TestInstance;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.ses.SesV2Requests.post;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -27,8 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SesTrackingOverridesV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-southeast-4/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-southeast-4");
     // A sender of its own, verified once below: the identity outlives this class, and other SES
     // classes that share the application create their own senders.
     private static final String SENDER = "tracking-overrides-sender@floci.test";
@@ -49,7 +48,7 @@ class SesTrackingOverridesV2IntegrationTest {
         if (senderVerified) {
             return;
         }
-        send("/v2/email/identities", "{\"EmailIdentity\": \"" + SENDER + "\"}").statusCode(200);
+        post(AUTH, "/v2/email/identities", "{\"EmailIdentity\": \"" + SENDER + "\"}").statusCode(200);
         senderVerified = true;
     }
 
@@ -67,7 +66,7 @@ class SesTrackingOverridesV2IntegrationTest {
     void sendEmail_acceptsAnOverrideOnRawContent() {
         String mime = "From: " + SENDER + "\r\nTo: alice@example.com\r\nSubject: raw\r\n\r\nbody\r\n";
         String data = Base64.getEncoder().encodeToString(mime.getBytes(StandardCharsets.UTF_8));
-        send(SEND, "{\"FromEmailAddress\": \"" + SENDER + "\", \"Destination\": "
+        post(AUTH, SEND, "{\"FromEmailAddress\": \"" + SENDER + "\", \"Destination\": "
                 + "{\"ToAddresses\": [\"alice@example.com\"]}, \"Content\": {\"Raw\": {\"Data\": \"" + data + "\"}}, "
                 + "\"ConfigurationOverrides\": {\"Tracking\": {\"OpenTrackingEnabled\": \"ENABLED\"}}}")
                 .statusCode(200);
@@ -104,20 +103,20 @@ class SesTrackingOverridesV2IntegrationTest {
                 + "[\"alice@example.com\"]}, " + SIMPLE + ", \"EmailTags\": [{\"Name\": \"a b\", \"Value\": \"v\"}], "
                 + "\"ConfigurationSetName\": \"tracking-missing\", "
                 + "\"ConfigurationOverrides\": {\"Tracking\": {\"OpenTrackingEnabled\": \"%s\"}}}";
-        send(SEND, request.formatted("yes")).statusCode(400)
+        post(AUTH, SEND, request.formatted("yes")).statusCode(400)
                 .body("message", equalTo("1 validation error detected: " + OPEN_ENUM));
         // With a valid value the same request fails on the tags or the set, so the order above is real.
-        send(SEND, request.formatted("ENABLED")).statusCode(not(200))
+        post(AUTH, SEND, request.formatted("ENABLED")).statusCode(not(200))
                 .body("message", not(containsString("configurationOverrides")));
     }
 
     @Test
     void sendBulkEmail_acceptsAValidOverride_andRefusesAnInvalidOne() {
-        send(BULK, bulkBody("{\"Tracking\": {\"OpenTrackingEnabled\": \"DISABLED\"}}")).statusCode(200)
+        post(AUTH, BULK, bulkBody("{\"Tracking\": {\"OpenTrackingEnabled\": \"DISABLED\"}}")).statusCode(200)
                 .body("BulkEmailEntryResults", hasSize(2))
                 .body("BulkEmailEntryResults[0].Status", equalTo("SUCCESS"));
         String recipient = "refused-bulk@tracking.test";
-        send(BULK, bulkBody("{\"Tracking\": {\"ClickTrackingEnabled\": \"on\"}}", recipient)).statusCode(400)
+        post(AUTH, BULK, bulkBody("{\"Tracking\": {\"ClickTrackingEnabled\": \"on\"}}", recipient)).statusCode(400)
                 .body("message", equalTo("1 validation error detected: " + CLICK_ENUM));
         assertNothingSentTo(recipient);
     }
@@ -127,7 +126,7 @@ class SesTrackingOverridesV2IntegrationTest {
     }
 
     private static ValidatableResponse sendWith(String overrides, String recipient) {
-        return send(SEND, "{\"FromEmailAddress\": \"" + SENDER + "\", \"Destination\": {\"ToAddresses\": "
+        return post(AUTH, SEND, "{\"FromEmailAddress\": \"" + SENDER + "\", \"Destination\": {\"ToAddresses\": "
                 + "[\"" + recipient + "\"]}, " + SIMPLE + ", \"ConfigurationOverrides\": " + overrides + "}");
     }
 
@@ -146,10 +145,5 @@ class SesTrackingOverridesV2IntegrationTest {
     // The check runs before the send reaches the service, so a refused request records nothing.
     private static void assertNothingSentTo(String recipient) {
         assertTrue(SesMailbox.messagesTo(recipient).isEmpty(), "a refused send recorded a message to " + recipient);
-    }
-
-    private static ValidatableResponse send(String path, String body) {
-        return given().contentType("application/json").header("Authorization", AUTH).body(body)
-                .when().post(path).then();
     }
 }

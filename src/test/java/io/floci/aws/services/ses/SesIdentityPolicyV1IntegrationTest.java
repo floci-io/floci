@@ -23,8 +23,6 @@ class SesIdentityPolicyV1IntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String IDENTITY = "policy-v1.floci.test";
     private static final String DOC_A = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AAA\"}]}";
     private static final String DOC_B = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"BBB\"}]}";
@@ -130,7 +128,7 @@ class SesIdentityPolicyV1IntegrationTest {
                 .formParam("PolicyName", "shared").formParam("Policy", DOC_A)
         .when().post("/").then().statusCode(200);
 
-        given().header("Authorization", V2_AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/" + IDENTITY + "/policies")
         .then().statusCode(200)
                 .body("Policies.shared", containsString("AAA"));

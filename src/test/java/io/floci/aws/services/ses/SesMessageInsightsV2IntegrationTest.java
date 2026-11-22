@@ -33,8 +33,7 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesMessageInsightsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String SENDER = "insights-sender@example.com";
     private static final String ACCOUNT_A_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260101/eu-north-1/ses/aws4_request";

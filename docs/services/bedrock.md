@@ -99,10 +99,17 @@ returns the empty policy `{}`. A profile ARN of another account or partition ret
 `ResourceNotFoundException`; whether the profile's Region is a destination of the
 calling Region is not checked.
 
-With IAM enforcement on, `PutResourcePolicy`, `GetResourcePolicy` and
-`DeleteResourcePolicy` are authorized as `bedrock:PutResourcePolicy`,
-`bedrock:GetResourcePolicy` and `bedrock:DeleteResourcePolicy` on the ARN the request
-names.
+With IAM enforcement on, every Bedrock and Bedrock Runtime request is authorized as the action
+AWS's Service Reference gives its operation, on the resources its request names, read from the
+generated tables like other services' requests: `GetGuardrail` on the guardrail its path names,
+`PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy` on the ARN the request
+names, and `TagResource`, `UntagResource` and `ListTagsForResource` on the guardrail or
+application inference profile ARN they carry. A `CreateGuardrail` or `CreateInferenceProfile`
+carrying tags also needs `bedrock:TagResource`, with `aws:RequestTag` and `aws:TagKeys` taken
+from those tags. The tables do not read the model an `InvokeModel` or
+`InvokeModelWithResponseStream` request names, so those two are checked on the account's
+`marketplace/model-endpoint/all-access` resource, the one type of their actions that names no
+model.
 
 Guardrails are listed by the Resource Groups Tagging API (resource type `bedrock:guardrail`)
 and Resource Explorer with their own tags, and `TagResources` / `UntagResources` there change

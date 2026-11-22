@@ -22,8 +22,6 @@ class SesTemplateNameIntegrationTest {
 
     private static final String V1_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String BLANK = "The template name must be specified.";
     private static final String TOO_LONG = "Template name cannot exceed 64 characters.";
 
@@ -82,7 +80,7 @@ class SesTemplateNameIntegrationTest {
     void v2_everyOperationRefusesTheName(String name, String message) {
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"" + name + "\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -93,7 +91,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .put("/v2/email/templates/{name}", name)
@@ -103,7 +101,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -112,7 +110,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()
@@ -122,7 +120,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateData\": \"{}\"}")
         .when()
             .post("/v2/email/templates/{name}/render", name)
@@ -149,7 +147,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"name probe\", \"TemplateContent\": {\"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -174,7 +172,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"name\\tprobe\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -199,7 +197,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -218,7 +216,7 @@ class SesTemplateNameIntegrationTest {
             .body(containsString("<TemplateName>" + name + "</TemplateName>"));
 
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()

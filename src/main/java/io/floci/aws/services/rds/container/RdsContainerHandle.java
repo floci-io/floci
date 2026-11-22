@@ -7,6 +7,17 @@ import java.io.Closeable;
  */
 public class RdsContainerHandle {
 
+    /**
+     * A PostgreSQL backend's superuser, and the password Floci set for it when this container started. The password
+     * is null when the superuser is the master user, which logs in with the master's own password.
+     */
+    public record PostgresSuperuser(String user, String password) {
+        @Override
+        public String toString() {
+            return "PostgresSuperuser[user=" + user + "]";
+        }
+    }
+
     private final String containerId;
     private final String runtimeId;
     private final String instanceId;
@@ -15,6 +26,7 @@ public class RdsContainerHandle {
     private final String storageKey;
     private final String containerKey;
     private Closeable logStream;
+    private volatile PostgresSuperuser postgresSuperuser;
 
     public RdsContainerHandle(String containerId, String instanceId, String host, int port) {
         this(containerId, instanceId, instanceId, host, port, null);
@@ -52,4 +64,6 @@ public class RdsContainerHandle {
     public String getContainerKey() { return containerKey; }
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+    public PostgresSuperuser getPostgresSuperuser() { return postgresSuperuser; }
+    public void setPostgresSuperuser(PostgresSuperuser postgresSuperuser) { this.postgresSuperuser = postgresSuperuser; }
 }

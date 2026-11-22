@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 /**
  * A partition offset to commit through a Kafka REST Proxy, in place of
@@ -6,5 +6,5 @@ package io.floci.aws.services.pipes;
  * client, {@code offset} is the next offset to consume (last delivered offset + 1), not the last
  * delivered offset itself.
  */
-record KafkaOffsetDto(String topic, int partition, long offset) {
+public record KafkaOffsetDto(String topic, int partition, long offset) {
 }

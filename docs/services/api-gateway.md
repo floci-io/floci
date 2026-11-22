@@ -767,6 +767,24 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 
 ---
 
+## IAM enforcement of management calls
+
+With IAM enforcement on, a v1 or v2 management call is authorized as AWS authorizes it, read from
+the generated tables like other services' requests. A route AWS authorizes by its HTTP method is
+checked as `apigateway:GET`, `POST`, `PUT`, `DELETE` or `PATCH` on the resource its own path names,
+`arn:aws:apigateway:<region>::<path>`, without the `/v2` of an HTTP or WebSocket API path:
+`GET /restapis/abc123/stages` acts on `arn:aws:apigateway:<region>::/restapis/abc123/stages`. The
+[ARN reference](https://docs.aws.amazon.com/apigateway/latest/developerguide/arn-format-reference.html)
+of the developer guide gives the ARN of each such path; where it gives one with an account
+(`/domainnameaccessassociations`), the account is the caller's. A path it gives no ARN for
+(`/sdktypes`, `/usageplans/<id>/usage`) acts on the guide's ARN format with that path as its
+resource path. A tagging route acts on `/tags/<arn>` with the ARN it tags URL-encoded, however the
+request sends it. A label's own `/` stays escaped in its segment, and
+`DeleteDomainNameAccessAssociation` acts on the association ARN its path carries. A route AWS
+authorizes as an action of its own, a portal's, a routing rule's or
+`RejectDomainNameAccessAssociation`'s, is checked as that action on the resources the Service
+Reference gives it.
+
 ## Partitions
 
 Edge-optimized APIs and custom domains (`EDGE`) exist only in the commercial partition: China

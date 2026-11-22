@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
@@ -24,8 +25,6 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetMessageSecurityV2IntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String CS = "cs-message-security";
     private static final String SMIME = "{\"SigningScheme\":{\"SmimeScheme\":{\"SignatureFormat\":\"DETACHED\"}}}";
     private static final String DEFAULT = "{\"SigningScheme\":{\"DefaultScheme\":{}}}";
@@ -154,7 +153,7 @@ class SesConfigurationSetMessageSecurityV2IntegrationTest {
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo(BAD_FORMAT_MESSAGE));
 
-        given().header("Authorization", AUTH_HEADER)
+        given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/cs-message-security-bad")
         .then().statusCode(404);
     }
@@ -188,19 +187,19 @@ class SesConfigurationSetMessageSecurityV2IntegrationTest {
     }
 
     private static ValidatableResponse create(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH_HEADER).body(body)
+        return given().contentType("application/json").header("Authorization", AUTH).body(body)
         .when().post("/v2/email/configuration-sets")
         .then();
     }
 
     private static ValidatableResponse update(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH_HEADER).body(body)
+        return given().contentType("application/json").header("Authorization", AUTH).body(body)
         .when().post("/v2/email/update-configuration-sets")
         .then();
     }
 
     private static ValidatableResponse get(String name) {
-        return given().header("Authorization", AUTH_HEADER)
+        return given().header("Authorization", AUTH)
         .when().get("/v2/email/configuration-sets/" + name)
         .then().statusCode(200);
     }

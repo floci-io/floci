@@ -3,6 +3,7 @@ package io.floci.aws.services.rds.proxy;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.services.rds.container.RdsBackendGate;
+import io.floci.aws.services.rds.container.RdsContainerHandle;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -86,6 +87,18 @@ public class RdsProxyManager {
                 masterPassword, dbName, passwordValidator, binding, endpointKind);
     }
 
+    /**
+     * The rdsadmin login of the runtime's current PostgreSQL container, which an IAM session is handed over from,
+     * or null where the master user is the container's superuser.
+     */
+    private RdsAuthProxy.HandoverLoginResolver handoverLogin(String backendRuntimeId) {
+        return () -> {
+            RdsContainerHandle.PostgresSuperuser superuser = containerManager.postgresHandoverLogin(backendRuntimeId);
+            return superuser == null ? null
+                    : new PostgresProtocolHandler.BackendLogin(superuser.user(), superuser.password());
+        };
+    }
+
     private void startProxy(String instanceId, String backendRuntimeId,
                             DatabaseEngine engine, boolean iamEnabled,
                             int proxyPort, String backendHost, int backendPort,
@@ -110,7 +123,7 @@ public class RdsProxyManager {
                 tlsCertificates, passwordValidator, rdsConfig.proxyHandshakeTimeoutMillis(),
                 rdsConfig.proxyBackendConnectTimeoutMillis(), rdsConfig.proxyMaxConnections(),
                 binding, username -> binding != null, backendGate, endpointKind,
-                () -> forceSsl.test(instanceId));
+                () -> forceSsl.test(instanceId), handoverLogin(backendRuntimeId));
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {

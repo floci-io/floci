@@ -31,9 +31,11 @@ jobs:
     # Each group runs its checks one after another, within their own @Timeout bounds, plus about twenty minutes for
     # compilation, the image and the prefetch; together they would exceed the 360 minutes a hosted runner gives one
     # job. standard holds every check but the EMR Docker runner's, 339 minutes. docker-runner holds
-    # EmrDockerRunnerNightlyIntegrationTest's eleven two-minute tests and two-minute setup, and
-    # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, 42 minutes. A check added,
-    # or a bound raised, raises its group's timeout with it, so a slow check fails with its own message.
+    # EmrDockerRunnerNightlyIntegrationTest's eleven two-minute tests and two-minute setup,
+    # EmrClusterShrinkNightlyIntegrationTest's sixteen-minute method and two-minute setup, and
+    # EmrContainersSparkNightlyIntegrationTest's three six-minute methods, eleven-minute method, two-minute setup before
+    # each and 21-minute image pull, 100 minutes. A check added, or a bound raised, raises its group's timeout with it,
+    # so a slow check fails with its own message.
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +43,7 @@ jobs:
           - group: standard
             timeout: 359
           - group: docker-runner
-            timeout: 62
+            timeout: 120
     timeout-minutes: ${{ matrix.timeout }}
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
@@ -73,7 +75,7 @@ jobs:
               mv selected.txt all-nightly.txt
             fi
           fi
-          runner='/(EmrDockerRunner|EmrClusterShrink)NightlyIntegrationTest$'
+          runner='/(EmrDockerRunner|EmrClusterShrink|EmrContainersSpark)NightlyIntegrationTest$'
           if [ "$GROUP" = "docker-runner" ]; then
             grep -E "$runner" all-nightly.txt > nightly.txt || true
           else

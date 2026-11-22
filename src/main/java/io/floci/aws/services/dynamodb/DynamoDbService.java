@@ -184,6 +184,7 @@ public class DynamoDbService {
     private DynamoDbStreamService streamService;
     private KinesisStreamingForwarder kinesisForwarder;
     private S3Service s3Service;
+    private DynamoDbTransactionConflicts transactionConflicts = DynamoDbTransactionConflicts.OFF;
     private final int vectorIndexAllocationSeconds;
     private final int vectorIndexBackfillSeconds;
     private static final long MAX_DYNAMODB_LIST_INDEX = 4_294_967_294L;
@@ -210,6 +211,13 @@ public class DynamoDbService {
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds(),
              config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
+        this.transactionConflicts = DynamoDbTransactionConflicts.of(
+                config.services().dynamodb().transactionConflictsEnabled());
+    }
+
+    /** Package-private for tests: the transaction conflict emulation this service applies. */
+    void useTransactionConflicts(DynamoDbTransactionConflicts transactionConflicts) {
+        this.transactionConflicts = transactionConflicts;
     }
 
     /** The item store the configured {@code item-layout} selects; package-private for tests. */
@@ -354,6 +362,7 @@ public class DynamoDbService {
     /** Emulator reset: drops the in-process item cache, locks and idempotency tokens, and stream state. */
     public void clearProcessState() {
         itemsByTable.clear();
+        transactionConflicts.clear();
         itemLocks.clear();
         txIdempotency.clear();
         pointInTimeRecovery.clear();
@@ -1166,7 +1175,7 @@ public class DynamoDbService {
         String canonicalTableName = canonicalTableName(region, tableName);
         requireActiveTable(regionKey(region, canonicalTableName));
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck, true);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -1185,7 +1194,7 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents) {
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null, false);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -1195,7 +1204,8 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents,
                                   Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                  Consumer<JsonNode> existingItemCheck) {
+                                  Consumer<JsonNode> existingItemCheck,
+                                  boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1208,6 +1218,9 @@ public class DynamoDbService {
         validateIndexKeyTypes(table, normalizedItem, false);
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> tableItems = itemsFor(storageKey, stagedItems, true);
 
             JsonNode existing = tableItems.get(itemKey);
@@ -1290,7 +1303,7 @@ public class DynamoDbService {
                                 String region, String returnValuesOnConditionCheckFailure,
                                 Consumer<JsonNode> existingItemCheck) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck, true);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1309,7 +1322,7 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null, false);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1319,7 +1332,8 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents,
                                          Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                         Consumer<JsonNode> existingItemCheck) {
+                                         Consumer<JsonNode> existingItemCheck,
+                                         boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1327,6 +1341,9 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, false);
             if (existingItemCheck != null) {
                 existingItemCheck.accept(items == null ? null : items.get(itemKey));
@@ -1404,7 +1421,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null,
-                UpdateSizeRule.UPDATE_ITEM, existingItemCheck);
+                UpdateSizeRule.UPDATE_ITEM, existingItemCheck, true);
     }
 
     UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1415,7 +1432,8 @@ public class DynamoDbService {
                                     UpdateSizeRule sizeRule) {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
-                conditionExpression, region, returnValuesOnConditionCheckFailure, true, sizeRule);
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null, sizeRule,
+                null, true);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1442,7 +1460,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
-                deferredStreamEvents, null, sizeRule, null);
+                deferredStreamEvents, null, sizeRule, null, false);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1454,7 +1472,8 @@ public class DynamoDbService {
                                              Consumer<Runnable> deferredStreamEvents,
                                              Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
                                              UpdateSizeRule sizeRule,
-                                             Consumer<JsonNode> existingItemCheck) {
+                                             Consumer<JsonNode> existingItemCheck,
+                                             boolean singleItemWrite) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1468,6 +1487,9 @@ public class DynamoDbService {
         }
 
         return withItemLock(storageKey, itemKey, () -> {
+            if (singleItemWrite) {
+                transactionConflicts.rejectSingleItemWrite(scopedItemsKey(storageKey), itemKey);
+            }
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
 
             // Get existing item or create new one from key
@@ -2170,11 +2192,15 @@ public class DynamoDbService {
         }
 
         List<ReentrantLock> acquired = new ArrayList<>(toAcquire.size());
+        List<DynamoDbTransactionConflicts.Item> held = List.of();
+        long holdDeadline = 0;
+        boolean committed = false;
         try {
             for (ReentrantLock lock : toAcquire.values()) {
                 lock.lock();
                 acquired.add(lock);
             }
+            rejectHeldParticipants(memberParticipants);
 
             List<Runnable> pendingStreamEvents = new ArrayList<>();
             Set<String> affectedStorageKeys = new LinkedHashSet<>();
@@ -2209,6 +2235,10 @@ public class DynamoDbService {
             if (hasFailed) {
                 throw new TransactionCanceledException(cancellationReasons);
             }
+            held = toAcquire.keySet().stream()
+                    .map(p -> new DynamoDbTransactionConflicts.Item(scopedItemsKey(p.storageKey()), p.itemKey()))
+                    .toList();
+            holdDeadline = transactionConflicts.hold(held);
             List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
                 if (transactItem.has("Put")) {
@@ -2216,14 +2246,14 @@ public class DynamoDbService {
                     String tableName = put.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     putItemInternal(tableName, put.get("Item"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged, null);
+                            pendingStreamEvents::add, staged, null, false);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Delete")) {
                     JsonNode del = transactItem.get("Delete");
                     String tableName = del.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     deleteItemInternal(tableName, del.get("Key"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged, null);
+                            pendingStreamEvents::add, staged, null, false);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Update")) {
                     JsonNode upd = transactItem.get("Update");
@@ -2234,7 +2264,7 @@ public class DynamoDbService {
                             upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null,
                             upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null,
                             "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged,
-                            UpdateSizeRule.FINISHED_ITEM, null);
+                            UpdateSizeRule.FINISHED_ITEM, null, false);
                     affectedStorageKeys.add(storageKey);
                 }
             }
@@ -2272,11 +2302,39 @@ public class DynamoDbService {
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
+            holdDeadline = transactionConflicts.settle(held, holdDeadline);
+            committed = true;
             return new AppliedTransactWrite(writeCapacity, replayCapacity);
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
                 acquired.get(i).unlock();
             }
+            transactionConflicts.release(held, holdDeadline, committed);
+        }
+    }
+
+    /**
+     * With transaction conflicts emulated, cancels a write transaction one of whose items another write
+     * transaction holds, with {@code TransactionConflict} at that item, before any condition is evaluated.
+     */
+    private void rejectHeldParticipants(List<TransactParticipant> memberParticipants) {
+        if (!transactionConflicts.enabled()) {
+            return;
+        }
+        List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
+        boolean conflicted = false;
+        for (TransactParticipant participant : memberParticipants) {
+            if (participant != null
+                    && transactionConflicts.busy(scopedItemsKey(participant.storageKey()), participant.itemKey())) {
+                conflicted = true;
+                reasons.add(new TransactionCanceledException.CancellationReason(
+                        DynamoDbTransactionConflicts.REASON, null, DynamoDbTransactionConflicts.MESSAGE));
+            } else {
+                reasons.add(new TransactionCanceledException.CancellationReason("", null));
+            }
+        }
+        if (conflicted) {
+            throw new TransactionCanceledException(reasons);
         }
     }
 
@@ -2578,9 +2636,18 @@ public class DynamoDbService {
                 JsonNode key = get.get("Key");
                 try {
                     JsonNode item = getItem(tableName, key, region);
+                    TableDefinition table = requireTableForItemCall(tableName, region);
+                    String itemsKey = scopedItemsKey(regionKey(region, canonicalTableName(region, tableName)));
+                    if (transactionConflicts.busy(itemsKey, buildItemKey(table, key, true))) {
+                        hasCancelled = true;
+                        results.add(null);
+                        cancelReasons.add(new TransactionCanceledException.CancellationReason(
+                                DynamoDbTransactionConflicts.REASON, null, DynamoDbTransactionConflicts.MESSAGE));
+                        continue;
+                    }
                     results.add(projectTransactGet(item, get));
                     capacity.merge(canonicalTableName(region, tableName),
-                            DynamoDbTransactCapacity.read(requireTableForItemCall(tableName, region), item, null),
+                            DynamoDbTransactCapacity.read(table, item, null),
                             DynamoDbWriteCapacity.Cost::plus);
                     cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
                 } catch (AwsException e) {

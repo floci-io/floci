@@ -28,11 +28,9 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesTemplatePagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-southeast-2/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-southeast-2");
     // A second region holding eleven templates, one more than the default page.
-    private static final String AUTH_ELEVEN =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-southeast-3/ses/aws4_request";
+    private static final String AUTH_ELEVEN = SesV2Requests.authFor("ap-southeast-3");
     private static final String V1_ROOT = "ListTemplatesResponse.ListTemplatesResult.";
 
     @Test

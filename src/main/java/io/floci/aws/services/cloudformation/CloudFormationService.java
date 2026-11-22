@@ -679,7 +679,8 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateGetStackOutputPlacement(resolvedTemplate);
+        validateGetStackOutputPlacement(resolvedTemplate, parameters, preflightStackName, preflightStackId,
+                region, accountId);
         validateResourceDependencies(resolvedTemplate, parameters, preflightStackName, preflightStackId,
                 region, accountId);
 
@@ -857,7 +858,8 @@ public class CloudFormationService implements ResourceProvider {
             // Compared as execution stores it: AWS::Include fragments read again and merged, then
             // the SAM transform applied with the stack's parameter values, which it can resolve
             // into the expansion. A fragment that changed in S3 is a change.
-            JsonNode template = awsIncludeProcessor.mergeIncludes(submittedTemplate);
+            JsonNode template = mergeAwsIncludes(submittedTemplate, given, region, ownerAccount(stack),
+                    stack.getStackName(), stack.getStackId());
             if (samTransformProcessor.hasSamTransform(template)) {
                 template = samTransformProcessor.expandSamTemplate(template,
                         samTransformParameters(template, given, region));
@@ -1108,7 +1110,8 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
             // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
             // an included fragment may itself carry SAM resources.
-            newTemplate = awsIncludeProcessor.mergeIncludes(newTemplate);
+            newTemplate = mergeAwsIncludes(newTemplate, cs.getParameters(), region, accountId,
+                    stack.getStackName(), stack.getStackId());
             if (samTransformProcessor.hasSamTransform(newTemplate)) {
                 // The deployed stack's template is always the SAM-expanded form (see
                 // executeTemplate); comparing the change set's raw SAM source against it would
@@ -1728,7 +1731,7 @@ public class CloudFormationService implements ResourceProvider {
                                                         Map<String, Boolean> conditions, JsonNode template) {
             return new CloudFormationTemplateEngine(accountId, region, stack.getStackName(), stack.getStackId(),
                     params, physicalIds, attributes, conditions, templateMappings(template), objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))), value -> value);
+                    exportResolver(accountId, region), value -> value);
         }
     }
 
@@ -2811,7 +2814,7 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
+    static Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
         Map<String, String> resolved = new HashMap<>(callerParams != null ? callerParams : Map.of());
         JsonNode paramDefs = template.path("Parameters");
         if (paramDefs.isObject()) {
@@ -2823,6 +2826,48 @@ public class CloudFormationService implements ResourceProvider {
                 }
             });
         }
+        return resolved;
+    }
+
+    private JsonNode mergeAwsIncludes(JsonNode template, Map<String, String> params, String region,
+                                      String accountId, String stackName, String stackId) {
+        if (!awsIncludeProcessor.containsAwsInclude(template)) {
+            return template;
+        }
+        return awsIncludeProcessor.mergeIncludes(template, includeParameters(template, params, region),
+                region, accountId, stackName, stackId, exportResolver(accountId, region));
+    }
+
+    /**
+     * The parameter values {@code AWS::Include} sees: the given ones over each {@code Default}, with
+     * readable {@code AWS::SSM::Parameter::Value<String>} parameters read from Parameter Store and
+     * unreadable ones omitted so an include that does not reference them still expands (for example
+     * during {@code DescribeChangeSet}) while a {@code Location} that does reference one is rejected
+     * as unresolved.
+     */
+    private Map<String, String> includeParameters(JsonNode template, Map<String, String> params, String region) {
+        Map<String, String> resolved = resolveDefaultParameters(template, params);
+        JsonNode paramDefs = template.path("Parameters");
+        if (!paramDefs.isObject()) {
+            return resolved;
+        }
+        paramDefs.fields().forEachRemaining(e -> {
+            if (!"AWS::SSM::Parameter::Value<String>".equals(e.getValue().path("Type").asText())) {
+                return;
+            }
+            String parameterName = resolved.get(e.getKey());
+            if (parameterName == null || parameterName.isBlank()) {
+                resolved.remove(e.getKey());
+                return;
+            }
+            try {
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, false, region).getValue());
+            } catch (AwsException ex) {
+                LOG.debugv("Omitting unreadable SSM parameter {0} from AWS::Include context: {1}",
+                        e.getKey(), ex.getMessage());
+                resolved.remove(e.getKey());
+            }
+        });
         return resolved;
     }
 
@@ -2917,7 +2962,8 @@ public class CloudFormationService implements ResourceProvider {
             // reference, unchanged, when the template carries no AWS::Include, which is what lets
             // the check below tell a real merge apart from a no-op one.
             JsonNode beforeInclude = template;
-            template = awsIncludeProcessor.mergeIncludes(template);
+            template = mergeAwsIncludes(template, params, region, accountId,
+                    stack.getStackName(), stack.getStackId());
             boolean includeMerged = template != beforeInclude;
 
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
@@ -3201,7 +3247,7 @@ public class CloudFormationService implements ResourceProvider {
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                    exportResolver(accountId, region),
                     value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                     (name, output, outputRegion, roleArn) ->
                             resolveStackOutput(accountId, name, output, outputRegion, roleArn),
@@ -4086,12 +4132,16 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private static Map<String, JsonNode> templateMappings(JsonNode template) {
+    static Map<String, JsonNode> templateMappings(JsonNode template) {
         Map<String, JsonNode> mappings = new HashMap<>();
         if (template != null) {
             template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
         }
         return mappings;
+    }
+
+    private Function<String, String> exportResolver(String accountId, String region) {
+        return name -> exports.get(accountExportKey(accountId, exportKey(region, name)));
     }
 
     /** An engine for one deployment's template: its parameters, conditions, mappings and resource types. */
@@ -4104,7 +4154,7 @@ public class CloudFormationService implements ResourceProvider {
         return new CloudFormationTemplateEngine(
                 accountId, region, stack.getStackName(),
                 stack.getStackId(), params, ids, attributes, conditions, mappings, objectMapper,
-                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                exportResolver(accountId, region),
                 value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                 (name, output, outputRegion, roleArn) ->
                         resolveStackOutput(accountId, name, output, outputRegion, roleArn),
@@ -5376,9 +5426,11 @@ public class CloudFormationService implements ResourceProvider {
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
         // without a value, or a Fn::GetStackOutput where the child's template may not hold one
         // (measured: the Child resource fails with the template error, and the parent rolls back).
+        String childStackId = childCreate ? newStackId(childStackName, region, accountId) : childStack.getStackId();
         try {
             requireParameterValues(childTemplate, childParams);
-            validateGetStackOutputPlacement(childTemplate);
+            validateGetStackOutputPlacement(childTemplate, childParams, childStackName,
+                    childStackId, region, accountId);
         } catch (AwsException e) {
             resource.setStatus("CREATE_FAILED");
             resource.setStatusReason(e.getMessage());
@@ -5386,7 +5438,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         if (childCreate) {
-            childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
+            childStack = newStack(childStackName, childStackId, region, accountId);
             childStack.setParentId(parentStack.getStackId());
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
@@ -5835,7 +5887,9 @@ public class CloudFormationService implements ResourceProvider {
      * {@code Export.Name}, neither of which may depend on another stack. A nested stack's template
      * is checked when the child is created, and the child's resource fails with the same message.
      */
-    private void validateGetStackOutputPlacement(String templateBody) {
+    private void validateGetStackOutputPlacement(String templateBody, Map<String, String> params,
+                                                 String stackName, String stackId, String region,
+                                                 String accountId) {
         JsonNode parsed;
         try {
             parsed = parseTemplate(templateBody);
@@ -5849,7 +5903,7 @@ public class CloudFormationService implements ResourceProvider {
         JsonNode template;
         try {
             // The rules hold for the template as processed: an AWS::Include fragment can carry it.
-            template = awsIncludeProcessor.mergeIncludes(parsed);
+            template = mergeAwsIncludes(parsed, params, region, accountId, stackName, stackId);
         } catch (AwsException e) {
             // A fragment that cannot be read fails the operation as the transform does, where the
             // includes are processed; the request itself is not refused for it on AWS.

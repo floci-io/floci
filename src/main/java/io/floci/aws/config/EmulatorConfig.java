@@ -1205,13 +1205,49 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
-         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
-         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         * How long a job run stays RUNNING before it completes in the {@code immediate} runner mode; 0, the default,
+         * completes a job run as soon as it is submitted.
          *
          * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
          */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs each job run's
+         * Spark job, its {@code spark-submit} or {@code spark-sql}, in a container of its release's EMR on EKS image.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /**
+         * The Docker network a {@code docker} job run's container joins; the global default when omitted.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_DOCKER_NETWORK
+         */
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses when it names no custom image, with {@code %s} standing for its
+         * release's container image tag, {@code emr-7.2.0:20240610} for {@code emr-7.2.0-20240610}, for example
+         * "registry.internal/emr-on-eks/spark/%s". If omitted, Floci uses the release's base image on Amazon ECR
+         * Public.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_IMAGE_TEMPLATE
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR on EKS driver a previous run of
+         * <em>this same</em> Floci left on the daemon before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface EmrServerlessServiceConfig {
@@ -1731,6 +1767,26 @@ public interface EmulatorConfig {
          */
         @WithDefault("1000")
         int streamMaxRecords();
+
+        /**
+         * Emulates the transaction conflicts DynamoDB reports under contention: a TransactWriteItems keeps its
+         * items busy for a few milliseconds, so a PutItem, UpdateItem or DeleteItem on one fails with
+         * TransactionConflictException and another TransactWriteItems or a TransactGetItems is cancelled with
+         * TransactionConflict. Off, overlapping transactions serialize instead. The native backend only.
+         * Env: FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED.
+         */
+        @WithDefault("false")
+        boolean transactionConflictsEnabled();
+
+        /**
+         * Whether the operations that AWS answers in a new order on each call do the same: the
+         * ReturnValues of PutItem, UpdateItem and DeleteItem, the Item of a failed condition check,
+         * TransactGetItems and the Item of a TransactWriteItems cancellation reason. Map keys and
+         * top-level attributes come back shuffled. False keeps the stored order. The native backend only.
+         * Env: FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER
+         */
+        @WithDefault("true")
+        boolean randomizeAttributeOrder();
 
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
@@ -3594,15 +3650,16 @@ public interface EmulatorConfig {
          * Maximum idle (warm) containers kept across all functions. When a release would push
          * the total past this, the least-recently-used idle container of any function is
          * stopped first, so the container that just ran (the most likely to run again) stays
-         * warm. {@code 0} disables the bound; a negative value is ignored with a warning and
-         * also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
+         * warm. The default, 128, keeps a stack of many functions from accumulating one warm
+         * container per function touched. {@code 0} disables the bound; a negative value is ignored
+         * with a warning and also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
          * containers are not counted: their ceiling is {@code region-concurrency-limit}, which
          * applies independently in each region, so peak container count is this cap plus the
          * in-flight invocations across every active region.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL
          */
-        @WithDefault("0")
+        @WithDefault("128")
         int warmPoolMaxTotal();
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
@@ -4533,6 +4590,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean eventsExitDetection();
+
+        /**
+         * Milliseconds between the reads of a long-lived service container's log (a database, a broker, a
+         * registry), which Floci reads on a timer instead of holding a follow stream open for the
+         * container's life. A line reaches the console and CloudWatch Logs up to this long after the
+         * container writes it. At least 100.
+         */
+        @WithDefault("1000")
+        int logPollIntervalMillis();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

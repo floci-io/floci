@@ -258,4 +258,34 @@ class ApplicationDefaultsTest {
         assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("eventsExitDetection")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
+
+    // Catches: log-poll-interval-millis missing from the shipped application.yml, or a yml value that
+    // silently disagrees with its @WithDefault fallback.
+    @Test
+    void productionConfigDeclaresTheContainerLogPollIntervalAtItsDefault() throws IOException, NoSuchMethodException {
+        JsonNode interval = productionConfig().path("floci").path("docker").path("log-poll-interval-millis");
+
+        assertFalse(interval.isMissingNode(), "log-poll-interval-millis should be declared in application.yml");
+        assertEquals(1000, interval.asInt());
+        assertEquals("1000", EmulatorConfig.DockerConfig.class.getMethod("logPollIntervalMillis")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
+    // Catches: warm-pool-max-total shipped unbounded again, so a stack of many functions keeps one
+    // warm container per function touched, or a yml value that disagrees with the @WithDefault.
+    @Test
+    void productionConfigBoundsTheLambdaWarmPoolTotalByDefault() throws IOException, NoSuchMethodException {
+        JsonNode maxTotal = productionConfig()
+                .path("floci").path("services").path("lambda").path("warm-pool-max-total");
+
+        assertFalse(maxTotal.isMissingNode(), "warm-pool-max-total should be declared in application.yml");
+        assertEquals(128, maxTotal.asInt());
+
+        WithDefault fallback = EmulatorConfig.LambdaServiceConfig.class
+                .getMethod("warmPoolMaxTotal")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "warmPoolMaxTotal should declare a fallback default");
+        assertEquals("128", fallback.value(),
+                "the @WithDefault must match application.yml, which wins over it");
+    }
 }

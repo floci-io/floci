@@ -49,6 +49,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -2332,90 +2333,116 @@ class ResourceArnBuilderTest {
         return builder.buildResources("dsql", operation, ctx, region, "000000000000", partition);
     }
 
+    /**
+     * Bedrock's requests are read from the generated table on the route they match: a resource-policy route acts on
+     * the resource whose ARN it carries, in its path or in its body's {@code resourceArn} for PutResourcePolicy, and a
+     * guardrail route on the guardrail its path names.
+     */
     @Test
-    void bedrockResourcePolicyRoutesResolveTheArnTheyCarry() {
+    void aBedrockRequestIsCheckedOnTheResourceItsRouteNames() {
         String guardrail = "arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456";
-        for (String method : List.of("GET", "DELETE")) {
-            when(ctx.getMethod()).thenReturn(method);
-            when(uriInfo.getPath()).thenReturn("/resource-policy/" + guardrail);
-            assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT), method);
+        // An SDK escapes a label's slashes, so the ARN is one segment of the path.
+        String encoded = "arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aguardrail%2Fabc123def456";
+        for (String[] call : List.of(new String[] {"GET", "GetResourcePolicy"},
+                new String[] {"DELETE", "DeleteResourcePolicy"})) {
+            when(ctx.getMethod()).thenReturn(call[0]);
+            request("/resource-policy/" + encoded);
+            assertEquals(List.of(guardrail), bedrock(call[1]), call[1]);
         }
         when(ctx.getMethod()).thenReturn("POST");
-        when(uriInfo.getPath()).thenReturn("/resource-policy");
+        request("/resource-policy");
         setJsonBody("{\"resourceArn\":\"" + guardrail + "\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        // A value that is not an ARN, and every other Bedrock route, name no resource.
+        assertEquals(List.of(guardrail), bedrock("PutResourcePolicy"));
+        // A value that is not an ARN names no resource.
         setJsonBody("{\"resourceArn\":\"abc123def456\",\"resourcePolicy\":\"{}\"}");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("*"), bedrock("PutResourcePolicy"));
         when(ctx.getMethod()).thenReturn("GET");
-        when(uriInfo.getPath()).thenReturn("/resource-policy/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
-        when(uriInfo.getPath()).thenReturn("/guardrails/abc123def456");
-        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        request("/resource-policy/abc123def456");
+        assertEquals(List.of("*"), bedrock("GetResourcePolicy"));
+        request("/guardrails/abc123def456");
+        assertEquals(List.of(guardrail), bedrock("GetGuardrail"));
     }
 
+    private List<String> bedrock(String operation) {
+        return builder.buildResources("bedrock", "bedrock:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /**
+     * API Gateway's requests are read from the generated table on the route they match: a route authorized as its HTTP
+     * method acts on the resource its own path names, with no account, the {@code /v2} of an HTTP or WebSocket API's
+     * left out. The router resolves dot segments and empty segments before the route is matched, which
+     * {@code ApiGatewayPathArnEnforcementIntegrationTest} covers through the server.
+     */
     @Test
-    void apiGatewayRoutesResolveThePathTheyNameWithNoAccount() {
+    void anApiGatewayRouteIsCheckedOnThePathItNames() {
+        when(ctx.getMethod()).thenReturn("GET");
         request("/restapis/abc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Each segment is decoded as the router decodes it, so an encoded id names the API it routes to.
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"), apiGateway("GetStages"));
+        // A label is decoded as the router decodes it, so an encoded id names the API it routes to.
         request("/restapis/%61bc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Dot segments are resolved after decoding, as the router resolves them.
-        request("/restapis/x/%2E%2E/abc123/stages");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/%2e/abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // Empty segments are dropped once the dots are resolved, as the router collapses them.
-        request("/restapis//abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/x/..//abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/restapis/x//../abc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/x/abc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/x/%2E%2E/a1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"), apiGateway("GetStages"));
+        // The guide's REST API row, where the Service Reference gives the HTTP API's stage.
+        request("/restapis/abc123/stages/prod");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod"), apiGateway("GetStage"));
         request("/restapis/");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"), apiGateway("GetRestApis"));
+        // A label's own slash or escape stays in its segment, so it cannot pass for a path of more segments.
+        request("/restapis/abc%2Fstages%2Fprod");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc%2Fstages%2Fprod"), apiGateway("GetRestApi"));
+        request("/restapis/abc%2525");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc%2525"), apiGateway("GetRestApi"));
+        // A path the guide publishes no row for is its own resource path.
+        request("/sdktypes");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/sdktypes"), apiGateway("GetSdkTypes"));
         // An HTTP or WebSocket API path's /v2 is not part of the resource it names.
         request("/v2/apis");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis"), apiGateway("GetApis"));
         request("/v2/apis/a1b2c3/stages/prod");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/prod"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/prod"), apiGateway("GetStage"));
         // A stage name keeps the characters it is written with, sent literally or encoded.
         request("/v2/apis/a1b2c3/stages/$default");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"), apiGateway("GetStage"));
         request("/v2/apis/a1b2c3/stages/%24default");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        request("/v2domains");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/v2domains"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
-        // A tagging route names the ARN it tags still encoded, as AWS names its Tags resource.
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"), apiGateway("GetStage"));
+        // A tagging route names the ARN it tags URL-encoded, as AWS names its Tags resource, however it is sent.
+        String tags = "arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3";
         request("/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of(tags), apiGateway("GetTags"));
         request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/a1b2c3");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of(tags), apiGateway("GetTags"));
         request("/tags/arn%3aaws%3aapigateway%3aus-east-1%3a%3a%2frestapis%2fabc123");
-        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"),
-                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/"
+                + "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"), apiGateway("GetTags"));
+        // The guide's domain name access associations carry the account.
+        request("/domainnameaccessassociations");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1:" + ACCOUNT + ":/domainnameaccessassociations"),
+                apiGateway("GetDomainNameAccessAssociations"));
         request("/restapis");
         assertEquals(List.of("arn:aws-us-gov:apigateway:us-gov-west-1::/restapis"),
-                builder.buildResources("apigateway", ctx, "us-gov-west-1", ACCOUNT, "aws-us-gov"));
+                builder.buildResources("apigateway", "apigateway:GetRestApis", ctx, "us-gov-west-1", ACCOUNT,
+                        "aws-us-gov"));
+    }
+
+    /** API Gateway's operations AWS authorizes as their method by several of its actions, and their own named ones. */
+    @Test
+    void anApiGatewayRouteOfSeveralActionsOrAnArnItCarriesIsCheckedAsTheTableReadsIt() {
+        // CreateRestApi is authorized by POST and PUT, and by UpdateRestApiPolicy for a policy: its route's own path.
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/restapis");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"), apiGateway("CreateRestApi"));
+        when(ctx.getMethod()).thenReturn("DELETE");
+        request("/restapis/abc123/stages/prod/cache/data");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod/cache/data"),
+                apiGateway("FlushStageCache"));
+        // A label holding the ARN of what the route acts on names that resource.
+        String association = "arn:aws:apigateway:us-east-1:" + ACCOUNT + ":/domainnameaccessassociations/domainname/"
+                + "private.example.com+abc123/vpcesource/vpce-0123456789abcdef0";
+        request("/domainnameaccessassociations/" + URLEncoder.encode(association, StandardCharsets.UTF_8));
+        assertEquals(List.of(association), apiGateway("DeleteDomainNameAccessAssociation"));
+    }
+
+    private List<String> apiGateway(String operation) {
+        return builder.buildResources("apigateway", "apigateway:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     /**

@@ -24,8 +24,7 @@ import static org.hamcrest.Matchers.notNullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesAccountDetailsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ca-central-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ca-central-1");
 
     @Test
     @Order(0)
@@ -249,7 +248,7 @@ class SesAccountDetailsV2IntegrationTest {
         // has no sandbox and runs no production-access review, so the top-level flag stays true
         // regardless of the value sent to PutAccountDetails, and it never appears inside Details. Use a
         // dedicated region so this is independent of the other ordered cases.
-        String euAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-2/ses/aws4_request";
+        String euAuth = SesV2Requests.authFor("eu-west-2");
         given().contentType("application/json").header("Authorization", euAuth)
                 .body("""
                     {"MailType":"MARKETING","WebsiteURL":"https://example.org",

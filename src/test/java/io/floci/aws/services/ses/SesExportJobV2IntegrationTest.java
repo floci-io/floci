@@ -39,8 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesExportJobV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-2/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("eu-west-2");
     private static final String SENDER = "export-sender@example.com";
 
     private static long midnightToday() {

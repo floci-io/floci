@@ -201,7 +201,7 @@ public class RedpandaManager {
         String region = regionResolver.regionOf(cluster.getClusterArn());
 
         String account = AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getDefaultAccountId());
-        Closeable logHandle = logStreamer.attachForAccount(
+        Closeable logHandle = logStreamer.attachPolledForAccount(
                 account, info.containerId(), logGroup, logStream, region, "msk:" + cluster.getClusterName());
         if (logHandle != null) {
             logStreams.put(clusterIdentityKey(cluster), logHandle);

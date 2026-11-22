@@ -13,8 +13,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesConfigurationSetNameIntegrationTest {
 
-    private static final String V2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String V1_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String SIXTY_FIVE =
@@ -23,7 +21,7 @@ class SesConfigurationSetNameIntegrationTest {
     @Test
     void v2_invalidCharacters_nameTheOffendingValue() {
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/configuration-sets/a.b")
         .then()
@@ -36,7 +34,7 @@ class SesConfigurationSetNameIntegrationTest {
     @Test
     void v2_lengthIsCheckedBeforeCharacters() {
         given()
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/configuration-sets/b." + SIXTY_FIVE)
         .then()
@@ -49,7 +47,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v2_createWithEmptyName_mustBeSpecified() {
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"ConfigurationSetName\": \"\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -63,7 +61,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v2_createWithInvalidName_rejectsBeforeStoring() {
         given()
             .contentType("application/json")
-            .header("Authorization", V2_AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"ConfigurationSetName\": \"bad name\"}")
         .when()
             .post("/v2/email/configuration-sets")
