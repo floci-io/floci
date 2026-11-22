@@ -137,6 +137,7 @@ floci:
     breaker-failure-threshold: 3             # Consecutive Docker call attempts (each retry counts) failing at the transport before Floci pings the daemon and fails calls fast if it is gone; 0 = off
     breaker-probe-interval-seconds: 5        # Seconds between pings while the daemon is unreachable
     max-concurrent-launches: 0               # Most container creates and starts at once; 0 = twice the CPUs, at least 4
+    events-exit-detection: false             # Watch Lambda exits through one Docker events stream instead of a wait per container
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

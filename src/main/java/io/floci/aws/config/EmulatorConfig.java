@@ -4527,6 +4527,14 @@ public interface EmulatorConfig {
         int maxConcurrentLaunches();
 
         /**
+         * Whether Lambda containers' exits are seen through one Docker events subscription for the whole
+         * daemon rather than one {@code /wait} stream per container, which saves each running container a
+         * streaming connection and a thread. Off by default while it proves itself.
+         */
+        @WithDefault("false")
+        boolean eventsExitDetection();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

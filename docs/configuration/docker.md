@@ -147,6 +147,18 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES`
 
+### Container exits through Docker events
+
+Each running Lambda container holds a streaming connection whose only job is to notice its runtime exiting, so an invocation reports `Runtime.ExitError` at once instead of waiting out its timeout. With `events-exit-detection` on, Floci watches every Lambda container's exit through one Docker events subscription instead, which saves each container that connection and its thread. After the subscription drops (a daemon restart, a lost connection), Floci subscribes again and inspects every watched container, so an exit in the gap is still reported. It is off by default while it proves itself:
+
+```yaml
+floci:
+  docker:
+    events-exit-detection: false
+```
+
+Environment variable: `FLOCI_DOCKER_EVENTS_EXIT_DETECTION`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
@@ -396,6 +408,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
 | `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
 | `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES` | `0` | Most container creates and starts sent to the daemon at once; `0` means twice the CPUs Floci sees, at least 4 |
+| `FLOCI_DOCKER_EVENTS_EXIT_DETECTION` | `false` | Watch Lambda containers' exits through one Docker events subscription instead of a wait stream per container |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
