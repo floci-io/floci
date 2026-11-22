@@ -3306,6 +3306,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * prevented from reusing", with no value meaning "IAM users are not prevented from reusing
      * previous passwords", so the window is that many superseded passwords.
      *
+     * <p>The sentence is this package's own and stays that way: AWS publishes no wording for a
+     * reused password and nothing records one, where the five rules of {@link PasswordRule} carry
+     * two recordings between them. A recording moves this one site.
+     *
      * <p>The password the profile currently holds is refused alongside them, which the reference
      * does not spell out. Reading it the other way makes a window of 1 refuse nothing a user
      * would attempt: it would leave setting a password to the value it already has allowed, and
@@ -3366,27 +3370,61 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * One rule of the account password policy, named the way AWS names it. A refusal carries one
+     * of these and no more, even where the password breaks several, so the rules are checked in
+     * the order a refusal names them: the length first, then the character classes in the order
+     * the policy declares them.
+     *
+     * <p>Two of the five are captured from a real account, both {@code PasswordPolicyViolation}
+     * 400 with a sender fault and both on {@code CreateLoginProfile}: the length on 2026-10-29,
+     * with the policy's own minimum substituted, and the symbol on 2026-11-11, which is wholly
+     * fixed text and names no symbol set. The three character classes left carry no recording and
+     * take the same shape, which is this emulator's reading rather than a measurement, and so is
+     * the order above. Neither recorded sentence ends in a period.
+     */
+    private enum PasswordRule {
+        MINIMUM_LENGTH,
+        UPPERCASE,
+        LOWERCASE,
+        NUMBER,
+        SYMBOL;
+
+        private String sentenceFor(AccountPasswordPolicy policy) {
+            return switch (this) {
+                case MINIMUM_LENGTH -> "a minimum length of " + policy.getMinimumPasswordLength();
+                case UPPERCASE -> "at least one uppercase letter";
+                case LOWERCASE -> "at least one lowercase letter";
+                case NUMBER -> "at least one number";
+                case SYMBOL -> "at least one symbol";
+            };
+        }
+
+        private boolean isBrokenBy(String password, AccountPasswordPolicy policy) {
+            return switch (this) {
+                case MINIMUM_LENGTH -> password.length() < policy.getMinimumPasswordLength();
+                case UPPERCASE -> policy.isRequireUppercaseCharacters()
+                        && password.chars().noneMatch(Character::isUpperCase);
+                case LOWERCASE -> policy.isRequireLowercaseCharacters()
+                        && password.chars().noneMatch(Character::isLowerCase);
+                case NUMBER -> policy.isRequireNumbers()
+                        && password.chars().noneMatch(Character::isDigit);
+                case SYMBOL -> policy.isRequireSymbols()
+                        && password.chars().allMatch(Character::isLetterOrDigit);
+            };
+        }
+
+        private AwsException refusal(AccountPasswordPolicy policy) {
+            return new AwsException("PasswordPolicyViolation",
+                    "Password should have " + sentenceFor(policy), 400);
+        }
+    }
+
     private void checkPasswordAgainstPolicy(String password, AccountPasswordPolicy policy) {
-        List<String> violations = new ArrayList<>();
-        if (password.length() < policy.getMinimumPasswordLength()) {
-            violations.add("a minimum length of " + policy.getMinimumPasswordLength());
-        }
-        if (policy.isRequireUppercaseCharacters() && password.chars().noneMatch(Character::isUpperCase)) {
-            violations.add("at least one uppercase letter");
-        }
-        if (policy.isRequireLowercaseCharacters() && password.chars().noneMatch(Character::isLowerCase)) {
-            violations.add("at least one lowercase letter");
-        }
-        if (policy.isRequireNumbers() && password.chars().noneMatch(Character::isDigit)) {
-            violations.add("at least one number");
-        }
-        if (policy.isRequireSymbols() && password.chars().allMatch(Character::isLetterOrDigit)) {
-            violations.add("at least one non-alphanumeric character");
-        }
-        if (!violations.isEmpty()) {
-            throw new AwsException("PasswordPolicyViolation",
-                    "Password does not conform to the account password policy. It must contain: "
-                            + String.join(", ", violations) + ".", 400);
+        for (PasswordRule rule : PasswordRule.values()) {
+            if (rule.isBrokenBy(password, policy)) {
+                throw rule.refusal(policy);
+            }
         }
     }
 

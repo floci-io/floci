@@ -778,6 +778,36 @@ rejected with `ValidationError`. The integer parameters (`MinimumPasswordLength`
 a malformed integer or a value other than `true`/`false` (case-insensitive) returns
 `ValidationError` rather than silently falling back to a default.
 
+#### What a refused password answers
+
+A password the policy refuses is `PasswordPolicyViolation` 400 with a sender fault, and the message
+names one rule and no more, even where the password breaks several. The sentence is
+`Password should have <rule>`, with no period at the end:
+
+| Rule | What the refusal says |
+|---|---|
+| `MinimumPasswordLength` | `Password should have a minimum length of <MinimumPasswordLength>` |
+| `RequireUppercaseCharacters` | `Password should have at least one uppercase letter` |
+| `RequireLowercaseCharacters` | `Password should have at least one lowercase letter` |
+| `RequireNumbers` | `Password should have at least one number` |
+| `RequireSymbols` | `Password should have at least one symbol` |
+
+Two of the five are recorded against a real account, both on `CreateLoginProfile`: the length on
+2026-10-29, where the policy's own configured minimum is substituted and nothing else in the
+sentence varies, and the symbol on 2026-11-11, which is wholly fixed text and names no symbol set,
+where this emulator used to enumerate one. The three character classes left carry no recording and
+take the same shape, which is a reading rather than a measurement.
+
+Which rule a refusal names when a password breaks more than one is recorded nowhere either, each
+recording having used a password that broke exactly one rule, so the order is fixed here and
+stated: the length first, then the character classes in the order the policy declares them. A
+password that is both too short and has no symbol is answered the length.
+
+The reuse window is the one refusal of the six that keeps a sentence of this emulator's own,
+`Password does not conform to the account password policy. It must not be the current password or
+one of the previous <PasswordReusePrevention> passwords.`, because AWS publishes no wording for a
+reused password and nothing records one. A recording moves that one sentence and nothing else.
+
 ### OIDC Identity Providers
 
 | Action | Description |
@@ -866,8 +896,9 @@ returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user wit
 wholesale replace. A password must be 1–128 characters from AWS's documented password character
 class, and when the account has an [account password policy](#account-password-policy) set, it is
 also checked against that policy's length and character-class requirements, with
-`PasswordPolicyViolation` returned on either action if it doesn't comply, naming the rule the
-password broke, which is also what `ChangePassword` answers for a new password. The password itself
+`PasswordPolicyViolation` returned on either action if it doesn't comply, naming the one rule the
+password broke in [the sentence AWS uses](#what-a-refused-password-answers), which is also what
+`ChangePassword` answers for a new password. The password itself
 is never echoed back by any of these actions, matching AWS.
 
 `ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
