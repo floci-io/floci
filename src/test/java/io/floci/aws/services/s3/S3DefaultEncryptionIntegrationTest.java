@@ -8,12 +8,16 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CopyObjectResponse;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyResponse;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,9 +49,12 @@ class S3DefaultEncryptionIntegrationTest {
 
     @AfterEach
     void deleteBucketsAndCloseClient() {
-        S3TestClients.deleteBucket(s3, bucket);
-        otherBuckets.forEach(other -> S3TestClients.deleteBucket(s3, other));
-        s3.close();
+        try {
+            S3TestClients.deleteBucket(s3, bucket);
+            otherBuckets.forEach(other -> S3TestClients.deleteBucket(s3, other));
+        } finally {
+            s3.close();
+        }
     }
 
     @Test
@@ -87,6 +94,65 @@ class S3DefaultEncryptionIntegrationTest {
         HeadObjectResponse head = head("multipart");
         assertEquals(ServerSideEncryption.AWS_KMS, head.serverSideEncryption());
         assertEquals(KMS_KEY, head.ssekmsKeyId());
+    }
+
+    @Test
+    void aMultipartUploadReportsTheDefaultInEveryResponse() {
+        useKmsDefault();
+        s3.putObject(r -> r.bucket(bucket).key("source"), RequestBody.fromString("source"));
+
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(r -> r.bucket(bucket).key("multipart"));
+        String uploadId = created.uploadId();
+        UploadPartResponse part = s3.uploadPart(r -> r.bucket(bucket).key("multipart").uploadId(uploadId)
+                .partNumber(1), RequestBody.fromString("part"));
+        UploadPartCopyResponse copied = s3.uploadPartCopy(r -> r.sourceBucket(bucket).sourceKey("source")
+                .destinationBucket(bucket).destinationKey("multipart").uploadId(uploadId).partNumber(2));
+
+        assertEquals(ServerSideEncryption.AWS_KMS, created.serverSideEncryption());
+        assertEquals(KMS_KEY, created.ssekmsKeyId());
+        assertEquals(ServerSideEncryption.AWS_KMS, part.serverSideEncryption());
+        assertEquals(KMS_KEY, part.ssekmsKeyId());
+        assertEquals(ServerSideEncryption.AWS_KMS, copied.serverSideEncryption());
+        assertEquals(KMS_KEY, copied.ssekmsKeyId());
+        s3.abortMultipartUpload(r -> r.bucket(bucket).key("multipart").uploadId(uploadId));
+    }
+
+    @Test
+    void aMultipartUploadKeepsTheDefaultItWasCreatedWith() {
+        useKmsDefault();
+        String uploadId = s3.createMultipartUpload(r -> r.bucket(bucket).key("multipart")).uploadId();
+        s3.putBucketEncryption(r -> r.bucket(bucket).serverSideEncryptionConfiguration(c -> c.rules(rule ->
+                rule.applyServerSideEncryptionByDefault(d -> d.sseAlgorithm(ServerSideEncryption.AES256)))));
+
+        UploadPartResponse part = s3.uploadPart(r -> r.bucket(bucket).key("multipart").uploadId(uploadId)
+                .partNumber(1), RequestBody.fromString("part"));
+        CompleteMultipartUploadResponse completed = s3.completeMultipartUpload(r -> r.bucket(bucket)
+                .key("multipart").uploadId(uploadId).multipartUpload(m -> m.parts(
+                        CompletedPart.builder().partNumber(1).eTag(part.eTag()).build())));
+
+        assertEquals(ServerSideEncryption.AWS_KMS, part.serverSideEncryption());
+        assertEquals(ServerSideEncryption.AWS_KMS, completed.serverSideEncryption());
+        assertEquals(KMS_KEY, completed.ssekmsKeyId());
+        HeadObjectResponse head = head("multipart");
+        assertEquals(ServerSideEncryption.AWS_KMS, head.serverSideEncryption());
+        assertEquals(KMS_KEY, head.ssekmsKeyId());
+    }
+
+    @Test
+    void aMultipartUploadWithAnExplicitHeaderReportsIt() {
+        useKmsDefault();
+
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(r -> r.bucket(bucket).key("multipart")
+                .serverSideEncryption(ServerSideEncryption.AES256));
+        String uploadId = created.uploadId();
+        UploadPartResponse part = s3.uploadPart(r -> r.bucket(bucket).key("multipart").uploadId(uploadId)
+                .partNumber(1), RequestBody.fromString("part"));
+
+        assertEquals(ServerSideEncryption.AES256, created.serverSideEncryption());
+        assertNull(created.ssekmsKeyId());
+        assertEquals(ServerSideEncryption.AES256, part.serverSideEncryption());
+        assertNull(part.ssekmsKeyId());
+        s3.abortMultipartUpload(r -> r.bucket(bucket).key("multipart").uploadId(uploadId));
     }
 
     @Test

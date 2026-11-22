@@ -4841,7 +4841,16 @@ public class S3Service implements Resettable, ResourceProvider {
             upload.setContentEncoding(objectOptions.getContentEncoding());
             upload.setCacheControl(objectOptions.getCacheControl());
             upload.setServerSideEncryption(normalizedServerSideEncryption);
-            upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
+            upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
+                    || "aws:kms:dsse".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
+            if (normalizedServerSideEncryption == null && customerKey == null) {
+                ObjectEncryption encryption = defaultEncryption(destination);
+                upload.setDefaultServerSideEncryption(encryption.algorithm());
+                upload.setDefaultSseKmsKeyId("aws:kms".equals(encryption.algorithm())
+                        || "aws:kms:dsse".equals(encryption.algorithm())
+                        ? encryption.kmsKeyId()
+                        : null);
+            }
             if (customerKey != null) {
                 upload.setSseCustomerAlgorithm(customerKey.algorithm());
                 upload.setSseCustomerKeyMd5(customerKey.keyMd5());
@@ -5368,8 +5377,8 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withContentDisposition(upload.getContentDisposition())
                                     .withContentEncoding(upload.getContentEncoding())
                                     .withCacheControl(upload.getCacheControl())
-                                    .withServerSideEncryption(upload.getServerSideEncryption())
-                                    .withSseKmsKeyId(upload.getSseKmsKeyId())
+                                    .withServerSideEncryption(upload.effectiveServerSideEncryption())
+                                    .withSseKmsKeyId(upload.effectiveSseKmsKeyId())
                                     .withAcl(upload.getAcl())
                                     .withGrantRead(upload.getGrantRead())
                                     .withGrantWrite(upload.getGrantWrite())
@@ -5634,7 +5643,7 @@ public class S3Service implements Resettable, ResourceProvider {
     /** The encryption condition keys of an upload's parts and completion: what it recorded when created. */
     public Map<String, List<String>> multipartEncryptionConditions(String bucket, String key, String uploadId) {
         MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
-        return S3ObjectActions.encryptionConditions(upload.getServerSideEncryption(), upload.getSseKmsKeyId());
+        return S3ObjectActions.encryptionConditions(upload.effectiveServerSideEncryption(), upload.effectiveSseKmsKeyId());
     }
 
     /** Checks a part or a completion against the bucket policy by the encryption its upload recorded. */
