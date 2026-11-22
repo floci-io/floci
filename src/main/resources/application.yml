@@ -445,6 +445,10 @@ floci:
     # Floci sees, at least 4. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.maxConcurrentLaunches: a value set here WINS over the annotation.
     max-concurrent-launches: 0
+    # FLOCI_DOCKER_EVENTS_EXIT_DETECTION: see Lambda containers exit through one Docker events
+    # subscription instead of a wait stream per container. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.eventsExitDetection: a value set here WINS over the annotation.
+    events-exit-detection: false
     # FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS: milliseconds between the reads of a long-lived service
     # container's log (databases, brokers, registries), read on a timer instead of a follow stream held
     # for the container's life; at least 100. Keep in step with the @WithDefault on

@@ -247,6 +247,18 @@ class ApplicationDefaultsTest {
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
 
+    // Catches: events-based exit detection switched on by default before it has proven itself, or the
+    // yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsEventsBasedExitDetectionOff() throws IOException, NoSuchMethodException {
+        JsonNode flag = productionConfig().path("floci").path("docker").path("events-exit-detection");
+
+        assertFalse(flag.isMissingNode(), "events-exit-detection should be declared in application.yml");
+        assertFalse(flag.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("eventsExitDetection")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
+
     // Catches: log-poll-interval-millis missing from the shipped application.yml, or a yml value that
     // silently disagrees with its @WithDefault fallback.
     @Test

@@ -13,6 +13,7 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerCapacityExceededException;
+import io.floci.aws.core.common.docker.DockerExitEvents;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
@@ -133,6 +134,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
     private final Ec2Service ec2Service;
+    /** When off, each container's exit is watched with its own wait stream (LambdaExitWatcher). */
+    private final DockerExitEvents exitEvents;
     private final LambdaContainerReconciler containerReconciler;
     /** The VPC address each VpcConfig function's container holds, returned once it is removed. */
     private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
@@ -151,7 +154,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                              LambdaLayerService layerService,
                              LaunchedContainerAwsEnv awsEnv,
                              LambdaExecutionRoleCredentials executionRoleCredentials,
-                             Ec2Service ec2Service) {
+                             Ec2Service ec2Service,
+                             DockerExitEvents exitEvents) {
+        this.exitEvents = exitEvents;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.streamingDocker = streamingDocker;
@@ -459,9 +464,23 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Now start the container with code in place
         joinVpcNetwork(fn, containerId, lambdaAccountId, lambdaRegion);
-        lifecycleManager.startCreated(containerId, spec);
+        boolean exitByEvents = exitEvents.enabled();
+        if (exitByEvents) {
+            // Events report only what happens after the subscription, so register before the start.
+            exitEvents.register(containerId, runtimeApiServer::handleRuntimeProcessExited);
+        }
+        try {
+            lifecycleManager.startCreated(containerId, spec);
+        } catch (RuntimeException e) {
+            if (exitByEvents) {
+                exitEvents.unregister(containerId);
+            }
+            throw e;
+        }
         runtimeApiServer.markContainerStarted();
-        watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
+        if (!exitByEvents) {
+            watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
+        }
 
         // Extensions can log as soon as they start, which is before the container's own log stream
         // is attached below. Create the group/stream up front so those early lines are not dropped

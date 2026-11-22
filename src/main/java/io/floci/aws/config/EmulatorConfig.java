@@ -4584,6 +4584,14 @@ public interface EmulatorConfig {
         int maxConcurrentLaunches();
 
         /**
+         * Whether Lambda containers' exits are seen through one Docker events subscription for the whole
+         * daemon rather than one {@code /wait} stream per container, which saves each running container a
+         * streaming connection and a thread. Off by default while it proves itself.
+         */
+        @WithDefault("false")
+        boolean eventsExitDetection();
+
+        /**
          * Most containers a service may run at once, keyed by its {@code io.floci.service} label
          * ({@code lambda}, {@code rds}, {@code elasticache}, ...). A create past it fails at once with the
          * capacity or limit error that service's API declares (Lambda's {@code TooManyRequestsException},
