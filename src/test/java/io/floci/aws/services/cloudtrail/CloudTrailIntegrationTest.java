@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CloudTrailIntegrationTest {
 
     private static final String CT_TARGET = "CloudTrail_20131101.";
+    private static final String EMPTY_HISTORY_ACCOUNT = "246813579024";
     private static final String JSON11 = "application/x-amz-json-1.1";
 
     @Inject
@@ -195,6 +196,49 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
+    void lookupEventsRefusesMalformedTimeBoundsAndLookupAttributes() {
+        invokeCloudTrail("LookupEvents", "{\"StartTime\":\"2026-01-01\"}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"EndTime\":true}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":{}}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents", "{\"LookupAttributes\":[\"EventName\"]}")
+            .then().statusCode(400).body(containsString("SerializationException"));
+        invokeCloudTrail("LookupEvents",
+                "{\"LookupAttributes\":[{\"AttributeKey\":\"EventName\",\"AttributeValue\":\"\"}]}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidLookupAttributesException"))
+                .body("message", equalTo("Lookup attribute key is invalid"));
+    }
+
+    @Test
+    void lookupEventsAnswersAwsFixedRejectionMessages() {
+        invokeCloudTrail("LookupEvents", "{\"StartTime\":1790000000,\"EndTime\":1780000000}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidTimeRangeException"))
+                .body("message", equalTo("The start time precedes the end time."));
+        invokeCloudTrail("LookupEvents", "{\"NextToken\":\"not-a-real-token\"}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidNextTokenException"))
+                .body("message", equalTo("Can't decrypt marker"));
+        invokeCloudTrail("LookupEvents", "{\"EventCategory\":\"not-a-category\"}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidEventCategoryException"))
+                .body("message", equalTo("Invalid event category specified."));
+        invokeCloudTrail("LookupEvents",
+                "{\"LookupAttributes\":[{\"AttributeKey\":\"NotARealAttributeKey\",\"AttributeValue\":\"x\"}]}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidLookupAttributesException"))
+                .body("message", equalTo("Lookup attribute key cannot be null or empty."));
+        invokeCloudTrail("LookupEvents",
+                "{\"LookupAttributes\":[{\"AttributeKey\":\"ReadOnly\",\"AttributeValue\":\"maybe\"}]}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidLookupAttributesException"))
+                .body("message", equalTo("Lookup attribute key is invalid"));
+    }
+
+    @Test
     void lookupEventsReturnsEmptyEventPage() {
         invokeCloudTrail("LookupEvents", """
                 {
@@ -211,47 +255,47 @@ class CloudTrailIntegrationTest {
 
     @Test
     void lookupEventsAcceptsOmittedAndPositiveMaxResults() {
-        invokeCloudTrail("LookupEvents", "{}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":null}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":null}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":50}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":50}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":51}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":51}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1000}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1000}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1001}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1001}")
             .then().statusCode(200).body("Events", hasSize(0));
     }
 
     @Test
     void lookupEventsCoercesFractionalMaxResultsLikeTheSdkParser() {
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":0.5}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":0.5}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of 0 is invalid."));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":-0.5}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":-0.5}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of 0 is invalid."));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1.5}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1.5}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":50.9}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":50.9}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1000.5}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1000.5}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":2147483648}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":2147483648}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":-2147483649}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":-2147483649}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of -2147483648 is invalid."));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":1e309}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":1e309}")
             .then().statusCode(200).body("Events", hasSize(0));
-        invokeCloudTrail("LookupEvents", "{\"MaxResults\":-1e309}")
+        invokeCloudTrailInAnEmptyAccount("LookupEvents", "{\"MaxResults\":-1e309}")
             .then().statusCode(400)
                 .body(containsString("InvalidMaxResultsException"))
                 .body(containsString("A max results value of -2147483648 is invalid."));
@@ -564,6 +608,17 @@ class CloudTrailIntegrationTest {
     }
 
     // --- Helpers ---
+
+    /** The MaxResults checks run in an account no test writes to, so its history stays empty. */
+    private static Response invokeCloudTrailInAnEmptyAccount(String action, String body) {
+        return given()
+            .header("X-Amz-Target", CT_TARGET + action)
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + EMPTY_HISTORY_ACCOUNT
+                    + "/20260101/us-east-1/cloudtrail/aws4_request, SignedHeaders=host, Signature=0")
+            .contentType(JSON11)
+            .body(body)
+        .when().post("/");
+    }
 
     private static Response invokeCloudTrail(String action, String body) {
         return given()
