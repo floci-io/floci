@@ -274,10 +274,13 @@ def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_aft
     assert r.with_parent_ids([instance, made], formats, ["instance", "set"], members("InstanceArn", "Name")) == [
         instance, {"type": "set", "fill": {"InstanceId": "InstanceArn"}, "arnOf": {"InstanceArn": "instance"},
                    "made": True}]
-    # Not from a type the action does not act on, a member in a structure, or with two ARN members to pick from,
-    # and not over a variable a member fills already.
+    # Not from a type the action does not act on, a member in a structure or a list's elements (keyed by its path, as
+    # RAM's permissionTemplateParameters[].permissionArn is), or with two ARN members to pick from, and not over a
+    # variable a member fills already.
     assert r.with_parent_ids([made], formats, ["set"], members("InstanceArn")) == [made]
     assert r.with_parent_ids([made], formats, ["instance", "set"], {"InstanceArn": "Config.InstanceArn"}) == [made]
+    for path in ("Config.InstanceArn", "Configs[].InstanceArn"):
+        assert r.with_parent_ids([made], formats, ["instance", "set"], {path: path}) == [made]
     assert r.with_parent_ids([made], formats, ["instance", "set"],
                              members("InstanceArn", "SourceInstanceArn")) == [made]
     filled = {"type": "set", "fill": {"InstanceId": "InstanceId"}}

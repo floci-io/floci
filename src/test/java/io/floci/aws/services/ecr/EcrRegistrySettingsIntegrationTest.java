@@ -73,15 +73,19 @@ class EcrRegistrySettingsIntegrationTest {
 
         String rules = "{\"replicationConfiguration\":{\"rules\":[{\"destinations\":[{\"region\":\"us-west-2\","
                 + "\"registryId\":\"000000000000\"}],\"repositoryFilters\":[{\"filter\":\"prod\","
-                + "\"filterType\":\"PREFIX_MATCH\"}]},{\"destinations\":[{\"region\":\"eu-west-1\","
+                + "\"filterType\":\"PREFIX_MATCH\"}],\"deleteReplication\":{\"enabled\":true}},"
+                + "{\"destinations\":[{\"region\":\"eu-west-1\","
                 + "\"registryId\":\"111111111111\"}]}]}}";
         call("PutReplicationConfiguration", rules, region).statusCode(200)
                 .body("replicationConfiguration.rules", hasSize(2))
-                .body("replicationConfiguration.rules[0].repositoryFilters[0].filter", equalTo("prod"));
+                .body("replicationConfiguration.rules[0].repositoryFilters[0].filter", equalTo("prod"))
+                .body("replicationConfiguration.rules[0].deleteReplication.enabled", equalTo(true));
         call("DescribeRegistry", "{}", region).statusCode(200)
                 .body("replicationConfiguration.rules[0].destinations[0].region", equalTo("us-west-2"))
                 .body("replicationConfiguration.rules[1].destinations[0].registryId", equalTo("111111111111"))
-                .body("replicationConfiguration.rules[1].repositoryFilters", equalTo(null));
+                .body("replicationConfiguration.rules[0].deleteReplication.enabled", equalTo(true))
+                .body("replicationConfiguration.rules[1].repositoryFilters", equalTo(null))
+                .body("replicationConfiguration.rules[1].deleteReplication", equalTo(null));
 
         call("PutReplicationConfiguration", "{\"replicationConfiguration\":{\"rules\":[{\"destinations\":"
                 + "[{\"region\":\"us-west-2\",\"registryId\":\"123\"}]}]}}", region).statusCode(400)

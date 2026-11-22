@@ -1,6 +1,6 @@
 {
   "source": "https://servicereference.us-east-1.amazonaws.com/v1/dynamodb/dynamodb.json",
-  "botocore": "botocore 1.43.118 (installed package)",
+  "botocore": "botocore 1.44.9 (local/aws/botocore)",
   "actions": {
     "dynamodb:AssociateTableReplica": [
       "aws:ResourceTag/${TagKey}"
@@ -340,6 +340,17 @@
       "dynamodb:ReturnValues": [],
       "dynamodb:Select": []
     },
+    "CancelBulkOperation": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
     "CreateBackup": {
       "dynamodb:Attributes": [],
       "dynamodb:EnclosingOperation": [],
@@ -437,6 +448,17 @@
       "dynamodb:Select": []
     },
     "DescribeBackup": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeBulkOperation": {
       "dynamodb:Attributes": [],
       "dynamodb:EnclosingOperation": [],
       "dynamodb:FisActionId": [],
@@ -724,6 +746,17 @@
       "dynamodb:ReturnValues": [],
       "dynamodb:Select": []
     },
+    "ListBulkOperations": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
     "ListContributorInsights": {
       "dynamodb:Attributes": [],
       "dynamodb:EnclosingOperation": [],
@@ -924,6 +957,17 @@
         "IndexName",
         "ProjectionExpression"
       ]
+    },
+    "StartBulkPutItems": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
     },
     "TagResource": {
       "dynamodb:Attributes": [

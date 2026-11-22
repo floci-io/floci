@@ -22,9 +22,14 @@ public class RegistrySettings {
     @RegisterForReflection
     public record ReplicationDestination(String region, String registryId) {}
 
-    /** One replication rule: where to copy, and which repositories. */
+    /** Whether a replication rule replicates image deletions and tag removals as well. */
     @RegisterForReflection
-    public record ReplicationRule(List<ReplicationDestination> destinations, List<RepositoryFilter> repositoryFilters) {}
+    public record DeleteReplication(boolean enabled) {}
+
+    /** One replication rule: where to copy, which repositories, and whether deletions follow. */
+    @RegisterForReflection
+    public record ReplicationRule(List<ReplicationDestination> destinations, List<RepositoryFilter> repositoryFilters,
+                                  DeleteReplication deleteReplication) {}
 
     /** One scanning rule: how often, and which repositories. */
     @RegisterForReflection

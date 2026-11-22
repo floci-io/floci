@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_eks_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "ActivateCertificateAuthority": "ActivateCertificateAuthorityRequest",
@@ -273,6 +273,12 @@
       "type": "structure",
       "members": {
         "tier": "ProvisionedControlPlaneTier"
+      }
+    },
+    "CrdManagementConfiguration": {
+      "type": "structure",
+      "members": {
+        "managed": "BoxedBoolean"
       }
     },
     "CreateAccessConfigRequest": {
@@ -548,7 +554,8 @@
     "ElasticLoadBalancing": {
       "type": "structure",
       "members": {
-        "enabled": "BoxedBoolean"
+        "enabled": "BoxedBoolean",
+        "gatewayApi": "GatewayApiConfiguration"
       }
     },
     "EncryptionConfig": {
@@ -582,6 +589,12 @@
     "FargateProfileSelectors": {
       "type": "list",
       "member": "FargateProfileSelector"
+    },
+    "GatewayApiConfiguration": {
+      "type": "structure",
+      "members": {
+        "crds": "CrdManagementConfiguration"
+      }
     },
     "HorizontalPodAutoscalerControllerConfigRequest": {
       "type": "structure",

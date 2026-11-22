@@ -2256,7 +2256,7 @@ class EcrServiceTest {
     private static RegistrySettings.ReplicationRule replicateTo(String region, String registryId, String prefix) {
         return new RegistrySettings.ReplicationRule(
                 List.of(new RegistrySettings.ReplicationDestination(region, registryId)),
-                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")));
+                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")), null);
     }
 
     private static RegistrySettings.ScanningRule scan(String frequency, String filter) {

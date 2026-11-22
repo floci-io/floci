@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_athena_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "BatchGetNamedQuery": "BatchGetNamedQueryInput",
@@ -14,12 +14,14 @@
     "CreateNotebook": "CreateNotebookInput",
     "CreatePreparedStatement": "CreatePreparedStatementInput",
     "CreatePresignedNotebookUrl": "CreatePresignedNotebookUrlRequest",
+    "CreateSystemTableConfiguration": "CreateSystemTableConfigurationInput",
     "CreateWorkGroup": "CreateWorkGroupInput",
     "DeleteCapacityReservation": "DeleteCapacityReservationInput",
     "DeleteDataCatalog": "DeleteDataCatalogInput",
     "DeleteNamedQuery": "DeleteNamedQueryInput",
     "DeleteNotebook": "DeleteNotebookInput",
     "DeletePreparedStatement": "DeletePreparedStatementInput",
+    "DeleteSystemTableConfiguration": "DeleteSystemTableConfigurationInput",
     "DeleteWorkGroup": "DeleteWorkGroupInput",
     "ExportNotebook": "ExportNotebookInput",
     "GetCalculationExecution": "GetCalculationExecutionRequest",
@@ -39,6 +41,7 @@
     "GetSession": "GetSessionRequest",
     "GetSessionEndpoint": "GetSessionEndpointRequest",
     "GetSessionStatus": "GetSessionStatusRequest",
+    "GetSystemTableConfiguration": "GetSystemTableConfigurationInput",
     "GetTableMetadata": "GetTableMetadataInput",
     "GetWorkGroup": "GetWorkGroupInput",
     "ImportNotebook": "ImportNotebookInput",
@@ -55,6 +58,7 @@
     "ListPreparedStatements": "ListPreparedStatementsInput",
     "ListQueryExecutions": "ListQueryExecutionsInput",
     "ListSessions": "ListSessionsRequest",
+    "ListSystemTableStatuses": "ListSystemTableStatusesInput",
     "ListTableMetadata": "ListTableMetadataInput",
     "ListTagsForResource": "ListTagsForResourceInput",
     "ListWorkGroups": "ListWorkGroupsInput",
@@ -73,6 +77,7 @@
     "UpdateNotebook": "UpdateNotebookInput",
     "UpdateNotebookMetadata": "UpdateNotebookMetadataInput",
     "UpdatePreparedStatement": "UpdatePreparedStatementInput",
+    "UpdateSystemTableConfiguration": "UpdateSystemTableConfigurationInput",
     "UpdateWorkGroup": "UpdateWorkGroupInput"
   },
   "shapes": {
@@ -316,6 +321,18 @@
         "SessionId": "SessionId"
       }
     },
+    "CreateSystemTableConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "TableName"
+      ],
+      "members": {
+        "ClientRequestToken": "IdempotencyToken",
+        "TableName": "SystemTableName",
+        "KmsKeyArn": "KmsKeyArn",
+        "Tags": "TagList"
+      }
+    },
     "CreateWorkGroupInput": {
       "type": "structure",
       "required": [
@@ -345,6 +362,18 @@
         "HIVE",
         "FEDERATED"
       ]
+    },
+    "DatabaseAttributes": {
+      "type": "string",
+      "enum": [
+        "NAME"
+      ]
+    },
+    "DatabaseAttributesList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "DatabaseAttributes"
     },
     "DatabaseString": {
       "type": "string",
@@ -402,6 +431,15 @@
       "members": {
         "StatementName": "StatementName",
         "WorkGroup": "WorkGroupName"
+      }
+    },
+    "DeleteSystemTableConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "TableName"
+      ],
+      "members": {
+        "TableName": "SystemTableName"
       }
     },
     "DeleteWorkGroupInput": {
@@ -658,6 +696,15 @@
         "SessionId": "SessionId"
       }
     },
+    "GetSystemTableConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "TableName"
+      ],
+      "members": {
+        "TableName": "SystemTableName"
+      }
+    },
     "GetTableMetadataInput": {
       "type": "structure",
       "required": [
@@ -725,7 +772,13 @@
       "type": "string",
       "min": 1,
       "max": 2048,
-      "pattern": "^arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:key/?[a-zA-Z_0-9+=,.@\\-_/]+$|^arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:alias/?[a-zA-Z_0-9+=,.@\\-_/]+$|^alias/[a-zA-Z0-9/_-]+$|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+      "pattern": "^(arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:key/?[a-zA-Z_0-9+=,.@\\-_/]+|arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:alias/?[a-zA-Z_0-9+=,.@\\-_/]+|alias/[a-zA-Z0-9/_-]+|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$"
+    },
+    "KmsKeyArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "^arn:aws[a-z\\-]*:kms:[a-z0-9\\-]+:\\d{12}:(key/(mrk-)?[0-9a-f\\-]+|alias/[a-zA-Z0-9/_\\-]+)$"
     },
     "ListApplicationDPUSizesInput": {
       "type": "structure",
@@ -770,7 +823,8 @@
         "CatalogName": "CatalogNameString",
         "NextToken": "Token",
         "MaxResults": "MaxDatabasesCount",
-        "WorkGroup": "WorkGroupName"
+        "WorkGroup": "WorkGroupName",
+        "AttributesToGet": "DatabaseAttributesList"
       }
     },
     "ListEngineVersionsInput": {
@@ -854,6 +908,13 @@
         "NextToken": "SessionManagerToken"
       }
     },
+    "ListSystemTableStatusesInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxSystemTableStatusesCount"
+      }
+    },
     "ListTableMetadataInput": {
       "type": "structure",
       "required": [
@@ -866,7 +927,8 @@
         "Expression": "ExpressionString",
         "NextToken": "Token",
         "MaxResults": "MaxTableMetadataCount",
-        "WorkGroup": "WorkGroupName"
+        "WorkGroup": "WorkGroupName",
+        "AttributesToGet": "TableAttributesList"
       }
     },
     "ListTagsForResourceInput": {
@@ -1020,6 +1082,11 @@
       "type": "integer",
       "min": 1,
       "max": 100
+    },
+    "MaxSystemTableStatusesCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
     },
     "MaxTableMetadataCount": {
       "type": "integer",
@@ -1331,6 +1398,48 @@
     "String": {
       "type": "string"
     },
+    "SystemTableName": {
+      "type": "string",
+      "enum": [
+        "ALL"
+      ]
+    },
+    "SystemTableStatus": {
+      "type": "structure",
+      "required": [
+        "TableName",
+        "Enabled"
+      ],
+      "members": {
+        "TableName": "SystemTableType",
+        "Enabled": "BoxedBoolean"
+      }
+    },
+    "SystemTableStatusList": {
+      "type": "list",
+      "min": 0,
+      "max": 50,
+      "member": "SystemTableStatus"
+    },
+    "SystemTableType": {
+      "type": "string",
+      "enum": [
+        "QUERY_EXECUTIONS"
+      ]
+    },
+    "TableAttributes": {
+      "type": "string",
+      "enum": [
+        "NAME",
+        "TABLE_TYPE"
+      ]
+    },
+    "TableAttributesList": {
+      "type": "list",
+      "min": 1,
+      "max": 2,
+      "member": "TableAttributes"
+    },
     "Tag": {
       "type": "structure",
       "members": {
@@ -1475,6 +1584,16 @@
         "Description": "DescriptionString"
       }
     },
+    "UpdateSystemTableConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "TableName"
+      ],
+      "members": {
+        "TableName": "SystemTableName",
+        "KmsKeyArn": "KmsKeyArn"
+      }
+    },
     "UpdateWorkGroupInput": {
       "type": "structure",
       "required": [
@@ -1504,7 +1623,8 @@
         "CustomerContentEncryptionConfiguration": "CustomerContentEncryptionConfiguration",
         "EnableMinimumEncryptionConfiguration": "BoxedBoolean",
         "IdentityCenterConfiguration": "IdentityCenterConfiguration",
-        "QueryResultsS3AccessGrantsConfiguration": "QueryResultsS3AccessGrantsConfiguration"
+        "QueryResultsS3AccessGrantsConfiguration": "QueryResultsS3AccessGrantsConfiguration",
+        "SystemTableStatuses": "SystemTableStatusList"
       }
     },
     "WorkGroupConfigurationUpdates": {

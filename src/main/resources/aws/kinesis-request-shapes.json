@@ -1,20 +1,25 @@
 {
   "_source": {
     "generator": "tools/aws/regen_kinesis_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
+    "AcknowledgeDeadLetterQueueRecords": "AcknowledgeDeadLetterQueueRecordsInput",
+    "AcknowledgeQueueRecords": "AcknowledgeQueueRecordsInput",
     "AddTagsToStream": "AddTagsToStreamInput",
     "CreateChannel": "CreateChannelInput",
+    "CreateQueue": "CreateQueueInput",
     "CreateStream": "CreateStreamInput",
     "DecreaseStreamRetentionPeriod": "DecreaseStreamRetentionPeriodInput",
     "DeleteChannel": "DeleteChannelInput",
+    "DeleteQueue": "DeleteQueueInput",
     "DeleteResourcePolicy": "DeleteResourcePolicyInput",
     "DeleteStream": "DeleteStreamInput",
     "DeregisterStreamConsumer": "DeregisterStreamConsumerInput",
     "DescribeAccountSettings": "DescribeAccountSettingsInput",
     "DescribeChannel": "DescribeChannelInput",
     "DescribeLimits": "DescribeLimitsInput",
+    "DescribeQueue": "DescribeQueueInput",
     "DescribeStream": "DescribeStreamInput",
     "DescribeStreamConsumer": "DescribeStreamConsumerInput",
     "DescribeStreamSummary": "DescribeStreamSummaryInput",
@@ -25,6 +30,7 @@
     "GetShardIterator": "GetShardIteratorInput",
     "IncreaseStreamRetentionPeriod": "IncreaseStreamRetentionPeriodInput",
     "ListChannels": "ListChannelsInput",
+    "ListQueues": "ListQueuesInput",
     "ListShards": "ListShardsInput",
     "ListStreamConsumers": "ListStreamConsumersInput",
     "ListStreams": "ListStreamsInput",
@@ -34,8 +40,11 @@
     "PutRecord": "PutRecordInput",
     "PutRecords": "PutRecordsInput",
     "PutResourcePolicy": "PutResourcePolicyInput",
+    "ReceiveDeadLetterQueueRecords": "ReceiveDeadLetterQueueRecordsInput",
+    "ReceiveQueueRecords": "ReceiveQueueRecordsInput",
     "RegisterStreamConsumer": "RegisterStreamConsumerInput",
     "RemoveTagsFromStream": "RemoveTagsFromStreamInput",
+    "RestoreDeadLetterQueueRecords": "RestoreDeadLetterQueueRecordsInput",
     "SplitShard": "SplitShardInput",
     "StartStreamEncryption": "StartStreamEncryptionInput",
     "StopStreamEncryption": "StopStreamEncryptionInput",
@@ -44,13 +53,68 @@
     "UntagResource": "UntagResourceInput",
     "UpdateAccountSettings": "UpdateAccountSettingsInput",
     "UpdateChannel": "UpdateChannelInput",
+    "UpdateDeadLetterQueueRecordsVisibility": "UpdateDeadLetterQueueRecordsVisibilityInput",
     "UpdateMaxRecordSize": "UpdateMaxRecordSizeInput",
+    "UpdateQueue": "UpdateQueueInput",
+    "UpdateQueueRecordsVisibility": "UpdateQueueRecordsVisibilityInput",
     "UpdateShardCount": "UpdateShardCountInput",
     "UpdateStreamMode": "UpdateStreamModeInput",
     "UpdateStreamRecordDistributionStrategy": "UpdateStreamRecordDistributionStrategyInput",
     "UpdateStreamWarmThroughput": "UpdateStreamWarmThroughputInput"
   },
   "shapes": {
+    "AcknowledgeDeadLetterQueueRecordsInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "Entries"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Entries": "AcknowledgeDeadLetterQueueRecordsRequestEntryList"
+      }
+    },
+    "AcknowledgeDeadLetterQueueRecordsRequestEntry": {
+      "type": "structure",
+      "required": [
+        "ReceiptHandle"
+      ],
+      "members": {
+        "ReceiptHandle": "ReceiptHandle"
+      }
+    },
+    "AcknowledgeDeadLetterQueueRecordsRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "AcknowledgeDeadLetterQueueRecordsRequestEntry"
+    },
+    "AcknowledgeQueueRecordsInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "Entries"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Entries": "AcknowledgeQueueRecordsRequestEntryList"
+      }
+    },
+    "AcknowledgeQueueRecordsRequestEntry": {
+      "type": "structure",
+      "required": [
+        "ReceiptHandle"
+      ],
+      "members": {
+        "ReceiptHandle": "ReceiptHandle"
+      }
+    },
+    "AcknowledgeQueueRecordsRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "AcknowledgeQueueRecordsRequestEntry"
+    },
     "AddTagsToStreamInput": {
       "type": "structure",
       "required": [
@@ -200,6 +264,19 @@
         "LoggingConfiguration": "ChannelLoggingConfiguration"
       }
     },
+    "CreateQueueInput": {
+      "type": "structure",
+      "required": [
+        "QueueName",
+        "StreamConfigurationList"
+      ],
+      "members": {
+        "QueueName": "QueueName",
+        "StreamConfigurationList": "QueueStreamConfigurationList",
+        "QueueAttributes": "QueueAttributes",
+        "Tags": "TagMap"
+      }
+    },
     "CreateStreamInput": {
       "type": "structure",
       "required": [
@@ -217,6 +294,16 @@
     },
     "DataFreshnessInSeconds": {
       "type": "integer"
+    },
+    "DeadLetterConfiguration": {
+      "type": "structure",
+      "required": [
+        "TargetType"
+      ],
+      "members": {
+        "TargetType": "TargetType",
+        "MaxReceiveCount": "MaxReceiveCount"
+      }
     },
     "DeadLetterQueueS3Configuration": {
       "type": "structure",
@@ -249,6 +336,15 @@
       ],
       "members": {
         "ChannelARN": "ChannelARN"
+      }
+    },
+    "DeleteQueueInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN"
+      ],
+      "members": {
+        "QueueARN": "QueueARN"
       }
     },
     "DeleteResourcePolicyInput": {
@@ -295,6 +391,15 @@
     "DescribeLimitsInput": {
       "type": "structure",
       "members": {}
+    },
+    "DescribeQueueInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN"
+      ],
+      "members": {
+        "QueueARN": "QueueARN"
+      }
     },
     "DescribeStreamConsumerInput": {
       "type": "structure",
@@ -449,6 +554,19 @@
       "min": 1,
       "max": 10000
     },
+    "ListQueuesInput": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "ListQueuesInputLimit",
+        "NextToken": "NextToken",
+        "StreamFilter": "QueueStreamFilterList"
+      }
+    },
+    "ListQueuesInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
     "ListShardsInput": {
       "type": "structure",
       "members": {
@@ -520,6 +638,11 @@
       "type": "integer",
       "min": 1,
       "max": 50
+    },
+    "MaxReceiveCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 1000
     },
     "MaxRecordSizeInKiB": {
       "type": "integer",
@@ -690,6 +813,112 @@
         "Policy": "Policy"
       }
     },
+    "QueueARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:queue/\\S+"
+    },
+    "QueueAttributes": {
+      "type": "structure",
+      "members": {
+        "VisibilityTimeoutSeconds": "VisibilityTimeoutSeconds",
+        "DeadLetterConfiguration": "DeadLetterConfiguration"
+      }
+    },
+    "QueueName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "QueueStartingPosition": {
+      "type": "structure",
+      "required": [
+        "Type"
+      ],
+      "members": {
+        "Type": "QueueStartingPositionType"
+      }
+    },
+    "QueueStartingPositionType": {
+      "type": "string",
+      "enum": [
+        "TRIM_HORIZON",
+        "LATEST",
+        "AT_TIMESTAMP"
+      ]
+    },
+    "QueueStreamConfiguration": {
+      "type": "structure",
+      "required": [
+        "StreamARN"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "StartingPosition": "QueueStartingPosition"
+      }
+    },
+    "QueueStreamConfigurationList": {
+      "type": "list",
+      "min": 1,
+      "max": 10000,
+      "member": "QueueStreamConfiguration"
+    },
+    "QueueStreamFilter": {
+      "type": "structure",
+      "required": [
+        "StreamARN"
+      ],
+      "members": {
+        "StreamARN": "StreamARN"
+      }
+    },
+    "QueueStreamFilterList": {
+      "type": "list",
+      "min": 1,
+      "max": 10000,
+      "member": "QueueStreamFilter"
+    },
+    "ReceiptHandle": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "ReceiveDeadLetterQueueRecordsInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Limit": "ReceiveQueueRecordsInputLimit",
+        "WaitTimeSeconds": "ReceiveQueueRecordsWaitTimeSeconds",
+        "VisibilityTimeoutSeconds": "VisibilityTimeoutSeconds"
+      }
+    },
+    "ReceiveQueueRecordsInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Limit": "ReceiveQueueRecordsInputLimit",
+        "WaitTimeSeconds": "ReceiveQueueRecordsWaitTimeSeconds",
+        "VisibilityTimeoutSeconds": "VisibilityTimeoutSeconds"
+      }
+    },
+    "ReceiveQueueRecordsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10
+    },
+    "ReceiveQueueRecordsWaitTimeSeconds": {
+      "type": "integer",
+      "min": 1,
+      "max": 20
+    },
     "RecordConfiguration": {
       "type": "structure",
       "required": [
@@ -745,7 +974,33 @@
       "type": "string",
       "min": 1,
       "max": 2048,
-      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:.*(stream|channel)/\\S+"
+      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:.*(stream|channel|queue)/\\S+"
+    },
+    "RestoreDeadLetterQueueRecordsInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "Entries"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Entries": "RestoreDeadLetterQueueRecordsRequestEntryList"
+      }
+    },
+    "RestoreDeadLetterQueueRecordsRequestEntry": {
+      "type": "structure",
+      "required": [
+        "ReceiptHandle"
+      ],
+      "members": {
+        "ReceiptHandle": "ReceiptHandle"
+      }
+    },
+    "RestoreDeadLetterQueueRecordsRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "RestoreDeadLetterQueueRecordsRequestEntry"
     },
     "RetentionPeriodHours": {
       "type": "integer"
@@ -1091,6 +1346,13 @@
       "min": 0,
       "max": 256
     },
+    "TargetType": {
+      "type": "string",
+      "enum": [
+        "BUILT_IN",
+        "NONE"
+      ]
+    },
     "UntagResourceInput": {
       "type": "structure",
       "required": [
@@ -1124,6 +1386,34 @@
         "LoggingConfiguration": "ChannelLoggingUpdateInput"
       }
     },
+    "UpdateDeadLetterQueueRecordsVisibilityInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "Entries"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Entries": "UpdateDeadLetterQueueRecordsVisibilityRequestEntryList"
+      }
+    },
+    "UpdateDeadLetterQueueRecordsVisibilityRequestEntry": {
+      "type": "structure",
+      "required": [
+        "ReceiptHandle",
+        "VisibilityTimeoutSeconds"
+      ],
+      "members": {
+        "ReceiptHandle": "ReceiptHandle",
+        "VisibilityTimeoutSeconds": "VisibilityTimeoutSeconds"
+      }
+    },
+    "UpdateDeadLetterQueueRecordsVisibilityRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "UpdateDeadLetterQueueRecordsVisibilityRequestEntry"
+    },
     "UpdateMaxRecordSizeInput": {
       "type": "structure",
       "required": [
@@ -1134,6 +1424,45 @@
         "StreamId": "StreamId",
         "MaxRecordSizeInKiB": "MaxRecordSizeInKiB"
       }
+    },
+    "UpdateQueueInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "QueueAttributes"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "QueueAttributes": "QueueAttributes"
+      }
+    },
+    "UpdateQueueRecordsVisibilityInput": {
+      "type": "structure",
+      "required": [
+        "QueueARN",
+        "Entries"
+      ],
+      "members": {
+        "QueueARN": "QueueARN",
+        "Entries": "UpdateQueueRecordsVisibilityRequestEntryList"
+      }
+    },
+    "UpdateQueueRecordsVisibilityRequestEntry": {
+      "type": "structure",
+      "required": [
+        "ReceiptHandle",
+        "VisibilityTimeoutSeconds"
+      ],
+      "members": {
+        "ReceiptHandle": "ReceiptHandle",
+        "VisibilityTimeoutSeconds": "VisibilityTimeoutSeconds"
+      }
+    },
+    "UpdateQueueRecordsVisibilityRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "UpdateQueueRecordsVisibilityRequestEntry"
     },
     "UpdateShardCountInput": {
       "type": "structure",
@@ -1185,6 +1514,11 @@
         "StreamId": "StreamId",
         "WarmThroughputMiBps": "NaturalIntegerObject"
       }
+    },
+    "VisibilityTimeoutSeconds": {
+      "type": "integer",
+      "min": 0,
+      "max": 43200
     }
   }
 }
