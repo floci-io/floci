@@ -55,7 +55,18 @@ public class KmsJsonHandler {
             "DisableKey", "RotateKeyOnDemand", "ListKeyRotations", "GetParametersForImport", "ImportKeyMaterial",
             "DeleteImportedKeyMaterial");
 
+    /**
+     * The operations whose request takes {@code DryRun}. A dry run of one is checked as the call itself
+     * is, and is then answered with DryRunOperationException: the grant calls answer before they change
+     * anything, and the others, which change nothing, in place of their result.
+     */
+    private static final Set<String> DRY_RUN_OPERATIONS = Set.of(
+            "CreateGrant", "RetireGrant", "RevokeGrant", "Encrypt", "Decrypt", "ReEncrypt", "GenerateDataKey",
+            "GenerateDataKeyWithoutPlaintext", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext",
+            "Sign", "Verify", "GenerateMac", "VerifyMac");
+
     public Response handle(String action, JsonNode request, String region) {
+        boolean dryRun = DRY_RUN_OPERATIONS.contains(action) && dryRun(request);
         if (KEY_ID_OPERATIONS.contains(action)) {
             validateKeyIdMember(request, "KeyId");
             String keyId = request.path("KeyId").asText();
@@ -74,22 +85,24 @@ public class KmsJsonHandler {
             case "DescribeKey" -> handleDescribeKey(request, region);
             case "ReplicateKey" -> handleReplicateKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
-            case "CreateGrant" -> handleCreateGrant(request, region);
+            case "CreateGrant" -> handleCreateGrant(request, region, dryRun);
             case "ListGrants" -> handleListGrants(request, region);
             case "ListRetirableGrants" -> handleListRetirableGrants(request, region);
-            case "RevokeGrant" -> handleRevokeGrant(request, region);
-            case "RetireGrant" -> handleRetireGrant(request, region);
-            case "Encrypt" -> handleEncrypt(request, region);
-            case "Decrypt" -> handleDecrypt(request, region);
-            case "ReEncrypt" -> handleReEncrypt(request, region);
-            case "GenerateDataKey" -> handleGenerateDataKey(request, region);
-            case "GenerateDataKeyWithoutPlaintext" -> handleGenerateDataKeyWithoutPlaintext(request, region);
-            case "GenerateDataKeyPair" -> handleGenerateDataKeyPair(request, region);
-            case "GenerateDataKeyPairWithoutPlaintext" -> handleGenerateDataKeyPairWithoutPlaintext(request, region);
-            case "Sign" -> handleSign(request, region);
-            case "Verify" -> handleVerify(request, region);
-            case "GenerateMac" -> handleGenerateMac(request, region);
-            case "VerifyMac" -> handleVerifyMac(request, region);
+            case "RevokeGrant" -> handleRevokeGrant(request, region, dryRun);
+            case "RetireGrant" -> handleRetireGrant(request, region, dryRun);
+            case "Encrypt" -> resultUnlessDryRun(dryRun, handleEncrypt(request, region));
+            case "Decrypt" -> resultUnlessDryRun(dryRun, handleDecrypt(request, region));
+            case "ReEncrypt" -> resultUnlessDryRun(dryRun, handleReEncrypt(request, region));
+            case "GenerateDataKey" -> resultUnlessDryRun(dryRun, handleGenerateDataKey(request, region));
+            case "GenerateDataKeyWithoutPlaintext" ->
+                    resultUnlessDryRun(dryRun, handleGenerateDataKeyWithoutPlaintext(request, region));
+            case "GenerateDataKeyPair" -> resultUnlessDryRun(dryRun, handleGenerateDataKeyPair(request, region));
+            case "GenerateDataKeyPairWithoutPlaintext" ->
+                    resultUnlessDryRun(dryRun, handleGenerateDataKeyPairWithoutPlaintext(request, region));
+            case "Sign" -> resultUnlessDryRun(dryRun, handleSign(request, region));
+            case "Verify" -> resultUnlessDryRun(dryRun, handleVerify(request, region));
+            case "GenerateMac" -> resultUnlessDryRun(dryRun, handleGenerateMac(request, region));
+            case "VerifyMac" -> resultUnlessDryRun(dryRun, handleVerifyMac(request, region));
             case "CreateAlias" -> handleCreateAlias(request, region);
             case "UpdateAlias" -> handleUpdateAlias(request, region);
             case "DeleteAlias" -> handleDeleteAlias(request, region);
@@ -319,7 +332,7 @@ public class KmsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleCreateGrant(JsonNode request, String region) {
+    private Response handleCreateGrant(JsonNode request, String region, boolean dryRun) {
         String keyId = request.path("KeyId").asText(null);
         String granteePrincipal = request.path("GranteePrincipal").asText(null);
         List<String> operations = new ArrayList<>();
@@ -338,22 +351,22 @@ public class KmsJsonHandler {
                 : null;
 
         KmsGrant grant = service.createGrant(
-                keyId, granteePrincipal, operations, retiringPrincipal, name, constraints, region);
+                keyId, granteePrincipal, operations, retiringPrincipal, name, constraints, region, dryRun);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("GrantId", grant.getGrantId());
         response.put("GrantToken", grant.getGrantToken());
         return Response.ok(response).build();
     }
 
-    private Response handleRevokeGrant(JsonNode request, String region) {
+    private Response handleRevokeGrant(JsonNode request, String region, boolean dryRun) {
         String keyId = request.path("KeyId").asText(null);
         String grantId = request.path("GrantId").asText(null);
 
-        service.revokeGrant(keyId, grantId, region);
+        service.revokeGrant(keyId, grantId, region, dryRun);
         return Response.ok().build();
     }
 
-    private Response handleRetireGrant(JsonNode request, String region) {
+    private Response handleRetireGrant(JsonNode request, String region, boolean dryRun) {
         String grantToken = request.path("GrantToken").isMissingNode()
                 ? null : request.path("GrantToken").asText(null);
         String keyId = request.path("KeyId").isMissingNode()
@@ -361,8 +374,45 @@ public class KmsJsonHandler {
         String grantId = request.path("GrantId").isMissingNode()
                 ? null : request.path("GrantId").asText(null);
 
-        service.retireGrant(grantToken, keyId, grantId, region);
+        service.retireGrant(grantToken, keyId, grantId, region, dryRun);
         return Response.ok().build();
+    }
+
+    /**
+     * The request's {@code DryRun}, read as KMS's JSON deserializer reads a boolean (measured on AWS):
+     * true or false, or a string naming one in any case ({@code true}, {@code yes}, {@code y}, {@code t}
+     * or {@code 1}, and {@code false}, {@code no}, {@code n}, {@code f} or {@code 0}); absent or null is
+     * false. Any other value is refused with the deserializer's SerializationException.
+     */
+    private static boolean dryRun(JsonNode request) {
+        JsonNode node = request.path("DryRun");
+        if (node.isMissingNode() || node.isNull()) {
+            return false;
+        }
+        if (node.isBoolean()) {
+            return node.booleanValue();
+        }
+        if (node.isTextual()) {
+            return switch (node.textValue().toLowerCase(Locale.ROOT)) {
+                case "true", "yes", "y", "t", "1" -> true;
+                case "false", "no", "n", "f", "0" -> false;
+                default -> throw new AwsException("SerializationException",
+                        "STRING_VALUE can not be converted to an Boolean", 400);
+            };
+        }
+        String message = node.isIntegralNumber() ? "NUMBER_VALUE can not be converted to a Boolean"
+                : node.isNumber() ? "DECIMAL_VALUE cannot be converted to Boolean"
+                : node.isArray() ? "Start of list found where not expected"
+                : "Start of structure or map found where not expected.";
+        throw new AwsException("SerializationException", message, 400);
+    }
+
+    /** The result of a call that changes nothing, or DryRunOperationException in its place for a dry run. */
+    private static Response resultUnlessDryRun(boolean dryRun, Response result) {
+        if (dryRun) {
+            throw KmsService.dryRunOperation();
+        }
+        return result;
     }
 
     // Blob fields arrive base64-encoded on the wire. A value that is not valid base64 is a
