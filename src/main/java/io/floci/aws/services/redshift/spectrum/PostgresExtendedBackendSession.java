@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.UUID;
 
 /** Runs preparation without ending the client's transaction or destroying its portals. */
@@ -36,6 +37,17 @@ public final class PostgresExtendedBackendSession implements BackendSql {
 
     public void onSync() {
         failedUntilSync = false;
+    }
+
+    @Override
+    public Optional<String> queryString(String sql) {
+        try {
+            start(sql);
+            closeAndFlush();
+            return awaitSingleStringClosed();
+        } catch (IOException exception) {
+            throw failure(exception);
+        }
     }
 
     @Override
@@ -134,6 +146,21 @@ public final class PostgresExtendedBackendSession implements BackendSql {
             }
         }
         return tag;
+    }
+
+    private Optional<String> awaitSingleStringClosed() throws IOException {
+        String value = null;
+        boolean seenRow = false;
+        for (int closed = 0; closed < 2;) {
+            Response response = read();
+            if (response.type() == 'D' && !seenRow) {
+                seenRow = true;
+                value = PostgresBackendSession.firstColumn(response.body());
+            } else if (response.type() == '3') {
+                closed++;
+            }
+        }
+        return Optional.ofNullable(value);
     }
 
     private void readUntil(char type) throws IOException {

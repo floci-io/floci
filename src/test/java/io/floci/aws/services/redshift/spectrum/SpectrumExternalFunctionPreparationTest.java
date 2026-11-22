@@ -20,6 +20,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class SpectrumExternalFunctionPreparationTest {
     private static final String ACCOUNT = "000000000000";
@@ -36,6 +37,7 @@ class SpectrumExternalFunctionPreparationTest {
     void setUp() {
         functions = new ExternalFunctionRegistry(AccountAwareStorageBackend.<ExternalFunctionBinding>inMemory(ACCOUNT));
         backend = mock(BackendSql.class);
+        when(backend.queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL)).thenReturn(Optional.of("public"));
         GlueService glue = mock(GlueService.class);
         KinesisStreamingViews views = new KinesisStreamingViews(
                 new KinesisViewRegistry(AccountAwareStorageBackend.<KinesisViewBinding>inMemory(ACCOUNT)),
@@ -230,5 +232,69 @@ class SpectrumExternalFunctionPreparationTest {
 
         verify(backend).execute(argThat(sql -> sql.contains("public.exfunc_sum")
                 && sql.contains("invoking Lambda from SQL is not supported yet")));
+    }
+
+    @Test
+    void createsUnqualifiedFunctionInTheCurrentSchemaReportedByTheBackend() {
+        when(backend.queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL)).thenReturn(Optional.of("analytics"));
+
+        assertThat(preparation.prepare(CREATE, SESSION, backend), equalTo(true));
+
+        verify(backend).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION \"analytics\".\"exfunc_sum\"(integer, integer) ")
+                && sql.contains("External function analytics.exfunc_sum")));
+        assertThat(bound("analytics", "exfunc_sum", List.of("integer", "integer")).isPresent(), equalTo(true));
+        assertThat(bound("public", "exfunc_sum", List.of("integer", "integer")).isPresent(), equalTo(false));
+    }
+
+    @Test
+    void refusesUnqualifiedCreateWhenNoSchemaIsSelected() {
+        when(backend.queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL)).thenReturn(Optional.empty());
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(CREATE, SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("3F000"));
+        verify(backend, never()).execute(argThat(sql -> sql.startsWith("CREATE FUNCTION")));
+    }
+
+    @Test
+    void qualifiedCreateDoesNotAskTheBackendForCurrentSchema() {
+        preparation.prepare("CREATE EXTERNAL FUNCTION \"Sales\".f_now() RETURNS VARCHAR(8) STABLE "
+                + "LAMBDA 'now' IAM_ROLE '" + ROLE + "'", SESSION, backend);
+
+        verify(backend, never()).queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL);
+    }
+
+    @Test
+    void unqualifiedDropResolvesFunctionAlongSearchPath() {
+        when(backend.queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL)).thenReturn(Optional.of("analytics"));
+        preparation.prepare(CREATE, SESSION, backend);
+
+        String resolveSql = SpectrumQueryPreparation.resolveFunctionSchemaSql("exfunc_sum", List.of("integer", "integer"));
+        when(backend.queryString(SpectrumQueryPreparation.CURRENT_SCHEMA_SQL)).thenReturn(Optional.of("other"));
+        when(backend.queryString(resolveSql)).thenReturn(Optional.of("analytics"));
+
+        String drop = "DROP FUNCTION exfunc_sum(INT, INT)";
+        assertThat(preparation.needsBackendForDdl(drop, SESSION), equalTo(true));
+        assertThat(preparation.handlesDdl(drop, SESSION, backend), equalTo(true));
+        assertThat(preparation.prepare(drop, SESSION, backend), equalTo(true));
+
+        verify(backend).execute("DROP FUNCTION \"analytics\".\"exfunc_sum\"(integer, integer) RESTRICT");
+        assertThat(bound("analytics", "exfunc_sum", List.of("integer", "integer")).isPresent(), equalTo(false));
+    }
+
+    @Test
+    void unqualifiedDropLeavesOrdinaryFunctionInEarlierSearchPathSchemaToBackend() {
+        preparation.prepare(CREATE, SESSION, backend);
+
+        String resolveSql = SpectrumQueryPreparation.resolveFunctionSchemaSql("exfunc_sum", List.of("integer", "integer"));
+        when(backend.queryString(resolveSql)).thenReturn(Optional.of("analytics"));
+
+        String drop = "DROP FUNCTION exfunc_sum(INT, INT)";
+        assertThat(preparation.handlesDdl(drop, SESSION, backend), equalTo(false));
+        assertThat(preparation.prepare(drop, SESSION, backend), equalTo(false));
+
+        verify(backend, never()).execute(argThat(sql -> sql.startsWith("DROP FUNCTION")));
+        assertThat(bound("public", "exfunc_sum", List.of("integer", "integer")).isPresent(), equalTo(true));
     }
 }

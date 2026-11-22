@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -268,5 +269,83 @@ class PostgresBackendSessionTest {
         SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> session.execute("CREATE TABLE t(id INT)"));
         assertEquals("25P02", error.sqlState());
         session.onSync();
+    }
+
+    @Test
+    void queryStringReadsFirstColumnOfFirstRowAndHandlesNullAndEmpty() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<Void> server = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    InputStream input = socket.getInputStream();
+                    OutputStream output = socket.getOutputStream();
+                    // First query returns "analytics".
+                    readFrame(input);
+                    send(output, 'D', dataRow("analytics"));
+                    send(output, 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
+                    send(output, 'Z', new byte[]{'I'});
+                    // Second query returns SQL NULL.
+                    readFrame(input);
+                    send(output, 'D', new byte[]{0, 1, (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff});
+                    send(output, 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
+                    send(output, 'Z', new byte[]{'I'});
+                    // Third query returns no rows.
+                    readFrame(input);
+                    send(output, 'C', "SELECT 0\0".getBytes(StandardCharsets.UTF_8));
+                    send(output, 'Z', new byte[]{'I'});
+                    return null;
+                }
+            });
+            PostgresBackendSession session = new PostgresBackendSession(backend);
+            assertEquals(Optional.of("analytics"), session.queryString("SELECT pg_catalog.current_schema()"));
+            assertEquals(Optional.empty(), session.queryString("SELECT pg_catalog.current_schema()"));
+            assertEquals(Optional.empty(), session.queryString("SELECT n.nspname FROM pg_proc WHERE false"));
+            server.get();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void extendedQueryStringReadsFirstColumnWithoutSync() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<String> messages = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    StringBuilder types = new StringBuilder();
+                    Frame frame;
+                    do {
+                        frame = readFrame(socket.getInputStream());
+                        types.append(frame.type());
+                    } while (frame.type() != 'H');
+                    send(socket.getOutputStream(), '1', new byte[0]);
+                    send(socket.getOutputStream(), '2', new byte[0]);
+                    send(socket.getOutputStream(), 'D', dataRow("analytics"));
+                    send(socket.getOutputStream(), 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    return types.toString();
+                }
+            });
+            Optional<String> schema = new PostgresExtendedBackendSession(backend)
+                    .queryString("SELECT pg_catalog.current_schema()");
+            assertEquals(Optional.of("analytics"), schema);
+            assertEquals("PBECCH", messages.get());
+            executor.shutdownNow();
+        }
+    }
+
+    private static byte[] dataRow(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        byte[] body = new byte[6 + bytes.length];
+        body[0] = 0;
+        body[1] = 1;
+        body[2] = (byte) ((bytes.length >>> 24) & 0xff);
+        body[3] = (byte) ((bytes.length >>> 16) & 0xff);
+        body[4] = (byte) ((bytes.length >>> 8) & 0xff);
+        body[5] = (byte) (bytes.length & 0xff);
+        System.arraycopy(bytes, 0, body, 6, bytes.length);
+        return body;
     }
 }

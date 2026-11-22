@@ -57,8 +57,12 @@ class RedshiftExternalFunctionIntegrationTest {
     }
 
     private static int stubCount(Statement statement, String name) throws SQLException {
+        return stubCount(statement, "public", name);
+    }
+
+    private static int stubCount(Statement statement, String schema, String name) throws SQLException {
         try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM pg_proc p JOIN pg_namespace n "
-                + "ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = '" + name + "'")) {
+                + "ON n.oid = p.pronamespace WHERE n.nspname = '" + schema + "' AND p.proname = '" + name + "'")) {
             rows.next();
             return rows.getInt(1);
         }
@@ -125,6 +129,45 @@ class RedshiftExternalFunctionIntegrationTest {
             }
             assertFalse(bound("public", "exfunc_tx", List.of("integer")));
             assertEquals(0, stubCount(statement, "exfunc_tx"));
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void createsCallsAndDropsUnqualifiedFunctionInSessionSearchPath() throws Exception {
+        clusterId = "it-fn-" + UUID.randomUUID().toString().substring(0, 8);
+        Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA analytics");
+            statement.execute("CREATE SCHEMA other");
+            statement.execute("SET search_path TO analytics");
+
+            statement.execute(create("exfunc_sum", "INT, INT", "lambda_sum"));
+
+            assertTrue(bound("analytics", "exfunc_sum", List.of("integer", "integer")));
+            assertFalse(bound("public", "exfunc_sum", List.of("integer", "integer")));
+            assertEquals(1, stubCount(statement, "analytics", "exfunc_sum"));
+            assertEquals(0, stubCount(statement, "public", "exfunc_sum"));
+
+            SQLException qualifiedCall = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT analytics.exfunc_sum(1, 2)"));
+            assertEquals("0A000", qualifiedCall.getSQLState());
+
+            statement.execute("DROP FUNCTION analytics.exfunc_sum(INT, INT)");
+            assertFalse(bound("analytics", "exfunc_sum", List.of("integer", "integer")));
+            assertEquals(0, stubCount(statement, "analytics", "exfunc_sum"));
+
+            statement.execute(create("exfunc_sum", "INT, INT", "lambda_sum"));
+            statement.execute("SET search_path TO other, analytics");
+            statement.execute("DROP FUNCTION exfunc_sum(INT, INT)");
+            assertFalse(bound("analytics", "exfunc_sum", List.of("integer", "integer")));
+            assertEquals(0, stubCount(statement, "analytics", "exfunc_sum"));
+
+            statement.execute("SET search_path TO nonexistent_schema");
+            SQLException noSchema = assertThrows(SQLException.class,
+                    () -> statement.execute(create("exfunc_none", "INT", "lambda_none")));
+            assertEquals("3F000", noSchema.getSQLState());
         }
     }
 }

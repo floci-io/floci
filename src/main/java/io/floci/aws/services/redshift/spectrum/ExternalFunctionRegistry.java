@@ -27,6 +27,12 @@ public class ExternalFunctionRegistry extends SchemaBindingRegistry<ExternalFunc
                 ExternalFunctionBinding.nameOf(schemaName, functionName, argumentTypes));
     }
 
+    public boolean hasFunctionNamed(SpectrumSession session, String functionName, List<String> argumentTypes) {
+        return list(session.accountId(), session.clusterKey(), session.databaseName()).stream()
+                .anyMatch(binding -> binding.functionName().equals(functionName)
+                        && binding.argumentTypes().equals(argumentTypes));
+    }
+
     public void unbindFunction(ExternalFunctionBinding binding) {
         unbind(binding.accountId(), binding.clusterKey(), binding.databaseName(), binding.bindingName());
     }

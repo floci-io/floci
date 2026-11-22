@@ -364,7 +364,19 @@ public class RedshiftInterceptingBridge {
         if (spectrumInterceptor != null && parse.parameterTypeOids().isEmpty()
                 && !coordinator.isDiscardingUntilSync()) {
             try {
-                SpectrumInterceptor.Plan plan = spectrumInterceptor.plan(parse.sql(), spectrumSession());
+                SpectrumInterceptor.Plan plan;
+                if (spectrumInterceptor.preparation() != null
+                        && spectrumInterceptor.preparation().needsBackendForDdl(parse.sql(), spectrumSession())) {
+                    write(backendOut, new byte[]{'H', 0, 0, 0, 4});
+                    SpectrumInterceptor.Plan[] resolved = new SpectrumInterceptor.Plan[1];
+                    boolean owned = runWithBackendOwned(() -> {
+                        resolved[0] = spectrumInterceptor.plan(parse.sql(), spectrumSession(), relationalBackend);
+                        return true;
+                    });
+                    plan = owned ? resolved[0] : new SpectrumInterceptor.Plan.Forward();
+                } else {
+                    plan = spectrumInterceptor.plan(parse.sql(), spectrumSession());
+                }
                 if (plan instanceof SpectrumInterceptor.Plan.Ddl || plan instanceof SpectrumInterceptor.Plan.Query
                         || plan instanceof SpectrumInterceptor.Plan.ExternalDdl) {
                     awaitPriorBackendResponses();

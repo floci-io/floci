@@ -33,8 +33,10 @@ public class SpectrumQueryPreparation {
     private static final Logger LOG = Logger.getLogger(SpectrumQueryPreparation.class);
     private static final String DUPLICATE_SCHEMA = "42P06";
     private static final String UNDEFINED_FUNCTION = "42883";
-    /** Where an unqualified function lands: the default search path of a Redshift database resolves to it. */
+    private static final String INVALID_SCHEMA_NAME = "3F000";
+    /** Fallback when checking an unqualified DROP FUNCTION without a live backend session. */
     private static final String DEFAULT_FUNCTION_SCHEMA = "public";
+    static final String CURRENT_SCHEMA_SQL = "SELECT pg_catalog.current_schema()";
     private static final Pattern JOIN = Pattern.compile("\\bJOIN\\b", Pattern.CASE_INSENSITIVE);
     // Each batch is inserted on its own, so a view that groups or aggregates would keep a partial row per batch.
     private static final Pattern AGGREGATE = Pattern.compile(
@@ -175,16 +177,24 @@ public class SpectrumQueryPreparation {
                         externalSchemaNames(schemas, kinesisSchemaNames, mskSchemaNames)).isPresent();
     }
 
+    public boolean needsBackendForDdl(String sql, SpectrumSession session) {
+        return parser.parse(sql).orElse(null) instanceof ExternalStatement.DropFunction function
+                && function.schemaName() == null
+                && functions.hasFunctionNamed(session, function.functionName(), function.argumentTypes());
+    }
+
     public boolean handlesDdl(String sql, SpectrumSession session) {
+        return handlesDdl(sql, session, null);
+    }
+
+    public boolean handlesDdl(String sql, SpectrumSession session, BackendSql backend) {
         ExternalStatement statement = parser.parse(sql).orElse(null);
         return switch (statement) {
             case ExternalStatement.CreateSchema ignored -> true;
             case ExternalStatement.CreateKinesisSchema ignored -> true;
             case ExternalStatement.CreateMskSchema ignored -> true;
             case ExternalStatement.CreateFunction ignored -> true;
-            case ExternalStatement.DropFunction function -> functions.findFunction(session,
-                    schemaOrDefault(function.schemaName()), function.functionName(),
-                    function.argumentTypes()).isPresent();
+            case ExternalStatement.DropFunction function -> findFunctionToDrop(function, session, backend).isPresent();
             case ExternalStatement.CreateTable table -> session.inTransaction()
                     || bindingsOf(registry, session).containsKey(table.schemaName())
                     || bindingsOf(kinesisSchemas, session).containsKey(table.schemaName())
@@ -556,7 +566,7 @@ public class SpectrumQueryPreparation {
     private boolean createFunction(ExternalStatement.CreateFunction function, SpectrumSession session,
                                    BackendSql backend) {
         rejectTransaction(session);
-        String schema = schemaOrDefault(function.schemaName());
+        String schema = function.schemaName() != null ? function.schemaName() : currentSchema(backend);
         ExternalFunctionBinding binding = new ExternalFunctionBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema, function.functionName(), function.argumentTypes(),
                 function.returnType(), function.volatility(), function.lambdaFunction(), function.iamRoleArn(),
@@ -583,13 +593,12 @@ public class SpectrumQueryPreparation {
     }
 
     private boolean dropFunction(ExternalStatement.DropFunction function, SpectrumSession session, BackendSql backend) {
-        rejectTransaction(session);
-        String schema = schemaOrDefault(function.schemaName());
-        Optional<ExternalFunctionBinding> binding = functions.findFunction(session, schema, function.functionName(),
-                function.argumentTypes());
+        Optional<ExternalFunctionBinding> binding = findFunctionToDrop(function, session, backend);
         if (binding.isEmpty()) {
             return false;
         }
+        rejectTransaction(session);
+        String schema = binding.get().schemaName();
         try {
             backend.execute(dropStubSql(schema, function.functionName(), function.argumentTypes(),
                     function.ifExists(), function.cascade()));
@@ -604,8 +613,44 @@ public class SpectrumQueryPreparation {
         return true;
     }
 
-    private static String schemaOrDefault(String schemaName) {
-        return schemaName == null ? DEFAULT_FUNCTION_SCHEMA : schemaName;
+    private Optional<ExternalFunctionBinding> findFunctionToDrop(ExternalStatement.DropFunction function,
+                                                                 SpectrumSession session, BackendSql backend) {
+        if (function.schemaName() != null) {
+            return functions.findFunction(session, function.schemaName(), function.functionName(),
+                    function.argumentTypes());
+        }
+        if (!functions.hasFunctionNamed(session, function.functionName(), function.argumentTypes())) {
+            return Optional.empty();
+        }
+        if (backend == null) {
+            return functions.findFunction(session, DEFAULT_FUNCTION_SCHEMA, function.functionName(),
+                    function.argumentTypes());
+        }
+        Optional<String> resolved = backend.queryString(resolveFunctionSchemaSql(
+                function.functionName(), function.argumentTypes()));
+        if (resolved.isPresent()) {
+            return functions.findFunction(session, resolved.get(), function.functionName(), function.argumentTypes());
+        }
+        // The stub may already be gone; check the current schema so a stale binding is cleared when DROP fails (42883).
+        return backend.queryString(CURRENT_SCHEMA_SQL)
+                .filter(schema -> !schema.isEmpty())
+                .flatMap(schema -> functions.findFunction(session, schema, function.functionName(),
+                        function.argumentTypes()));
+    }
+
+    private static String currentSchema(BackendSql backend) {
+        return backend.queryString(CURRENT_SCHEMA_SQL)
+                .filter(schema -> !schema.isEmpty())
+                .orElseThrow(() -> new SpectrumSqlException(INVALID_SCHEMA_NAME,
+                        "no schema has been selected to create in"));
+    }
+
+    static String resolveFunctionSchemaSql(String functionName, List<String> argumentTypes) {
+        String signature = ExternalTableMaterializer.quote(functionName)
+                + "(" + String.join(", ", argumentTypes) + ")";
+        return "SELECT n.nspname FROM pg_catalog.pg_proc p "
+                + "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+                + "WHERE p.oid = pg_catalog.to_regprocedure(" + PostgresWire.quoteLiteral(signature) + ")";
     }
 
     private static String stubSql(ExternalStatement.CreateFunction function, String schema, boolean replace) {
