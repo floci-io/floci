@@ -105,6 +105,26 @@ list when none was, as AWS gives them, and a request naming both is refused with
 documented, so it is Floci's. `IamInstanceProfile` is the `JobFlowRole`, "The IAM role that was specified when the
 cluster was launched", and `AdditionalMasterSecurityGroups` and `AdditionalSlaveSecurityGroups` are the ones given.
 
+`DescribeCluster` also gives back the cluster's own settings as `RunJobFlow` took them: `EbsRootVolumeIops`,
+`EbsRootVolumeThroughput`, `LogEncryptionKmsKeyId`, `RepoUpgradeOnBoot`, `PlacementGroupConfigs` as its
+`PlacementGroups`, and `MonitoringConfiguration`. `RepoUpgradeOnBoot` "Applies only when CustomAmiID is used", and is
+`SECURITY` for a cluster with a custom AMI that names none, as "If omitted, the default is SECURITY".
+`OSReleaseLabel` is the one asked for, else the latest Amazon Linux release `DescribeReleaseLabel` lists for the
+cluster's release, as "If no Amazon Linux release was specified, the default Amazon Linux release is shown in the
+response". Of `KerberosAttributes` only the `Realm` is kept and given back, never a password, and a cluster without
+them answers an empty structure, as AWS does. A member the model requires (the `Realm` and `KdcAdminPassword`, a
+placement group's `InstanceRole`, a CloudWatch log configuration's `Enabled`) or a value outside its enum is refused
+with the framework's `ValidationException`. So are two placement groups for one instance role, and one for the primary
+nodes of a cluster without multiple primary nodes, in AWS's words: "Placement group supports single placement strategy
+for an instance role. Found multiple strategy for the following instance role: MASTER", and "Placement group support
+for master node is available only for multi-master cluster and not for single-master cluster." A cluster has multiple
+primary nodes with "an instance count value of 3 for the primary node instance group", or "the TargetOnDemandCapacity
+of 3, TargetSpotCapacity of 0 for the primary instance fleet". As "only primary node types are supported by the
+placement group strategy, and the SPREAD strategy is applied to those primary nodes", a placement group for another
+role, or with a strategy other than `SPREAD` or `NONE`, is refused with `ValidationException` too, in Floci's words.
+One without a strategy gets `SPREAD`, as "the MASTER instance role automatically uses SPREAD as the placement group
+strategy".
+
 The limits the API reference and the Management Guide give steps are checked, in each operation's own error code, in
 Floci's words, as no source gives AWS's: a `StepConcurrencyLevel` from 1 to 256 ("You can specify a minimum of 1 step
 and a maximum of 256 steps"), which `RunJobFlow` refuses with `ValidationException` and `ModifyCluster` with

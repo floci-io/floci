@@ -51,6 +51,15 @@ public class EmrHandler {
     private static final Logger LOG = Logger.getLogger(EmrHandler.class);
     /** "There is a limit of 25 volumes per instance." (Amazon EMR Management Guide, Instance storage) */
     private static final int EBS_VOLUMES_PER_INSTANCE = 25;
+    // The enums of RunJobFlow's RepoUpgradeOnBoot and of a PlacementGroupConfig's InstanceRole and PlacementStrategy.
+    private static final List<String> REPO_UPGRADES = List.of("SECURITY", "NONE");
+    private static final List<String> INSTANCE_ROLES = List.of("MASTER", "CORE", "TASK");
+    private static final List<String> PLACEMENT_STRATEGIES = List.of("SPREAD", "PARTITION", "CLUSTER", "NONE");
+    private static final String PRIMARY_ROLE = "MASTER";
+    // The logging configurations of a cluster's MonitoringConfiguration and of a session's.
+    private static final List<String> CLUSTER_LOGGING = List.of("CloudWatchLogConfiguration", "S3LoggingConfiguration");
+    private static final List<String> SESSION_LOGGING = List.of("S3LoggingConfiguration",
+            "CloudWatchLoggingConfiguration", "ManagedLoggingConfiguration");
     // RunJobFlow's uniform form's instance groups (see uniformInstanceGroups).
     static final String UNIFORM_MASTER_GROUP = "Master InstanceGroup";
     static final String UNIFORM_CORE_GROUP = "Core InstanceGroup";
@@ -193,6 +202,7 @@ public class EmrHandler {
         cluster.setVisibleToAllUsers(request.path("VisibleToAllUsers").asBoolean(true));
         cluster.setStepConcurrencyLevel(request.path("StepConcurrencyLevel").asInt(1));
         cluster.setEbsRootVolumeSize(request.path("EbsRootVolumeSize").asInt(0));
+        readClusterSettings(request, cluster);
         cluster.setApplications(rawArray(request.path("Applications")));
         cluster.setConfigurations(rawArray(request.path("Configurations")));
         cluster.setTags(parseTags(request.path("Tags")));
@@ -222,8 +232,158 @@ public class EmrHandler {
         List<EmrInstanceFleet> fleets = parseInstanceFleets(instances.path("InstanceFleets"));
         cluster.setInstanceGroups(groups.isEmpty() && fleets.isEmpty() ? uniformInstanceGroups(instances) : groups);
         cluster.setInstanceFleets(fleets);
+        checkPlacementGroups(request.path("PlacementGroupConfigs"), cluster);
         cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
         return cluster;
+    }
+
+    /**
+     * The settings of the cluster as a whole that DescribeCluster gives back as they were asked for: the root volume's
+     * IOPS and throughput, the Amazon Linux release, the log encryption key, RepoUpgradeOnBoot, the realm of its
+     * KerberosAttributes, its PlacementGroupConfigs and its MonitoringConfiguration. A member its model requires, or
+     * a value outside its enum, is refused as the framework refuses one. RepoUpgradeOnBoot "Applies only when
+     * CustomAmiID is used", where "If omitted, the default is SECURITY". Of the KerberosAttributes only the realm is
+     * kept, its passwords never.
+     */
+    private void readClusterSettings(JsonNode request, EmrCluster cluster) {
+        List<String> violations = new ArrayList<>();
+        cluster.setEbsRootVolumeIops(intOrNull(request.path("EbsRootVolumeIops"), "EbsRootVolumeIops"));
+        cluster.setEbsRootVolumeThroughput(
+                intOrNull(request.path("EbsRootVolumeThroughput"), "EbsRootVolumeThroughput"));
+        cluster.setOsReleaseLabel(string(request, "OSReleaseLabel"));
+        cluster.setLogEncryptionKmsKeyId(string(request, "LogEncryptionKmsKeyId"));
+        String repoUpgrade = string(request, "RepoUpgradeOnBoot");
+        if (repoUpgrade != null && !REPO_UPGRADES.contains(repoUpgrade)) {
+            violations.add(SmithyValidationErrors.notInEnum(repoUpgrade, "repoUpgradeOnBoot", REPO_UPGRADES));
+        }
+        cluster.setRepoUpgradeOnBoot(repoUpgrade == null && cluster.getCustomAmiId() != null
+                ? "SECURITY" : repoUpgrade);
+        cluster.setKerberosRealm(kerberosRealm(request.path("KerberosAttributes"), violations));
+        cluster.setPlacementGroups(placementGroups(request.path("PlacementGroupConfigs"), violations));
+        JsonNode monitoring = request.path("MonitoringConfiguration");
+        cluster.setMonitoringConfiguration(monitoringConfiguration(monitoring, CLUSTER_LOGGING));
+        JsonNode enabled = monitoring.path("CloudWatchLogConfiguration").path("Enabled");
+        if (monitoring.path("CloudWatchLogConfiguration").isObject() && (enabled.isMissingNode() || enabled.isNull())) {
+            violations.add(SmithyValidationErrors.notNull(
+                    "monitoringConfiguration.cloudWatchLogConfiguration.enabled"));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    // The realm of KerberosAttributes, whose Realm and KdcAdminPassword the model requires; null when none is given.
+    private static String kerberosRealm(JsonNode kerberos, List<String> violations) {
+        if (kerberos.isMissingNode() || kerberos.isNull()) {
+            return null;
+        }
+        requireStructure(kerberos, "KerberosAttributes");
+        for (String secret : List.of("CrossRealmTrustPrincipalPassword", "ADDomainJoinUser", "ADDomainJoinPassword")) {
+            string(kerberos, secret);
+        }
+        if (string(kerberos, "KdcAdminPassword") == null) {
+            violations.add(SmithyValidationErrors.notNull("kerberosAttributes.kdcAdminPassword"));
+        }
+        String realm = string(kerberos, "Realm");
+        if (realm == null) {
+            violations.add(SmithyValidationErrors.notNull("kerberosAttributes.realm"));
+        }
+        return realm;
+    }
+
+    /**
+     * PlacementGroupConfigs as DescribeCluster's PlacementGroups give them, null when none is given; each config's
+     * InstanceRole, which the model requires, and its PlacementStrategy must be in their enums. A config for the
+     * primary nodes without a strategy gets SPREAD, as "the MASTER instance role automatically uses SPREAD as the
+     * placement group strategy" (Management Guide, "Amazon EMR integration with EC2 placement groups").
+     */
+    private String placementGroups(JsonNode configs, List<String> violations) {
+        if (configs.isMissingNode() || configs.isNull()) {
+            return null;
+        }
+        if (!configs.isArray()) {
+            throw malformed("PlacementGroupConfigs must be a list of placement group configs");
+        }
+        ArrayNode placements = objectMapper.createArrayNode();
+        int position = 1;
+        for (JsonNode config : configs) {
+            if (!config.isObject()) {
+                throw malformed("PlacementGroupConfigs must be a list of placement group configs");
+            }
+            String path = "placementGroupConfigs." + position + ".member.";
+            String role = string(config, "InstanceRole");
+            if (role == null) {
+                violations.add(SmithyValidationErrors.notNull(path + "instanceRole"));
+            } else if (!INSTANCE_ROLES.contains(role)) {
+                violations.add(SmithyValidationErrors.notInEnum(role, path + "instanceRole", INSTANCE_ROLES));
+            }
+            String strategy = string(config, "PlacementStrategy");
+            if (strategy != null && !PLACEMENT_STRATEGIES.contains(strategy)) {
+                violations.add(SmithyValidationErrors.notInEnum(strategy, path + "placementStrategy",
+                        PLACEMENT_STRATEGIES));
+            }
+            ObjectNode placement = placements.addObject().put("InstanceRole", role);
+            if (strategy != null || PRIMARY_ROLE.equals(role)) {
+                placement.put("PlacementStrategy", strategy != null ? strategy : "SPREAD");
+            }
+            position++;
+        }
+        return placements.isEmpty() ? null : placements.toString();
+    }
+
+    /**
+     * Refuses PlacementGroupConfigs AWS refuses. Two for one instance role, and one for the primary nodes of a cluster
+     * without multiple primary nodes, are recorded from AWS, in its words. "Currently, only primary node types are
+     * supported by the placement group strategy, and the SPREAD strategy is applied to those primary nodes", NONE
+     * launching them "without placement group strategy", so another role or strategy is refused too, in Floci's words,
+     * as no source gives AWS's.
+     */
+    private static void checkPlacementGroups(JsonNode configs, EmrCluster cluster) {
+        List<String> roles = new ArrayList<>();
+        for (JsonNode config : configs) {
+            String role = config.path("InstanceRole").asText();
+            if (roles.contains(role)) {
+                throw new AwsException("ValidationException", "Placement group supports single placement strategy "
+                        + "for an instance role. Found multiple strategy for the following instance role: " + role,
+                        400);
+            }
+            roles.add(role);
+        }
+        for (JsonNode config : configs) {
+            String role = config.path("InstanceRole").asText();
+            if (!PRIMARY_ROLE.equals(role)) {
+                throw new AwsException("ValidationException",
+                        "Placement groups are supported only for the MASTER instance role, not " + role + ".", 400);
+            }
+            String strategy = config.path("PlacementStrategy").asText("SPREAD");
+            if (!"SPREAD".equals(strategy) && !"NONE".equals(strategy)) {
+                throw new AwsException("ValidationException", "The MASTER instance role supports only the SPREAD "
+                        + "or NONE placement strategy, not " + strategy + ".", 400);
+            }
+        }
+        if (roles.contains(PRIMARY_ROLE) && !multiplePrimaryNodes(cluster)) {
+            throw new AwsException("ValidationException", "Placement group support for master node is available "
+                    + "only for multi-master cluster and not for single-master cluster.", 400);
+        }
+    }
+
+    /**
+     * Whether the cluster has multiple primary nodes: "an instance count value of 3 for the primary node instance
+     * group", or "the TargetOnDemandCapacity of 3, TargetSpotCapacity of 0 for the primary instance fleet"
+     * (Management Guide, "Launch an Amazon EMR Cluster with multiple primary nodes").
+     */
+    private static boolean multiplePrimaryNodes(EmrCluster cluster) {
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            if (PRIMARY_ROLE.equals(group.getInstanceGroupType())) {
+                return group.getRequestedInstanceCount() == 3;
+            }
+        }
+        for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+            if (PRIMARY_ROLE.equals(fleet.getInstanceFleetType())) {
+                return fleet.getTargetOnDemandCapacity() == 3 && fleet.getTargetSpotCapacity() == 0;
+            }
+        }
+        return false;
     }
 
     private Response handleDescribeCluster(JsonNode request) {
@@ -337,7 +497,8 @@ public class EmrHandler {
     private Response handleStartSession(JsonNode request) {
         EmrSessions.Request start = new EmrSessions.Request(string(request, "Name"),
                 string(request, "ExecutionRoleArn"), configurationList(request.path("EngineConfigurations"),
-                "EngineConfigurations"), monitoringConfiguration(request.path("MonitoringConfiguration")),
+                "EngineConfigurations"),
+                monitoringConfiguration(request.path("MonitoringConfiguration"), SESSION_LOGGING),
                 longOrNull(request.path("SessionIdleTimeoutInMinutes"), "SessionIdleTimeoutInMinutes"),
                 string(request, "ClientRequestToken"), tagList(request.path("Tags"), "Tags"));
         EmrSession session = service.startSession(string(request, "ClusterId"), start);
@@ -452,6 +613,15 @@ public class EmrHandler {
         throw malformed("EC2InstanceIdsToTerminate must be a list of strings");
     }
 
+    // An Integer member, read as longOrNull reads a Long one; a number past an Integer's range is refused as well.
+    private static Integer intOrNull(JsonNode value, String member) {
+        Long number = longOrNull(value, member);
+        if (number != null && !value.canConvertToInt()) {
+            throw malformed(member + " must be an integer");
+        }
+        return number == null ? null : number.intValue();
+    }
+
     private static Long longOrNull(JsonNode value, String member) {
         if (value.isMissingNode() || value.isNull()) {
             return null;
@@ -463,18 +633,17 @@ public class EmrHandler {
     }
 
     /**
-     * StartSession's SessionMonitoringConfiguration, kept as its raw JSON; null when it is not there or empty. Each of
-     * its S3, CloudWatch and managed logging configurations is a structure of an {@code Enabled} boolean, strings, and
-     * {@code LogTypes}, a map of lists of strings.
+     * A MonitoringConfiguration, RunJobFlow's or StartSession's, kept as its raw JSON; null when it is not there or
+     * empty. Each of its {@code loggings} configurations is a structure of an {@code Enabled} boolean, strings,
+     * {@code LogTypes}, a map of lists of strings, and {@code LogTypeUploadPolicy}, a map of strings.
      */
-    private static String monitoringConfiguration(JsonNode value) {
+    private static String monitoringConfiguration(JsonNode value, List<String> loggings) {
         String member = "MonitoringConfiguration";
         if (value.isMissingNode() || value.isNull()) {
             return null;
         }
         requireStructure(value, member);
-        for (String logging : List.of("S3LoggingConfiguration", "CloudWatchLoggingConfiguration",
-                "ManagedLoggingConfiguration")) {
+        for (String logging : loggings) {
             JsonNode configuration = value.path(logging);
             if (configuration.isMissingNode() || configuration.isNull()) {
                 continue;
@@ -494,6 +663,8 @@ public class EmrHandler {
                 } else if ("LogTypes".equals(entry.getKey())) {
                     requireStructure(field, path + ".LogTypes");
                     field.forEach(types -> strings(types, path + ".LogTypes"));
+                } else if ("LogTypeUploadPolicy".equals(entry.getKey())) {
+                    stringMap(field, path + ".LogTypeUploadPolicy");
                 } else if (!field.isTextual()) {
                     throw malformed(path + "." + entry.getKey() + " must be a string");
                 }
@@ -1528,6 +1699,28 @@ public class EmrHandler {
             node.put("CustomAmiId", c.getCustomAmiId());
         }
         node.put("EbsRootVolumeSize", c.getEbsRootVolumeSize());
+        if (c.getEbsRootVolumeIops() != null) {
+            node.put("EbsRootVolumeIops", c.getEbsRootVolumeIops());
+        }
+        if (c.getEbsRootVolumeThroughput() != null) {
+            node.put("EbsRootVolumeThroughput", c.getEbsRootVolumeThroughput());
+        }
+        if (c.getOsReleaseLabel() != null) {
+            node.put("OSReleaseLabel", c.getOsReleaseLabel());
+        }
+        if (c.getLogEncryptionKmsKeyId() != null) {
+            node.put("LogEncryptionKmsKeyId", c.getLogEncryptionKmsKeyId());
+        }
+        if (c.getRepoUpgradeOnBoot() != null) {
+            node.put("RepoUpgradeOnBoot", c.getRepoUpgradeOnBoot());
+        }
+        // An empty structure where the cluster has none, as AWS answers one.
+        ObjectNode kerberos = node.putObject("KerberosAttributes");
+        if (c.getKerberosRealm() != null) {
+            kerberos.put("Realm", c.getKerberosRealm());
+        }
+        setRawJson(node, "PlacementGroups", c.getPlacementGroups());
+        setRawJson(node, "MonitoringConfiguration", c.getMonitoringConfiguration());
         node.put("StepConcurrencyLevel", c.getStepConcurrencyLevel());
         node.put("ClusterArn", c.getClusterArn());
         node.put("SessionEnabled", c.isSessionEnabled());

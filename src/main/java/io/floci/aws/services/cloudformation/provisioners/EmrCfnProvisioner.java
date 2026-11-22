@@ -103,11 +103,11 @@ public class EmrCfnProvisioner implements CfnResourceProvisioner {
     private static final List<String> RUN_JOB_FLOW_MEMBERS = List.of("Name", "ReleaseLabel", "LogUri", "ServiceRole",
             "JobFlowRole", "AutoScalingRole", "ScaleDownBehavior", "SecurityConfiguration", "CustomAmiId",
             "VisibleToAllUsers", "StepConcurrencyLevel", "EbsRootVolumeSize", "Applications", "BootstrapActions",
-            "ManagedScalingPolicy", "AutoTerminationPolicy", "SessionEnabled", "Tags");
-    /** The cluster properties Floci's RunJobFlow keeps nothing of: accepted with a warning and not stored. */
-    private static final List<String> CLUSTER_NOT_STORED = List.of("AdditionalInfo", "KerberosAttributes",
+            "ManagedScalingPolicy", "AutoTerminationPolicy", "SessionEnabled", "Tags", "KerberosAttributes",
             "OSReleaseLabel", "EbsRootVolumeIops", "EbsRootVolumeThroughput", "PlacementGroupConfigs",
             "LogEncryptionKmsKeyId", "MonitoringConfiguration");
+    /** The cluster properties Floci's RunJobFlow keeps nothing of: accepted with a warning and not stored. */
+    private static final List<String> CLUSTER_NOT_STORED = List.of("AdditionalInfo");
     /** The members of {@code Instances} Floci's RunJobFlow keeps nothing of, accepted with a warning. */
     private static final List<String> INSTANCES_NOT_STORED = List.of("HadoopVersion");
     private static final String GROUPS = "groups";

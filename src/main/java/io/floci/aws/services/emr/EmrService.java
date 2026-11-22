@@ -541,6 +541,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if (cluster.getReleaseLabel() == null) {
                 cluster.setReleaseLabel(defaultReleaseLabel);
             }
+            // RunJobFlow "uses the latest validated Amazon Linux release" where none is asked for, and DescribeCluster
+            // shows it: the latest its release lists, or none where Floci's catalog lists none for it.
+            if (cluster.getOsReleaseLabel() == null) {
+                cluster.setOsReleaseLabel(EmrReleaseCatalog.release(cluster.getReleaseLabel())
+                        .map(EmrReleaseCatalog.Release::osReleases).filter(labels -> !labels.isEmpty())
+                        .map(List::getFirst).orElse(null));
+            }
             cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
                     ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
             cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
