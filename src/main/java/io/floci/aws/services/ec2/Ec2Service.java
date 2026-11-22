@@ -8608,12 +8608,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
+        return authorizeSecurityGroupIngress(region, groupId, permissions, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the group and every prefix list the permissions name must exist, and the
+     * request is then answered with DryRunOperation, no rule added.
+     */
+    public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId,
+                                                                 List<IpPermission> permissions, boolean dryRun) {
         ensureDefaultResources(region);
         List<SecurityGroupRule> rules = new ArrayList<>();
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, groupId))) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
                 requireKnownPrefixLists(region, permissions);
+                if (dryRun) {
+                    throw dryRunOperation();
+                }
                 List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
                 for (IpPermission perm : permissions) {
                     resolveGroupReferences(region, sg.getVpcId(), perm);
@@ -8629,12 +8641,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
+        return authorizeSecurityGroupEgress(region, groupId, permissions, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the group and every prefix list the permissions name must exist, and the
+     * request is then answered with DryRunOperation, no rule added.
+     */
+    public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId,
+                                                                List<IpPermission> permissions, boolean dryRun) {
         ensureDefaultResources(region);
         List<SecurityGroupRule> rules = new ArrayList<>();
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, groupId))) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
                 requireKnownPrefixLists(region, permissions);
+                if (dryRun) {
+                    throw dryRunOperation();
+                }
                 List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
                 for (IpPermission perm : permissions) {
                     resolveGroupReferences(region, sg.getVpcId(), perm);
@@ -8764,9 +8788,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
+        revokeSecurityGroupIngress(region, groupId, permissions, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the group must exist, and the request is then answered with DryRunOperation,
+     * no rule removed.
+     */
+    public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions,
+                                         boolean dryRun) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             // Authorize stores a group reference by id, so a revoke naming it by name alone has to
             // resolve the same way before the sources can be compared.
             for (IpPermission perm : permissions) {
@@ -8780,9 +8816,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
+        revokeSecurityGroupEgress(region, groupId, permissions, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the group must exist, and the request is then answered with DryRunOperation,
+     * no rule removed.
+     */
+    public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions,
+                                         boolean dryRun) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             for (IpPermission perm : permissions) {
                 resolveGroupReferences(region, sg.getVpcId(), perm);
             }
@@ -8799,6 +8847,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public void revokeSecurityGroupRulesByIds(String region, String groupId, List<String> ruleIds,
                                               boolean egress) {
+        revokeSecurityGroupRulesByIds(region, groupId, ruleIds, egress, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every id must name a rule of the group in the requested direction, and the
+     * request is then answered with DryRunOperation, no rule removed.
+     */
+    public void revokeSecurityGroupRulesByIds(String region, String groupId, List<String> ruleIds,
+                                              boolean egress, boolean dryRun) {
         ensureDefaultResources(region);
         getRequiredSecurityGroup(region, groupId);
         synchronized (lockFor(key(region, groupId))) {
@@ -8810,6 +8867,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             "The security group rule ID '" + ruleId + "' does not exist", 400);
                 }
                 rules.add(rule);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             for (SecurityGroupRule rule : rules) {
                 removeRuleFromGroup(region, rule);
@@ -9049,11 +9109,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void modifySecurityGroupRules(String region, String groupId, List<Map<String, String>> ruleUpdates) {
+        modifySecurityGroupRules(region, groupId, ruleUpdates, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the group must exist and every update name a rule of it, and the request is
+     * then answered with DryRunOperation, no description changed.
+     */
+    public void modifySecurityGroupRules(String region, String groupId, List<Map<String, String>> ruleUpdates,
+                                         boolean dryRun) {
         ensureDefaultResources(region);
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, groupId))) {
                 SecurityGroup group = getRequiredSecurityGroup(region, groupId);
                 List<RuleDescriptionUpdate> updates = requireRuleDescriptionUpdates(region, groupId, ruleUpdates);
+                if (dryRun) {
+                    throw dryRunOperation();
+                }
                 for (RuleDescriptionUpdate update : updates) {
                     SecurityGroupRule rule = update.rule();
                     rule.setDescription(update.description());
