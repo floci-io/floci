@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -375,6 +376,11 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         if (!missing.isEmpty()) {
             throw SmithyValidationErrors.validationException(missing);
+        }
+        // A template's configurationOverrides follow its parametric model, whose monitoring destinations need not name
+        // their log group or log URI; the run they make follows StartJobRun's, which a request's own already met.
+        if (!request.hasNonNull("configurationOverrides") && template.hasNonNull("configurationOverrides")) {
+            EmrContainersRequestShapes.checkShape("ConfigurationOverrides", template.get("configurationOverrides"));
         }
 
         String id = newId(JOB_RUN_ID_LENGTH);
@@ -1134,7 +1140,8 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         for (ObjectNode run : submitted) {
             String arn = run.get("arn").textValue();
             try {
-                SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, imageTemplate, dockerNetwork);
+                SparkJobRunner.Job job = EmrContainersSparkJobs.job(run, imageTemplate, dockerNetwork,
+                        sparkApplicationId());
                 runExecutor.execute(() -> execute(arn, job, launchedIn));
             } catch (RuntimeException e) {
                 LOG.warnv(e, "EMR on EKS job run {0} could not be handed to a thread", run.get("id").textValue());
@@ -1361,6 +1368,14 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
             id.append(ID_ALPHABET.charAt(random.nextInt(ID_ALPHABET.length())));
         }
         return id.toString();
+    }
+
+    /**
+     * An id of the form a Spark application on Kubernetes gets, {@code spark-} and 32 hexadecimal digits, which names
+     * a run's driver logs as its Spark application's id names them on EMR on EKS.
+     */
+    static String sparkApplicationId() {
+        return "spark-" + UUID.randomUUID().toString().replace("-", "");
     }
 
     private static String sessionToken() {

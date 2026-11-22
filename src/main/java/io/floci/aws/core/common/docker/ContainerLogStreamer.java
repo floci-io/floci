@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -203,15 +204,28 @@ public class ContainerLogStreamer {
                 ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
             }
         }
+        // The lines of one emission, by stream, each sent as the container wrote it, but for a line ending and an empty
+        // line, which CloudWatch Logs refuses as an event. One emitter at a time touches it.
+        Map<String, List<Map<String, Object>>> batch = new LinkedHashMap<>();
         BiConsumer<StreamType, String> emitter = (stream, line) -> {
-            String logged = logToConsole(logPrefix, line);
+            logToConsole(logPrefix, line);
             String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
-            if (logged != null && logStream != null) {
-                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            String message = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+            if (logStream != null && !message.isEmpty()) {
+                Map<String, Object> event = new HashMap<>();
+                event.put("timestamp", System.currentTimeMillis());
+                event.put("message", message);
+                batch.computeIfAbsent(logStream, ignored -> new ArrayList<>()).add(event);
             }
         };
+        // Each stream's lines of one emission in one PutLogEvents, not one call a line.
+        Runnable drained = () -> {
+            batch.forEach((logStream, events) -> forwardToCloudWatchLogs(accountId, logGroup, logStream, region,
+                    events));
+            batch.clear();
+        };
         return follow(containerId, null,
-                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter));
+                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter, drained));
     }
 
     /**
@@ -401,14 +415,18 @@ public class ContainerLogStreamer {
 
     private void forwardToCloudWatchLogs(
             String accountId, String logGroup, String logStream, String region, String line) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("timestamp", System.currentTimeMillis());
+        event.put("message", line);
+        forwardToCloudWatchLogs(accountId, logGroup, logStream, region, List.of(event));
+    }
+
+    private void forwardToCloudWatchLogs(
+            String accountId, String logGroup, String logStream, String region, List<Map<String, Object>> events) {
         try {
-            Map<String, Object> event = new HashMap<>();
-            event.put("timestamp", System.currentTimeMillis());
-            event.put("message", line);
-            cloudWatchLogsService.putLogEventsForAccount(
-                    accountId, logGroup, logStream, List.of(event), region);
+            cloudWatchLogsService.putLogEventsForAccount(accountId, logGroup, logStream, events, region);
         } catch (Exception e) {
-            LOG.debugv("Could not forward log line to CloudWatch Logs: {0}", e.getMessage());
+            LOG.debugv("Could not forward log lines to CloudWatch Logs: {0}", e.getMessage());
         }
     }
 
@@ -445,6 +463,9 @@ public class ContainerLogStreamer {
         // any later callback until the transport has been closed and the final tail has been flushed.
         private final ReentrantReadWriteLock callbackGate = new ReentrantReadWriteLock(true);
         private final BiConsumer<StreamType, String> lineConsumer;
+        // Runs once the lines pending at a time have all gone to lineConsumer, on the thread that emitted them, which
+        // is still the only one emitting; a consumer that gathers lines sends them on from here.
+        private final Runnable drained;
         private final long closeGraceMillis;
         // Guarded by 'buffers'. Set only by the Docker transport terminal callback; afterwards onNext
         // refuses to append, so nothing is ever buffered past the final flush.
@@ -466,7 +487,12 @@ public class ContainerLogStreamer {
         }
 
         LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer) {
+            this(closeGraceMillis, lineConsumer, () -> { });
+        }
+
+        LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer, Runnable drained) {
             this.lineConsumer = lineConsumer;
+            this.drained = drained;
             this.closeGraceMillis = closeGraceMillis;
         }
 
@@ -604,13 +630,27 @@ public class ContainerLogStreamer {
                 synchronized (emissionLock) {
                     synchronized (buffers) {
                         pending = pendingLines.pollFirst();
-                        if (pending == null) {
+                    }
+                }
+                if (pending != null) {
+                    lineConsumer.accept(pending.stream(), pending.line());
+                    continue;
+                }
+                // Still the only emitter here, so drained never runs beside lineConsumer; lines that came while it
+                // ran are emitted before this emission ends.
+                try {
+                    drained.run();
+                } catch (RuntimeException e) {
+                    LOG.debugv("Could not send on a container's log lines: {0}", e.getMessage());
+                }
+                synchronized (emissionLock) {
+                    synchronized (buffers) {
+                        if (pendingLines.isEmpty()) {
                             emitting = false;
                             return;
                         }
                     }
                 }
-                lineConsumer.accept(pending.stream(), pending.line());
             }
         }
 

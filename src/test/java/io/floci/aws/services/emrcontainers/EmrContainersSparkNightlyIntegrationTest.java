@@ -24,7 +24,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.OutputLogEvent;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.time.Duration;
 import java.util.Set;
@@ -38,7 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * EMR on EKS job runs, run for real in the {@code docker} runner mode: each runs its Spark job in a container of its
- * release's base image from Amazon ECR Public, on Floci's S3, and ends as its driver does.
+ * release's base image from Amazon ECR Public, on Floci's S3, sends its driver's output where its monitoring
+ * configuration says, and ends as its driver does.
  *
  * <p>A nightly check: the release's base image is about 5 GB.
  */
@@ -70,6 +74,7 @@ class EmrContainersSparkNightlyIntegrationTest {
     DockerClient docker;
 
     private S3Client s3;
+    private CloudWatchLogsClient logs;
     private String bucket;
     private String virtualClusterId;
 
@@ -91,6 +96,8 @@ class EmrContainersSparkNightlyIntegrationTest {
     void setUp() {
         s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
         cleanup.register(s3::close);
+        logs = AwsTestClients.create(CloudWatchLogsClient.builder(), ACCOUNT, Region.US_EAST_1);
+        cleanup.register(logs::close);
         bucket = "emr-eks-" + UUID.randomUUID().toString().substring(0, 8);
         s3.createBucket(request -> request.bucket(bucket));
         cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
@@ -99,6 +106,7 @@ class EmrContainersSparkNightlyIntegrationTest {
                 from pyspark.sql import SparkSession
                 spark = SparkSession.builder.getOrCreate()
                 spark.createDataFrame([(sys.argv[2],)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                print("driver-wrote-" + sys.argv[2])
                 """);
         put("fail.py", """
                 import sys
@@ -133,16 +141,34 @@ class EmrContainersSparkNightlyIntegrationTest {
 
     @Test
     void sparkSubmitJobRunWritesToS3AndCompletes() {
+        String logGroup = "/emr-on-eks/" + bucket;
+        // The run creates it, as EMR on EKS creates a log group that does not exist.
+        cleanup.register(() -> logs.deleteLogGroup(request -> request.logGroupName(logGroup)));
         String id = startJobRun("""
                 {"sparkSubmitJobDriver": {"entryPoint": "s3://%s/write.py",
                   "entryPointArguments": ["s3://%s/out/", "from-submit"],
                   "sparkSubmitParameters": "--conf spark.sql.shuffle.partitions=1"}}
-                """.formatted(bucket, bucket));
+                """.formatted(bucket, bucket), """
+                {"monitoringConfiguration": {"s3MonitoringConfiguration": {"logUri": "s3://%s/logs/"},
+                   "cloudWatchMonitoringConfiguration": {"logGroupName": "%s", "logStreamNamePrefix": "nightly"}}}
+                """.formatted(bucket, logGroup));
 
         Response run = awaitFinished(id);
 
         assertEquals("COMPLETED", run.jsonPath().getString("jobRun.state"), run.asString());
         assertEquals("from-submit\n", S3TestClients.partFiles(s3, bucket, "out/"));
+        // logUri/virtual-cluster-id/jobs/job-id/containers/spark-application-id/spark-job-id-driver/stdout.gz
+        String containers = "logs/" + virtualClusterId + "/jobs/" + id + "/containers/";
+        String stdout = s3.listObjectsV2(request -> request.bucket(bucket).prefix(containers)).contents().stream()
+                .map(S3Object::key)
+                .filter(key -> key.matches(containers + "spark-[0-9a-f]{32}/spark-" + id + "-driver/stdout\\.gz"))
+                .findFirst().orElseThrow();
+        assertTrue(S3TestClients.gunzipped(s3, bucket, stdout).contains("driver-wrote-from-submit"));
+        String stream = "nightly/" + stdout.substring("logs/".length(), stdout.length() - ".gz".length());
+        await("the driver's output in CloudWatch Logs").atMost(Duration.ofSeconds(30)).pollInterval(POLL_INTERVAL)
+                .until(() -> logs.getLogEvents(request -> request.logGroupName(logGroup).logStreamName(stream))
+                        .events().stream().map(OutputLogEvent::message)
+                        .anyMatch(message -> message.contains("driver-wrote-from-submit")));
     }
 
     @Test
@@ -196,10 +222,14 @@ class EmrContainersSparkNightlyIntegrationTest {
     }
 
     private String startJobRun(String jobDriver) {
+        return startJobRun(jobDriver, "{}");
+    }
+
+    private String startJobRun(String jobDriver, String configurationOverrides) {
         return emr().body("""
                         {"name": "nightly", "clientToken": "%s", "executionRoleArn": "%s", "releaseLabel": "%s",
-                         "jobDriver": %s}
-                        """.formatted(UUID.randomUUID(), ROLE, RELEASE, jobDriver))
+                         "jobDriver": %s, "configurationOverrides": %s}
+                        """.formatted(UUID.randomUUID(), ROLE, RELEASE, jobDriver, configurationOverrides))
                 .post("/virtualclusters/" + virtualClusterId + "/jobruns")
                 .then().statusCode(200)
                 .extract().path("id");

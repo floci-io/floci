@@ -962,6 +962,64 @@ class EmrContainersServiceTest {
     }
 
     @Test
+    void dockerRunsDriverLogsGoUnderASparkApplicationIdOfItsOwn() {
+        FakeRunner runner = new FakeRunner();
+        QueuedExecutor executor = new QueuedExecutor();
+        EmrContainersService service = dockerService(runner, executor);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String id = service.startJobRun(clusterId, json("""
+                {"clientToken": "logs", "executionRoleArn": "%s", "releaseLabel": "%s",
+                 "jobDriver": {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}},
+                 "configurationOverrides": {"monitoringConfiguration": {
+                   "s3MonitoringConfiguration": {"logUri": "s3://logs"},
+                   "cloudWatchMonitoringConfiguration": {"logGroupName": "jobs", "logStreamNamePrefix": "p"}}}}
+                """.formatted(ROLE, RELEASE))).get("id").textValue();
+
+        executor.runAll();
+
+        SparkJobRunner.Job job = runner.jobs.getFirst();
+        String driver = clusterId + "/jobs/" + id + "/containers/spark-[0-9a-f]{32}/spark-" + id + "-driver/";
+        assertTrue(job.logFolder().matches("s3://logs/" + driver), job.logFolder());
+        assertEquals("jobs", job.cloudWatchLogs().logGroup());
+        assertTrue(job.cloudWatchLogs().stdoutStream().matches("p/" + driver + "stdout"));
+        assertEquals(job.cloudWatchLogs().stdoutStream().replace("/stdout", "/stderr"),
+                job.cloudWatchLogs().stderrStream());
+        assertTrue(job.logFolder().endsWith(job.cloudWatchLogs().stdoutStream().substring(2).replace("stdout", "")),
+                "the same Spark application id names both");
+    }
+
+    @Test
+    void monitoringDestinationWithoutItsLogGroupOrUriIsRefusedFromATemplateAsFromARequest() {
+        EmrContainersService service = service(0);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        // The template's parametric model lets the destination leave its log group out.
+        String templateId = service.createJobTemplate(json("""
+                {"name": "t", "clientToken": "%s", "jobTemplateData": {
+                   "executionRoleArn": "%s", "releaseLabel": "%s",
+                   "jobDriver": {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}},
+                   "configurationOverrides": {"monitoringConfiguration": {
+                     "cloudWatchMonitoringConfiguration": {"logStreamNamePrefix": "p"}}}}}
+                """.formatted(UUID.randomUUID(), ROLE, RELEASE))).get("id").textValue();
+
+        AwsException fromTemplate = assertThrows(AwsException.class, () -> service.startJobRun(clusterId, json("""
+                {"clientToken": "%s", "jobTemplateId": "%s"}
+                """.formatted(UUID.randomUUID(), templateId))));
+        AwsException fromRequest = assertThrows(AwsException.class, () -> service.startJobRun(clusterId, json("""
+                {"clientToken": "%s", "executionRoleArn": "%s", "releaseLabel": "%s",
+                 "jobDriver": {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}},
+                 "configurationOverrides": {"monitoringConfiguration": {"s3MonitoringConfiguration": {}}}}
+                """.formatted(UUID.randomUUID(), ROLE, RELEASE))));
+
+        assertEquals("ValidationException", fromTemplate.getErrorCode());
+        assertTrue(fromTemplate.getMessage().contains(
+                "monitoringConfiguration.cloudWatchMonitoringConfiguration.logGroupName"), fromTemplate.getMessage());
+        assertEquals("ValidationException", fromRequest.getErrorCode());
+        assertTrue(fromRequest.getMessage().contains("logUri"), fromRequest.getMessage());
+        assertTrue(service.listJobRuns(clusterId, ListQuery.of(null, null, null, null, null), null)
+                .get("jobRuns").isEmpty(), "neither run is stored");
+    }
+
+    @Test
     void immediateModeNeverStartsAContainer() {
         EmrContainersService service = service(0);
         String clusterId = virtualCluster(service, EKS_CLUSTER);
