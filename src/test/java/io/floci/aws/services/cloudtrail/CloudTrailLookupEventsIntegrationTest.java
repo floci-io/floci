@@ -106,6 +106,17 @@ class CloudTrailLookupEventsIntegrationTest {
     }
 
     @Test
+    void aPageHoldsAtMostFiftyEventsWhateverMaxResultsAsks() {
+        String account = newAccount();
+        putSecretValues(account, 51);
+
+        LookupEventsResponse page = lookup(account, LookupAttributeKey.EVENT_SOURCE, SECRETS_MANAGER, 1000);
+
+        assertEquals(50, page.events().size());
+        assertNotNull(page.nextToken());
+    }
+
+    @Test
     void aNextTokenIsRefusedForADifferentLookup() {
         String account = newAccount();
         putSecretValues(account, 2);
