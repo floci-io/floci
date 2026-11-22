@@ -12,6 +12,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
+import static io.floci.aws.testing.Ec2Requests.createDefaultVpcSecurityGroup;
+import static io.floci.aws.testing.Ec2Requests.ec2;
 import static io.floci.aws.testing.RdsRequests.auroraClusterWithMember;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -304,6 +306,8 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-rds-sg-out-" + suffix;
         String clusterId = "cfn-sg-out-" + suffix;
+        // ModifyDBCluster refuses a group EC2 does not know; the cluster is in the default VPC
+        String outside = createDefaultVpcSecurityGroup("test", "us-east-1", "cfn-sg-outside-" + suffix);
         String cluster = """
                 {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
                   "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
@@ -315,12 +319,12 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                     + " \"PreferredMaintenanceWindow\": \"mon:05:00-mon:06:00\""));
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             rds("ModifyDBCluster").formParam("DBClusterIdentifier", clusterId)
-                    .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-outside")
+                    .formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", outside)
             .when().post("/").then().statusCode(200);
 
             stack("UpdateStack", stackName, cluster.formatted(clusterId, "password456", ""));
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
-            assertEquals(List.of("sg-outside"), clusterGroups(clusterId));
+            assertEquals(List.of(outside), clusterGroups(clusterId));
             XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
                     .when().post("/").then().statusCode(200).extract().xmlPath();
             assertEquals("true", xml.getString("**.find { it.name() == 'DeletionProtection' }"));
@@ -332,6 +336,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                     .formParam("DeletionProtection", "false").when().post("/");
             stack("DeleteStack", stackName, null);
             CfnStackWaits.awaitStackDeleted(stackName);
+            ec2("DeleteSecurityGroup", "test", "us-east-1").formParam("GroupId", outside).when().post("/");
         }
     }
 

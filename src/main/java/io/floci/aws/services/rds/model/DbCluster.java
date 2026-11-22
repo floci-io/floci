@@ -36,6 +36,13 @@ public class DbCluster {
     // Null until a request names them; the emitted XML then falls back to the defaults.
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
+    /** MonitoringInterval documents 0 as its default. */
+    private int monitoringInterval;
+    private String monitoringRoleArn;
+    private boolean performanceInsightsEnabled;
+    private Integer performanceInsightsRetentionPeriod;
+    // Null on a cluster stored before it was kept; the response then leaves it out.
+    private String databaseInsightsMode;
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -283,4 +290,22 @@ public class DbCluster {
         enabledCloudwatchLogsExports = value == null ? new ArrayList<>() : new ArrayList<>(value);
     }
 
+    public int getMonitoringInterval() { return monitoringInterval; }
+    public void setMonitoringInterval(int monitoringInterval) { this.monitoringInterval = monitoringInterval; }
+
+    public String getMonitoringRoleArn() { return monitoringRoleArn; }
+    public void setMonitoringRoleArn(String monitoringRoleArn) { this.monitoringRoleArn = monitoringRoleArn; }
+
+    public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
+    public void setPerformanceInsightsEnabled(boolean performanceInsightsEnabled) {
+        this.performanceInsightsEnabled = performanceInsightsEnabled;
+    }
+
+    public Integer getPerformanceInsightsRetentionPeriod() { return performanceInsightsRetentionPeriod; }
+    public void setPerformanceInsightsRetentionPeriod(Integer performanceInsightsRetentionPeriod) {
+        this.performanceInsightsRetentionPeriod = performanceInsightsRetentionPeriod;
+    }
+
+    public String getDatabaseInsightsMode() { return databaseInsightsMode; }
+    public void setDatabaseInsightsMode(String databaseInsightsMode) { this.databaseInsightsMode = databaseInsightsMode; }
 }
