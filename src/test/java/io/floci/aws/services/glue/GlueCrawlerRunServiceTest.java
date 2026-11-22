@@ -7,6 +7,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Crawler;
 import io.floci.aws.services.glue.model.CrawlerRunRecord;
 import io.floci.aws.services.glue.model.CrawlerTargets;
+import io.floci.aws.services.glue.model.LastCrawlInfo;
 import io.floci.aws.services.glue.model.S3Target;
 import io.floci.aws.services.glue.model.Schedule;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
@@ -66,6 +67,58 @@ class GlueCrawlerRunServiceTest {
 
     private GlueCrawlerRunService service(int runDurationSeconds) {
         return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, runDurationSeconds, clock);
+    }
+
+    private GlueCrawlerRunService service(CrawlRunner runner) {
+        return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, 0, clock, runner);
+    }
+
+    @Test
+    void aCrawlThatFailsReportsFailedWithItsErrorMessageAndNoTableChanges() {
+        createCrawler("raw", null);
+        GlueCrawlerRunService service = service(name -> CrawlOutcome.failed("Connection missing not found."));
+
+        service.startCrawler("raw");
+
+        Crawler crawler = service.withRunState(glueService.getCrawler("raw"));
+        assertEquals("READY", crawler.getState());
+        assertEquals("FAILED", crawler.getLastCrawl().getStatus());
+        assertEquals("Connection missing not found.", crawler.getLastCrawl().getErrorMessage());
+        Map<String, Object> metrics = metrics(service, "raw");
+        assertEquals(0, metrics.get("TablesCreated"));
+        assertEquals(0, metrics.get("TablesUpdated"));
+    }
+
+    @Test
+    void metricsReportTheTableChangesOfTheLastCrawl() {
+        createCrawler("raw", null);
+        List<CrawlOutcome> outcomes = List.of(CrawlOutcome.succeeded(3, 0, 0), CrawlOutcome.succeeded(1, 2, 0));
+        int[] next = {0};
+        GlueCrawlerRunService service = service(name -> outcomes.get(next[0]++));
+
+        service.startCrawler("raw");
+        service.startCrawler("raw");
+
+        Map<String, Object> metrics = metrics(service, "raw");
+        assertEquals(1, metrics.get("TablesCreated"));
+        assertEquals(2, metrics.get("TablesUpdated"));
+        assertEquals(0, metrics.get("TablesDeleted"));
+        assertEquals("SUCCEEDED", service.withRunState(glueService.getCrawler("raw")).getLastCrawl().getStatus());
+    }
+
+    @Test
+    void aLaterSuccessfulCrawlClearsTheErrorMessageOfAFailedOne() {
+        createCrawler("raw", null);
+        List<CrawlOutcome> outcomes = List.of(CrawlOutcome.failed("boom"), CrawlOutcome.succeeded());
+        int[] next = {0};
+        GlueCrawlerRunService service = service(name -> outcomes.get(next[0]++));
+
+        service.startCrawler("raw");
+        service.startCrawler("raw");
+
+        LastCrawlInfo lastCrawl = service.withRunState(glueService.getCrawler("raw")).getLastCrawl();
+        assertEquals("SUCCEEDED", lastCrawl.getStatus());
+        assertNull(lastCrawl.getErrorMessage());
     }
 
     private void createCrawler(String name, String scheduleExpression) {

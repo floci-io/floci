@@ -21,6 +21,10 @@ public class CrawlerRunRecord {
     private Instant lastStart;
     private String lastStatus;
     private String lastMessagePrefix;
+    private String lastErrorMessage;
+    private int lastTablesCreated;
+    private int lastTablesUpdated;
+    private int lastTablesDeleted;
     private List<Double> runtimeSeconds = new ArrayList<>();
     private long finishedCount;
     private List<FinishedCrawl> recentCrawls = new ArrayList<>();
@@ -53,6 +57,18 @@ public class CrawlerRunRecord {
 
     public String getLastMessagePrefix() { return lastMessagePrefix; }
     public void setLastMessagePrefix(String lastMessagePrefix) { this.lastMessagePrefix = lastMessagePrefix; }
+
+    public String getLastErrorMessage() { return lastErrorMessage; }
+    public void setLastErrorMessage(String lastErrorMessage) { this.lastErrorMessage = lastErrorMessage; }
+
+    public int getLastTablesCreated() { return lastTablesCreated; }
+    public void setLastTablesCreated(int lastTablesCreated) { this.lastTablesCreated = lastTablesCreated; }
+
+    public int getLastTablesUpdated() { return lastTablesUpdated; }
+    public void setLastTablesUpdated(int lastTablesUpdated) { this.lastTablesUpdated = lastTablesUpdated; }
+
+    public int getLastTablesDeleted() { return lastTablesDeleted; }
+    public void setLastTablesDeleted(int lastTablesDeleted) { this.lastTablesDeleted = lastTablesDeleted; }
 
     public List<Double> getRuntimeSeconds() { return runtimeSeconds; }
     public void setRuntimeSeconds(List<Double> runtimeSeconds) { this.runtimeSeconds = runtimeSeconds; }

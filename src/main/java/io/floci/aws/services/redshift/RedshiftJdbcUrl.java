@@ -1,21 +1,22 @@
-package io.floci.aws.services.firehose;
+package io.floci.aws.services.redshift;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The logical address in a Firehose {@code ClusterJDBCURL}. Floci routes by the first host label
+ * The logical address in a Redshift JDBC URL, as a Firehose {@code ClusterJDBCURL} or a Glue
+ * connection's {@code JDBC_CONNECTION_URL} carries it. Floci routes by the first host label
  * (the cluster identifier or workgroup name) and ignores the host suffix and port, because a
  * Floci cluster is reachable on a Docker host and a dynamic port, not on the AWS-shaped name the
  * API requires.
  */
-record RedshiftJdbcUrl(String clusterIdentifier, boolean serverless, String database) {
+public record RedshiftJdbcUrl(String clusterIdentifier, boolean serverless, String database) {
 
     private static final Pattern URL = Pattern.compile(
             "jdbc:(?:redshift|postgresql)://([A-Za-z0-9-]{1,63})\\.([A-Za-z0-9.\\-]+):\\d{1,5}/([a-zA-Z0-9_$-]+)");
     private static final Pattern SERVICE_LABEL = Pattern.compile("(?:^|\\.)redshift(-serverless)?\\.");
 
-    static RedshiftJdbcUrl parse(String url) {
+    public static RedshiftJdbcUrl parse(String url) {
         Matcher matcher = URL.matcher(url == null ? "" : url);
         if (!matcher.matches()) {
             throw new IllegalArgumentException("Unsupported ClusterJDBCURL: " + url);
