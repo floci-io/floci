@@ -1240,6 +1240,16 @@ public interface EmulatorConfig {
         Optional<String> imageTemplate();
 
         /**
+         * The image a managed endpoint's Jupyter Enterprise Gateway and its kernels run in, in the {@code docker}
+         * runner mode, with {@code %s} standing for its release's container image tag, for example
+         * "registry.internal/emr-on-eks/notebook-spark/%s". If omitted, Floci uses the release's
+         * {@code notebook-spark} image on Amazon ECR Public.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_GATEWAY_IMAGE_TEMPLATE
+         */
+        Optional<String> gatewayImageTemplate();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR on EKS driver a previous run of
          * <em>this same</em> Floci left on the daemon before its first job run starts. Turn it off when two Floci
          * instances share a daemon with the same port and no resource namespace.

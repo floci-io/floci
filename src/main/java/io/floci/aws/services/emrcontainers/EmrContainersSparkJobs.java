@@ -42,8 +42,8 @@ final class EmrContainersSparkJobs {
     private static final String DRIVER_CONTAINER_IMAGE = "spark.kubernetes.driver.container.image";
     private static final String DRIVER_ENV_PREFIX = "spark.kubernetes.driverEnv.";
     // The base image's spark-defaults.conf runs a driver in Kubernetes' cluster mode, which local mode refuses.
-    private static final String DEPLOY_MODE = "spark.submit.deployMode";
-    private static final String CLIENT = "client";
+    static final String DEPLOY_MODE = "spark.submit.deployMode";
+    static final String CLIENT = "client";
     private static final String SPARK_SQL = "spark-sql";
     // A release label is its image's repository and tag joined by a hyphen: emr-7.2.0-20240610 runs the image tagged
     // emr-7.2.0:20240610, and emr-7.2.0-java11-latest the one tagged emr-7.2.0-java11:latest.

@@ -146,6 +146,10 @@ starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverle
 # The nightly EmrContainersSparkNightlyIntegrationTest runs EMR on EKS job runs in the emr-7.5.0 release's EMR on EKS
 # base image, about 5 GB.
 starts EmrContainersSparkNightlyIntegrationTest && ecr public.ecr.aws/emr-on-eks/spark/emr-7.5.0:latest
+# The nightly EmrContainersGatewayNightlyIntegrationTest runs an EMR on EKS managed endpoint's gateway and a PySpark
+# kernel in the emr-7.5.0 release's notebook-spark image, about 6 GB.
+starts EmrContainersGatewayNightlyIntegrationTest \
+    && ecr public.ecr.aws/emr-on-eks/notebook-spark/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)

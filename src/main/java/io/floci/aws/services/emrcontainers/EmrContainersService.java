@@ -17,6 +17,7 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -24,6 +25,7 @@ import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
+import io.floci.aws.services.emrserverless.SessionServers;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.IamService;
 import jakarta.annotation.PreDestroy;
@@ -32,6 +34,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -140,7 +143,19 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     // to 1000 concurrent job runs", and "buffered jobs fail after 30 minutes if no slot frees up".
     private static final int DEFAULT_MAX_CONCURRENT_JOB_RUNS = 1000;
     private static final Duration QUEUE_TIMEOUT = Duration.ofMinutes(30);
-    private static final Set<String> FINISHED_ENDPOINT_STATES = Set.of(TERMINATED, "TERMINATED_WITH_ERRORS");
+    private static final String CREATING = "CREATING";
+    private static final String TERMINATING = "TERMINATING";
+    private static final String TERMINATED_WITH_ERRORS = "TERMINATED_WITH_ERRORS";
+    private static final Set<String> FINISHED_ENDPOINT_STATES = Set.of(TERMINATED, TERMINATED_WITH_ERRORS);
+    /** The path under Floci's base URL that an endpoint's serverUrl is, its id after it. */
+    static final String GATEWAY_PATH = "/_aws/emr-containers/endpoints/";
+    // No source gives AWS's wording for an endpoint whose gateway failed; these are Floci's.
+    static final String GATEWAY_NOT_STARTED = "The endpoint's Jupyter Enterprise Gateway could not start: %s";
+    static final String GATEWAY_EXITED = "The endpoint's Jupyter Enterprise Gateway exited with code %d.";
+    static final String GATEWAY_ENDED = "The endpoint's Jupyter Enterprise Gateway ended with no exit code.";
+    static final String GATEWAY_SILENT = "The endpoint's Jupyter Enterprise Gateway did not answer within "
+            + SessionServers.START_LIMIT.toMinutes() + " minutes: %s";
+    static final String GATEWAY_LOST = "The endpoint's Jupyter Enterprise Gateway stopped with Floci.";
     private static final String TOKEN_CREDENTIAL = "TOKEN";
     private static final int DEFAULT_SESSION_SECONDS = 15 * 60;
     private static final int MAX_SESSION_SECONDS = 12 * 60 * 60;
@@ -173,6 +188,9 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     private final String dockerNetwork;
     // Where a retry waits for its backoff in the docker runner mode; null in the immediate one.
     private final Delays delays;
+    // The managed endpoints' gateways in the docker runner mode; null in the immediate one.
+    private final EndpointGateways gateways;
+    private final GatewayOwner gatewayOwner = new GatewayOwner();
     // The ARNs of the runs whose containers a thread of this process runs; a launched run not here was left by a
     // restart.
     private final Set<String> executing = new HashSet<>();
@@ -194,7 +212,12 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-run-", 0).factory()),
                 config.services().emrcontainers().imageTemplate().orElse(null),
                 config.services().emrcontainers().dockerNetwork().orElse(null),
-                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? Delays.timer() : null);
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode()) ? Delays.timer() : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emrcontainers().runnerMode())
+                        ? EndpointGateways.of(sparkRunner, clock,
+                                config.services().emrcontainers().gatewayImageTemplate().orElse(null),
+                                config.effectiveBaseUrl())
+                        : null);
         // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
         if (this.sparkRunner != null && config.services().emrcontainers().reconcileContainersOnStartup()) {
             sparkRunner.removeLeftoverDrivers(SERVICE);
@@ -211,7 +234,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                          int jobRunDurationSeconds) {
         this(virtualClusters, jobRuns, endpoints, jobTemplates, securityConfigurations, mapper, regionResolver,
                 eksService, iamService, requestContext, clock, jobRunDurationSeconds, null, Runnable::run, null, null,
-                null);
+                null, null);
     }
 
     EmrContainersService(AccountAwareStorageBackend<ObjectNode> virtualClusters,
@@ -222,7 +245,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
                          ObjectMapper mapper, RegionResolver regionResolver, EksService eksService,
                          IamService iamService, RequestContext requestContext, Clock clock,
                          int jobRunDurationSeconds, SparkJobRunner sparkRunner, Executor runExecutor,
-                         String imageTemplate, String dockerNetwork, Delays delays) {
+                         String imageTemplate, String dockerNetwork, Delays delays, EndpointGateways gateways) {
         this.virtualClusters = virtualClusters;
         this.jobRuns = jobRuns;
         this.endpoints = endpoints;
@@ -240,6 +263,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         this.imageTemplate = imageTemplate;
         this.dockerNetwork = dockerNetwork;
         this.delays = delays;
+        this.gateways = gateways;
     }
 
     @PreDestroy
@@ -249,6 +273,26 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         }
         if (delays != null) {
             delays.close();
+        }
+        if (gateways != null) {
+            gateways.servers().shutdown();
+        }
+    }
+
+    /**
+     * The managed endpoints' gateways of the docker runner mode: the servers that run them, the image they run in
+     * ({@code gateway-image-template}, null when not set), and Floci's base URL, which their {@code serverUrl} is
+     * under.
+     */
+    record EndpointGateways(SessionServers servers, String imageTemplate, String baseUrl) {
+
+        static EndpointGateways of(SparkJobRunner runner, Clock clock, String imageTemplate, String baseUrl) {
+            HttpClient probes = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+            return new EndpointGateways(new SessionServers(EmrContainersGateways.KIND, runner,
+                    Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-containers-gateway-", 0)
+                            .factory()),
+                    null, (host, port) -> EmrContainersGateways.unanswered(probes, host, port), clock),
+                    imageTemplate, baseUrl);
         }
     }
 
@@ -619,7 +663,9 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         endpoint.put("arn", arn);
         endpoint.put("virtualClusterId", virtualClusterId);
         endpoint.set("type", request.get("type"));
-        endpoint.put("state", ACTIVE);
+        // "Initially, your endpoint is in the CREATING state. After a few minutes, it transitions to the ACTIVE state"
+        // (EMR on EKS Development Guide, "Create an interactive endpoint"), once its gateway answers.
+        endpoint.put("state", gateways != null ? CREATING : ACTIVE);
         endpoint.set("releaseLabel", request.get("releaseLabel"));
         endpoint.set("executionRoleArn", request.get("executionRoleArn"));
         copy(request, endpoint, "certificateArn", "configurationOverrides");
@@ -627,13 +673,18 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         endpoint.set("tags", tags(request.get("tags")));
         endpoint.put(CLIENT_TOKEN, clientToken);
         endpoints.put(arn, endpoint);
+        if (gateways != null) {
+            gateways.servers().launch(EmrContainersGateways.job(endpoint, gateways.imageTemplate(), dockerNetwork),
+                    gatewayOwner);
+        }
         return pick(endpoint, "id", "name", "arn", "virtualClusterId");
     }
 
     public synchronized ObjectNode describeManagedEndpoint(String virtualClusterId, String id) {
         EmrContainersRequestShapes.check("DescribeManagedEndpoint",
                 object("id", id).put("virtualClusterId", virtualClusterId));
-        ObjectNode endpoint = endpoint(virtualClusterId, id).orElseThrow(() -> notFound(endpointMissing(id)));
+        ObjectNode endpoint = endpoint(virtualClusterId, id).map(this::settledEndpoint)
+                .orElseThrow(() -> notFound(endpointMissing(id)));
         return wrap("endpoint", endpoint);
     }
 
@@ -643,6 +694,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         EmrContainersRequestShapes.check("ListManagedEndpoints", shape);
         String prefix = arn(VIRTUAL_CLUSTERS + virtualClusterId + ENDPOINTS);
         List<ObjectNode> matching = endpoints.scan(key -> key.startsWith(prefix)).stream()
+                .map(this::settledEndpoint)
                 .filter(query::matches)
                 .filter(endpoint -> types == null || types.isEmpty()
                         || types.contains(endpoint.path("type").textValue()))
@@ -653,11 +705,19 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     public synchronized ObjectNode deleteManagedEndpoint(String virtualClusterId, String id) {
         EmrContainersRequestShapes.check("DeleteManagedEndpoint",
                 object("id", id).put("virtualClusterId", virtualClusterId));
-        ObjectNode endpoint = endpoint(virtualClusterId, id).orElseThrow(() -> invalid(endpointMissing(id)));
-        if (!FINISHED_ENDPOINT_STATES.contains(endpoint.path("state").textValue())) {
+        ObjectNode endpoint = endpoint(virtualClusterId, id).map(this::settledEndpoint)
+                .orElseThrow(() -> invalid(endpointMissing(id)));
+        String state = endpoint.path("state").textValue();
+        if (!FINISHED_ENDPOINT_STATES.contains(state) && !TERMINATING.equals(state)) {
             ObjectNode terminated = endpoint.deepCopy();
-            terminated.put("state", TERMINATED);
+            boolean gatewayRuns = gateways != null && gateways.servers().runs(id);
+            // TERMINATING until its gateway has stopped.
+            terminated.put("state", gatewayRuns ? TERMINATING : TERMINATED);
             endpoints.put(terminated.get("arn").textValue(), terminated);
+            if (gatewayRuns) {
+                // Off the request's thread, as stopping a container waits for Docker.
+                runExecutor.execute(() -> gateways.servers().stop(id));
+            }
         }
         return object("id", id).put("virtualClusterId", virtualClusterId);
     }
@@ -667,7 +727,7 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         request.put("virtualClusterIdentifier", virtualClusterId);
         request.put("endpointIdentifier", endpointId);
         EmrContainersRequestShapes.check("GetManagedEndpointSessionCredentials", request);
-        ObjectNode endpoint = endpoint(virtualClusterId, endpointId)
+        ObjectNode endpoint = endpoint(virtualClusterId, endpointId).map(this::settledEndpoint)
                 .orElseThrow(() -> notFound(endpointMissing(endpointId)));
         if (!ACTIVE.equals(endpoint.path("state").textValue())) {
             throw invalid("Endpoint " + endpointId + " is " + endpoint.path("state").textValue()
@@ -683,12 +743,174 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
         if (seconds < 1 || seconds > MAX_SESSION_SECONDS) {
             throw invalid("durationInSeconds must be between 1 and " + MAX_SESSION_SECONDS + ".");
         }
-        ObjectNode credentials = object("token", sessionToken());
+        String token = sessionToken();
+        Instant expiresAt = now().plusSeconds(seconds);
+        // "The token acts as proof of authentication to connect to the interactive endpoint server" ("Retrieve an auth
+        // token to connect to the interactive endpoint").
+        if (gateways != null) {
+            gateways.servers().grant(token, endpointId, regionResolver.getAccountId(), regionResolver.getRegion(),
+                    expiresAt);
+        }
+        ObjectNode credentials = object("token", token);
         ObjectNode response = object("id", newId(JOB_RUN_ID_LENGTH));
         response.set("credentials", credentials);
         response.set("endpointCredentials", credentials.deepCopy());
-        response.put("expiresAt", timestamp(now().plusSeconds(seconds)));
+        response.put("expiresAt", timestamp(expiresAt));
         return response;
+    }
+
+    /**
+     * Where a call to endpoint {@code endpointId}'s gateway carrying {@code token} goes: empty for a token not given
+     * for that endpoint, as in the immediate runner mode, where no gateway runs; refused for an expired one, or while
+     * the endpoint is not ACTIVE; else its gateway. Called off the event loop, as the account and Region of none.
+     */
+    public Optional<SparkConnectTargets.Route> gatewayRoute(String endpointId, String token) {
+        return gateways == null || token == null ? Optional.empty()
+                : gateways.servers().route(token, endpointId, gatewayOwner);
+    }
+
+    /**
+     * The endpoint as it stands, stored: in the docker runner mode, one whose gateway no thread of this process runs,
+     * as after a restart, has ended, TERMINATED_WITH_ERRORS, or TERMINATED where it was being deleted.
+     */
+    private ObjectNode settledEndpoint(ObjectNode endpoint) {
+        String state = endpoint.path("state").textValue();
+        if (gateways == null || FINISHED_ENDPOINT_STATES.contains(state)
+                || gateways.servers().runs(endpoint.get("id").textValue())) {
+            return endpoint;
+        }
+        ObjectNode ended = endpoint.deepCopy();
+        if (TERMINATING.equals(state)) {
+            ended.put("state", TERMINATED);
+        } else {
+            endWithErrors(ended, GATEWAY_LOST);
+        }
+        endpoints.put(ended.get("arn").textValue(), ended);
+        return ended;
+    }
+
+    private static void endWithErrors(ObjectNode endpoint, String details) {
+        endpoint.put("state", TERMINATED_WITH_ERRORS);
+        endpoint.put("stateDetails", details);
+        endpoint.put("failureReason", INTERNAL_ERROR);
+        endpoint.remove("serverUrl");
+    }
+
+    // The stored endpoint of that id, in the account and Region the call runs as.
+    private Optional<ObjectNode> endpointById(String id) {
+        return endpoints.scan(key -> key.endsWith(ENDPOINTS + id)).stream().findFirst();
+    }
+
+    /**
+     * The endpoints as their gateways' owner: CREATING until the gateway answers, then ACTIVE with its
+     * {@code serverUrl} and AWS's "Endpoint created successfully. It took 3 Minutes 15 Seconds" for the time it took
+     * ("Retrieve the gateway server URL of your interactive endpoint"); TERMINATED once a deleted endpoint's gateway
+     * has stopped, and TERMINATED_WITH_ERRORS, with INTERNAL_ERROR, when it stops otherwise or never answers. Each
+     * step is taken under the service's lock.
+     */
+    private final class GatewayOwner implements SessionServers.Owner {
+
+        @Override
+        public void running(String endpointId) {
+        }
+
+        @Override
+        public void answering(String endpointId) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId).filter(stored -> CREATING.equals(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode active = stored.deepCopy();
+                            Duration took = Duration.between(Instant.parse(stored.get("createdAt").textValue()),
+                                    now());
+                            active.put("state", ACTIVE);
+                            active.put("serverUrl", serverUrl(endpointId));
+                            active.put("stateDetails", "Endpoint created successfully. It took "
+                                    + took.toMinutes() + " Minutes " + took.toSecondsPart() + " Seconds");
+                            endpoints.put(active.get("arn").textValue(), active);
+                            LOG.infov("EMR on EKS endpoint {0} is ACTIVE", endpointId);
+                        });
+            }
+        }
+
+        @Override
+        public void silent(String endpointId, String why) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId).filter(stored -> CREATING.equals(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode failed = stored.deepCopy();
+                            endWithErrors(failed, String.format(GATEWAY_SILENT, why));
+                            endpoints.put(failed.get("arn").textValue(), failed);
+                        });
+            }
+        }
+
+        @Override
+        public void stopped(String endpointId, SparkJobRunner.Outcome outcome) {
+            synchronized (EmrContainersService.this) {
+                endpointById(endpointId)
+                        .filter(stored -> !FINISHED_ENDPOINT_STATES.contains(stored.path("state").textValue()))
+                        .ifPresent(stored -> {
+                            ObjectNode ended = stored.deepCopy();
+                            if (TERMINATING.equals(stored.path("state").textValue())) {
+                                ended.put("state", TERMINATED);
+                                ended.remove("serverUrl");
+                            } else if (outcome.stopped()) {
+                                // Stopped with no delete asking for it: Floci is shutting down, its kernels going
+                                // with the gateway, as they do when a restart leaves one behind.
+                                endWithErrors(ended, GATEWAY_LOST);
+                            } else {
+                                endWithErrors(ended, outcome.failure() != null
+                                        ? String.format(GATEWAY_NOT_STARTED, outcome.failure())
+                                        : outcome.exitCode() != null
+                                        ? String.format(GATEWAY_EXITED, outcome.exitCode()) : GATEWAY_ENDED);
+                            }
+                            endpoints.put(ended.get("arn").textValue(), ended);
+                            LOG.infov("EMR on EKS endpoint {0} is {1}", endpointId,
+                                    ended.get("state").textValue());
+                        });
+            }
+        }
+
+        @Override
+        public boolean starting(String endpointId) {
+            return inState(endpointId, CREATING);
+        }
+
+        @Override
+        public boolean going(String endpointId) {
+            return inState(endpointId, CREATING) || inState(endpointId, ACTIVE);
+        }
+
+        @Override
+        public String refusal(String endpointId) {
+            synchronized (EmrContainersService.this) {
+                String state = endpointById(endpointId).map(stored -> stored.path("state").textValue())
+                        .orElse(TERMINATED);
+                return ACTIVE.equals(state) ? null : "Endpoint " + endpointId + " is " + state + ".";
+            }
+        }
+
+        @Override
+        public void busy(String endpointId) {
+        }
+
+        @Override
+        public void idle(String endpointId) {
+        }
+
+        private boolean inState(String endpointId, String state) {
+            synchronized (EmrContainersService.this) {
+                return endpointById(endpointId).filter(stored -> state.equals(stored.path("state").textValue()))
+                        .isPresent();
+            }
+        }
+    }
+
+    // An endpoint's serverUrl: its path under Floci's base URL, which Floci's proxy serves.
+    private String serverUrl(String endpointId) {
+        String base = gateways.baseUrl() == null ? "" : gateways.baseUrl().endsWith("/")
+                ? gateways.baseUrl().substring(0, gateways.baseUrl().length() - 1) : gateways.baseUrl();
+        return base + GATEWAY_PATH + endpointId;
     }
 
     // ── Security configurations ──────────────────────────────────────────────────
@@ -835,12 +1057,18 @@ public class EmrContainersService implements Resettable, StoredResourceArns {
     public synchronized void beforeReset() {
         generation++;
         executing.clear();
+        if (gateways != null) {
+            gateways.servers().reset();
+        }
     }
 
     @Override
     public synchronized void clear() {
         generation++;
         executing.clear();
+        if (gateways != null) {
+            gateways.servers().reset();
+        }
         virtualClusters.clear();
         jobRuns.clear();
         endpoints.clear();
