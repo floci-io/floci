@@ -107,6 +107,7 @@ class GlueCrawlerRunServiceTest {
         assertEquals("FAILED", lastCrawl.getStatus());
         assertEquals("backend exploded", lastCrawl.getErrorMessage());
         assertEquals("FAILED", service.crawlsInWorkflowRun("wfr_1").get(0).state());
+        assertEquals("backend exploded", service.crawlsInWorkflowRun("wfr_1").get(0).errorMessage());
         service.startCrawler("raw");
         assertEquals(2, calls.get());
     }
