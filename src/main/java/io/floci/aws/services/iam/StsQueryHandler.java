@@ -1188,6 +1188,16 @@ public class StsQueryHandler {
      * gone does not get one that speaks for the account. An unknown long-term key keeps the
      * stand-in, which is what {@code GetCallerIdentity} answers it.
      */
+    /**
+     * The refusals the GetWebIdentityToken reference states for its two subject members, in its own
+     * sentences: AWS's answer is a validation error, and no recording gives its text.
+     */
+    private static final String SCOPE_NEEDS_ORIGIN_IDENTITY = "You can specify Scope only when SubjectMode is"
+            + " OriginIdentity and you request exactly one audience.";
+    private static final String ORIGIN_IDENTITY_NEEDS_CONTEXT = "To use OriginIdentity, the trusted identity"
+            + " propagation context of the calling session must contain the aws:OriginIdentity/Subject key and"
+            + " either the aws:OriginIdentity/Issuer key or the aws:OriginIdentity/FederatedProviderArn key.";
+
     private Response handleGetWebIdentityToken(MultivaluedMap<String, String> params) {
         if (arrivedOnTheGlobalEndpoint()) {
             return AwsQueryResponse.error("ValidationError", "The global endpoint is not supported"
@@ -1203,6 +1213,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        boolean originIdentity = "OriginIdentity".equals(params.getFirst("SubjectMode"));
+        if (params.getFirst("Scope") != null && (!originIdentity || audiences(params).size() != 1)) {
+            return AwsQueryResponse.error("ValidationError", SCOPE_NEEDS_ORIGIN_IDENTITY, AwsNamespaces.STS, 400);
+        }
 
         String accessKeyId = callerAccessKeyId();
         Optional<Instant> sessionEnds = accessKeyId == null
@@ -1211,6 +1225,11 @@ public class StsQueryHandler {
         if (sessionEnds.isEmpty() && IamService.isTemporaryAccessKey(accessKeyId)) {
             return AwsQueryResponse.error("ExpiredTokenException",
                     IamEnforcementFilter.EXPIRED_TOKEN, AwsNamespaces.STS, 403);
+        }
+        if (originIdentity) {
+            // The mode reads the aws:OriginIdentity/Subject key of the calling session's trusted identity
+            // propagation context, and no session Floci hands out carries one.
+            return AwsQueryResponse.error("ValidationError", ORIGIN_IDENTITY_NEEDS_CONTEXT, AwsNamespaces.STS, 400);
         }
 
         Optional<OutboundWebIdentityFederation> federation =

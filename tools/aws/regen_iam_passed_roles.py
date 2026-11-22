@@ -271,8 +271,6 @@ NOT_READ = {
     "elasticmapreduce:RunJobFlow": "JobFlowRole names an instance profile, and the reference passes the roles "
                                    "to three services without saying which goes where",
     "elasticmapreduce:UpdateStudio": NO_ROLE_MEMBER,
-    "events:CreateEventSource": MEMBER_NOT_IN_BOTOCORE,
-    "events:UpdateEventSource": MEMBER_NOT_IN_BOTOCORE,
     "glue:GetJob": NO_ROLE_MEMBER,
     "glue:GetJobs": NO_ROLE_MEMBER,
     "lambda:AddEventSource": NO_SUCH_OPERATION,
@@ -292,8 +290,6 @@ NOT_READ = {
     "ssm:StartChangeRequestExecution": RUNBOOK_PARAMETER,
     "ssm:UpdateDocument": NO_ROLE_MEMBER,
     "ssm:UpdateServiceSetting": "a role is only ever a setting's value, which the request names by SettingId",
-    "wafv2:CreateWebACL": MEMBER_NOT_IN_BOTOCORE,
-    "wafv2:UpdateWebACL": MEMBER_NOT_IN_BOTOCORE,
 }
 
 # A member the rule reads that passes no role, by operation, or by namespace for all its operations.

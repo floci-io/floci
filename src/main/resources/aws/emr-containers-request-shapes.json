@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_emr_containers_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "CancelJobRun": "CancelJobRunRequest",
@@ -430,8 +430,8 @@
     },
     "InQueueJobLimitInteger": {
       "type": "integer",
-      "min": 100,
-      "max": 10000
+      "min": 1,
+      "max": 1000
     },
     "InTransitEncryptionConfiguration": {
       "type": "structure",
@@ -452,7 +452,7 @@
     "JobLimitInteger": {
       "type": "integer",
       "min": 1,
-      "max": 10000
+      "max": 1000
     },
     "JobRunState": {
       "type": "string",

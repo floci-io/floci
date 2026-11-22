@@ -1772,7 +1772,7 @@ def with_parent_ids(resources: list[dict], formats: dict[str, str], types: list[
                     or variables[0] not in VARIABLE_RE.findall(formats[resource["type"]]) \
                     or not ONE_VARIABLE_RE.match(_resource(formats[parent])):
                 continue
-            held = [member for member, path in members.items() if path == member
+            held = [member for member, path in members.items() if path == member and not re.search(r"[.\[]", member)
                     and re.search(r"arn$", member, re.IGNORECASE) and related(stem(member), stem(parent))]
             if len(held) == 1:
                 fill[variables[0]] = held[0]

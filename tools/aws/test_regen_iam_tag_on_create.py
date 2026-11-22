@@ -516,7 +516,7 @@ def test_the_vendored_file_is_well_formed():
         {"member": "tags[]", "key": "key", "value": "value"}]
     assert operations["rds:CreateDBCapacityReservation"]["tags"] == [
         {"member": "Tags[Tag]", "key": "Key", "value": "Value"}]
-    assert operations["network-firewall:CreateFirewallPolicyV2"]["notRead"] == r.NOT_IN_BOTOCORE
+    assert operations["network-firewall:CreateFirewallPolicyV2"]["tags"] == [{"member": "Tags[]", "key": "Key", "value": "Value"}]
     assert operations["ec2:RequestSpotFleet"]["notRead"] == r.NOT_READ["ec2:RequestSpotFleet"]
     # The opensearch client's CreateDomain, which the reference does not list, as es's CreateElasticsearchDomain.
     assert document["namespaces"]["es"] == ["es", "opensearch"]

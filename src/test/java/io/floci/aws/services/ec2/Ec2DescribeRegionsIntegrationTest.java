@@ -53,7 +53,7 @@ class Ec2DescribeRegionsIntegrationTest {
     void allRegionsIncludesOptInRegionsAsNotOptedIn() {
         Response response = describeRegions("us-east-1", "AllRegions", "true");
         List<String> names = response.xmlPath().getList("DescribeRegionsResponse.regionInfo.item.regionName");
-        assertEquals(34, names.size(), names.toString());
+        assertEquals(36, names.size(), names.toString());
         int hongKong = names.indexOf("ap-east-1");
         assertTrue(hongKong >= 0, names.toString());
         assertEquals("not-opted-in",

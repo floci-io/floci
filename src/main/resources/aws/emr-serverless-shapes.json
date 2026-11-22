@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_emr_serverless_shapes.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "CancelJobRun": "CancelJobRunRequest",
@@ -256,6 +256,12 @@
     "EntryPointPath": {
       "type": "string"
     },
+    "FlexExecution": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean"
+      }
+    },
     "GetApplicationRequest": {
       "type": "structure",
       "members": {}
@@ -449,7 +455,8 @@
         "endedAt": "Date",
         "queuedDurationMilliseconds": "Long",
         "imageConfiguration": "ImageConfiguration",
-        "workerTypeSpecifications": "WorkerTypeSpecificationMap"
+        "workerTypeSpecifications": "WorkerTypeSpecificationMap",
+        "flexExecution": "FlexExecution"
       }
     },
     "JobRunAttemptSummary": {
@@ -469,7 +476,8 @@
         "stateDetails": "String256",
         "releaseLabel": "ReleaseLabel",
         "type": "JobRunType",
-        "attempt": "AttemptNumber"
+        "attempt": "AttemptNumber",
+        "flexExecution": "FlexExecution"
       }
     },
     "JobRunAttempts": {
@@ -510,7 +518,8 @@
         "type": "JobRunType",
         "attempt": "AttemptNumber",
         "attemptCreatedAt": "Date",
-        "attemptUpdatedAt": "Date"
+        "attemptUpdatedAt": "Date",
+        "flexExecution": "FlexExecution"
       }
     },
     "JobRunType": {
@@ -794,7 +803,8 @@
         "executionTimeoutMinutes": "Duration",
         "name": "String256",
         "mode": "JobRunMode",
-        "retryPolicy": "RetryPolicy"
+        "retryPolicy": "RetryPolicy",
+        "flexExecution": "FlexExecution"
       }
     },
     "StartJobRunResponse": {

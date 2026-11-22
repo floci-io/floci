@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_partitions.py",
-    "botocore": "botocore 1.43.118 (local/aws/botocore)",
+    "botocore": "botocore 1.44.9 (local/aws/botocore)",
     "partitionsJsonVersion": "1.1",
     "endpointsJsonVersion": 3,
     "regionFlags": "aws-cdk region-info/lib/aws-entities.ts rules"
@@ -142,6 +142,8 @@
       "api.sagemaker",
       "edge.sagemaker",
       "featurestore-runtime.sagemaker",
+      "gateway-runtime.sagemaker",
+      "inferencerouter-runtime.sagemaker",
       "job-runtime.sagemaker",
       "metrics.sagemaker",
       "runtime.sagemaker",
@@ -352,6 +354,12 @@
           "s3WebsiteDashForm": false
         },
         {
+          "id": "me-west-1",
+          "description": "Middle East (Saudi Arabia)",
+          "optIn": true,
+          "s3WebsiteDashForm": false
+        },
+        {
           "id": "mx-central-1",
           "description": "Mexico (Central)",
           "optIn": true,
@@ -362,6 +370,12 @@
           "description": "South America (Sao Paulo)",
           "optIn": false,
           "s3WebsiteDashForm": true
+        },
+        {
+          "id": "sa-west-1",
+          "description": "South America (Chile)",
+          "optIn": true,
+          "s3WebsiteDashForm": false
         },
         {
           "id": "us-east-1",
@@ -1110,6 +1124,7 @@
         "appconfig",
         "appconfigdata",
         "application-autoscaling",
+        "aps",
         "arc-zonal-shift",
         "athena",
         "autoscaling",
@@ -1121,7 +1136,9 @@
         "cloudcontrolapi",
         "cloudformation",
         "cloudtrail",
+        "codebuild",
         "codedeploy",
+        "codepipeline",
         "cognito-identity",
         "cognito-idp",
         "compute-optimizer",
@@ -1177,6 +1194,7 @@
         "notifications",
         "oam",
         "oidc",
+        "outposts",
         "pi",
         "polly",
         "portal.sso",
@@ -1213,8 +1231,11 @@
         "swf",
         "synthetics",
         "tagging",
+        "transcribe",
+        "transcribestreaming",
         "transfer",
         "trustedadvisor",
+        "verifiedpermissions",
         "wafv2",
         "xray"
       ],
@@ -1358,6 +1379,7 @@
         "transcribe",
         "transcribestreaming",
         "translate",
+        "verifiedpermissions",
         "wafv2",
         "workspaces",
         "xray"
@@ -1624,6 +1646,7 @@
         "events",
         "firehose",
         "glue",
+        "guardduty",
         "health",
         "iam",
         "kinesis",
@@ -1655,6 +1678,7 @@
         "scheduler",
         "schemas",
         "secretsmanager",
+        "securityhub",
         "servicecatalog",
         "servicediscovery",
         "servicequotas",

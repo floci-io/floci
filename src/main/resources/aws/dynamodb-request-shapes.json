@@ -1,12 +1,13 @@
 {
   "_source": {
     "generator": "tools/aws/regen_dynamodb_shapes.py",
-    "botocore": "botocore 1.43.118 (installed package)"
+    "botocore": "botocore 1.44.9 (local/aws/botocore)"
   },
   "operations": {
     "BatchExecuteStatement": "BatchExecuteStatementInput",
     "BatchGetItem": "BatchGetItemInput",
     "BatchWriteItem": "BatchWriteItemInput",
+    "CancelBulkOperation": "CancelBulkOperationInput",
     "CreateBackup": "CreateBackupInput",
     "CreateGlobalTable": "CreateGlobalTableInput",
     "CreateTable": "CreateTableInput",
@@ -15,6 +16,7 @@
     "DeleteResourcePolicy": "DeleteResourcePolicyInput",
     "DeleteTable": "DeleteTableInput",
     "DescribeBackup": "DescribeBackupInput",
+    "DescribeBulkOperation": "DescribeBulkOperationInput",
     "DescribeContinuousBackups": "DescribeContinuousBackupsInput",
     "DescribeContributorInsights": "DescribeContributorInsightsInput",
     "DescribeEndpoints": "DescribeEndpointsRequest",
@@ -36,6 +38,7 @@
     "GetResourcePolicy": "GetResourcePolicyInput",
     "ImportTable": "ImportTableInput",
     "ListBackups": "ListBackupsInput",
+    "ListBulkOperations": "ListBulkOperationsInput",
     "ListContributorInsights": "ListContributorInsightsInput",
     "ListExports": "ListExportsInput",
     "ListGlobalTables": "ListGlobalTablesInput",
@@ -49,6 +52,7 @@
     "RestoreTableToPointInTime": "RestoreTableToPointInTimeInput",
     "Scan": "ScanInput",
     "SearchVectors": "SearchVectorsInput",
+    "StartBulkPutItems": "StartBulkPutItemsInput",
     "TagResource": "TagResourceInput",
     "TransactGetItems": "TransactGetItemsInput",
     "TransactWriteItems": "TransactWriteItemsInput",
@@ -238,6 +242,30 @@
     },
     "BooleanObject": {
       "type": "boolean"
+    },
+    "BulkOperationArn": {
+      "type": "string"
+    },
+    "BulkOperationInputFormat": {
+      "type": "string"
+    },
+    "BulkOperationMaxWriteRequestUnits": {
+      "type": "long"
+    },
+    "BulkOperationNextToken": {
+      "type": "string"
+    },
+    "BulkOperationPerformanceTier": {
+      "type": "string"
+    },
+    "CancelBulkOperationInput": {
+      "type": "structure",
+      "required": [
+        "BulkOperationArn"
+      ],
+      "members": {
+        "BulkOperationArn": "BulkOperationArn"
+      }
     },
     "ClientRequestToken": {
       "type": "string"
@@ -553,6 +581,15 @@
       ],
       "members": {
         "BackupArn": "BackupArn"
+      }
+    },
+    "DescribeBulkOperationInput": {
+      "type": "structure",
+      "required": [
+        "BulkOperationArn"
+      ],
+      "members": {
+        "BulkOperationArn": "BulkOperationArn"
       }
     },
     "DescribeContinuousBackupsInput": {
@@ -941,6 +978,20 @@
         "Csv": "CsvOptions"
       }
     },
+    "InputS3Configuration": {
+      "type": "structure",
+      "required": [
+        "S3Bucket",
+        "InputFormat"
+      ],
+      "members": {
+        "S3BucketOwner": "S3BucketOwner",
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "S3Prefix",
+        "InputFormat": "BulkOperationInputFormat",
+        "InputCompressionType": "InputCompressionType"
+      }
+    },
     "IntegerObject": {
       "type": "integer"
     },
@@ -1022,6 +1073,16 @@
         "ExclusiveStartBackupArn": "BackupArn",
         "BackupType": "BackupTypeFilter"
       }
+    },
+    "ListBulkOperationsInput": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "ListBulkOperationsMaxLimit",
+        "NextToken": "BulkOperationNextToken"
+      }
+    },
+    "ListBulkOperationsMaxLimit": {
+      "type": "integer"
     },
     "ListContributorInsightsInput": {
       "type": "structure",
@@ -1143,6 +1204,27 @@
       "members": {
         "MaxReadRequestUnits": "LongObject"
       }
+    },
+    "OutputS3Configuration": {
+      "type": "structure",
+      "required": [
+        "OutputType"
+      ],
+      "members": {
+        "S3BucketOwner": "S3BucketOwner",
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "S3Prefix",
+        "S3SseAlgorithm": "S3SseAlgorithm",
+        "S3SseKmsKeyId": "S3SseKmsKeyId",
+        "OutputType": "OutputTypeList"
+      }
+    },
+    "OutputTypeEnum": {
+      "type": "string"
+    },
+    "OutputTypeList": {
+      "type": "list",
+      "member": "OutputTypeEnum"
     },
     "ParameterizedStatement": {
       "type": "structure",
@@ -1594,6 +1676,22 @@
     },
     "Select": {
       "type": "string"
+    },
+    "StartBulkPutItemsInput": {
+      "type": "structure",
+      "required": [
+        "InputS3Configuration",
+        "OutputS3Configuration",
+        "TableName"
+      ],
+      "members": {
+        "ClientToken": "ClientToken",
+        "InputS3Configuration": "InputS3Configuration",
+        "OutputS3Configuration": "OutputS3Configuration",
+        "TableName": "TableArn",
+        "MaxWriteRequestUnits": "BulkOperationMaxWriteRequestUnits",
+        "PerformanceTier": "BulkOperationPerformanceTier"
+      }
     },
     "StreamArn": {
       "type": "string"
