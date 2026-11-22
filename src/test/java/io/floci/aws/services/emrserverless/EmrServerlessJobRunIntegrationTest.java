@@ -768,4 +768,19 @@ class EmrServerlessJobRunIntegrationTest {
         givenReq().queryParam("shutdownGracePeriodInSeconds", 30).when().delete(run).then().statusCode(200);
         givenReq().when().get(run).then().statusCode(200).body("jobRun.state", equalTo("CANCELLED"));
     }
+
+    @Test
+    void anEndedSparkRunGivesItsTotalAndBilledResourceUtilization() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+
+        // Ended as it started, it used nothing, and is billed a minute of its workers and none of their disk.
+        givenReq().when().get("/applications/" + applicationId + "/jobruns/" + jobRunId).then().statusCode(200)
+                .body("jobRun.state", equalTo("SUCCESS"))
+                .body("jobRun.totalResourceUtilization.keySet()",
+                        containsInAnyOrder("vCPUHour", "memoryGBHour", "storageGBHour"))
+                .body("jobRun.totalResourceUtilization.vCPUHour", equalTo(0.0f))
+                .body("jobRun.billedResourceUtilization.storageGBHour", equalTo(0.0f))
+                .body("jobRun.billedResourceUtilization.memoryGBHour", greaterThan(1.0f));
+    }
 }
