@@ -218,11 +218,19 @@ class RdsPostgresIamRoleIntegrationTest {
     @Test
     void iamLogicalReplicationConnectionRequiresTheReplicationPrivilege() throws Exception {
         String id = uniqueId();
+        String group = id + "-logical";
         try {
-            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
-            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user",
-                    "ALTER SYSTEM SET wal_level = logical", "CREATE TABLE events (id int)");
-            rds("RebootDBInstance").formParam("DBInstanceIdentifier", id).when().post("/").then().statusCode(200);
+            // The master user is no superuser, so logical replication comes from the parameter group, as on RDS.
+            rds("CreateDBParameterGroup").formParam("DBParameterGroupName", group)
+                    .formParam("DBParameterGroupFamily", "postgres16").formParam("Description", "logical replication")
+                    .when().post("/").then().statusCode(200);
+            rds("ModifyDBParameterGroup").formParam("DBParameterGroupName", group)
+                    .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
+                    .formParam("Parameters.member.1.ParameterValue", "1")
+                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
+                    .when().post("/").then().statusCode(200);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true, group);
+            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user", "CREATE TABLE events (id int)");
             Properties replication = token(port, "app_user");
             replication.setProperty("replication", "database");
             replication.setProperty("assumeMinServerVersion", "10");
@@ -260,6 +268,7 @@ class RdsPostgresIamRoleIntegrationTest {
             assertUser(port, replication, "app_user");
         } finally {
             deleteInstance(id);
+            rds("DeleteDBParameterGroup").formParam("DBParameterGroupName", group).when().post("/");
         }
     }
 
