@@ -886,7 +886,7 @@ class SesEventPublishingV2IntegrationTest {
         JsonNode envelope = envelopes.get(0);
         assertEquals("aws.ses", envelope.path("source").asText());
         assertEquals("Email Sent", envelope.path("detail-type").asText());
-        assertEquals("default", envelope.path("event-bus-name").asText());
+        assertFalse(envelope.has("event-bus-name"), "EventBridge envelopes must not include event-bus-name");
         // AWS always emits a `resources` array on the envelope, and SesEventPublisher mirrors
         // that contract. SesService derives sourceArn from FromEmailAddress, so this case
         // produces a one-element array carrying the SES identity ARN; the sourceArn-null

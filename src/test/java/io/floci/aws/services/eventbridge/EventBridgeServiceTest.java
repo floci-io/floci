@@ -34,8 +34,10 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -1592,8 +1594,35 @@ class EventBridgeServiceTest {
         assertNotNull(result.entries().get(1).get("EventId"));
         assertEquals("MalformedDetail", result.entries().get(2).get("ErrorCode"));
         verify(dispatcherMock).dispatch(anyString(), any(Target.class),
-                contains("\"event-bus-name\":\"default\""), anyString(), any());
+                contains("\"id\":\"" + result.entries().get(1).get("EventId") + "\""), anyString(), any());
         verify(dispatcherMock).dispatch(anyString(), any(Target.class), anyString(), anyString(), any());
+    }
+
+    @Test
+    void putEventsOnCustomBusOmitsEventBusNameFromDeliveredEnvelope() throws Exception {
+        service.createEventBus("orders", null, null, REGION);
+        service.putRule("r1", "orders", "{\"source\":[\"shop\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target();
+        target.setId("1");
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:ebq");
+        service.putTargets("r1", "orders", List.of(target), REGION);
+
+        EventBridgeService.PutEventsResult result = service.putEvents(List.of(Map.of(
+                "EventBusName", "orders",
+                "Source", "shop",
+                "DetailType", "Order Shipped",
+                "Detail", "{\"id\":1}")), REGION);
+
+        assertEquals(0, result.failedCount());
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(anyString(), eq(target), payloadCaptor.capture(), eq(REGION), any());
+        JsonNode envelope = OBJECT_MAPPER.readTree(payloadCaptor.getValue());
+        assertFalse(envelope.has("event-bus-name"));
+        Set<String> fieldNames = new HashSet<>();
+        envelope.fieldNames().forEachRemaining(fieldNames::add);
+        assertEquals(Set.of("version", "id", "source", "detail-type", "account", "time", "region", "resources", "detail"),
+                fieldNames);
     }
 
     @Test
