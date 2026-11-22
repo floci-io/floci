@@ -195,7 +195,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         if (!tags.isEmpty()) {
             try {
-                redshiftService.createTags(id, tags);
+                redshiftService.createTags(redshiftService.clusterArn(id), tags);
             } catch (RuntimeException failure) {
                 if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
                     cleanupRestoredCluster(id, failure);
@@ -302,7 +302,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         if (!tags.isEmpty()) {
-            redshiftService.createTags(id, tags);
+            redshiftService.createTags(redshiftService.parameterGroupArn(id), tags);
         }
 
         r.setPhysicalId(id);
@@ -336,11 +336,15 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false);
         String description = ctx.resolveOptional(props, "Description");
         List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         if (ctx.reusesPriorEntity(id)) {
             redshiftService.modifyClusterSubnetGroup(id, description, subnetIds);
+            if (!tags.isEmpty()) {
+                redshiftService.createTags(redshiftService.subnetGroupArn(id), tags);
+            }
         } else {
-            redshiftService.createClusterSubnetGroup(id, description, null, subnetIds);
+            redshiftService.createClusterSubnetGroup(id, description, null, subnetIds, tags);
         }
 
         r.setPhysicalId(id);

@@ -4235,7 +4235,8 @@ public class RedshiftService implements ManagedSecretRotator {
         return resource.substring(0, sep);
     }
 
-    private String clusterArn(String clusterIdentifier) {
+    /** The ARN of a cluster of the request's account and Region, as Redshift's tag calls take it. */
+    public String clusterArn(String clusterIdentifier) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "cluster:" + clusterIdentifier);
     }
 
@@ -4244,11 +4245,13 @@ public class RedshiftService implements ManagedSecretRotator {
                 "snapshot:" + clusterIdentifier + "/" + snapshotIdentifier);
     }
 
-    private String parameterGroupArn(String parameterGroupName) {
+    /** The ARN of a cluster parameter group of the request's account and Region, as the tag calls take it. */
+    public String parameterGroupArn(String parameterGroupName) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "parametergroup:" + parameterGroupName);
     }
 
-    private String subnetGroupArn(String name) {
+    /** The ARN of a cluster subnet group of the request's account and Region, as the tag calls take it. */
+    public String subnetGroupArn(String name) {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "subnetgroup:" + name);
     }
 
