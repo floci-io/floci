@@ -393,9 +393,7 @@ class GlueWorkflowServiceTest {
 
     @SuppressWarnings("unchecked")
     private static List<String> jobRunIdsOnNode(WorkflowRun run, String jobName) {
-        Map<String, Object> node = ((List<Map<String, Object>>) run.getGraph().get("Nodes")).stream()
-                .filter(n -> "JOB".equals(n.get("Type")) && jobName.equals(n.get("Name")))
-                .findFirst().orElseThrow();
+        Map<String, Object> node = graphNode(run.getGraph(), "JOB", jobName);
         return ((List<JobRun>) ((Map<String, Object>) node.get("JobDetails")).get("JobRuns")).stream()
                 .map(JobRun::getId).toList();
     }
@@ -643,17 +641,18 @@ class GlueWorkflowServiceTest {
 
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> crawlsOnNode(WorkflowRun run, String crawlerName) {
-        Map<String, Object> node = ((List<Map<String, Object>>) run.getGraph().get("Nodes")).stream()
-                .filter(n -> "CRAWLER".equals(n.get("Type")) && crawlerName.equals(n.get("Name")))
-                .findFirst().orElseThrow();
+        Map<String, Object> node = graphNode(run.getGraph(), "CRAWLER", crawlerName);
         return (List<Map<String, Object>>) ((Map<String, Object>) node.get("CrawlerDetails")).get("Crawls");
     }
 
-    @SuppressWarnings("unchecked")
     private static String nodeId(Map<String, Object> graph, String type, String name) {
+        return (String) graphNode(graph, type, name).get("UniqueId");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> graphNode(Map<String, Object> graph, String type, String name) {
         return ((List<Map<String, Object>>) graph.get("Nodes")).stream()
                 .filter(node -> type.equals(node.get("Type")) && name.equals(node.get("Name")))
-                .map(node -> (String) node.get("UniqueId"))
                 .findFirst().orElseThrow();
     }
 }
