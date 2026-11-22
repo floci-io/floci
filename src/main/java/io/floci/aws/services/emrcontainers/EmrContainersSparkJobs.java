@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  * {@code spark-submit}, or its {@code sparkSqlJobDriver}'s {@code spark-sql}, in a container of its release's EMR on
  * EKS base image, with the {@code spark-defaults} of its {@code configurationOverrides} and its execution role's
  * credentials. Its driver runs in that container, its executors with it in Spark's local mode, where EMR on EKS runs
- * each in a pod of its own.
+ * each in a pod of its own. Its driver's output goes where its {@code monitoringConfiguration} sends a driver's logs,
+ * in S3 and CloudWatch Logs.
  */
 final class EmrContainersSparkJobs {
 
@@ -47,6 +48,8 @@ final class EmrContainersSparkJobs {
     // A release label is its image's repository and tag joined by a hyphen: emr-7.2.0-20240610 runs the image tagged
     // emr-7.2.0:20240610, and emr-7.2.0-java11-latest the one tagged emr-7.2.0-java11:latest.
     private static final Pattern RELEASE_LABEL = Pattern.compile("(.+)-(latest|\\d{8})");
+    private static final String STDOUT = "stdout";
+    private static final String STDERR = "stderr";
 
     private EmrContainersSparkJobs() {
     }
@@ -98,9 +101,11 @@ final class EmrContainersSparkJobs {
      * {@code sparkSqlParameters} and its entry point as the file it runs ({@code -f}). Its custom image is the one
      * {@code spark.kubernetes.driver.container.image}, or else {@code spark.kubernetes.container.image}, names; its
      * driver's environment its {@code spark.kubernetes.driverEnv.<KEY>} properties; its {@code spark.archives} are
-     * unpacked in its working directory, as they are in a pod's.
+     * unpacked in its working directory, as they are in a pod's. Its driver's logs go to {@link #driverLogFolder} and
+     * {@link #driverCloudWatchLogs}, under {@code sparkApplicationId}.
      */
-    static SparkJobRunner.Job job(ObjectNode run, String imageTemplate, String dockerNetwork) {
+    static SparkJobRunner.Job job(ObjectNode run, String imageTemplate, String dockerNetwork,
+                                  String sparkApplicationId) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(run.get("arn").textValue());
         String releaseLabel = run.get("releaseLabel").textValue();
         JsonNode sparkSql = run.path("jobDriver").path("sparkSqlJobDriver");
@@ -125,9 +130,48 @@ final class EmrContainersSparkJobs {
         return new SparkJobRunner.Job(EmrContainersService.SERVICE, run.get("id").textValue(), arn.accountId(),
                 arn.region(), releaseLabel, SparkJobRunner.Engine.SPARK, image(imageTemplate, releaseLabel),
                 customImage, dockerNetwork, run.get("executionRoleArn").textValue(), sparkDefaults, application,
-                command, Duration.ZERO, null, null,
+                command, Duration.ZERO, driverLogFolder(run, sparkApplicationId),
+                driverCloudWatchLogs(run, sparkApplicationId),
                 EmrServerlessJobRunService.environment(properties, DRIVER_ENV_PREFIX),
                 EmrServerlessJobRunService.archives(properties), null, Map.of(), Map.of(), Map.of(), Map.of(),
                 Map.of(), null);
+    }
+
+    /**
+     * The S3 folder a run's driver logs go to, or null without an {@code s3MonitoringConfiguration}: "Driver Logs -
+     * /logUri/virtual-cluster-id/jobs/job-id/containers/spark-application-id/spark-job-id-driver/(stderr.gz/stdout.gz)"
+     * (EMR on EKS Development Guide, "Configure a job run to use Amazon S3 logs").
+     */
+    static String driverLogFolder(ObjectNode run, String sparkApplicationId) {
+        String logUri = run.path("configurationOverrides").path("monitoringConfiguration")
+                .path("s3MonitoringConfiguration").path("logUri").textValue();
+        return EmrServerlessSparkRunner.logFolder(logUri, driverLogPath(run, sparkApplicationId) + "/");
+    }
+
+    /**
+     * Where in CloudWatch Logs a run's driver output goes, or null without a {@code cloudWatchMonitoringConfiguration}:
+     * its {@code logGroupName}, and "Driver logs - logGroup/logStreamPrefix/virtual-cluster-id/jobs/job-id/containers/
+     * spark-application-id/spark-job-id-driver/(stderr/stdout)", a stream for each (EMR on EKS Development Guide,
+     * "Configure a job run to use Amazon CloudWatch Logs"). Without a {@code logStreamNamePrefix} a stream's name
+     * starts at the virtual cluster's id.
+     */
+    static SparkJobRunner.CloudWatchLogs driverCloudWatchLogs(ObjectNode run, String sparkApplicationId) {
+        JsonNode cloudWatch = run.path("configurationOverrides").path("monitoringConfiguration")
+                .path("cloudWatchMonitoringConfiguration");
+        String logGroup = cloudWatch.path("logGroupName").textValue();
+        if (logGroup == null) {
+            return null;
+        }
+        String prefix = cloudWatch.path("logStreamNamePrefix").textValue();
+        String driver = (prefix != null && !prefix.isEmpty() ? prefix + "/" : "")
+                + driverLogPath(run, sparkApplicationId) + "/";
+        return new SparkJobRunner.CloudWatchLogs(logGroup, driver + STDOUT, driver + STDERR);
+    }
+
+    // virtual-cluster-id/jobs/job-id/containers/spark-application-id/spark-job-id-driver, the driver pod's name.
+    private static String driverLogPath(ObjectNode run, String sparkApplicationId) {
+        String jobId = run.get("id").textValue();
+        return run.get("virtualClusterId").textValue() + "/jobs/" + jobId + "/containers/" + sparkApplicationId
+                + "/spark-" + jobId + "-driver";
     }
 }

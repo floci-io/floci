@@ -168,7 +168,20 @@ wrapper with `FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE=docker` (see [Docker](../
   `failureReason` `INTERNAL_ERROR` and `stateDetails` "Trouble monitoring your JobRun due to an internal
   error". Floci's shutdown and a state reset stop every driver, and a driver a hard stop left running is
   removed when Floci starts again, unless `reconcile-containers-on-startup` is off.
-* **Not emulated yet**: the driver's output goes to Floci's log only, not to the run's
-  `monitoringConfiguration` destinations in S3 or CloudWatch Logs; a `retryPolicyConfiguration` does not
-  start the driver again; and a run waits for its container however long it takes, with no
-  `job-start-timeout`.
+* **Logs**: the driver's output always goes to Floci's log, and to the run's `monitoringConfiguration`
+  destinations as the development guide lays them out. With an `s3MonitoringConfiguration`, its `stdout.gz`
+  and `stderr.gz` go to `<logUri>/<virtual-cluster-id>/jobs/<job-id>/containers/<spark-application-id>/spark-<job-id>-driver/`
+  once the run ends, where EMR on EKS uploads them as it runs. With a `cloudWatchMonitoringConfiguration`,
+  its standard output and standard error go, as the driver writes them, to the streams
+  `<logStreamNamePrefix>/<virtual-cluster-id>/jobs/<job-id>/containers/<spark-application-id>/spark-<job-id>-driver/stdout`
+  and `.../stderr` in its `logGroupName`, the group and streams created if they do not exist; without a prefix a
+  stream's name starts at the virtual cluster's id. Each line goes as the driver wrote it, but for an empty one,
+  which CloudWatch Logs refuses as an event. A run from a job template whose destination leaves out its
+  `logGroupName` or `logUri`, which the template's model allows, is refused with `ValidationException`, as
+  `StartJobRun` refuses a request that does. The `<spark-application-id>` has the form a Spark
+  application on Kubernetes gets, `spark-` and 32 hexadecimal digits, but is Floci's own: the driver's local
+  mode reports another. Floci runs no job submitter, so there are no submitter logs, and its executors run
+  in the driver's container, so their output is the driver's. `persistentAppUI`, `containerLogRotationConfiguration`
+  and `managedLogs` are kept but not applied.
+* **Not emulated yet**: a `retryPolicyConfiguration` does not start the driver again, and a run waits for its
+  container however long it takes, with no `job-start-timeout`.
