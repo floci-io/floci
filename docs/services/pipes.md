@@ -216,6 +216,13 @@ target input.
   pipe has an enrichment, before the `InputTemplate` renders. A value that is not wholly a JSON path
   stays as written. A path that names nothing fails the delivery, which is retried or sent to the
   dead-letter queue like any other failure.
+- An SQS queue target sends `SqsQueueParameters` `MessageGroupId` and `MessageDeduplicationId`. Each is
+  a literal or a JSON path read off the event before the `InputTemplate` renders. A number becomes its
+  text and an object becomes its compact JSON. A path that names nothing fails the delivery.
+- CreatePipe and UpdatePipe refuse an SQS target whose queue name ends in `.fifo` when it has no
+  `SqsQueueParameters` or no `MessageGroupId`. They refuse a `MessageDeduplicationId` on a standard
+  queue. They refuse a `MessageGroupId` or `MessageDeduplicationId` that starts with `$.` but is not a
+  valid JSON path. The errors are reported together in `fieldList`.
 - An `InputTemplate` that is exactly one placeholder, such as `<$.Detail>`, renders a string as its
   own text with no quotes added, so a serialized object reaches an event bus as that object. A
   placeholder inside a larger template renders a string with quotes where the template gives none:

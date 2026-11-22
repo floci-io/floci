@@ -104,7 +104,7 @@ public class PipesTargetInvoker {
         if (targetArn.contains(":lambda:") || targetArn.contains(":function:")) {
             invokeLambda(targetArn, payload, region);
         } else if (targetArn.contains(":sqs:")) {
-            invokeSqs(targetArn, payload, region);
+            invokeSqs(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
         } else if (targetArn.contains(":events:")) {
@@ -198,9 +198,14 @@ public class PipesTargetInvoker {
         return fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
     }
 
-    private void invokeSqs(String arn, String payload, String region) {
+    private void invokeSqs(String arn, String payload, String region, JsonNode tp, String event) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
-        sqsService.sendMessage(queueUrl, payload, 0, region);
+        JsonNode sqsParams = tp == null ? MissingNode.getInstance() : tp.path("SqsQueueParameters");
+        String groupId = resolveDynamicParameter(text(sqsParams, "MessageGroupId"), event,
+                "target parameter MessageGroupId");
+        String dedupId = resolveDynamicParameter(text(sqsParams, "MessageDeduplicationId"), event,
+                "target parameter MessageDeduplicationId");
+        sqsService.sendMessage(queueUrl, payload, 0, groupId, dedupId, region);
         LOG.debugv("Pipe delivered to SQS: {0}", arn);
     }
 
@@ -290,7 +295,7 @@ public class PipesTargetInvoker {
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
     }
 
-    private static String text(JsonNode parent, String field) {
+    static String text(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         return node.isTextual() ? node.asText() : null;
     }
