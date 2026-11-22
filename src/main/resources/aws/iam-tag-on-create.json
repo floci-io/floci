@@ -655,6 +655,7 @@
     "textract:CreateAdapterVersion": {"tagging": ["textract:TagResource"], "requestTags": true, "tags": [{"member": "Tags{}"}]},
     "textract:CreateBlueprint": {"tagging": ["textract:TagResource"], "requestTags": true, "notRead": "the pinned botocore does not have the operation yet, so its request cannot be read"},
     "textract:CreateProject": {"tagging": ["textract:TagResource"], "requestTags": true, "notRead": "the pinned botocore does not have the operation yet, so its request cannot be read"},
+    "textract:StartDocumentInsights": {"tagging": ["textract:TagResource"], "requestTags": true, "notRead": "the pinned botocore does not have the operation yet, so its request cannot be read"},
     "timestream-influxdb:CreateDbBackup": {"tagging": ["timestream-influxdb:TagResource"], "requestTags": true, "tags": [{"member": "tags{}"}]},
     "timestream-influxdb:CreateDbCluster": {"tagging": ["timestream-influxdb:TagResource"], "requestTags": true, "tags": [{"member": "tags{}"}]},
     "timestream-influxdb:CreateDbInstance": {"tagging": ["timestream-influxdb:TagResource"], "requestTags": true, "tags": [{"member": "tags{}"}]},
