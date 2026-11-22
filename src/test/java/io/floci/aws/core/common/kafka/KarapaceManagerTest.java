@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;

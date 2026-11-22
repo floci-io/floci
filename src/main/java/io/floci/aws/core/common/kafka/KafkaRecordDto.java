@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 import java.util.List;
 
@@ -12,7 +12,7 @@ import java.util.List;
  * for any topic that does not explicitly configure {@code message.timestamp.type}. This is a
  * documented, intentional deviation from the native Kafka protocol's per-record fidelity.
  */
-record KafkaRecordDto(
+public record KafkaRecordDto(
         String topic,
         int partition,
         long offset,
@@ -22,5 +22,5 @@ record KafkaRecordDto(
         byte[] value,
         List<KafkaHeaderDto> headers) {
 
-    static final String DEFAULT_TIMESTAMP_TYPE = "CreateTime";
+    public static final String DEFAULT_TIMESTAMP_TYPE = "CreateTime";
 }

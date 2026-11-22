@@ -1,17 +1,17 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 /** A Kafka REST Proxy (Karapace) response outside the expected 2xx status for its call. */
-class PipesKafkaRestClientException extends RuntimeException {
+public class KafkaRestClientException extends RuntimeException {
 
     private final int statusCode;
 
-    PipesKafkaRestClientException(String method, String path, int statusCode, String body) {
+    public KafkaRestClientException(String method, String path, int statusCode, String body) {
         super("Kafka REST Proxy " + method + " " + path + " failed: HTTP " + statusCode
                 + (body == null || body.isBlank() ? "" : " " + body));
         this.statusCode = statusCode;
     }
 
-    int getStatusCode() {
+    public int getStatusCode() {
         return statusCode;
     }
 }

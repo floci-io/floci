@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,19 +24,20 @@ import java.util.concurrent.Executors;
 
 /**
  * Thin REST client for the subset of the Kafka REST Proxy v2 API (Karapace, Redpanda's
- * Pandaproxy) that Pipes needs to consume a Kafka topic: create a consumer instance, subscribe,
- * poll for records, commit offsets, close. Uses the JDK {@link HttpClient}, the same approach
+ * Pandaproxy) that Floci services need to consume a Kafka topic: discover a topic's partitions,
+ * create a consumer instance, subscribe or assign partitions manually, seek, poll for records,
+ * commit offsets, close. Uses the JDK {@link HttpClient}, the same approach
  * Floci already uses for other REST-shaped backends (e.g. {@code KubernetesApiClient}), instead
  * of embedding {@code kafka-clients} directly: see #2916, where kafka-clients (and the
- * zstd-jni/lz4-java it pulls in) was reachable in every native image regardless of whether a Pipe
- * ever used a Kafka source.
+ * zstd-jni/lz4-java it pulls in) was reachable in every native image regardless of whether a Kafka
+ * consumer was ever used.
  *
  * <p>Every consumer instance lives on exactly one REST Proxy process for its whole lifetime (the
  * proxy holds the actual Kafka client state), so all calls for a given {@link KafkaConsumerHandle}
  * must keep going to the {@code base_uri} that instance's creation call returned.
  */
 @ApplicationScoped
-class PipesKafkaRestClient {
+public class KafkaRestClient {
 
     private static final String CONSUMER_CONTENT_TYPE = "application/vnd.kafka.v2+json";
     private static final String BINARY_RECORDS_ACCEPT = "application/vnd.kafka.binary.v2+json";
@@ -45,7 +46,7 @@ class PipesKafkaRestClient {
     private final HttpClient httpClient;
 
     @Inject
-    PipesKafkaRestClient(ObjectMapper objectMapper) {
+    KafkaRestClient(ObjectMapper objectMapper) {
         this(objectMapper, HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -53,12 +54,12 @@ class PipesKafkaRestClient {
     }
 
     /** Test-only: injects an explicit client, e.g. one pointed at a fake REST Proxy server. */
-    PipesKafkaRestClient(ObjectMapper objectMapper, HttpClient httpClient) {
+    KafkaRestClient(ObjectMapper objectMapper, HttpClient httpClient) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
     }
 
-    KafkaConsumerHandle createConsumer(URI restBaseUri, String groupId, String offsetReset) {
+    public KafkaConsumerHandle createConsumer(URI restBaseUri, String groupId, String offsetReset) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("format", "binary");
         body.put("auto.offset.reset", offsetReset);
@@ -72,14 +73,83 @@ class PipesKafkaRestClient {
                 restBaseUri.resolve(response.path("base_uri").asText()));
     }
 
-    void subscribe(KafkaConsumerHandle consumer, List<String> topics) {
+    public void subscribe(KafkaConsumerHandle consumer, List<String> topics) {
         ObjectNode body = objectMapper.createObjectNode();
         ArrayNode topicsNode = body.putArray("topics");
         topics.forEach(topicsNode::add);
         send("POST", instanceUri(consumer, "subscription"), body);
     }
 
-    List<KafkaRecordDto> poll(KafkaConsumerHandle consumer, Duration timeout) {
+    /**
+     * Lists the partition ids of a topic ({@code GET /topics/{topic}}). A topic the broker does not
+     * know raises {@link KafkaTopicNotFoundException}, distinct from the
+     * {@link KafkaRestClientException} / {@link UncheckedIOException} a broker or proxy failure raises,
+     * so a caller can tell a missing topic from an unreachable cluster.
+     */
+    public List<Integer> listPartitions(URI restBaseUri, String topic) {
+        JsonNode response;
+        try {
+            response = send("GET", restBaseUri.resolve("topics/" + urlEncode(topic)), null);
+        } catch (KafkaRestClientException e) {
+            if (e.getStatusCode() == 404) {
+                throw new KafkaTopicNotFoundException(topic, e);
+            }
+            throw e;
+        }
+        List<Integer> partitions = new ArrayList<>();
+        for (JsonNode partitionNode : response.path("partitions")) {
+            partitions.add(partitionNode.path("partition").asInt());
+        }
+        partitions.sort(Integer::compare);
+        return partitions;
+    }
+
+    /**
+     * Assigns partitions manually instead of {@link #subscribe}, so a poll covers exactly these
+     * partitions with no group rebalance deciding which ones this consumer owns.
+     */
+    public void assign(KafkaConsumerHandle consumer, List<KafkaTopicPartition> partitions) {
+        send("POST", instanceUri(consumer, "assignments"), partitionsBody(partitions));
+    }
+
+    /**
+     * Positions each partition at the given offset, which is the next offset to read, so the caller
+     * controls where a poll resumes instead of relying on broker-side committed group offsets.
+     */
+    public void seek(KafkaConsumerHandle consumer, List<KafkaOffsetDto> offsets) {
+        if (offsets.isEmpty()) {
+            return;
+        }
+        ObjectNode body = objectMapper.createObjectNode();
+        ArrayNode offsetsNode = body.putArray("offsets");
+        for (KafkaOffsetDto offset : offsets) {
+            ObjectNode offsetNode = offsetsNode.addObject();
+            offsetNode.put("topic", offset.topic());
+            offsetNode.put("partition", offset.partition());
+            offsetNode.put("offset", offset.offset());
+        }
+        send("POST", instanceUri(consumer, "positions"), body);
+    }
+
+    public void seekToBeginning(KafkaConsumerHandle consumer, List<KafkaTopicPartition> partitions) {
+        if (partitions.isEmpty()) {
+            return;
+        }
+        send("POST", instanceUri(consumer, "positions/beginning"), partitionsBody(partitions));
+    }
+
+    private ObjectNode partitionsBody(List<KafkaTopicPartition> partitions) {
+        ObjectNode body = objectMapper.createObjectNode();
+        ArrayNode partitionsNode = body.putArray("partitions");
+        for (KafkaTopicPartition partition : partitions) {
+            ObjectNode partitionNode = partitionsNode.addObject();
+            partitionNode.put("topic", partition.topic());
+            partitionNode.put("partition", partition.partition());
+        }
+        return body;
+    }
+
+    public List<KafkaRecordDto> poll(KafkaConsumerHandle consumer, Duration timeout) {
         URI uri = URI.create(instanceUri(consumer, "records") + "?timeout=" + timeout.toMillis());
         JsonNode response = sendWithAccept("GET", uri, null, BINARY_RECORDS_ACCEPT);
 
@@ -93,7 +163,7 @@ class PipesKafkaRestClient {
      * REST Proxy reference spec, an empty body is rejected with 400 rather than committing
      * everything consumed), so callers always compute what to commit themselves.
      */
-    void commit(KafkaConsumerHandle consumer, List<KafkaOffsetDto> offsets) {
+    public void commit(KafkaConsumerHandle consumer, List<KafkaOffsetDto> offsets) {
         if (offsets.isEmpty()) {
             return;
         }
@@ -109,10 +179,10 @@ class PipesKafkaRestClient {
     }
 
     /** No-op if the consumer instance is already gone (e.g. the REST Proxy container restarted). */
-    void close(KafkaConsumerHandle consumer) {
+    public void close(KafkaConsumerHandle consumer) {
         try {
             send("DELETE", consumer.baseUri(), null);
-        } catch (PipesKafkaRestClientException e) {
+        } catch (KafkaRestClientException e) {
             if (e.getStatusCode() != 404) {
                 throw e;
             }
@@ -167,7 +237,7 @@ class PipesKafkaRestClient {
 
             HttpResponse<byte[]> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
             if (response.statusCode() / 100 != 2) {
-                throw new PipesKafkaRestClientException(method, uri.toString(), response.statusCode(),
+                throw new KafkaRestClientException(method, uri.toString(), response.statusCode(),
                         new String(response.body(), StandardCharsets.UTF_8));
             }
             return response.body().length == 0 ? NullNode.getInstance() : objectMapper.readTree(response.body());
