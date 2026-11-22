@@ -4,11 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.order;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -22,18 +21,12 @@ class DynamoDbAttributeOrderTest {
         return MAPPER.readTree(text);
     }
 
-    private static List<String> keys(JsonNode node) {
-        List<String> keys = new ArrayList<>();
-        node.fieldNames().forEachRemaining(keys::add);
-        return keys;
-    }
-
     @Test
     void mapShowsEverySixOrdersOverManyCalls() throws Exception {
         JsonNode item = json("{\"m\":{\"M\":{\"a\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"},\"c\":{\"S\":\"3\"}}}}");
-        Set<List<String>> orders = new HashSet<>();
+        Set<String> orders = new HashSet<>();
         for (int i = 0; i < 500; i++) {
-            orders.add(keys(DynamoDbAttributeOrder.shuffled(item, true).get("m").get("M")));
+            orders.add(order(DynamoDbAttributeOrder.shuffled(item, true).get("m").get("M")));
         }
         assertEquals(6, orders.size());
     }
@@ -41,9 +34,9 @@ class DynamoDbAttributeOrderTest {
     @Test
     void topLevelAttributesShuffle() throws Exception {
         JsonNode item = json("{\"a\":{\"S\":\"1\"},\"b\":{\"S\":\"2\"},\"c\":{\"S\":\"3\"}}");
-        Set<List<String>> orders = new HashSet<>();
+        Set<String> orders = new HashSet<>();
         for (int i = 0; i < 500; i++) {
-            orders.add(keys(DynamoDbAttributeOrder.shuffled(item, true)));
+            orders.add(order(DynamoDbAttributeOrder.shuffled(item, true)));
         }
         assertEquals(6, orders.size());
     }
@@ -52,11 +45,11 @@ class DynamoDbAttributeOrderTest {
     void mapInsideListInsideMapShuffles() throws Exception {
         JsonNode item = json("{\"o\":{\"M\":{\"l\":{\"L\":[{\"M\":{\"a\":{\"N\":\"1\"},\"b\":{\"N\":\"2\"},"
                 + "\"c\":{\"N\":\"3\"}}}]}}}}");
-        Set<List<String>> orders = new HashSet<>();
+        Set<String> orders = new HashSet<>();
         for (int i = 0; i < 500; i++) {
             JsonNode inner = DynamoDbAttributeOrder.shuffled(item, true)
                     .get("o").get("M").get("l").get("L").get(0).get("M");
-            orders.add(keys(inner));
+            orders.add(order(inner));
         }
         assertEquals(6, orders.size());
     }

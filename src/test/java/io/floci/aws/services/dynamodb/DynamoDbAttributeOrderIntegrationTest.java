@@ -1,34 +1,33 @@
 package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.ITEM;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.MAP;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.call;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.createTable;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.deleteTable;
+import static io.floci.aws.services.dynamodb.DynamoDbAttributeOrderFixture.order;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class DynamoDbAttributeOrderIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String TABLE = "AttributeOrderTable";
-    private static final String ITEM = """
-            {"pk":{"S":"k"},"a1":{"S":"1"},"a2":{"S":"2"},"a3":{"S":"3"},"a4":{"S":"4"},"a5":{"S":"5"},
-             "m":{"M":{"k1":{"S":"1"},"k2":{"S":"2"},"k3":{"S":"3"},"k4":{"S":"4"},"k5":{"S":"5"},"k6":{"S":"6"}}}}
-            """;
     private static final int CALLS = 30;
+
+    private String table;
 
     @BeforeAll
     static void configure() {
@@ -36,39 +35,17 @@ class DynamoDbAttributeOrderIntegrationTest {
     }
 
     @BeforeEach
-    void createTable() {
-        call("CreateTable", """
-                {"TableName":"%s","BillingMode":"PAY_PER_REQUEST",
-                 "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
-                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
-                """.formatted(TABLE));
+    void createTestTable() {
+        table = createTable("attribute-order");
     }
 
-    private static String call(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "DynamoDB_20120810." + action)
-                .contentType(CONTENT_TYPE)
-                .body(body)
-                .when().post("/")
-                .then().extract().asString();
+    @AfterEach
+    void deleteTestTable() {
+        deleteTable(table);
     }
 
-    private static void putItem() {
-        call("PutItem", "{\"TableName\":\"" + TABLE + "\",\"Item\":" + ITEM + "}");
-    }
-
-    private static JsonNode parse(String body) {
-        try {
-            return MAPPER.readTree(body);
-        } catch (Exception e) {
-            throw new IllegalStateException(body, e);
-        }
-    }
-
-    private static String order(JsonNode node) {
-        List<String> names = new ArrayList<>();
-        node.fieldNames().forEachRemaining(names::add);
-        return String.join(",", names);
+    private void putItem() {
+        call("PutItem", "{\"TableName\":\"" + table + "\",\"Item\":" + ITEM + "}");
     }
 
     private static String topAndMapOrder(JsonNode item) {
@@ -103,17 +80,17 @@ class DynamoDbAttributeOrderIntegrationTest {
     @Test
     void putItemAllOldShuffles() {
         putItem();
-        assertShuffled(orders(() -> parse(call("PutItem", "{\"TableName\":\"" + TABLE + "\",\"Item\":" + ITEM
-                + ",\"ReturnValues\":\"ALL_OLD\"}")).get("Attributes")));
+        assertShuffled(orders(() -> call("PutItem", "{\"TableName\":\"" + table + "\",\"Item\":" + ITEM
+                + ",\"ReturnValues\":\"ALL_OLD\"}").get("Attributes")));
     }
 
     @Test
     void updateItemReturnValuesShuffle() {
         putItem();
         for (String mode : List.of("ALL_OLD", "ALL_NEW")) {
-            assertShuffled(orders(() -> parse(call("UpdateItem", "{\"TableName\":\"" + TABLE
+            assertShuffled(orders(() -> call("UpdateItem", "{\"TableName\":\"" + table
                     + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"UpdateExpression\":\"SET a1 = :v\","
-                    + "\"ExpressionAttributeValues\":{\":v\":{\"S\":\"1\"}},\"ReturnValues\":\"" + mode + "\"}"))
+                    + "\"ExpressionAttributeValues\":{\":v\":{\"S\":\"1\"}},\"ReturnValues\":\"" + mode + "\"}")
                     .get("Attributes")));
         }
     }
@@ -124,10 +101,10 @@ class DynamoDbAttributeOrderIntegrationTest {
         for (String mode : List.of("UPDATED_OLD", "UPDATED_NEW")) {
             Set<String> seen = new HashSet<>();
             for (int i = 0; i < CALLS; i++) {
-                JsonNode attributes = parse(call("UpdateItem", "{\"TableName\":\"" + TABLE
+                JsonNode attributes = call("UpdateItem", "{\"TableName\":\"" + table
                         + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"UpdateExpression\":\"SET m = :v\","
-                        + "\"ExpressionAttributeValues\":{\":v\":" + parse(ITEM).get("m")
-                        + "},\"ReturnValues\":\"" + mode + "\"}")).get("Attributes");
+                        + "\"ExpressionAttributeValues\":{\":v\":" + MAP
+                        + "},\"ReturnValues\":\"" + mode + "\"}").get("Attributes");
                 seen.add(order(attributes.get("m").get("M")));
             }
             assertTrue(seen.size() > 1, mode + " saw " + seen);
@@ -138,8 +115,8 @@ class DynamoDbAttributeOrderIntegrationTest {
     void deleteItemAllOldShuffles() {
         assertShuffled(orders(() -> {
             putItem();
-            return parse(call("DeleteItem", "{\"TableName\":\"" + TABLE
-                    + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"ReturnValues\":\"ALL_OLD\"}")).get("Attributes");
+            return call("DeleteItem", "{\"TableName\":\"" + table
+                    + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"ReturnValues\":\"ALL_OLD\"}").get("Attributes");
         }));
     }
 
@@ -148,47 +125,47 @@ class DynamoDbAttributeOrderIntegrationTest {
         putItem();
         String conditionFails = ",\"ConditionExpression\":\"attribute_not_exists(pk)\","
                 + "\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"}";
-        assertShuffled(orders(() -> parse(call("PutItem", "{\"TableName\":\"" + TABLE + "\",\"Item\":" + ITEM
-                + conditionFails)).get("Item")));
-        assertShuffled(orders(() -> parse(call("UpdateItem", "{\"TableName\":\"" + TABLE
+        assertShuffled(orders(() -> call("PutItem", "{\"TableName\":\"" + table + "\",\"Item\":" + ITEM
+                + conditionFails).get("Item")));
+        assertShuffled(orders(() -> call("UpdateItem", "{\"TableName\":\"" + table
                 + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"UpdateExpression\":\"SET a1 = :v\","
-                + "\"ExpressionAttributeValues\":{\":v\":{\"S\":\"1\"}}" + conditionFails)).get("Item")));
-        assertShuffled(orders(() -> parse(call("DeleteItem", "{\"TableName\":\"" + TABLE
-                + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}" + conditionFails)).get("Item")));
+                + "\"ExpressionAttributeValues\":{\":v\":{\"S\":\"1\"}}" + conditionFails).get("Item")));
+        assertShuffled(orders(() -> call("DeleteItem", "{\"TableName\":\"" + table
+                + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}" + conditionFails).get("Item")));
     }
 
     @Test
     void transactGetItemsShuffles() {
         putItem();
-        assertShuffled(orders(() -> parse(call("TransactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\""
-                + TABLE + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}}}]}")).get("Responses").get(0).get("Item")));
-        assertShuffled(orders(() -> parse(call("TransactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\""
-                + TABLE + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"ProjectionExpression\":\"pk, a1, m\"}}]}"))
+        assertShuffled(orders(() -> call("TransactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\""
+                + table + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}}}]}").get("Responses").get(0).get("Item")));
+        assertShuffled(orders(() -> call("TransactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\""
+                + table + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},\"ProjectionExpression\":\"pk, a1, m\"}}]}")
                 .get("Responses").get(0).get("Item")));
     }
 
     @Test
     void transactWriteCancellationItemShuffles() {
         putItem();
-        assertShuffled(orders(() -> parse(call("TransactWriteItems", "{\"TransactItems\":[{\"ConditionCheck\":"
-                + "{\"TableName\":\"" + TABLE + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},"
+        assertShuffled(orders(() -> call("TransactWriteItems", "{\"TransactItems\":[{\"ConditionCheck\":"
+                + "{\"TableName\":\"" + table + "\",\"Key\":{\"pk\":{\"S\":\"k\"}},"
                 + "\"ConditionExpression\":\"attribute_not_exists(pk)\","
-                + "\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"}}]}"))
+                + "\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"}}]}")
                 .get("CancellationReasons").get(0).get("Item")));
     }
 
     @Test
     void getItemQueryAndPartiQlSelectKeepOneOrder() {
         putItem();
-        assertStable(orders(() -> parse(call("GetItem", "{\"TableName\":\"" + TABLE
-                + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}}")).get("Item")));
-        assertStable(orders(() -> parse(call("Query", "{\"TableName\":\"" + TABLE
-                + "\",\"KeyConditionExpression\":\"pk = :p\",\"ExpressionAttributeValues\":{\":p\":{\"S\":\"k\"}}}"))
+        assertStable(orders(() -> call("GetItem", "{\"TableName\":\"" + table
+                + "\",\"Key\":{\"pk\":{\"S\":\"k\"}}}").get("Item")));
+        assertStable(orders(() -> call("Query", "{\"TableName\":\"" + table
+                + "\",\"KeyConditionExpression\":\"pk = :p\",\"ExpressionAttributeValues\":{\":p\":{\"S\":\"k\"}}}")
                 .get("Items").get(0)));
-        assertStable(orders(() -> parse(call("Scan", "{\"TableName\":\"" + TABLE + "\"}")).get("Items").get(0)));
-        assertStable(orders(() -> parse(call("BatchGetItem", "{\"RequestItems\":{\"" + TABLE
-                + "\":{\"Keys\":[{\"pk\":{\"S\":\"k\"}}]}}}")).get("Responses").get(TABLE).get(0)));
-        assertStable(orders(() -> parse(call("ExecuteStatement", "{\"Statement\":\"SELECT * FROM " + TABLE
-                + " WHERE pk = 'k'\"}")).get("Items").get(0)));
+        assertStable(orders(() -> call("Scan", "{\"TableName\":\"" + table + "\"}").get("Items").get(0)));
+        assertStable(orders(() -> call("BatchGetItem", "{\"RequestItems\":{\"" + table
+                + "\":{\"Keys\":[{\"pk\":{\"S\":\"k\"}}]}}}").get("Responses").get(table).get(0)));
+        assertStable(orders(() -> call("ExecuteStatement", "{\"Statement\":\"SELECT * FROM \\\"" + table
+                + "\\\" WHERE pk = 'k'\"}").get("Items").get(0)));
     }
 }
