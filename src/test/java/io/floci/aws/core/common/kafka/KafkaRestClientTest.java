@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,13 +22,13 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exercises {@link PipesKafkaRestClient} against a fake server speaking Karapace's REST Proxy API. */
-class PipesKafkaRestClientTest {
+/** Exercises {@link KafkaRestClient} against a fake server speaking Karapace's REST Proxy API. */
+class KafkaRestClientTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private HttpServer fakeServer;
-    private PipesKafkaRestClient client;
+    private KafkaRestClient client;
     private final AtomicReference<String> lastRequestBody = new AtomicReference<>();
     private final AtomicReference<String> lastRequestMethod = new AtomicReference<>();
     private final AtomicReference<String> lastRequestPath = new AtomicReference<>();
@@ -88,7 +88,7 @@ class PipesKafkaRestClientTest {
         });
 
         fakeServer.start();
-        client = new PipesKafkaRestClient(MAPPER, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+        client = new KafkaRestClient(MAPPER, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     @AfterEach

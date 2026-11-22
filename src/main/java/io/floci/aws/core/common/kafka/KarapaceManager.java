@@ -1,4 +1,4 @@
-package io.floci.aws.services.pipes;
+package io.floci.aws.core.common.kafka;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.ContainerTeardown;
@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
 
 /**
  * Starts, on demand, a Karapace REST Proxy sidecar fronting a Kafka {@code bootstrap.servers}
- * target, so Pipes can poll a Kafka source over plain HTTP ({@link PipesKafkaRestClient}) instead
+ * target, so Pipes can poll a Kafka source over plain HTTP ({@link KafkaRestClient}) instead
  * of embedding {@code kafka-clients} in Floci itself. See #2916.
  *
  * <p>One container is started per distinct target and reused for the life of this process:
@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
  * (multiple Pipes reading the same cluster share one Karapace instance).
  */
 @ApplicationScoped
-class KarapaceManager implements ContainerTeardown {
+public class KarapaceManager implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(KarapaceManager.class);
     private static final int REST_PORT = 8082;
@@ -88,7 +88,7 @@ class KarapaceManager implements ContainerTeardown {
         this.readyTimeout = readyTimeout;
     }
 
-    URI ensureStarted(String bootstrapServers) {
+    public URI ensureStarted(String bootstrapServers) {
         synchronized (lifecycleLock) {
             if (teardown != null) {
                 throw new IllegalStateException("Karapace containers are being stopped");
