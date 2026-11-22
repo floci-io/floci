@@ -164,6 +164,23 @@ class S3DefaultEncryptionServiceTest {
 
         s3Service.putBucketEncryption(BUCKET, "not xml");
         assertEquals("AES256", put("malformed-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY) + "<Broken>");
+        assertEquals("AES256", put("truncated-configuration.txt", new PutObjectOptions()).getServerSideEncryption());
+    }
+
+    @Test
+    void aDefaultOutsideTheRuleIsIgnored() {
+        s3Service.putBucketEncryption(BUCKET, "<ServerSideEncryptionConfiguration>"
+                + "<Elsewhere><SSEAlgorithm>AES256</SSEAlgorithm><KMSMasterKeyID>other-key</KMSMasterKeyID></Elsewhere>"
+                + "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                + "<KMSMasterKeyID>" + KMS_KEY + "</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule>"
+                + "</ServerSideEncryptionConfiguration>");
+
+        S3Object put = put("rule.txt", new PutObjectOptions());
+
+        assertEquals("aws:kms", put.getServerSideEncryption());
+        assertEquals(KMS_KEY, put.getSseKmsKeyId());
     }
 
     @Test

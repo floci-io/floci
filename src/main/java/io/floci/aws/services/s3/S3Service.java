@@ -7285,20 +7285,21 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * The encryption S3 applies to an object written to {@code bucket} without encryption headers: the
-     * bucket's default encryption ({@code ApplyServerSideEncryptionByDefault}), or SSE-S3
-     * ({@code AES256}) for a bucket with none, the base level of encryption S3 has applied to every
-     * bucket since January 5, 2023.
+     * bucket's default encryption, read from the first rule's {@code ApplyServerSideEncryptionByDefault},
+     * or SSE-S3 ({@code AES256}) for a bucket with none, the base level of encryption S3 has applied to
+     * every bucket since January 5, 2023. A stored configuration that does not parse everywhere, or has no
+     * supported algorithm there, counts as none.
      */
     private static ObjectEncryption defaultEncryption(Bucket bucket) {
-        String configuration = bucket.getEncryptionConfiguration();
-        String algorithm = configuration == null
-                ? null
-                : XmlParser.extractFirst(configuration, "SSEAlgorithm", null);
-        if (algorithm == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(algorithm.trim())) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(bucket.getEncryptionConfiguration());
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        XmlParser.XmlElement byDefault = rule == null ? null : rule.child("ApplyServerSideEncryptionByDefault");
+        XmlParser.XmlElement algorithm = byDefault == null ? null : byDefault.child("SSEAlgorithm");
+        if (algorithm == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(algorithm.text())) {
             return new ObjectEncryption("AES256", null);
         }
-        String kmsKeyId = XmlParser.extractFirst(configuration, "KMSMasterKeyID", null);
-        return new ObjectEncryption(algorithm.trim(), kmsKeyId == null || kmsKeyId.isBlank() ? null : kmsKeyId.trim());
+        XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
+        return new ObjectEncryption(algorithm.text(), key == null || key.text().isBlank() ? null : key.text());
     }
 
     record SseCustomerHeaders(String algorithm, String key, String keyMd5) {
