@@ -15,6 +15,7 @@ import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.bedrock.model.ApplicationInferenceProfile;
@@ -698,10 +699,35 @@ public class BedrockService implements ResourceProvider {
             return;
         }
         Guardrail guardrail = findByArn(resourceArn, region);
-        if (guardrail.getTags() != null && tagKeys != null) {
-            tagKeys.forEach(guardrail.getTags()::remove);
+        Map<String, String> remaining = new HashMap<>(guardrail.getTags() != null ? guardrail.getTags() : Map.of());
+        if (tagKeys != null) {
+            tagKeys.forEach(remaining::remove);
         }
+        guardrail.setTags(remaining);
         guardrails.put(storageKey(region, guardrail.getGuardrailId(), DRAFT_VERSION), guardrail);
+    }
+
+    /**
+     * The tags of the guardrail or application inference profile whose ARN is {@code arn} in {@code account}, read in
+     * place under the key the tag handlers read, in the ARN's Region, and matched on the whole ARN it records; none
+     * when there is no such resource. Tag calls give the resource a new map, so the read is of one whole set.
+     */
+    Map<String, String> tagsInAccount(String account, String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        Optional<Map<String, String>> tags = Optional.empty();
+        if (resource.startsWith(GUARDRAIL_RESOURCE_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(guardrails, account,
+                            storageKey(parsed.region(), resource.substring(GUARDRAIL_RESOURCE_PREFIX.length()), DRAFT_VERSION))
+                    .filter(guardrail -> arn.equals(guardrail.getGuardrailArn())).map(Guardrail::getTags);
+        } else if (resource.startsWith(APPLICATION_INFERENCE_PROFILE_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(applicationInferenceProfiles, account,
+                            applicationProfileKey(parsed.region(),
+                                    resource.substring(APPLICATION_INFERENCE_PROFILE_PREFIX.length())))
+                    .filter(profile -> arn.equals(profile.getInferenceProfileArn()))
+                    .map(ApplicationInferenceProfile::getTags);
+        }
+        return tags.orElse(Map.of());
     }
 
     // Resource discovery (Resource Groups Tagging API, Resource Explorer)

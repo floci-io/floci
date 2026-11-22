@@ -60,8 +60,6 @@ public class ResourceArnBuilder {
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
-    /** The route of Bedrock's resource-policy actions, which the ARN of the resource they act on may follow. */
-    private static final String BEDROCK_RESOURCE_POLICY_ROUTE = "/resource-policy";
 
     private final ObjectMapper objectMapper;
     /**
@@ -151,12 +149,10 @@ public class ResourceArnBuilder {
         if (operation != null && operation.startsWith(credentialScope + ":") && RequestResources.reads(operation)) {
             return namedResources(credentialScope, operation, ctx, region, accountId, partition);
         }
-        String path = IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
-            case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -836,24 +832,6 @@ public class ResourceArnBuilder {
         } catch (IllegalArgumentException e) {
             return raw;
         }
-    }
-
-    // ── Bedrock ──────────────────────────────────────────────────────────────────
-
-    /**
-     * The resource of a Bedrock route. The resource-policy actions act on the resource whose ARN they carry,
-     * in the path, or in the body's {@code resourceArn} for {@code PutResourcePolicy}, as the Service
-     * Authorization Reference gives them; every other route, and a value that is not an ARN, is {@code *}.
-     */
-    private String buildBedrockArn(String path, ContainerRequestContext ctx) {
-        String resourceArn = null;
-        if (path.startsWith(BEDROCK_RESOURCE_POLICY_ROUTE + "/")) {
-            resourceArn = path.substring(BEDROCK_RESOURCE_POLICY_ROUTE.length() + 1);
-        } else if (BEDROCK_RESOURCE_POLICY_ROUTE.equals(path) && "POST".equalsIgnoreCase(ctx.getMethod())) {
-            JsonNode body = readJsonBody(ctx);
-            resourceArn = body == null ? null : body.path("resourceArn").asText(null);
-        }
-        return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────

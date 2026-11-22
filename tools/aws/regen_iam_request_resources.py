@@ -304,10 +304,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect", "s3")
+              "ec2-instance-connect", "s3", "bedrock")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dynamodb", "iam", "kms")
+HAND_BUILT = ("apigateway", "dynamodb", "iam", "kms")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -2844,6 +2844,11 @@ def pattern_words(pattern: str) -> set[str]:
                 part += char
         parts.append(part)
         words |= {found.group(0) for found in (re.match(r"[a-z][a-z0-9-]*", item) for item in parts) if found}
+    # A pattern whose account is optional, `([0-9]{12}|)`, gives each type word in an alternative of its own, as
+    # `:word/` or `:(one|two)/`: Bedrock's taggable ARNs, `...:([0-9]{12}|)((:(custom-model|...)/...)|(:guardrail/...))`.
+    for account in re.finditer(r"\{12\}\|\)", pattern):
+        for found in re.finditer(r":\(?([a-z][a-z0-9-]*(?:\|[a-z][a-z0-9-]*)*)\)?\\?/", pattern[account.end():]):
+            words |= set(found.group(1).split("|"))
     return words
 
 
