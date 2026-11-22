@@ -68,13 +68,26 @@ class PolledLogHandleTest {
 
     // Catches: docker-java handing a Docker frame on in reads of up to 1024 bytes, one of which ends inside
     // a record's timestamp, so that neither piece parses as a record and the line is dropped or forwarded
-    // with Docker's timestamp in front of it.
+    // with Docker's timestamp in front of it; or one that ends right after the stamp, so that a line whose
+    // text starts with an instant, as MySQL's error log does, is taken for an older record and dropped.
     @Test
     void aRecordCutAnywhereByTheTransportIsForwardedOnceWithoutItsTimestamp() {
-        byte[] stream = (String.join("", "2026-11-19T10:00:00.100000000Z first\n",
-                "2026-11-19T10:00:00.200000000Z second line\n", "2026-11-19T10:00:01.000000000Z third\n",
-                "2026-11-19T10:00:01.500000000Z 2026-11-19T10:00:00.099999Z 0 [System] ready\n"))
-                .getBytes(StandardCharsets.UTF_8);
+        assertForwardedOnceWhereverCut("2026-11-19T10:00:00.100000000Z", "2026-11-19T10:00:00.200000000Z",
+                "2026-11-19T10:00:01.000000000Z", "2026-11-19T10:00:01.500000000Z");
+    }
+
+    // Catches: the stamp Podman wrote before 5.8 (Go's time.RFC3339: whole seconds, in the daemon's offset)
+    // not being read as one, so that no line of a service container under that Podman is forwarded.
+    @Test
+    void aWholeSecondStampAsPodmanWroteBefore58IsReadWhereverTheRecordIsCut() {
+        assertForwardedOnceWhereverCut("2026-11-19T04:00:00-06:00", "2026-11-19T04:00:00-06:00",
+                "2026-11-19T04:00:01-06:00", "2026-11-19T04:00:02-06:00");
+    }
+
+    /** Four records, the last one's text opening with MySQL's instant, cut by the transport at every byte. */
+    private void assertForwardedOnceWhereverCut(String t1, String t2, String t3, String t4) {
+        byte[] stream = String.join("", t1 + " first\n", t2 + " second line\n", t3 + " third\n",
+                t4 + " 2026-11-19T10:00:00.099999Z 0 [System] ready\n").getBytes(StandardCharsets.UTF_8);
         List<String> expected = List.of("STDOUT:first", "STDOUT:second line", "STDOUT:third",
                 "STDOUT:2026-11-19T10:00:00.099999Z 0 [System] ready");
 
@@ -92,6 +105,39 @@ class PolledLogHandleTest {
             byteAtATime.accept(StreamType.STDOUT, new byte[] {b});
         }
         assertEquals(expected, lines);
+    }
+
+    // Catches: a line over 16 KB, which Docker writes as several records with a newline only on the last,
+    // forwarded with a later record's stamp in its text, or that record dropped when the transport cuts it.
+    @Test
+    void aLineDockerSplitIntoRecordsIsForwardedWholeWhereverItsLaterRecordIsCut() {
+        byte[] first = record("2026-11-19T10:00:00.100000000Z", "partial-");
+        byte[] last = record("2026-11-19T10:00:00.200000000Z", "end\n");
+
+        for (int cut = 1; cut < last.length; cut++) {
+            lines.clear();
+            read(handle(null), StreamType.STDOUT, first, Arrays.copyOfRange(last, 0, cut),
+                    Arrays.copyOfRange(last, cut, last.length));
+            assertEquals(List.of("STDOUT:partial-end"), lines, "cut at byte " + cut);
+        }
+    }
+
+    // Catches: digits ending a payload inside a record, held in case they open a stamp, lost when the read
+    // ends there and the rest of the line comes only in a later read.
+    @Test
+    void textHeldAtTheEndOfAReadIsForwardedWithItsLine() {
+        String t1 = "2026-11-19T10:00:00.100000000Z";
+        String t2 = "2026-11-19T10:00:00.200000000Z";
+        LogContainerCmd first = logRead(record(t1, "closing at "), "12:30".getBytes(StandardCharsets.UTF_8));
+        LogContainerCmd second = logRead(record(t1, "closing at 12:30"), record(t2, " done\n"));
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.logContainerCmd("c1")).thenReturn(first, second);
+        PolledLogHandle handle = new PolledLogHandle(docker, "c1", null, (stream, line) -> lines.add(line));
+
+        handle.read();
+        handle.read();
+
+        assertEquals(List.of("closing at 12:30 done"), lines);
     }
 
     // Catches: a line the container had not finished writing at one read being split in two, or its

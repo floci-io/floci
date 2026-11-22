@@ -14,8 +14,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.EnumMap;
@@ -50,10 +48,6 @@ final class PolledLogHandle implements Closeable {
     private static final Logger LOG = Logger.getLogger(PolledLogHandle.class);
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(2);
     private static final int TIMESTAMP_MAX_BYTES = 40;
-    // Docker and Podman both stamp a record with exactly nine fractional digits; a log line's own text that
-    // starts with an instant (MySQL's error log writes six) does not match, so it stays text.
-    private static final DateTimeFormatter RECORD_STAMP =
-            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSSSSSSSXXX");
     static final int TAIL_LINES = 1000;
 
     // Idle threads time out, as the close-drain scheduler's do, so the poller pins no classloader.
@@ -80,6 +74,8 @@ final class PolledLogHandle implements Closeable {
     private final Map<StreamType, Boolean> includeContinuation = new EnumMap<>(StreamType.class);
     private final Map<StreamType, Boolean> atRecordStart = new EnumMap<>(StreamType.class);
     private final Map<StreamType, byte[]> pendingRecordStart = new EnumMap<>(StreamType.class);
+    // How long the stamp of the record each stream is in was: one further into that record must match it.
+    private final Map<StreamType, Integer> stampLength = new EnumMap<>(StreamType.class);
     private Instant cursor;
     private int recordsAtCursor;
     private int seenAtCursor;
@@ -166,7 +162,9 @@ final class PolledLogHandle implements Closeable {
             if (isBoundedRead()) {
                 command.withTail(TAIL_LINES);
             }
-            if (!command.exec(callback).awaitCompletion(READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+            if (command.exec(callback).awaitCompletion(READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                endRead();
+            } else {
                 LOG.debugv("Reading the log of container {0} took over {1} s; the next read resumes it",
                         containerId, READ_TIMEOUT.toSeconds());
             }
@@ -217,9 +215,18 @@ final class PolledLogHandle implements Closeable {
 
     /**
      * One payload of a timestamped read: records of {@code <RFC 3339 timestamp> <content>}, each up to its
-     * newline. docker-java hands a Docker frame on in reads of up to 1024 bytes, so a payload can end inside
-     * a record's timestamp: a record start that reaches the payload's end holding only timestamp characters
-     * is held and read again with the stream's next payload.
+     * newline. Docker writes each record as one frame, and docker-java hands a frame on in reads of up to
+     * 1024 bytes, so a payload can begin or end anywhere inside a record.
+     *
+     * <p>A read begins with a record, and a frame holds no newline but its last byte, so the start of a read
+     * and what follows a newline open a record, whose stamp is read in any RFC 3339 form the runtime writes:
+     * Docker's nine fractional digits, or the whole seconds Podman wrote before 5.8. A payload that continues
+     * a line is either more of that record, cut by the transport, or the next record of one Docker split at
+     * 16 KB, which has no newline. Only a stamp exactly as long as the record's own opens a record there, so
+     * a line's text that starts with a shorter instant, as MySQL's six-digit one, stays text.
+     *
+     * <p>A payload that ends while its start could still be a stamp is held and read again with that
+     * stream's next payload.
      */
     void accept(StreamType stream, byte[] payload) {
         synchronized (stateLock) {
@@ -233,7 +240,6 @@ final class PolledLogHandle implements Closeable {
                 data = new byte[pending.length + payload.length];
                 System.arraycopy(pending, 0, data, 0, pending.length);
                 System.arraycopy(payload, 0, data, pending.length, payload.length);
-                atStart = true;
             }
             int offset = 0;
             while (offset < data.length) {
@@ -244,12 +250,18 @@ final class PolledLogHandle implements Closeable {
                 boolean terminated = end < data.length;
                 if (terminated) {
                     end++;
-                } else if (atStart && isTimestampPrefix(data, offset, end)) {
+                }
+                Stamp stamp = stampAt(stream, atStart, data, offset, end);
+                if (stamp == Stamp.UNDECIDED) {
                     pendingRecordStart.put(stream, Arrays.copyOfRange(data, offset, end));
-                    atRecordStart.put(stream, true);
+                    atRecordStart.put(stream, atStart);
                     return;
                 }
-                acceptRecord(stream, data, offset, end);
+                if (stamp == Stamp.NONE) {
+                    acceptContinuation(stream, data, offset, end);
+                } else {
+                    acceptRecord(stream, stamp, data, offset, end);
+                }
                 if (overflowed) {
                     return;
                 }
@@ -260,45 +272,75 @@ final class PolledLogHandle implements Closeable {
         }
     }
 
-    /** Whether {@code data[start, end)} could be the beginning of a record's timestamp, cut before its space. */
-    private static boolean isTimestampPrefix(byte[] data, int start, int end) {
-        if (end - start >= TIMESTAMP_MAX_BYTES) {
-            return false;
-        }
-        for (int i = start; i < end; i++) {
-            byte b = data[i];
-            boolean timestampChar = (b >= '0' && b <= '9') || b == '-' || b == ':' || b == '.' || b == 'T'
-                    || b == 'Z' || b == '+';
-            if (!timestampChar) {
-                return false;
-            }
-        }
-        return true;
+    /** A record's stamp: its instant and where the space after it is. */
+    private record Stamp(Instant instant, int space) {
+        static final Stamp NONE = new Stamp(null, -1);
+        // The bytes so far could still be a stamp cut before its space.
+        static final Stamp UNDECIDED = new Stamp(null, -2);
     }
 
-    private void acceptRecord(StreamType stream, byte[] payload, int start, int end) {
-        int space = -1;
-        for (int i = start; i < Math.min(end, start + TIMESTAMP_MAX_BYTES); i++) {
-            if (payload[i] == ' ') {
-                space = i;
-                break;
+    /** The stamp opening {@code data[start, end)}, at a record start or, when {@code atStart} is false, further into one. */
+    private Stamp stampAt(StreamType stream, boolean atStart, byte[] data, int start, int end) {
+        int required = atStart ? -1 : stampLength.getOrDefault(stream, 0);
+        if (required == 0) {
+            return Stamp.NONE;
+        }
+        int limit = atStart ? TIMESTAMP_MAX_BYTES : required;
+        int space = start;
+        while (space < end && space - start <= limit && isTimestampChar(data[space])) {
+            space++;
+        }
+        if (space - start > limit) {
+            return Stamp.NONE;
+        }
+        if (space == end) {
+            return Stamp.UNDECIDED;
+        }
+        if (data[space] != ' ' || space == start || (!atStart && space - start != required)) {
+            return Stamp.NONE;
+        }
+        try {
+            return new Stamp(Instant.parse(new String(data, start, space - start, StandardCharsets.US_ASCII)), space);
+        } catch (DateTimeParseException notAStamp) {
+            return Stamp.NONE;
+        }
+    }
+
+    private static boolean isTimestampChar(byte b) {
+        return (b >= '0' && b <= '9') || b == '-' || b == ':' || b == '.' || b == 'T' || b == 'Z' || b == '+';
+    }
+
+    /** Text of the record a stream is in, without a stamp of its own; it shares that record's fate. */
+    private void acceptContinuation(StreamType stream, byte[] data, int start, int end) {
+        if (includeContinuation.getOrDefault(stream, false)) {
+            emit(stream, data, start, end);
+        }
+    }
+
+    /**
+     * Ends a read that completed. It ended on a frame, so bytes held further into a record were that record's
+     * text and not the start of a stamp.
+     */
+    void endRead() {
+        synchronized (stateLock) {
+            if (!finished) {
+                flushHeldText();
             }
         }
-        Instant timestamp = null;
-        if (space > start) {
-            try {
-                timestamp = OffsetDateTime.parse(new String(payload, start, space - start, StandardCharsets.US_ASCII),
-                        RECORD_STAMP).toInstant();
-            } catch (DateTimeParseException expected) {
-                // A record can continue without a timestamp of its own; it shares the previous one's fate.
+    }
+
+    private void flushHeldText() {
+        pendingRecordStart.forEach((stream, held) -> {
+            if (!atRecordStart.getOrDefault(stream, true)) {
+                acceptContinuation(stream, held, 0, held.length);
             }
-        }
-        if (timestamp == null) {
-            if (includeContinuation.getOrDefault(stream, false)) {
-                emit(stream, payload, start, end);
-            }
-            return;
-        }
+        });
+        pendingRecordStart.clear();
+    }
+
+    private void acceptRecord(StreamType stream, Stamp stamp, byte[] data, int start, int end) {
+        stampLength.put(stream, stamp.space() - start);
+        Instant timestamp = stamp.instant();
         if (awaitingFirstRecord) {
             awaitingFirstRecord = false;
             if (boundedRead && timestamp.isAfter(cursor)) {
@@ -309,7 +351,7 @@ final class PolledLogHandle implements Closeable {
         boolean include = isNew(timestamp);
         includeContinuation.put(stream, include);
         if (include) {
-            emit(stream, payload, space + 1, end);
+            emit(stream, data, stamp.space() + 1, end);
         }
     }
 
@@ -357,6 +399,7 @@ final class PolledLogHandle implements Closeable {
             if (finished) {
                 return;
             }
+            flushHeldText();
             finished = true;
             buffers.forEach((stream, buffer) -> buffer.flush().ifPresent(line -> sink.accept(stream, line)));
         }
