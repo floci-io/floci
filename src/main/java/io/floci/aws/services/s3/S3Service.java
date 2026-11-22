@@ -8707,14 +8707,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
-        String effectiveServerSideEncryption = destinationCustomerKey != null
-                ? null
-                : (normalizedServerSideEncryption != null ? normalizedServerSideEncryption : source.getServerSideEncryption());
-        String effectiveSseKmsKeyId = "aws:kms".equals(effectiveServerSideEncryption)
-                ? (normalizedServerSideEncryption != null
-                    ? effectiveOptions.getSseKmsKeyId()
-                    : source.getSseKmsKeyId())
-                : null;
+        String effectiveSseKmsKeyId = effectiveOptions.getSseKmsKeyId();
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()
@@ -8769,7 +8762,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
                 result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                         effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
-                        effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                        effectiveContentDisposition, effectiveCacheControl, normalizedServerSideEncryption,
                         effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
                 if (copyAnnotations) {
                     restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);
@@ -8793,7 +8786,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> noSuchBucket())) {
             result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                     effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
-                    effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                    effectiveContentDisposition, effectiveCacheControl, normalizedServerSideEncryption,
                     effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
             if (copyAnnotations) {
                 restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);
