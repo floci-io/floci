@@ -1149,6 +1149,12 @@ floci:
     emrcontainers:
       enabled: true
       job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
+      runner-mode: immediate        # docker = run each job run's Spark job in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-on-eks/spark/%s"   # %s = the container image tag, emr-7.2.0:20240610
+      # Remove the drivers a previous run of this deployment left on the daemon before the first job
+      # run starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true
     ssooidc:

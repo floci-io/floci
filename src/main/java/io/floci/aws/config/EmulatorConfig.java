@@ -1205,13 +1205,49 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
-         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
-         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         * How long a job run stays RUNNING before it completes in the {@code immediate} runner mode; 0, the default,
+         * completes a job run as soon as it is submitted.
          *
          * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
          */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs each job run's
+         * Spark job, its {@code spark-submit} or {@code spark-sql}, in a container of its release's EMR on EKS image.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /**
+         * The Docker network a {@code docker} job run's container joins; the global default when omitted.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_DOCKER_NETWORK
+         */
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses when it names no custom image, with {@code %s} standing for its
+         * release's container image tag, {@code emr-7.2.0:20240610} for {@code emr-7.2.0-20240610}, for example
+         * "registry.internal/emr-on-eks/spark/%s". If omitted, Floci uses the release's base image on Amazon ECR
+         * Public.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_IMAGE_TEMPLATE
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR on EKS driver a previous run of
+         * <em>this same</em> Floci left on the daemon before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface EmrServerlessServiceConfig {
