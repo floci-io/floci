@@ -26,6 +26,7 @@ import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunRecord;
 import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
+import io.floci.aws.services.emrserverless.model.RunWorkers;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
 import io.floci.aws.services.emrserverless.model.Session;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
@@ -676,6 +677,7 @@ public class EmrServerlessJobRunService implements Resettable {
         record.setClientToken(request.getClientToken());
         record.setRequest(original);
         record.setApplicationType(app.getType());
+        record.setWorkers(workers(app, run));
         record.setContainerRun(sparkRunner != null);
         keepDriverLogs(record, app);
         store.put(jobRunId, record);
@@ -1223,6 +1225,17 @@ public class EmrServerlessJobRunService implements Resettable {
         });
     }
 
+    // How long each of a run's executors' workers ran, for its attempt's resource utilization.
+    private synchronized void keepExecutorLifetimes(String jobRunId, long launchedIn, List<Duration> lifetimes) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(jobRunId).ifPresent(record -> {
+            record.setExecutorLifetimes(lifetimes.stream().map(Duration::toMillis).toList());
+            store.put(jobRunId, record);
+        });
+    }
+
     // A run past its timeout is CANCELLING while its driver is stopped: "the job run has timed out".
     private synchronized void driverTimedOut(String jobRunId, long launchedIn) {
         if (launchedIn != generation) {
@@ -1318,7 +1331,8 @@ public class EmrServerlessJobRunService implements Resettable {
         JobRun run = record.getJobRun();
         JobRun failed = objectMapper.convertValue(run, JobRun.class);
         failed.setStateDetails(details);
-        end(failed, STATE_FAILED, now);
+        end(record, failed, STATE_FAILED, now);
+        record.setExecutorLifetimes(null);
         record.getEarlierAttempts().add(failed);
         run.setAttempt(run.getAttempt() + 1);
         run.setAttemptCreatedAt(now);
@@ -1329,12 +1343,24 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setStartedAt(null);
         run.setEndedAt(null);
         run.setTotalExecutionDurationSeconds(null);
+        run.setTotalResourceUtilization(null);
+        run.setBilledResourceUtilization(null);
         applyImages(run, app);
         keepDriverLogs(record, app);
         store.put(run.getJobRunId(), record);
         LOG.infov("EMR Serverless job run {0} failed its attempt {1}; attempt {2} starts", run.getJobRunId(),
                 failed.getAttempt(), run.getAttempt());
         launch(record, app);
+    }
+
+    /**
+     * The workers a Spark run asks for ({@link EmrServerlessWorkers}), from its properties as {@code spark-submit} gets
+     * them; none for a Hive run, whose Tez tasks come and go with its query.
+     */
+    private static RunWorkers workers(Application app, JobRun run) {
+        JobDriver.SparkSubmit sparkSubmit = run.getJobDriver() != null ? run.getJobDriver().getSparkSubmit() : null;
+        return sparkSubmit != null ? EmrServerlessWorkers.plan(sparkProperties(sparkDefaults(app, run), sparkSubmit),
+                sparkSubmit.getSparkSubmitParameters()) : null;
     }
 
     /** The {@code spark-defaults} properties for a run, as {@link #classificationProperties} merges them. */
@@ -1507,7 +1533,7 @@ public class EmrServerlessJobRunService implements Resettable {
                 queued.add(record);
             } else if (record.isContainerRun() && !executing.contains(run.getJobRunId())) {
                 run.setStateDetails(INTERRUPTED);
-                end(run, STATE_FAILED, now);
+                end(record, run, STATE_FAILED, now);
                 replay.changed.add(record);
             } else {
                 replay.running(record);
@@ -1606,11 +1632,11 @@ public class EmrServerlessJobRunService implements Resettable {
                     // No source gives AWS's stateDetails for it; the wording is Floci's.
                     run.setStateDetails("Job run timed out after " + limits.queueTimeout().toMinutes()
                             + " minutes in the queue.");
-                    end(run, STATE_CANCELLED, timesOutAt);
+                    end(head, run, STATE_CANCELLED, timesOutAt);
                     changed.add(head);
                 } else if (endsAt != null) {
                     timed.poll();
-                    end(first.record().getJobRun(), first.ending().state(), endsAt);
+                    end(first.record(), first.record().getJobRun(), first.ending().state(), endsAt);
                     changed.add(first.record());
                     startQueued(endsAt);
                 } else if (!startQueued(now)) {
@@ -1643,7 +1669,7 @@ public class EmrServerlessJobRunService implements Resettable {
                     running(record);
                 } else if (!driverIsTheApplications(run, app)) {
                     run.setStateDetails(DRIVER_NOT_THE_APPLICATIONS);
-                    end(run, STATE_FAILED, at);
+                    end(record, run, STATE_FAILED, at);
                 } else {
                     run.setState(STATE_SCHEDULED);
                     launched.add(record);
@@ -1701,11 +1727,12 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     private void finish(JobRunRecord record, String state, Instant endedAt) {
-        end(record.getJobRun(), state, endedAt);
+        end(record, record.getJobRun(), state, endedAt);
         store.put(record.getJobRun().getJobRunId(), record);
     }
 
-    private static void end(JobRun run, String state, Instant endedAt) {
+    // Ends an attempt of a run, as of endedAt, with what its workers used.
+    private void end(JobRunRecord record, JobRun run, String state, Instant endedAt) {
         run.setState(state);
         run.setEndedAt(endedAt);
         run.setUpdatedAt(endedAt);
@@ -1713,6 +1740,19 @@ public class EmrServerlessJobRunService implements Resettable {
         // A container run cancelled or failed before its driver ran never started.
         run.setTotalExecutionDurationSeconds(run.getStartedAt() != null
                 ? (int) Duration.between(run.getStartedAt(), endedAt).toSeconds() : 0);
+        EmrServerlessWorkers.account(run, workersOf(record), record.getExecutorLifetimes());
+    }
+
+    /**
+     * The workers a run asked for: as it was admitted, or, for a Spark run stored before Floci kept them, from its
+     * application and request now, while its application is live.
+     */
+    private RunWorkers workersOf(JobRunRecord record) {
+        JobRun run = record.getJobRun();
+        if (record.getWorkers() == null && run.getJobDriver() != null && run.getJobDriver().getSparkSubmit() != null) {
+            applications.findLive(run.getApplicationId()).ifPresent(app -> record.setWorkers(workers(app, run)));
+        }
+        return record.getWorkers();
     }
 
     // Every attempt of a run, oldest first: the earlier ones, then the latest.
@@ -1944,6 +1984,12 @@ public class EmrServerlessJobRunService implements Resettable {
         public boolean cancelled() {
             return !RequestScopes.callAs(job.accountId(), job.region(),
                     () -> stillGoing(job.runId(), launchedIn));
+        }
+
+        @Override
+        public void executorsRan(List<Duration> lifetimes) {
+            RequestScopes.runAs(job.accountId(), job.region(),
+                    () -> keepExecutorLifetimes(job.runId(), launchedIn, lifetimes));
         }
     }
 }

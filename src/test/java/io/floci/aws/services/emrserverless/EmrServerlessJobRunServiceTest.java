@@ -1143,6 +1143,64 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void anEndedSparkRunGivesItsResourceUtilizationAndAHiveRunNone() {
+        EmrServerlessJobRunService service = service(90);
+        StartJobRunRequest sized = request(null, null);
+        sized.getJobDriver().getSparkSubmit()
+                .setSparkSubmitParameters("--conf spark.dynamicAllocation.enabled=false"
+                        + " --conf spark.executor.instances=1 --conf spark.executor.cores=2");
+        String spark = service.startJobRun(applicationId, sized).getJobRunId();
+        String hiveApplication = applications.createApplication(applicationRequest("hive", "emr-7.5.0", "HIVE"))
+                .getApplicationId();
+        String hive = service.startJobRun(hiveApplication, hiveRequest("s3://bucket/queries/report.sql", null, null))
+                .getJobRunId();
+
+        assertNull(service.getJobRun(applicationId, spark, null).getTotalResourceUtilization(),
+                "a run still running has used nothing yet");
+        clock.advance(Duration.ofSeconds(90));
+        JobRun ended = service.getJobRun(applicationId, spark, null);
+
+        // A default driver, 4 vCPUs, 16 GB and 20 GB, and one executor of 2 vCPUs, whose 14G and 1.4G of overhead
+        // round up to a 2-vCPU worker's largest 16 GB, for 90 seconds.
+        assertEquals("SUCCESS", ended.getState());
+        assertEquals(Map.of("vCPUHour", 6 * 90 / 3600.0, "memoryGBHour", 32 * 90 / 3600.0,
+                "storageGBHour", 40 * 90 / 3600.0), ended.getTotalResourceUtilization());
+        assertEquals(Map.of("vCPUHour", 6 * 90 / 3600.0, "memoryGBHour", 32 * 90 / 3600.0, "storageGBHour", 0.0),
+                ended.getBilledResourceUtilization());
+        JobRun hiveRun = service.getJobRun(hiveApplication, hive, null);
+        assertEquals("SUCCESS", hiveRun.getState());
+        assertNull(hiveRun.getTotalResourceUtilization());
+    }
+
+    @Test
+    void aRunWhoseExecutorsHadContainersCountsTheTimeEachRanAndOneStoredWithoutWorkersGetsThemAsItEnds() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String measured = service.startJobRun(applicationId, request(null, null)).getJobRunId();
+        runner.whileRunning = () -> clock.advance(Duration.ofSeconds(100));
+        runner.executorLifetimes = List.of(Duration.ofSeconds(30), Duration.ofMillis(90_500));
+        runNext();
+
+        // The driver for its attempt, a little over 100 seconds as the test's clock ticks, rounded up; the executors
+        // for 121 seconds between them, each billed a minute at least.
+        JobRun ended = service.getJobRun(applicationId, measured, null);
+        long driver = Math.ceilDiv(Duration.between(ended.getStartedAt(), ended.getEndedAt()).toMillis(), 1000);
+        assertEquals(101, driver);
+        assertEquals((4 * driver + 4 * 121) / 3600.0, ended.getTotalResourceUtilization().get("vCPUHour"));
+        assertEquals((4 * driver + 4 * 151) / 3600.0, ended.getBilledResourceUtilization().get("vCPUHour"));
+
+        EmrServerlessJobRunService immediate = service(90);
+        String stored = immediate.startJobRun(applicationId, request(null, null)).getJobRunId();
+        JobRunRecord record = store.get(stored).orElseThrow();
+        record.setWorkers(null);
+        store.put(stored, record);
+        clock.advance(Duration.ofSeconds(90));
+
+        assertEquals(16 * 90 / 3600.0,
+                immediate.getJobRun(applicationId, stored, null).getTotalResourceUtilization().get("vCPUHour"));
+    }
+
+    @Test
     void eachAttemptIsLaunchedWhileItsApplicationCannotBeDeleted() {
         FakeRunner runner = new FakeRunner();
         runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
@@ -1853,6 +1911,9 @@ class EmrServerlessJobRunServiceTest {
         Outcome outcome = Outcome.exitedWith(0);
         Runnable whileRunning = () -> { };
         Runnable whileTimingOut = () -> { };
+        // How long its executors' workers ran, told as the run ends, as the Docker runner tells it for executors with
+        // containers of their own; null for none told.
+        List<Duration> executorLifetimes;
         // The manifest digest each custom image resolves to, told before the driver starts as the Docker runner does,
         // and the executors' where their pull resolves another, as a push between the two pulls gives.
         final Map<String, String> digests = new HashMap<>();
@@ -1881,6 +1942,9 @@ class EmrServerlessJobRunServiceTest {
             if (outcome.timedOut()) {
                 progress.timedOut();
                 whileTimingOut.run();
+            }
+            if (executorLifetimes != null) {
+                progress.executorsRan(executorLifetimes);
             }
             return stopped.contains(job.runId()) ? Outcome.halted() : outcome;
         }

@@ -96,6 +96,13 @@ public interface SparkJobRunner {
          * that runs is stopped.
          */
         boolean cancelled();
+
+        /**
+         * How long each of the run's executors' workers ran, from its start to its end, where its executors had
+         * containers of their own, told as the run ends.
+         */
+        default void executorsRan(List<Duration> lifetimes) {
+        }
     }
 
     /** What a run's container runs as: its driver, or one of its executors. */
