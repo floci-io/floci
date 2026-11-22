@@ -1129,8 +1129,17 @@ public class EmrServerlessJobRunService implements Resettable {
      * {@code spark-submit} has it.
      */
     static Map<String, String> sparkProperties(Map<String, String> sparkDefaults, JobDriver.SparkSubmit sparkSubmit) {
+        return sparkProperties(sparkDefaults, sparkSubmit.getSparkSubmitParameters());
+    }
+
+    /**
+     * A Spark driver's properties: {@code sparkDefaults}, then the {@code --conf} settings and the last
+     * {@code --archives} option of {@code sparkSubmitParameters}, a {@code spark-submit} command line's options, as
+     * {@link #sparkProperties(Map, JobDriver.SparkSubmit)} reads a run's.
+     */
+    public static Map<String, String> sparkProperties(Map<String, String> sparkDefaults, String sparkSubmitParameters) {
         Map<String, String> properties = new LinkedHashMap<>(sparkDefaults);
-        List<String> parameters = EmrServerlessSparkRunner.splitParameters(sparkSubmit.getSparkSubmitParameters());
+        List<String> parameters = EmrServerlessSparkRunner.splitParameters(sparkSubmitParameters);
         String archivesOption = null;
         for (int i = 0; i < parameters.size(); i++) {
             String parameter = parameters.get(i);
@@ -1158,10 +1167,15 @@ public class EmrServerlessJobRunService implements Resettable {
 
     /** The environment variables a run's driver gets: its {@code spark.emr-serverless.driverEnv.<KEY>} properties. */
     static Map<String, String> driverEnvironment(Map<String, String> sparkProperties) {
+        return environment(sparkProperties, DRIVER_ENV_PREFIX);
+    }
+
+    /** The environment variables {@code sparkProperties} set by their {@code <prefix><KEY>} properties. */
+    public static Map<String, String> environment(Map<String, String> sparkProperties, String prefix) {
         Map<String, String> environment = new LinkedHashMap<>();
         sparkProperties.forEach((key, value) -> {
-            if (key.startsWith(DRIVER_ENV_PREFIX) && key.length() > DRIVER_ENV_PREFIX.length()) {
-                environment.put(key.substring(DRIVER_ENV_PREFIX.length()), value);
+            if (key.startsWith(prefix) && key.length() > prefix.length()) {
+                environment.put(key.substring(prefix.length()), value);
             }
         });
         return environment;
@@ -1171,7 +1185,7 @@ public class EmrServerlessJobRunService implements Resettable {
      * A run's {@code spark.archives}: a comma-separated list, of which Spark takes each entry trimmed and drops
      * the empty ones.
      */
-    static List<String> archives(Map<String, String> sparkProperties) {
+    public static List<String> archives(Map<String, String> sparkProperties) {
         String archives = sparkProperties.get(SPARK_ARCHIVES);
         if (archives == null) {
             return List.of();
@@ -1468,16 +1482,25 @@ public class EmrServerlessJobRunService implements Resettable {
             }
         }
         if (overrides instanceof List<?> configurations) {
-            boolean replaces = !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 1);
-            for (Object configuration : configurations) {
-                if (configuration instanceof Map<?, ?> members
-                        && classification.equals(members.get("classification"))) {
-                    if (replaces) {
-                        properties.clear();
-                        replaces = false;
-                    }
-                    addProperties(properties, members, classification);
-                }
+            boolean named = configurations.stream().anyMatch(configuration -> configuration instanceof Map<?, ?> members
+                    && classification.equals(members.get("classification")));
+            if (named && !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 1)) {
+                properties.clear();
+            }
+            properties.putAll(classificationProperties(configurations, classification));
+        }
+        return properties;
+    }
+
+    /**
+     * The properties of each {@code classification} configuration of {@code configurations}, a workload's own
+     * configuration list as the API's JSON gives it, a later configuration's winning where a property is the same.
+     */
+    public static Map<String, String> classificationProperties(List<?> configurations, String classification) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        for (Object configuration : configurations) {
+            if (configuration instanceof Map<?, ?> members) {
+                addProperties(properties, members, classification);
             }
         }
         return properties;

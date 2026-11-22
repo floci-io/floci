@@ -551,6 +551,7 @@ floci:
     emrcontainers:
       enabled: true
       job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
+      runner-mode: immediate
     ssoadmin:
       enabled: true
     ssooidc:

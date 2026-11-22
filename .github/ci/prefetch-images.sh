@@ -139,6 +139,9 @@ starts EmrServerlessSparkConnectNightlyIntegrationTest EmrServerlessDashboardNig
 # The nightly EmrSessionServerNightlyIntegrationTest runs an EMR session's Spark Connect server on an emr-spark-8.1.0
 # cluster, Spark 4, sessions needing the AWS runtime for Apache Spark, and its client in that image.
 starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest
+# The nightly EmrContainersSparkNightlyIntegrationTest runs EMR on EKS job runs in the emr-7.5.0 release's EMR on EKS
+# base image, about 5 GB.
+starts EmrContainersSparkNightlyIntegrationTest && ecr public.ecr.aws/emr-on-eks/spark/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
