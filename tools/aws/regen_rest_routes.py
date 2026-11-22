@@ -62,6 +62,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/rest-routes.json"
 MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
     "account": "account",
+    "amp": "aps",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "bedrock": "bedrock",
