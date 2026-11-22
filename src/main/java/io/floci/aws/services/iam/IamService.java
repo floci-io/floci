@@ -394,6 +394,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             "Cannot delete entity, must delete policies first.";
     private static final String MUST_REMOVE_PROFILE_ROLES_FIRST =
             "Cannot delete entity, must remove roles from instance profile first.";
+    /**
+     * What a managed policy's own delete is refused with while a version other than its default
+     * is still stored, three sentences of entirely fixed text: no ARN, no version id, no count.
+     * The last of them tells the caller what not to go looking for, the default version being
+     * the one version a delete takes with it and the one {@code DeletePolicyVersion} refuses.
+     */
+    private static final String MUST_DELETE_POLICY_VERSIONS_FIRST =
+            "This policy has more than one version. Before you delete a policy, you must delete"
+                    + " the policy's versions. The default version is deleted with the policy.";
+    /**
+     * What a managed policy delete answers while an entity still has it attached, Floci's own
+     * wording rather than a recording. It is also what clearing the policy's other versions
+     * answers, since the clearing is only ever on the way to the delete.
+     */
+    private static final String POLICY_STILL_ATTACHED =
+            "Cannot delete a policy attached to entities. Detach it first.";
     public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
     public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
 
@@ -2171,15 +2187,93 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * Deletes a customer-managed policy, which AWS does only once nothing is left on it: no
+     * entity attached to it, and no version beside the default one the delete takes with it. A
+     * policy an update published a new document for still holds the document before it, and that
+     * is enough to refuse the delete, so whoever wants the policy gone clears those versions
+     * first; {@link #clearNonDefaultPolicyVersions} is what Floci's own stacks do it with.
+     *
+     * <p>Which dependency a policy carrying both is told about follows the order AWS's own steps
+     * for deleting a managed policy are written in, the attachments and then the versions. That
+     * order is a reading rather than a recording, and {@code docs/services/iam.md} says so.
+     *
+     * <p>Both reads and the delete they decide are under {@code resourceNameLock}, which every
+     * write to a policy's versions and attachments takes as well: a version published between the
+     * count and the delete would otherwise be deleted along with the policy it was added to.
+     */
     public void deletePolicy(String policyArn) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
-        if (policy.getAttachmentCount() > 0) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete a policy attached to entities. Detach it first.", 409);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = getPolicy(policyArn);
+            if (policy.getAttachmentCount() > 0) {
+                throw new AwsException("DeleteConflict", POLICY_STILL_ATTACHED, 409);
+            }
+            if (hasAVersionBesideItsDefault(policy)) {
+                throw new AwsException("DeleteConflict", MUST_DELETE_POLICY_VERSIONS_FIRST, 409);
+            }
+            policies.delete(policyArn);
+            LOG.infov("Deleted IAM policy: {0}", policyArn);
         }
-        policies.delete(policyArn);
-        LOG.infov("Deleted IAM policy: {0}", policyArn);
+    }
+
+    /**
+     * Whether the policy holds anything besides the version a delete would take with it. Every
+     * policy carries a default version from the moment it is created and nothing can delete that
+     * one on its own, so a second version is exactly what an unfinished cleanup leaves behind.
+     */
+    private static boolean hasAVersionBesideItsDefault(IamPolicy policy) {
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            return versions.size() > 1;
+        }
+    }
+
+    /**
+     * Drops every version of a managed policy but its default, the work AWS leaves to whoever
+     * wants the policy deleted: {@link #deletePolicy} refuses while another version is stored and
+     * no IAM operation clears them in one go. Floci's CloudFormation provisioners own the
+     * policies their stacks created and publish a new default version on every update, so this is
+     * how such a stack takes its own policy down. It is refused while an entity still has the
+     * policy attached, with the sentence that delete would answer: the history is worth keeping
+     * for a delete that cannot go through anyway, and AWS's own steps detach before they clear.
+     *
+     * <p>The whole of it is under {@code resourceNameLock}, as the delete it leads to and every
+     * write to a policy's versions are, so the write back cannot resurrect a policy another
+     * caller deleted in between. The default is read and the rest dropped under the version map's
+     * own monitor as well, so a version published while this runs is either kept as the new
+     * default or dropped with the old ones, never deleted as a leftover of a default it has
+     * itself replaced.
+     */
+    public void clearNonDefaultPolicyVersions(String policyArn) {
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            // Asked before a single version goes. The delete this clears the way for is refused
+            // while anything still has the policy attached, a principal the caller never recorded
+            // included, and a clearing that ran first would have spent the history on a delete
+            // that was never going to happen. It is the published order too: detach, then the
+            // versions, then the policy.
+            if (policy.getAttachmentCount() > 0) {
+                throw new AwsException("DeleteConflict", POLICY_STILL_ATTACHED, 409);
+            }
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            boolean cleared;
+            synchronized (versions) {
+                String defaultVersionId = policy.getDefaultVersionId();
+                // No default recorded at all: a policy from a store this version of Floci did not
+                // write. Dropping every version would leave the policy with no document to serve.
+                if (defaultVersionId == null) {
+                    return;
+                }
+                cleared = versions.keySet()
+                        .removeIf(versionId -> !versionId.equals(defaultVersionId));
+            }
+            if (cleared) {
+                policies.put(policyArn, policy);
+                LOG.infov("Cleared the non-default versions of IAM policy: {0}", policyArn);
+            }
+        }
     }
 
     /** The roles, users and groups a managed policy is currently attached to. */
@@ -2334,46 +2428,50 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (heldToBeingAPolicy) {
             IamPolicyDocuments.checkManagedPolicy(document);
         }
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        PolicyVersion version;
-        synchronized (versions) {
-            if (versions.size() >= 5) {
-                throw new AwsException("LimitExceeded",
-                        "A managed policy can have up to 5 versions.", 409);
+        synchronized (resourceNameLock) {
+            // Under the lock a policy delete reads the version count with, so a version
+            // cannot be added between that read and the delete it decides.
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            PolicyVersion version;
+            synchronized (versions) {
+                if (versions.size() >= 5) {
+                    throw new AwsException("LimitExceeded",
+                            "A managed policy can have up to 5 versions.", 409);
+                }
+                // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
+                // The live keys' own max is only a floor, not the source of truth: deleting the
+                // highest-numbered surviving version would otherwise let a "derive from what's left"
+                // computation reissue its id. The stored high-water mark is the real counter.
+                int highestSurviving = versions.keySet().stream()
+                        .mapToInt(id -> Integer.parseInt(id.substring(1)))
+                        .max().orElse(0);
+                int nextVersionNum;
+                if (policy.getNextVersionNumber() == null) {
+                    // A policy persisted before this field existed: the live-key floor alone can't
+                    // reveal a version deleted before this field was ever recorded (e.g. v1-v4 live
+                    // after a pre-migration DeletePolicyVersion("v5")). Since a policy can never hold
+                    // more than 5 concurrent versions, no more than 5 stacked deletions could have
+                    // happened at the top between two persists; jump the counter past that worst
+                    // case rather than trust the live keys' max + 1 for an unknown history.
+                    nextVersionNum = highestSurviving + 1 + 5;
+                } else {
+                    nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
+                }
+                String versionId = "v" + nextVersionNum;
+                version = new PolicyVersion(versionId, document, setAsDefault);
+                if (setAsDefault) {
+                    versions.values().forEach(v -> v.setDefaultVersion(false));
+                    policy.setDefaultVersionId(versionId);
+                }
+                versions.put(versionId, version);
+                policy.setNextVersionNumber(nextVersionNum + 1);
             }
-            // AWS version ids are monotonic and never reissued after a DeletePolicyVersion.
-            // The live keys' own max is only a floor, not the source of truth: deleting the
-            // highest-numbered surviving version would otherwise let a "derive from what's left"
-            // computation reissue its id. The stored high-water mark is the real counter.
-            int highestSurviving = versions.keySet().stream()
-                    .mapToInt(id -> Integer.parseInt(id.substring(1)))
-                    .max().orElse(0);
-            int nextVersionNum;
-            if (policy.getNextVersionNumber() == null) {
-                // A policy persisted before this field existed: the live-key floor alone can't
-                // reveal a version deleted before this field was ever recorded (e.g. v1-v4 live
-                // after a pre-migration DeletePolicyVersion("v5")). Since a policy can never hold
-                // more than 5 concurrent versions, no more than 5 stacked deletions could have
-                // happened at the top between two persists; jump the counter past that worst
-                // case rather than trust the live keys' max + 1 for an unknown history.
-                nextVersionNum = highestSurviving + 1 + 5;
-            } else {
-                nextVersionNum = Math.max(policy.getNextVersionNumber(), highestSurviving + 1);
-            }
-            String versionId = "v" + nextVersionNum;
-            version = new PolicyVersion(versionId, document, setAsDefault);
-            if (setAsDefault) {
-                versions.values().forEach(v -> v.setDefaultVersion(false));
-                policy.setDefaultVersionId(versionId);
-            }
-            versions.put(versionId, version);
-            policy.setNextVersionNumber(nextVersionNum + 1);
+            policy.setUpdateDate(Instant.now());
+            policies.put(policyArn, policy);
+            return version;
         }
-        policy.setUpdateDate(Instant.now());
-        policies.put(policyArn, policy);
-        return version;
     }
 
     public PolicyVersion getPolicyVersion(String policyArn, String versionId) {
@@ -2388,21 +2486,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deletePolicyVersion(String policyArn, String versionId) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        if (versionId.equals(policy.getDefaultVersionId())) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete the default version of a policy.", 409);
-        }
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        synchronized (versions) {
-            if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            if (versionId.equals(policy.getDefaultVersionId())) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete the default version of a policy.", 409);
             }
-            versions.remove(versionId);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            synchronized (versions) {
+                if (!versions.containsKey(versionId)) {
+                    throw new AwsException("NoSuchEntity",
+                            "Policy version " + versionId + " does not exist.", 404);
+                }
+                versions.remove(versionId);
+            }
+            policies.put(policyArn, policy);
         }
-        policies.put(policyArn, policy);
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
@@ -2414,19 +2514,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
-        rejectIfAwsManaged(policyArn);
-        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
-        Map<String, PolicyVersion> versions = policy.getVersions();
-        synchronized (versions) {
-            if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+        synchronized (resourceNameLock) {
+            rejectIfAwsManaged(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
+            Map<String, PolicyVersion> versions = policy.getVersions();
+            synchronized (versions) {
+                if (!versions.containsKey(versionId)) {
+                    throw new AwsException("NoSuchEntity",
+                            "Policy version " + versionId + " does not exist.", 404);
+                }
+                versions.values().forEach(v -> v.setDefaultVersion(false));
+                versions.get(versionId).setDefaultVersion(true);
+                // Inside the monitor with the flags: a clearing of the other versions reads this
+                // id to decide what to keep, and between the two writes it would read the one
+                // this call has just replaced and drop the version it just made default.
+                policy.setDefaultVersionId(versionId);
             }
-            versions.values().forEach(v -> v.setDefaultVersion(false));
-            versions.get(versionId).setDefaultVersion(true);
+            policies.put(policyArn, policy);
         }
-        policy.setDefaultVersionId(versionId);
-        policies.put(policyArn, policy);
     }
 
     public void tagPolicy(String policyArn, Map<String, String> newTags) {

@@ -225,10 +225,18 @@ class IamPolicyDocumentWriteIntegrationTest {
                 .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{}]}"),
                 "Policy statement must contain actions.");
 
-        iam("CreatePolicyVersion")
+        String versionId = iam("CreatePolicyVersion")
                 .formParam("PolicyArn", arn)
                 .formParam("PolicyDocument", IDENTITY_POLICY)
-            .when().post("/").then().statusCode(200);
+            .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString(
+                        "CreatePolicyVersionResponse.CreatePolicyVersionResult.PolicyVersion.VersionId");
+
+        // The policy now has a version beside its default, and a policy carrying one cannot be
+        // deleted, so this goes first: the teardowns registered here run newest first.
+        cleanup.register(() -> iam("DeletePolicyVersion")
+                .formParam("PolicyArn", arn).formParam("VersionId", versionId)
+            .when().post("/").then().statusCode(200));
     }
 
     /**

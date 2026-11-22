@@ -12,10 +12,12 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 
 /**
- * Which dependency a blocked delete names, and in the sentence AWS was recorded answering. Three
- * sentences cover the four refusals: an instance profile still holding the role, a managed policy
- * that has to be detached, and an inline policy that has to be deleted. Each is entirely fixed
- * text, so a caller reading it to pick its next step gets the dependency that is actually there.
+ * Which dependency a blocked delete names, and in the sentence AWS was recorded answering. Four
+ * sentences cover the refusals: an instance profile still holding the role, a managed policy that
+ * has to be detached, an inline policy that has to be deleted, and a managed policy of the
+ * account's own that still has a version beside the default one its delete would take. Each is
+ * entirely fixed text, so a caller reading it to pick its next step gets the dependency that is
+ * actually there.
  *
  * <p>{@code docs/services/iam.md} carries the recordings and says which part of the ordering is a
  * reading rather than one of them.
@@ -35,6 +37,11 @@ class IamDeleteConflictDependencyIntegrationTest {
             "Cannot delete entity, must delete policies first.";
     private static final String MUST_REMOVE_PROFILE_ROLES =
             "Cannot delete entity, must remove roles from instance profile first.";
+    private static final String MUST_DELETE_POLICY_VERSIONS =
+            "This policy has more than one version. Before you delete a policy, you must delete"
+                    + " the policy's versions. The default version is deleted with the policy.";
+    private static final String MUST_DETACH_FROM_ENTITIES =
+            "Cannot delete a policy attached to entities. Detach it first.";
 
     private static final String TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":"
             + "[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},"
@@ -42,6 +49,10 @@ class IamDeleteConflictDependencyIntegrationTest {
 
     private static final String PERMISSION_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":"
             + "[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+
+    private static final String OTHER_PERMISSION_POLICY = "{\"Version\":\"2012-10-17\","
+            + "\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\","
+            + "\"Resource\":\"*\"}]}";
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -108,6 +119,22 @@ class IamDeleteConflictDependencyIntegrationTest {
                 .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
         cleanup.register(() -> cleared(iam("DeletePolicy").formParam("PolicyArn", arn)));
         return arn;
+    }
+
+    /**
+     * Publishes a second document on the policy, which stays beside the default rather than
+     * replacing it. Its teardown is registered after the policy's own, and teardowns run newest
+     * first, so the version is gone before anything tries to delete the policy.
+     */
+    private String versionBeside(String policyArn) {
+        String versionId = iam("CreatePolicyVersion").formParam("PolicyArn", policyArn)
+                .formParam("PolicyDocument", OTHER_PERMISSION_POLICY)
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString(
+                        "CreatePolicyVersionResponse.CreatePolicyVersionResult.PolicyVersion.VersionId");
+        cleanup.register(() -> cleared(iam("DeletePolicyVersion")
+                .formParam("PolicyArn", policyArn).formParam("VersionId", versionId)));
+        return versionId;
     }
 
     private String attachToRole(String roleName) {
@@ -231,6 +258,46 @@ class IamDeleteConflictDependencyIntegrationTest {
                 .when().post("/").then().statusCode(409)
                 .body(CODE, equalTo("DeleteConflict"))
                 .body(MESSAGE, equalTo(MUST_DELETE_POLICIES));
+    }
+
+    /**
+     * The policy's own delete: a version beside the default is a dependency of its own, and the
+     * sentence names the versions rather than the attachment the other refusal is about.
+     */
+    @Test
+    void aPolicyWithAVersionBesideItsDefaultAsksForTheVersions() {
+        String policyArn = managedPolicy();
+        versionBeside(policyArn);
+        iam("DeletePolicy").formParam("PolicyArn", policyArn)
+                .when().post("/").then().statusCode(409)
+                .body(CODE, equalTo("DeleteConflict"))
+                .body(MESSAGE, equalTo(MUST_DELETE_POLICY_VERSIONS));
+    }
+
+    /**
+     * Attached and versioned at once: the attachment is named first, the order AWS's own steps
+     * for deleting a managed policy are written in. That order is a reading, not a recording.
+     */
+    @Test
+    void theAttachmentIsNamedAheadOfTheVersions() {
+        String policyArn = attachToRole(createRole());
+        versionBeside(policyArn);
+        iam("DeletePolicy").formParam("PolicyArn", policyArn)
+                .when().post("/").then().statusCode(409)
+                .body(CODE, equalTo("DeleteConflict"))
+                .body(MESSAGE, equalTo(MUST_DETACH_FROM_ENTITIES));
+    }
+
+    /** The control for it: the other version is deleted and the policy goes with its default. */
+    @Test
+    void thePolicyGoesOnceTheVersionBesideItsDefaultIsDeleted() {
+        String policyArn = managedPolicy();
+        String versionId = versionBeside(policyArn);
+
+        iam("DeletePolicyVersion").formParam("PolicyArn", policyArn)
+                .formParam("VersionId", versionId).when().post("/").then().statusCode(200);
+        iam("DeletePolicy").formParam("PolicyArn", policyArn)
+                .when().post("/").then().statusCode(200);
     }
 
     /** The control: every dependency cleared in the order the refusals asked for, and it goes. */
