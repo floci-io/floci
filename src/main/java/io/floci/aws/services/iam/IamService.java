@@ -5381,6 +5381,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "OpenIDConnect Provider not found for arn " + arn, 404));
     }
 
+    /** The OIDC provider stored under {@code arn}, or empty when the account has registered none there. */
+    public Optional<OpenIDConnectProvider> findOpenIDConnectProvider(String arn) {
+        return oidcProviders.get(arn);
+    }
+
     public List<OpenIDConnectProvider> listOpenIDConnectProviders() {
         return oidcProviders.scan(k -> true);
     }

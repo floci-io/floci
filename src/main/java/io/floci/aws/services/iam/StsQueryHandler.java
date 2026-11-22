@@ -21,9 +21,11 @@ import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.WebIdentityToken;
 import io.floci.aws.core.common.WebIdentityTokenVerifier;
 import io.floci.aws.core.common.XmlBuilder;
+import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.iam.model.DelegationRequest;
 import io.floci.aws.services.iam.model.IamPolicy;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.OpenIDConnectProvider;
 import io.floci.aws.services.iam.model.OutboundWebIdentityFederation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -79,6 +81,7 @@ public class StsQueryHandler {
     private final WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator;
     private final WebIdentityTokenVerifier tokenVerifier;
     private final OidcIssuerKeyLookup oidcIssuerKeys;
+    private final JwtSignatureVerifier registeredIssuerKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
     private final DelegationRequestService delegationRequestService;
@@ -102,6 +105,7 @@ public class StsQueryHandler {
                            WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                            WebIdentityTokenVerifier tokenVerifier,
                            OidcIssuerKeyLookup oidcIssuerKeys,
+                           JwtSignatureVerifier registeredIssuerKeys,
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
@@ -109,8 +113,8 @@ public class StsQueryHandler {
                            WebIdentityTokenIssuer tokenIssuer,
                            RequestContext requestContext) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
-                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
+                tokenVerifier, oidcIssuerKeys, registeredIssuerKeys, samlProviderService, samlTrustEvaluator,
+                delegationRequestService, centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -118,6 +122,7 @@ public class StsQueryHandler {
                     WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                     WebIdentityTokenVerifier tokenVerifier,
                     OidcIssuerKeyLookup oidcIssuerKeys,
+                    JwtSignatureVerifier registeredIssuerKeys,
                     SAMLProviderService samlProviderService,
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
                     DelegationRequestService delegationRequestService,
@@ -133,6 +138,7 @@ public class StsQueryHandler {
         this.webIdentityTrustEvaluator = webIdentityTrustEvaluator;
         this.tokenVerifier = tokenVerifier;
         this.oidcIssuerKeys = oidcIssuerKeys;
+        this.registeredIssuerKeys = registeredIssuerKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
         this.delegationRequestService = delegationRequestService;
@@ -815,7 +821,27 @@ public class StsQueryHandler {
                     "The web identity token does not identify a trusted issuer.", AwsNamespaces.STS, 400))
                     : WebIdentityOutcome.unverifiable();
         }
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        String issuerKeyPrefix = stripScheme(issuer.get());
+        // The provider is an IAM resource of the role's account, so it shares the role's partition.
+        String oidcProviderArn = AwsArnUtils.Arn.global(
+                AwsArnUtils.partitionOrDefault(role.map(IamRole::getArn).orElse(roleArn),
+                        regionResolver.getPartition()),
+                "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
+        List<String> acceptedAudiences = List.of(STS_AUDIENCE);
+        Optional<OpenIDConnectProvider> provider = key.isPresent() || !config.services().iam().enforcementEnabled()
+                ? Optional.empty() : iamService.findOpenIDConnectProvider(oidcProviderArn);
+        if (provider.isPresent()) {
+            key = registeredIssuerKey(token, issuer.get());
+            if (key.isEmpty()) {
+                return WebIdentityOutcome.deny(AwsQueryResponse.error("IDPCommunicationError",
+                        "Couldn't retrieve verification key from your identity provider,  please reference "
+                                + "AssumeRoleWithWebIdentity documentation for requirements",
+                        AwsNamespaces.STS, 400));
+            }
+            acceptedAudiences = provider.get().getClientIdList();
+        }
         if (key.isEmpty()) {
             return config.services().iam().enforcementEnabled()
                     ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
@@ -825,7 +851,7 @@ public class StsQueryHandler {
 
         WebIdentityToken claims;
         try {
-            claims = tokenVerifier.verify(token, key.get(), issuer.get(), STS_AUDIENCE);
+            claims = tokenVerifier.verify(token, key.get(), issuer.get(), acceptedAudiences);
         } catch (WebIdentityTokenVerifier.ExpiredTokenException e) {
             LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
             return WebIdentityOutcome.deny(AwsQueryResponse.error("ExpiredTokenException",
@@ -838,16 +864,10 @@ public class StsQueryHandler {
                     e.getMessage(), AwsNamespaces.STS, 400));
         }
 
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
         if (role.isEmpty() || !IamService.roleArnMatches(roleArn, role.get())) {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
-        String issuerKeyPrefix = stripScheme(issuer.get());
-        // The provider is an IAM resource of the role's account, so it shares the role's partition.
-        String oidcProviderArn = AwsArnUtils.Arn.global(
-                AwsArnUtils.partitionOrDefault(role.get().getArn(), regionResolver.getPartition()),
-                "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Map<String, List<String>> conditionClaims = Map.of(
                 "sub", List.of(claims.subject()),
                 "aud", claims.audiences());
@@ -867,10 +887,30 @@ public class StsQueryHandler {
                     accessDenied(AssumeRolePolicyEvaluator.TAG_SESSION_ACTION, roleArn));
         }
 
-        // verify() already required the audience list to contain STS_AUDIENCE.
+        // verify() already required the audience list to hold one of the accepted audiences.
+        String audience = claims.audiences().stream().filter(acceptedAudiences::contains).findFirst()
+                .orElse(STS_AUDIENCE);
         return WebIdentityOutcome.allow(
-                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE,
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), audience,
                         claims.principalTags(), claims.transitiveTagKeys()), role.get());
+    }
+
+    /**
+     * The key an issuer registered with {@code CreateOpenIDConnectProvider} publishes under the
+     * token's {@code kid}, fetched from its {@code jwks_uri}. Empty when the keys cannot be fetched
+     * or none carries that id, which AWS answers as {@code IDPCommunicationError}.
+     */
+    private Optional<RSAPublicKey> registeredIssuerKey(String token, String issuer) {
+        Optional<String> keyId = tokenVerifier.peekKeyId(token);
+        if (keyId.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            return registeredIssuerKeys.signingKey(issuer, keyId.get());
+        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+            LOG.debugv("Cannot fetch the keys of OIDC issuer {0}: {1}", issuer, e.getMessage());
+            return Optional.empty();
+        }
     }
 
     private static String assumedRoleId(IamRole role, String sessionName) {

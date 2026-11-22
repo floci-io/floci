@@ -187,6 +187,16 @@ public class JwtSignatureVerifier implements AutoCloseable {
         }
     }
 
+    /**
+     * The key {@code issuer} publishes under {@code kid}, read from its discovery document's
+     * {@code jwks_uri}, or empty when it publishes none under that id.
+     *
+     * @throws JwtVerificationException if the discovery document or the key set cannot be fetched.
+     */
+    public Optional<RSAPublicKey> signingKey(String issuer, String kid) throws JwtVerificationException {
+        return Optional.ofNullable(resolveKey(issuer, kid));
+    }
+
     private RSAPublicKey resolveKey(String issuer, String kid) throws JwtVerificationException {
         CachedJwks cached = jwksCache.get(issuer);
         if (cached != null && !cached.isExpired()) {
