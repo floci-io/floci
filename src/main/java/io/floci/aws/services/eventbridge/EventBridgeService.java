@@ -1210,7 +1210,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = getInAccount(targetStore, accountId, ruleKey).orElse(List.of());
-                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
+                    String eventJson = buildEventEnvelope(entry, eventId, region, accountId);
                     for (Target target : targets) {
                         dispatcher.dispatch(rule.getArn(), target, eventJson, region,
                                 () -> getInAccount(targetStore, accountId, ruleKey).orElse(List.of()));
@@ -1598,7 +1598,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     // ──────────────────────────── Target Routing ────────────────────────────
 
 
-    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId,
+    private String buildEventEnvelope(Map<String, Object> entry, String eventId,
                                       String callRegion, String callAccountId) {
         try {
             String source = (String) entry.getOrDefault("Source", "");
@@ -1630,7 +1630,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             node.put("region", envelopeRegion);
             node.putArray("resources").addAll(resources);
             node.set("detail", objectMapper.readTree(detail));
-            node.put("event-bus-name", busName);
             return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
