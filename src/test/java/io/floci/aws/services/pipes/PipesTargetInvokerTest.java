@@ -373,6 +373,41 @@ class PipesTargetInvokerTest {
     }
 
     @Test
+    void kinesis_anEmptyPartitionKeyThrowsAndPutsNothing() {
+        Pipe pipe = kinesisPipe("", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> invoker.invoke(pipe, "{\"a\":1}", "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value '' at 'records.1.member.partitionKey' failed to satisfy"
+                + " constraint: Member must have length greater than or equal to 1", ex.getMessage());
+        verifyNoInteractions(kinesisService);
+    }
+
+    @Test
+    void kinesis_aPathResolvingToMoreThan256CharactersThrowsAndPutsNothing() {
+        String key = "a".repeat(257);
+        Pipe pipe = kinesisPipe("$.body.k", null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> invoker.invoke(pipe, "{\"body\":{\"k\":\"" + key + "\"}}", "us-east-1"));
+
+        assertEquals("1 validation error detected: Value '" + key + "' at 'records.1.member.partitionKey'"
+                + " failed to satisfy constraint: Member must have length less than or equal to 256",
+                ex.getMessage());
+        verifyNoInteractions(kinesisService);
+    }
+
+    @Test
+    void kinesis_a256CharacterPartitionKeyIsWritten() {
+        String key = "a".repeat(256);
+
+        invoker.invoke(kinesisPipe(key, null), "{\"a\":1}", "us-east-1");
+
+        verifyKinesisPut("{\"a\":1}", key);
+    }
+
+    @Test
     void inputTemplate_missingFieldReplacesWithEmpty() {
         String region = "us-east-1";
         ObjectNode tp = MAPPER.createObjectNode();

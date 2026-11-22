@@ -43,6 +43,7 @@ public class PipesTargetInvoker {
             Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
     private static final Pattern ARRAY_INDEX = Pattern.compile("^(.*?)\\[(\\d+)]$");
     private static final String PIPES_PRINCIPAL = ServicePrincipals.of("pipes");
+    static final int MAX_PARTITION_KEY_LENGTH = 256;
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
 
@@ -225,10 +226,26 @@ public class PipesTargetInvoker {
         JsonNode kinesisParams = tp == null ? MissingNode.getInstance() : tp.path("KinesisStreamParameters");
         String partitionKey = resolveDynamicParameter(text(kinesisParams, "PartitionKey"), event,
                 "target parameter PartitionKey");
+        validateKinesisPartitionKey(partitionKey);
         AwsArnUtils.Arn stream = AwsArnUtils.parse(arn);
         kinesisService.putRecordForAccount(stream.accountId(), PipesPoller.kinesisStreamName(arn),
                 payload.getBytes(StandardCharsets.UTF_8), partitionKey, extractRegionFromArn(arn, region));
         LOG.debugv("Pipe delivered to Kinesis: {0}", arn);
+    }
+
+    private static void validateKinesisPartitionKey(String partitionKey) {
+        String key = partitionKey == null ? "" : partitionKey;
+        String constraint;
+        if (key.isEmpty()) {
+            constraint = "greater than or equal to 1";
+        } else if (key.codePointCount(0, key.length()) > MAX_PARTITION_KEY_LENGTH) {
+            constraint = "less than or equal to " + MAX_PARTITION_KEY_LENGTH;
+        } else {
+            return;
+        }
+        throw new AwsException("ValidationException", "1 validation error detected: Value '" + key
+                + "' at 'records.1.member.partitionKey' failed to satisfy constraint: Member must have length "
+                + constraint, 400);
     }
 
     private void invokeEventBridge(String arn, String payload, String region, JsonNode tp, String event) {

@@ -3,6 +3,7 @@ package io.floci.aws.services.pipes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -184,19 +185,133 @@ class PipesServiceTest {
                 null, null, null, null, targetParameters, null, null, "us-east-1");
     }
 
+    private static final String MISSING_BLOCK = "Missing required target parameter.";
+    private static final String CROSS_ACCOUNT = "Creating cross-account pipe is not permitted.";
+
+    private void assertSchemaError(JsonNode targetParameters, String message) {
+        AwsException ex = assertThrows(AwsException.class, () -> createKinesisPipe(targetParameters));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals(message, ex.getMessage());
+        assertNull(ex.getExtendedData());
+    }
+
+    private static JsonNode partitionKeyOf(JsonNode value) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("KinesisStreamParameters").set("PartitionKey", value);
+        return tp;
+    }
+
+    private AwsException createKinesisPipeTo(String target, JsonNode targetParameters) {
+        return assertThrows(AwsException.class, () -> pipesService.createPipe("kinesis-pipe", SQS_SOURCE, target,
+                PIPE_ROLE, null, null, null, null, targetParameters, null, null, "us-east-1"));
+    }
+
     @Test
     void kinesisTargetWithoutKinesisStreamParametersIsRefused() throws Exception {
         AwsException ex = assertThrows(AwsException.class, () -> createKinesisPipe(null));
-        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", MISSING_BLOCK);
 
         ex = assertThrows(AwsException.class,
                 () -> createKinesisPipe(MAPPER.createObjectNode().put("InputTemplate", "x")));
-        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", MISSING_BLOCK);
 
         ObjectNode nullBlock = MAPPER.createObjectNode();
         nullBlock.putNull("KinesisStreamParameters");
         ex = assertThrows(AwsException.class, () -> createKinesisPipe(nullBlock));
-        assertFields(ex, "TargetParameters.KinesisStreamParameters", "Missing required target parameter.");
+        assertFields(ex, "TargetParameters.KinesisStreamParameters", MISSING_BLOCK);
+    }
+
+    @Test
+    void kinesisPartitionKeyAbsentIsASchemaError() {
+        assertSchemaError(MAPPER.createObjectNode().set("KinesisStreamParameters", MAPPER.createObjectNode()),
+                "[object has missing required properties ([\"PartitionKey\"])]");
+    }
+
+    @Test
+    void kinesisPartitionKeyOfAnotherJsonTypeIsASchemaError() {
+        JsonNodeFactory f = JsonNodeFactory.instance;
+        Map<String, JsonNode> byType = new LinkedHashMap<>();
+        byType.put("null", f.nullNode());
+        byType.put("integer", f.numberNode(5));
+        byType.put("number", f.numberNode(1.5));
+        byType.put("boolean", f.booleanNode(true));
+        byType.put("object", f.objectNode());
+        byType.put("array", f.arrayNode());
+        for (Map.Entry<String, JsonNode> entry : byType.entrySet()) {
+            assertSchemaError(partitionKeyOf(entry.getValue()), "[instance type (" + entry.getKey()
+                    + ") does not match any allowed primitive type (allowed: [\"string\"])]");
+        }
+    }
+
+    @Test
+    void kinesisPartitionKeyIsCountedInCodePoints() {
+        String tooLong = "a".repeat(257);
+        assertSchemaError(kinesisParameters(tooLong),
+                "[string \"" + tooLong + "\" is too long (length: 257, maximum allowed: 256)]");
+
+        assertNotNull(createKinesisPipe(kinesisParameters("a".repeat(256))));
+    }
+
+    @Test
+    void kinesisPartitionKeyOf200EmojiIsAccepted() {
+        assertNotNull(createKinesisPipe(kinesisParameters("\uD83D\uDE00".repeat(200))));
+    }
+
+    @Test
+    void kinesisTargetThatIsNotAPlainStreamArnIsRefused() throws Exception {
+        for (String target : List.of(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/s/consumer/c:1700000000",
+                "arn:aws:kinesis:us-east-1:000000000000:s",
+                "arn:aws:kinesis:us-east-1:000000000000:stream/")) {
+            assertFields(createKinesisPipeTo(target, kinesisParameters("k")),
+                    "Target", "Invalid pipe target ARN");
+        }
+    }
+
+    @Test
+    void kinesisTargetInAnotherAccountIsRefused() throws Exception {
+        assertFields(createKinesisPipeTo("arn:aws:kinesis:us-east-1:111111111111:stream/s", kinesisParameters("k")),
+                "Target", CROSS_ACCOUNT);
+    }
+
+    @Test
+    void kinesisTargetErrorsComeBeforeTheMissingBlockAndThePartitionKeyPath() throws Exception {
+        String otherAccount = "arn:aws:kinesis:us-east-1:111111111111:stream/s";
+        String consumer = "arn:aws:kinesis:us-east-1:000000000000:stream/s/consumer/c:1700000000";
+
+        assertFields(createKinesisPipeTo(otherAccount, null),
+                "Target", CROSS_ACCOUNT, "TargetParameters.KinesisStreamParameters", MISSING_BLOCK);
+        assertFields(createKinesisPipeTo(consumer, null),
+                "Target", "Invalid pipe target ARN", "TargetParameters.KinesisStreamParameters", MISSING_BLOCK);
+        assertFields(createKinesisPipeTo(otherAccount, kinesisParameters("$.a b")),
+                "Target", CROSS_ACCOUNT, "PartitionKey",
+                "Invalid JSON path $.a b provided in the service target parameters.");
+    }
+
+    @Test
+    void kinesisSchemaErrorIsThrownAloneBeforeTheTargetChecks() {
+        AwsException ex = createKinesisPipeTo(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/s/consumer/c:1700000000",
+                MAPPER.createObjectNode().set("KinesisStreamParameters", MAPPER.createObjectNode()));
+
+        assertEquals("[object has missing required properties ([\"PartitionKey\"])]", ex.getMessage());
+        assertNull(ex.getExtendedData());
+    }
+
+    @Test
+    void kinesisUpdateRunsTheSameChecks() {
+        createKinesisPipe(kinesisParameters("k"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> pipesService.updatePipe("kinesis-pipe", null, null,
+                null, null, null, null, MAPPER.createObjectNode().set("KinesisStreamParameters",
+                        MAPPER.createObjectNode()), null, "us-east-1"));
+        assertEquals("[object has missing required properties ([\"PartitionKey\"])]", ex.getMessage());
+
+        AwsException crossAccount = assertThrows(AwsException.class, () -> pipesService.updatePipe("kinesis-pipe",
+                "arn:aws:kinesis:us-east-1:111111111111:stream/s", null, null, null, null, null,
+                kinesisParameters("k"), null, "us-east-1"));
+        assertTrue(crossAccount.getMessage().contains(CROSS_ACCOUNT), crossAccount.getMessage());
     }
 
     @ParameterizedTest

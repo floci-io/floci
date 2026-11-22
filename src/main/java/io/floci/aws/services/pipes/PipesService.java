@@ -366,7 +366,7 @@ public class PipesService implements TagHandler, ResourceProvider {
         if (AwsArnUtils.isArnFor(target, "sqs")) {
             validateSqsTarget(target, targetParameters);
         } else if (AwsArnUtils.isArnFor(target, "kinesis")) {
-            validateKinesisTarget(targetParameters);
+            validateKinesisTarget(target, targetParameters);
         } else if (PipesTargetInvoker.isRedshiftTarget(target)) {
             validateRedshiftTarget(targetParameters);
         }
@@ -432,17 +432,66 @@ public class PipesService implements TagHandler, ResourceProvider {
         }
     }
 
-    private void validateKinesisTarget(JsonNode targetParameters) {
+    private void validateKinesisTarget(String target, JsonNode targetParameters) {
         JsonNode kinesisParameters = targetParameters == null
                 ? MissingNode.getInstance() : targetParameters.path("KinesisStreamParameters");
+        if (kinesisParameters.isObject()) {
+            validatePartitionKeySchema(kinesisParameters.path("PartitionKey"));
+        }
+        List<ValidationField> errors = new ArrayList<>();
+        String resource = AwsArnUtils.resourceIfArnFor(target, "kinesis").orElse("");
+        boolean plainStream = resource.startsWith("stream/") && resource.length() > "stream/".length()
+                && resource.indexOf('/', "stream/".length()) < 0;
+        if (!plainStream) {
+            errors.add(new ValidationField("Target", "Invalid pipe target ARN"));
+        } else if (!AwsArnUtils.parse(target).accountId().equals(regionResolver.getAccountId())) {
+            errors.add(new ValidationField("Target", "Creating cross-account pipe is not permitted."));
+        }
         if (kinesisParameters.isMissingNode() || kinesisParameters.isNull()) {
-            throw validationFields(List.of(new ValidationField(
-                    "TargetParameters.KinesisStreamParameters", "Missing required target parameter.")));
+            errors.add(new ValidationField(
+                    "TargetParameters.KinesisStreamParameters", "Missing required target parameter."));
+        } else {
+            String partitionKey = PipesTargetInvoker.text(kinesisParameters, "PartitionKey");
+            if (partitionKey != null && isInvalidDynamicPath(partitionKey)) {
+                errors.add(new ValidationField("PartitionKey", invalidPathMessage(partitionKey)));
+            }
         }
-        String partitionKey = PipesTargetInvoker.text(kinesisParameters, "PartitionKey");
-        if (partitionKey != null && isInvalidDynamicPath(partitionKey)) {
-            throw validationFields(List.of(new ValidationField("PartitionKey", invalidPathMessage(partitionKey))));
+        if (!errors.isEmpty()) {
+            throw validationFields(errors);
         }
+    }
+
+    private static void validatePartitionKeySchema(JsonNode partitionKey) {
+        if (partitionKey.isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "[object has missing required properties ([\"PartitionKey\"])]", 400);
+        }
+        if (!partitionKey.isTextual()) {
+            throw new AwsException("ValidationException", "[instance type (" + jsonTypeName(partitionKey)
+                    + ") does not match any allowed primitive type (allowed: [\"string\"])]", 400);
+        }
+        String value = partitionKey.asText();
+        int length = value.codePointCount(0, value.length());
+        if (length > PipesTargetInvoker.MAX_PARTITION_KEY_LENGTH) {
+            throw new AwsException("ValidationException", "[string \"" + value + "\" is too long (length: "
+                    + length + ", maximum allowed: " + PipesTargetInvoker.MAX_PARTITION_KEY_LENGTH + ")]", 400);
+        }
+    }
+
+    private static String jsonTypeName(JsonNode node) {
+        if (node.isNull()) {
+            return "null";
+        }
+        if (node.isIntegralNumber()) {
+            return "integer";
+        }
+        if (node.isNumber()) {
+            return "number";
+        }
+        if (node.isBoolean()) {
+            return "boolean";
+        }
+        return node.isObject() ? "object" : "array";
     }
 
     private static boolean isInvalidDynamicPath(String value) {
