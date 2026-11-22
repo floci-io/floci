@@ -246,4 +246,22 @@ class ApplicationDefaultsTest {
         assertEquals("0", EmulatorConfig.DockerConfig.class.getMethod("maxConcurrentLaunches")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
+
+    // Catches: warm-pool-max-total shipped unbounded again, so a stack of many functions keeps one
+    // warm container per function touched, or a yml value that disagrees with the @WithDefault.
+    @Test
+    void productionConfigBoundsTheLambdaWarmPoolTotalByDefault() throws IOException, NoSuchMethodException {
+        JsonNode maxTotal = productionConfig()
+                .path("floci").path("services").path("lambda").path("warm-pool-max-total");
+
+        assertFalse(maxTotal.isMissingNode(), "warm-pool-max-total should be declared in application.yml");
+        assertEquals(128, maxTotal.asInt());
+
+        WithDefault fallback = EmulatorConfig.LambdaServiceConfig.class
+                .getMethod("warmPoolMaxTotal")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "warmPoolMaxTotal should declare a fallback default");
+        assertEquals("128", fallback.value(),
+                "the @WithDefault must match application.yml, which wins over it");
+    }
 }
