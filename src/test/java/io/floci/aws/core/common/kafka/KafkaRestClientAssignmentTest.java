@@ -42,25 +42,30 @@ class KafkaRestClientAssignmentTest {
     void setUp() throws Exception {
         fakeServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
 
-        fakeServer.createContext("/topics/orders", exchange -> {
+        fakeServer.createContext("/topics/orders/partitions", exchange -> {
             record(exchange);
             respond(exchange, 200, """
-                    {"name": "orders", "partitions": [
+                    [
                       {"partition": 2, "leader": 1, "replicas": []},
                       {"partition": 0, "leader": 1, "replicas": []},
                       {"partition": 1, "leader": 1, "replicas": []}
-                    ]}
+                    ]
                     """);
         });
-        fakeServer.createContext("/topics/missing", exchange -> {
+        // Karapace answers a missing topic with 40401 on /partitions but 40403 on /topics/{topic}
+        fakeServer.createContext("/topics/missing/partitions", exchange -> {
             record(exchange);
             respond(exchange, 404, "{\"error_code\":40401,\"message\":\"Topic missing not found\"}");
         });
-        fakeServer.createContext("/topics/other-404-code", exchange -> {
+        fakeServer.createContext("/topics/missing", exchange -> {
+            record(exchange);
+            respond(exchange, 404, "{\"error_code\":40403,\"message\":\"Unknown topic or partition\"}");
+        });
+        fakeServer.createContext("/topics/other-404-code/partitions", exchange -> {
             record(exchange);
             respond(exchange, 404, "{\"error_code\":40402,\"message\":\"Partition not found\"}");
         });
-        fakeServer.createContext("/topics/broken", exchange -> {
+        fakeServer.createContext("/topics/broken/partitions", exchange -> {
             record(exchange);
             respond(exchange, 503, "{\"error_code\":50301,\"message\":\"broker unavailable\"}");
         });
@@ -116,7 +121,7 @@ class KafkaRestClientAssignmentTest {
 
         assertEquals(List.of(0, 1, 2), partitions);
         assertEquals("GET", lastRequestMethod.get());
-        assertEquals("/topics/orders", lastRequestPath.get());
+        assertEquals("/topics/orders/partitions", lastRequestPath.get());
     }
 
     @Test

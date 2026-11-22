@@ -82,15 +82,19 @@ public class KafkaRestClient {
     }
 
     /**
-     * Lists the partition ids of a topic ({@code GET /topics/{topic}}). A topic the broker does not
-     * know raises {@link KafkaTopicNotFoundException}, distinct from the
+     * Lists the partition ids of a topic ({@code GET /topics/{topic}/partitions}). A topic the broker
+     * does not know raises {@link KafkaTopicNotFoundException}, distinct from the
      * {@link KafkaRestClientException} / {@link UncheckedIOException} a broker or proxy failure raises,
      * so a caller can tell a missing topic from an unreachable cluster.
+     *
+     * <p>{@code /topics/{topic}/partitions} is used rather than {@code /topics/{topic}} because Karapace
+     * answers a missing topic on the latter with 40403 (from the admin metadata lookup), while the
+     * former maps it to 40401 and returns the partition array directly.
      */
     public List<Integer> listPartitions(URI restBaseUri, String topic) {
         JsonNode response;
         try {
-            response = send("GET", restBaseUri.resolve("topics/" + urlEncode(topic)), null);
+            response = send("GET", restBaseUri.resolve("topics/" + urlEncode(topic) + "/partitions"), null);
         } catch (KafkaRestClientException e) {
             if (e.getStatusCode() == 404 && isTopicNotFoundError(e.getResponseBody())) {
                 throw new KafkaTopicNotFoundException(topic, e);
@@ -98,7 +102,7 @@ public class KafkaRestClient {
             throw e;
         }
         List<Integer> partitions = new ArrayList<>();
-        for (JsonNode partitionNode : response.path("partitions")) {
+        for (JsonNode partitionNode : response) {
             partitions.add(partitionNode.path("partition").asInt());
         }
         partitions.sort(Integer::compare);
