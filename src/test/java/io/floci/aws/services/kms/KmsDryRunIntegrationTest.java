@@ -7,6 +7,7 @@ import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -159,7 +160,6 @@ class KmsDryRunIntegrationTest {
     @CsvSource(delimiter = '|', quoteCharacter = '"', value = {
             "CreateGrant | {'KeyId': '{key}', 'GranteePrincipal': '" + GRANTEE + "', 'Operations': ['Bogus']}"
                     + " | ValidationException",
-            "RevokeGrant | {'KeyId': '{key}', 'GrantId': '0123456789abcdef'} | NotFoundException",
             "Encrypt | {'KeyId': '" + MISSING_KEY + "', 'Plaintext': '{message}'} | NotFoundException",
             "Decrypt | {'CiphertextBlob': 'AAAA'} | InvalidCiphertextException",
             "GenerateDataKey | {'KeyId': '{signingKey}', 'KeySpec': 'AES_256'} | InvalidKeyUsageException",
@@ -183,6 +183,28 @@ class KmsDryRunIntegrationTest {
     }
 
     /** The symmetric key's grants, the only state these calls can change. */
+    /**
+     * A RevokeGrant dry run is answered once its key is found, before its grant is looked up, as AWS answers one
+     * naming a grant id that doesn't exist or that is another key's (measured): the real call refuses the first,
+     * and neither changes a grant.
+     */
+    @Test
+    void aRevokeGrantDryRunIsAnsweredBeforeItsGrantIsLookedUp() {
+        String before = grants();
+
+        call("RevokeGrant", withDryRun("{'KeyId': '{key}', 'GrantId': '0123456789abcdef'}", "true"))
+                .statusCode(400)
+                .body("__type", equalTo("DryRunOperationException"));
+        call("RevokeGrant", withDryRun("{'KeyId': '{signingKey}', 'GrantId': '{grantId}'}", "true"))
+                .statusCode(400)
+                .body("__type", equalTo("DryRunOperationException"));
+        call("RevokeGrant", "{'KeyId': '{key}', 'GrantId': '0123456789abcdef'}")
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"));
+
+        assertEquals(before, grants());
+    }
+
     private String grants() {
         return call("ListGrants", "{'KeyId': '{key}'}").statusCode(200).extract().asString();
     }

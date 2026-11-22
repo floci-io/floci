@@ -603,8 +603,9 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
-     * As above; with {@code dryRun} the key and the grant must exist, and the request is then answered
-     * with DryRunOperationException, the grant kept.
+     * As above; with {@code dryRun} the key must exist, and the request is then answered with
+     * DryRunOperationException before the grant is looked up, as AWS answers a dry run naming a grant id
+     * that doesn't exist or that is another key's (measured); no grant is revoked.
      */
     public void revokeGrant(String keyId, String grantId, String region, boolean dryRun) {
         if (keyId == null || keyId.isBlank()) {
@@ -616,13 +617,13 @@ public class KmsService implements ResourceProvider {
 
         // Resolve the key to validate it exists
         resolveKey(keyId, region);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         String storageKey = region + "::" + grantId;
         if (grantStore.get(storageKey).isEmpty()) {
             throw new AwsException("NotFoundException", "Grant not found: " + grantId, 400);
-        }
-        if (dryRun) {
-            throw dryRunOperation();
         }
 
         grantStore.delete(storageKey);
