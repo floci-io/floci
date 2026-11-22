@@ -122,7 +122,7 @@ class PaymentCryptographyPinTest {
 
     @Test
     void aPinThatDoesNotVerifyIsRefused() {
-        String block = client.generatePinData(r -> r
+        GeneratePinDataResponse generated = client.generatePinData(r -> r
                 .encryptionKeyIdentifier(pinEncryptionKeyArn)
                 .generationKeyIdentifier(visaVerificationKeyArn)
                 .pinBlockFormat(PinBlockFormatForPinData.ISO_FORMAT_0)
@@ -131,8 +131,11 @@ class PaymentCryptographyPinTest {
                         .visaPin(VisaPin.builder()
                                 .pinVerificationKeyIndex(VERIFICATION_KEY_INDEX)
                                 .build())
-                        .build()))
-                .encryptedPinBlock();
+                        .build()));
+        String block = generated.encryptedPinBlock();
+        String value = generated.pinData().verificationValue();
+        String differentFirstDigit = value.startsWith("0") ? "1" : "0";
+        String invalidValue = differentFirstDigit + value.substring(1);
 
         // The verification value is not the one over the PIN, so the verification fails.
         assertThatThrownBy(() -> client.verifyPinData(r -> r
@@ -144,7 +147,7 @@ class PaymentCryptographyPinTest {
                 .verificationAttributes(PinVerificationAttributes.builder()
                         .visaPin(VisaPinVerification.builder()
                                 .pinVerificationKeyIndex(VERIFICATION_KEY_INDEX)
-                                .verificationValue("9999")
+                                .verificationValue(invalidValue)
                                 .build())
                         .build())))
                 .isInstanceOf(VerificationFailedException.class);
