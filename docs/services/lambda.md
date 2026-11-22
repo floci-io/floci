@@ -667,8 +667,8 @@ unsupported weighted routing.
 This implementation supports the non-ephemeral Docker executor with immutable published
 versions and simple aliases. It refuses `$LATEST`, weighted aliases, hot reload, durable
 functions and other executors. Allocations share the configured `warm-pool-max-per-function`
-ceiling across a function's qualifiers, and the `warm-pool-max-total` ceiling across
-provisioned allocations. A function's reserved concurrency is also a ceiling. These local
+ceiling across a function's qualifiers; `warm-pool-max-total`, which bounds idle warm
+containers, does not apply to them. A function's reserved concurrency is also a ceiling. These local
 resource bounds do not implement AWS's complete regional provisioned-concurrency quota
 accounting, automatic scaling, or weighted-alias allocation. Provisioned runtimes receive
 their numeric `AWS_LAMBDA_FUNCTION_VERSION` and
