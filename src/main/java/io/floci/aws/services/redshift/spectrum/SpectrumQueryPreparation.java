@@ -46,6 +46,7 @@ public class SpectrumQueryPreparation {
     private final MskSchemaRegistry mskSchemas;
     private final ExternalFunctionRegistry functions;
     private final KinesisStreamingViews views;
+    private final MskStreamingViews mskViews;
     private final ExternalTableMaterializer materializer;
     private final ExternalStatementParser parser;
     private final GlueService glue;
@@ -74,9 +75,10 @@ public class SpectrumQueryPreparation {
                                     ExternalTableMaterializer materializer, ExternalStatementParser parser,
                                     GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
-                                    Instance<RedshiftService> redshift) {
+                                    MskStreamingViews mskViews, Instance<RedshiftService> redshift) {
         this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
-                views, (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+                views, mskViews,
+                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -116,8 +118,25 @@ public class SpectrumQueryPreparation {
                              ExternalTableMaterializer materializer, ExternalStatementParser parser,
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
+                views, inMemoryMskViews(), clusterRegion);
+    }
+
+    private static MskStreamingViews inMemoryMskViews() {
+        return new MskStreamingViews(new MskViewRegistry(
+                AccountAwareStorageBackend.<MskViewBinding>inMemory("000000000000")),
+                null, null, null, null, Clock.systemUTC());
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, MskStreamingViews mskViews,
+                             BiFunction<String, String, String> clusterRegion) {
         this.functions = functions;
         this.views = views;
+        this.mskViews = mskViews;
         this.clusterRegion = clusterRegion;
         this.registry = registry;
         this.kinesisSchemas = kinesisSchemas;
@@ -198,9 +217,11 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateStreamingView view -> streamSource(view.select(), session).isPresent()
                     || !ExternalReferenceScanner.scan(view.select(), bindingsOf(mskSchemas, session).keySet()).isEmpty();
             case ExternalStatement.RefreshView view ->
-                    views.find(session, view.viewSchema(), view.viewName()).isPresent();
+                    views.find(session, view.viewSchema(), view.viewName()).isPresent()
+                            || mskViews.find(session, view.viewSchema(), view.viewName()).isPresent();
             case ExternalStatement.DropView view ->
-                    views.find(session, view.viewSchema(), view.viewName()).isPresent();
+                    views.find(session, view.viewSchema(), view.viewName()).isPresent()
+                            || mskViews.find(session, view.viewSchema(), view.viewName()).isPresent();
             case null -> false;
         };
     }
@@ -241,23 +262,34 @@ public class SpectrumQueryPreparation {
         if (statement.orElse(null) instanceof ExternalStatement.DropSchema schema
                 && kinesis.containsKey(schema.schemaName())) {
             rejectTransaction(session);
+            List<KinesisViewBinding> dependents = views.overSchema(session, schema.schemaName());
             dropStreamingSchema(schema, kinesis.get(schema.schemaName()), kinesisSchemas,
-                    views.overSchema(session, schema.schemaName()), session, backend);
+                    dependents.stream().map(dependent -> KinesisStreamingViews.dropSql(dependent, true, true)).toList(),
+                    () -> dependents.forEach(views::unbindIfCurrent), session, backend);
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.DropSchema schema
                 && msk.containsKey(schema.schemaName())) {
             rejectTransaction(session);
-            dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas, List.of(), session, backend);
+            List<MskViewBinding> dependents = mskViews.overSchema(session, schema.schemaName());
+            dropStreamingSchema(schema, msk.get(schema.schemaName()), mskSchemas,
+                    dependents.stream().map(dependent -> MskStreamingViews.dropSql(dependent, true, true)).toList(),
+                    () -> dependents.forEach(mskViews::unbindIfCurrent), session, backend);
             return true;
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view) {
-            if (!ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty()) {
+            boolean overKinesis = !ExternalReferenceScanner.scan(view.select(), kinesis.keySet()).isEmpty();
+            boolean overMsk = !ExternalReferenceScanner.scan(view.select(), msk.keySet()).isEmpty();
+            if (overKinesis && overMsk) {
                 throw new SpectrumSqlException("0A000",
-                        "Streaming materialized views over MSK external schemas are not supported");
+                        "A streaming materialized view reads exactly one stream or topic");
             }
-            if (!ExternalReferenceScanner.scan(view.select(), kinesis.keySet()).isEmpty()) {
+            if (overKinesis) {
                 createStreamingView(view, kinesis, session, backend);
+                return true;
+            }
+            if (overMsk) {
+                createMskStreamingView(view, msk, session, backend);
                 return true;
             }
         }
@@ -267,12 +299,23 @@ public class SpectrumQueryPreparation {
                 refreshStreamingView(view.get(), kinesis, session, backend);
                 return true;
             }
+            Optional<MskViewBinding> mskView = mskViews.find(session, refresh.viewSchema(), refresh.viewName());
+            if (mskView.isPresent()) {
+                refreshMskStreamingView(mskView.get(), msk, session, backend);
+                return true;
+            }
         }
         if (statement.orElse(null) instanceof ExternalStatement.DropView drop) {
             Optional<KinesisViewBinding> view = views.find(session, drop.viewSchema(), drop.viewName());
             if (view.isPresent()) {
                 rejectTransaction(session);
                 views.drop(view.get(), drop.ifExists(), drop.cascade(), backend);
+                return true;
+            }
+            Optional<MskViewBinding> mskView = mskViews.find(session, drop.viewSchema(), drop.viewName());
+            if (mskView.isPresent()) {
+                rejectTransaction(session);
+                mskViews.drop(mskView.get(), drop.ifExists(), drop.cascade(), backend);
                 return true;
             }
         }
@@ -676,14 +719,15 @@ public class SpectrumQueryPreparation {
 
     private <B extends SchemaBinding> void dropStreamingSchema(ExternalStatement.DropSchema statement, B binding,
                                                                SchemaBindingRegistry<B> schemaRegistry,
-                                                               List<KinesisViewBinding> dependents,
+                                                               List<String> dropDependentSql,
+                                                               Runnable unbindDependents,
                                                                SpectrumSession session, BackendSql backend) {
         requireSchemaOwner(backend, binding.schemaName());
         // CASCADE takes the streaming views that read the schema with it; RESTRICT stops on their staging tables.
         StringBuilder dropViews = new StringBuilder();
         if (statement.cascade()) {
-            for (KinesisViewBinding dependent : dependents) {
-                dropViews.append(KinesisStreamingViews.dropSql(dependent, true, true)).append("; ");
+            for (String dropDependent : dropDependentSql) {
+                dropViews.append(dropDependent).append("; ");
             }
         }
         // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
@@ -691,7 +735,7 @@ public class SpectrumQueryPreparation {
                 + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
                 + "; " + metadata.purgeSql(binding.schemaName()));
         if (statement.cascade()) {
-            dependents.forEach(views::unbindIfCurrent);
+            unbindDependents.run();
         }
         // a concurrent drop and re-create of the name may have bound a newer schema meanwhile
         if (binding.equals(schemaRegistry.find(session.accountId(), session.clusterKey(), session.databaseName(),
@@ -708,6 +752,30 @@ public class SpectrumQueryPreparation {
     private void createStreamingView(ExternalStatement.CreateStreamingView view,
                                      Map<String, KinesisSchemaBinding> kinesis,
                                      SpectrumSession session, BackendSql backend) {
+        requireStreamingViewShape(view, session);
+        Set<ExternalReferenceScanner.Reference> streams =
+                ExternalReferenceScanner.scan(view.select(), kinesis.keySet());
+        if (streams.size() != 1) {
+            throw new SpectrumSqlException("0A000", "A streaming materialized view reads exactly one stream");
+        }
+        ExternalReferenceScanner.Reference stream = streams.iterator().next();
+        views.create(view, stream.table(), kinesis.get(stream.schema()), session, catalogRegion(session), backend);
+    }
+
+    private void createMskStreamingView(ExternalStatement.CreateStreamingView view,
+                                        Map<String, MskSchemaBinding> msk,
+                                        SpectrumSession session, BackendSql backend) {
+        requireStreamingViewShape(view, session);
+        Set<ExternalReferenceScanner.Reference> topics = ExternalReferenceScanner.scan(view.select(), msk.keySet());
+        if (topics.size() != 1) {
+            throw new SpectrumSqlException("0A000", "A streaming materialized view reads exactly one topic");
+        }
+        ExternalReferenceScanner.Reference topic = topics.iterator().next();
+        mskViews.create(view, topic.table(), msk.get(topic.schema()), session, backend);
+    }
+
+    /** What a streaming view over any source must satisfy, before the source is looked at. */
+    private static void requireStreamingViewShape(ExternalStatement.CreateStreamingView view, SpectrumSession session) {
         if (session.inTransaction()) {
             throw new SpectrumSqlException("0A000",
                     "CREATE MATERIALIZED VIEW over a stream inside a transaction is not supported");
@@ -724,13 +792,6 @@ public class SpectrumQueryPreparation {
             throw new SpectrumSqlException("0A000",
                     "A streaming materialized view cannot group or aggregate: each refresh batch is inserted on its own");
         }
-        Set<ExternalReferenceScanner.Reference> streams =
-                ExternalReferenceScanner.scan(view.select(), kinesis.keySet());
-        if (streams.size() != 1) {
-            throw new SpectrumSqlException("0A000", "A streaming materialized view reads exactly one stream");
-        }
-        ExternalReferenceScanner.Reference stream = streams.iterator().next();
-        views.create(view, stream.table(), kinesis.get(stream.schema()), session, catalogRegion(session), backend);
     }
 
     private void refreshStreamingView(KinesisViewBinding view, Map<String, KinesisSchemaBinding> kinesis,
@@ -744,6 +805,19 @@ public class SpectrumQueryPreparation {
             throw new SpectrumSqlException("42P01", "external schema \"" + view.streamSchema() + "\" does not exist");
         }
         views.refresh(view, schema, catalogRegion(session), backend);
+    }
+
+    private void refreshMskStreamingView(MskViewBinding view, Map<String, MskSchemaBinding> msk,
+                                         SpectrumSession session, BackendSql backend) {
+        if (session.inTransaction()) {
+            throw new SpectrumSqlException("25001",
+                    "REFRESH MATERIALIZED VIEW of a streaming view cannot run inside a transaction block");
+        }
+        MskSchemaBinding schema = msk.get(view.topicSchema());
+        if (schema == null) {
+            throw new SpectrumSqlException("42P01", "external schema \"" + view.topicSchema() + "\" does not exist");
+        }
+        mskViews.refresh(view, schema, backend);
     }
 
     private <B extends SchemaBinding> Map<String, B> bindingsOf(SchemaBindingRegistry<B> schemaRegistry,
@@ -761,6 +835,7 @@ public class SpectrumQueryPreparation {
         mskSchemas.removeCluster(accountId, clusterKey);
         functions.removeCluster(accountId, clusterKey);
         views.forgetCluster(accountId, clusterKey);
+        mskViews.forgetCluster(accountId, clusterKey);
         materializer.forgetCluster(clusterKey);
     }
 

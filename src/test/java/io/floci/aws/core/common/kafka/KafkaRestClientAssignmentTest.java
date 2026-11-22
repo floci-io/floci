@@ -69,6 +69,22 @@ class KafkaRestClientAssignmentTest {
             record(exchange);
             respond(exchange, 503, "{\"error_code\":50301,\"message\":\"broker unavailable\"}");
         });
+        fakeServer.createContext("/topics/orders/partitions/0/offsets", exchange -> {
+            record(exchange);
+            respond(exchange, 200, "{\"beginning_offset\":2,\"end_offset\":7}");
+        });
+        fakeServer.createContext("/topics/orders/partitions/9/offsets", exchange -> {
+            record(exchange);
+            respond(exchange, 404, "{\"error_code\":40402,\"message\":\"Partition 9 not found\"}");
+        });
+        fakeServer.createContext("/topics/missing/partitions/0/offsets", exchange -> {
+            record(exchange);
+            respond(exchange, 404, "{\"error_code\":40401,\"message\":\"Topic missing not found\"}");
+        });
+        fakeServer.createContext("/topics/malformed/partitions/0/offsets", exchange -> {
+            record(exchange);
+            respond(exchange, 200, "{}");
+        });
         fakeServer.createContext("/consumers/refresh-group", exchange -> {
             record(exchange);
             respond(exchange, 200, "{\"instance_id\":\"rest-consumer-1\","
@@ -122,6 +138,36 @@ class KafkaRestClientAssignmentTest {
         assertEquals(List.of(0, 1, 2), partitions);
         assertEquals("GET", lastRequestMethod.get());
         assertEquals("/topics/orders/partitions", lastRequestPath.get());
+    }
+
+    @Test
+    void partitionOffsetsReturnsTheBeginningAndEndOffset() {
+        KafkaPartitionOffsets offsets = client.partitionOffsets(restBaseUri(), "orders", 0);
+
+        assertEquals(new KafkaPartitionOffsets(2, 7), offsets);
+        assertEquals("GET", lastRequestMethod.get());
+        assertEquals("/topics/orders/partitions/0/offsets", lastRequestPath.get());
+    }
+
+    @Test
+    void partitionOffsetsOfMissingTopicRaisesTopicNotFound() {
+        KafkaTopicNotFoundException thrown = assertThrows(KafkaTopicNotFoundException.class,
+                () -> client.partitionOffsets(restBaseUri(), "missing", 0));
+
+        assertEquals("missing", thrown.getTopic());
+    }
+
+    @Test
+    void partitionOffsetsOfMissingPartitionIsARestClientFailureNotAMissingTopic() {
+        KafkaRestClientException thrown = assertThrows(KafkaRestClientException.class,
+                () -> client.partitionOffsets(restBaseUri(), "orders", 9));
+
+        assertEquals(404, thrown.getStatusCode());
+    }
+
+    @Test
+    void partitionOffsetsWithoutOffsetsInTheResponseIsARestClientFailure() {
+        assertThrows(KafkaRestClientException.class, () -> client.partitionOffsets(restBaseUri(), "malformed", 0));
     }
 
     @Test
