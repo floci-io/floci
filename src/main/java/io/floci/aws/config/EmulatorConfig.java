@@ -1732,6 +1732,16 @@ public interface EmulatorConfig {
         @WithDefault("1000")
         int streamMaxRecords();
 
+        /**
+         * Emulates the transaction conflicts DynamoDB reports under contention: a TransactWriteItems keeps its
+         * items busy for a few milliseconds, so a PutItem, UpdateItem or DeleteItem on one fails with
+         * TransactionConflictException and another TransactWriteItems or a TransactGetItems is cancelled with
+         * TransactionConflict. Off, overlapping transactions serialize instead. The native backend only.
+         * Env: FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED.
+         */
+        @WithDefault("false")
+        boolean transactionConflictsEnabled();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();

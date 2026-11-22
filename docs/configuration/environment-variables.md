@@ -297,6 +297,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_DYNAMODB_ENABLED` | `true` | Enable the DynamoDB service |
+| `FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED` | `false` | Reject requests that reach the items of a `TransactWriteItems` in flight with `TransactionConflictException` or a `TransactionConflict` cancellation, as AWS does, instead of making them wait. Native backend only. See [DynamoDB](../services/dynamodb.md#transaction-conflicts) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local` (DynamoDB Local), case-insensitive. Any other value fails startup. See [DynamoDB Local backend](../services/dynamodb.md#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | _(none)_ | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
