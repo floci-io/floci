@@ -219,7 +219,7 @@ Floci does the same on the `ReturnValues` of `PutItem`, `UpdateItem` and `Delete
 `TransactWriteItems` cancellation reason. Each map is shuffled on its own. Lists and sets keep their order.
 
 `GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams keep the stored order, as on AWS.
-Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to keep the stored order everywhere.
+Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to keep the stored order everywhere. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
 
 ## Time to Live
 
@@ -354,7 +354,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS` | `1000` | Most records each stream keeps across its shards; the oldest goes first. Must be at least `1` |
 | `FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED` | `false` | Reject requests that reach the items of a `TransactWriteItems` in flight, as AWS does, instead of making them wait. Native backend only. See [Transaction conflicts](#transaction-conflicts) |
-| `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER` | `true` | Return attributes and map keys in a random order where AWS does. See [Attribute order](#attribute-order) |
+| `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER` | `true` | Return attributes and map keys in a random order where AWS does. Native backend only. See [Attribute order](#attribute-order) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |

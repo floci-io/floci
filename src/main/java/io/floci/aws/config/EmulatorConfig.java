@@ -1746,7 +1746,7 @@ public interface EmulatorConfig {
          * Whether the operations that AWS answers in a new order on each call do the same: the
          * ReturnValues of PutItem, UpdateItem and DeleteItem, the Item of a failed condition check,
          * TransactGetItems and the Item of a TransactWriteItems cancellation reason. Map keys and
-         * top-level attributes come back shuffled. False keeps the stored order.
+         * top-level attributes come back shuffled. False keeps the stored order. The native backend only.
          * Env: FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER
          */
         @WithDefault("true")
