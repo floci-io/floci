@@ -1,14 +1,20 @@
 package io.floci.aws.services.aps;
 
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.AccessKey;
+import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.floci.aws.testing.SignedRestRequests;
+import io.floci.aws.testing.TestAccounts;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -32,6 +38,7 @@ import static org.hamcrest.Matchers.nullValue;
 @TestProfile(SignedIamEnforcementProfile.class)
 class ApsIamIntegrationTest {
 
+    private static final String TEAM_METRICS = "{\"tags\":{\"team\":\"metrics\"}}";
     private static final String RULES = Base64.getEncoder()
             .encodeToString("groups: []\n".getBytes(StandardCharsets.UTF_8));
 
@@ -39,6 +46,12 @@ class ApsIamIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @Inject
+    IamService iam;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void aWorkspaceReadIsRefusedWithoutThePermissionAllowedWithItAndRefusedOnceItIsRemoved() throws Exception {
@@ -201,6 +214,80 @@ class ApsIamIntegrationTest {
 
     private static void invalidArn(Response response, String arn) {
         response.then().statusCode(400).body("message", equalTo("Invalid resource ARN: " + arn));
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AMP holds on the workspace a request names, as tag calls
+     * leave them: an allow on one team's tag reads that team's workspace, not an untagged one, no longer reads it once
+     * {@code UntagResource} has removed the tag, and reads the other once {@code TagResource} has added it.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheWorkspaceARequestNames() throws Exception {
+        String account = TestAccounts.randomId();
+        AwsRequestSigner owner = user(account, "aps-owner", allow("\"aps:*\"", "*"));
+        AwsRequestSigner caller = user(account, "aps-tags", onTeamMetrics("aps:DescribeWorkspace"));
+        Workspace tagged = workspace(owner, TEAM_METRICS);
+        Workspace untagged = workspace(owner, "{}");
+
+        send(caller, "GET", "/workspaces/" + tagged.id(), null).then().statusCode(200)
+                .body("workspace.arn", equalTo(tagged.arn()));
+        denied(send(caller, "GET", "/workspaces/" + untagged.id(), null), "aps:DescribeWorkspace");
+        send(owner, "DELETE", "/tags/" + encoded(tagged.arn()) + "?tagKeys=team", null).then().statusCode(200);
+        denied(send(caller, "GET", "/workspaces/" + tagged.id(), null), "aps:DescribeWorkspace");
+        send(owner, "POST", "/tags/" + encoded(untagged.arn()), TEAM_METRICS).then().statusCode(200);
+        send(caller, "GET", "/workspaces/" + untagged.id(), null).then().statusCode(200)
+                .body("workspace.arn", equalTo(untagged.arn()));
+    }
+
+    /** As for a workspace, for the rule groups namespace a request names by its workspace and name. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheRuleGroupsNamespaceARequestNames() throws Exception {
+        String account = TestAccounts.randomId();
+        AwsRequestSigner owner = user(account, "aps-owner", allow("\"aps:*\"", "*"));
+        AwsRequestSigner caller = user(account, "aps-tags", onTeamMetrics("aps:DescribeRuleGroupsNamespace"));
+        String namespaces = "/workspaces/" + workspace(owner, "{}").id() + "/rulegroupsnamespaces";
+        String arn = send(owner, "POST", namespaces, tagged("metrics")).then().statusCode(202).extract().path("arn");
+        send(owner, "POST", namespaces, namespace("untagged")).then().statusCode(202);
+
+        send(caller, "GET", namespaces + "/tagged", null).then().statusCode(200)
+                .body("ruleGroupsNamespace.arn", equalTo(arn));
+        denied(send(caller, "GET", namespaces + "/untagged", null), "aps:DescribeRuleGroupsNamespace");
+        send(owner, "DELETE", "/tags/" + encoded(arn) + "?tagKeys=team", null).then().statusCode(200);
+        denied(send(caller, "GET", namespaces + "/tagged", null), "aps:DescribeRuleGroupsNamespace");
+        String untagged = arn.replace("/tagged", "/untagged");
+        send(owner, "POST", "/tags/" + encoded(untagged), TEAM_METRICS).then().statusCode(200);
+        send(caller, "GET", namespaces + "/untagged", null).then().statusCode(200)
+                .body("ruleGroupsNamespace.arn", equalTo(untagged));
+    }
+
+    /** A user of {@code account} with the inline policy {@code policy}, removed after the test, signing for AMP. */
+    private AwsRequestSigner user(String account, String name, String policy) {
+        AccessKey key = SignedIamUsers.createUser(iam, cleanup, account, name, "access", policy);
+        return AwsRequestSigner.signedAs(key.getAccessKeyId(), key.getSecretAccessKey(), "aps");
+    }
+
+    private record Workspace(String id, String arn) {
+    }
+
+    /** A workspace {@code owner} creates with {@code body}, deleted after the test. */
+    private Workspace workspace(AwsRequestSigner owner, String body) throws Exception {
+        Response created = send(owner, "POST", "/workspaces", body);
+        created.then().statusCode(202);
+        Workspace workspace = new Workspace(created.path("workspaceId"), created.path("arn"));
+        cleanup.register(() -> {
+            try {
+                send(owner, "DELETE", "/workspaces/" + workspace.id(), null).then().statusCode(202);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        return workspace;
+    }
+
+    /** An allow of {@code action} on any resource tagged {@code team} {@code metrics}. */
+    private static String onTeamMetrics(String action) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"" + action
+                + "\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"metrics\"}}}]}";
     }
 
     private static String encoded(String arn) {
