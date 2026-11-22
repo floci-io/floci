@@ -6,6 +6,8 @@ import java.util.Map;
 
 final class BedrockAgentCoreTagFixtures {
 
+    static final String EXPECTED_TAG_PATTERN = "[a-zA-Z0-9\\s._:/=+@-]*";
+
     private BedrockAgentCoreTagFixtures() {
     }
 

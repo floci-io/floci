@@ -3,6 +3,7 @@ package io.floci.aws.services.bedrockagentcorecontrol;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BedrockTagKeyValueRules;
+import io.floci.aws.core.common.SmithyValidationErrors;
 
 import java.util.Map;
 
@@ -23,10 +24,11 @@ final class BedrockAgentCoreTagValidation {
         if (tags == null || tags.isNull()) {
             return;
         }
-        if (!tags.isObject() || tags.size() > MAX_TAGS) {
+        if (!tags.isObject()) {
             throw new AwsException("ValidationException",
                     "tags must be an object with at most " + MAX_TAGS + " entries", 400);
         }
+        validateTagCount(tags.size());
         tags.fields().forEachRemaining(entry -> {
             String key = entry.getKey();
             JsonNode rawValue = entry.getValue();
@@ -39,10 +41,11 @@ final class BedrockAgentCoreTagValidation {
     }
 
     static void validateTagMap(Map<String, String> tags) {
-        if (tags == null || tags.size() > MAX_TAGS) {
+        if (tags == null) {
             throw new AwsException("ValidationException",
                     "tags must be an object with at most " + MAX_TAGS + " entries", 400);
         }
+        validateTagCount(tags.size());
         tags.forEach((key, value) -> {
             validateKey(key);
             validateValue(value);
@@ -50,8 +53,9 @@ final class BedrockAgentCoreTagValidation {
     }
 
     private static void validateKey(String key) {
-        if (key == null || !BedrockTagKeyValueRules.validKey(key)) {
-            throw new AwsException("ValidationException", "tag key does not satisfy AgentCore constraints", 400);
+        String violation = BedrockTagKeyValueRules.keyViolation(key);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
         }
     }
 
@@ -59,8 +63,17 @@ final class BedrockAgentCoreTagValidation {
         if (value == null) {
             throw new AwsException("ValidationException", "tag value must be a string", 400);
         }
-        if (!BedrockTagKeyValueRules.validValue(value)) {
-            throw new AwsException("ValidationException", "tag value does not satisfy AgentCore constraints", 400);
+        String violation = BedrockTagKeyValueRules.valueViolation(value);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
         }
     }
+
+    private static void validateTagCount(int size) {
+        String violation = SmithyValidationErrors.sizeOutOfRange("tags", size, 0, MAX_TAGS);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+    }
+
 }
