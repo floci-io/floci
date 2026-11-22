@@ -296,23 +296,27 @@ public class EcrService implements ResourceProvider, Resettable {
      * Recreates {@link Repository} metadata entries for registry namespaces found in the catalog.
      * Namespaces created by Floci are {@code <account>/<region>/<repoName>}; pre-proxy registry
      * namespaces are recovered for the default account and region without moving image storage.
+     *
+     * <p>The catalog is read when the registry starts, outside any request or inside the one that
+     * happened to start it, so each entry is read and written in the account it belongs to: the
+     * configured default account for a pre-proxy namespace, the account a namespaced one begins with.
      */
     void reconcileFromCatalog(List<String> catalog) {
         if (catalog == null || catalog.isEmpty()) {
             return;
         }
+        String defaultAccount = regionResolver.getDefaultAccountId();
+        String defaultRegion = regionResolver.getDefaultRegion();
         int recreated = 0;
         for (String registryRepositoryName : catalog) {
-            String defaultAccount = regionResolver.getAccountId();
-            String defaultRegion = regionResolver.getDefaultRegion();
             String legacyKey = key(defaultRegion, defaultAccount, registryRepositoryName);
-            Optional<Repository> legacyRepository = repoStore.get(legacyKey);
+            Optional<Repository> legacyRepository = repositoryInAccount(defaultAccount, legacyKey);
             if (legacyRepository.isPresent()) {
                 Repository repo = legacyRepository.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(
                         defaultAccount, defaultRegion, repo.getRepositoryName()));
                 repo.setRegistryRepositoryName(registryRepositoryName);
-                repoStore.put(legacyKey, repo);
+                AccountAwareStorageBackend.putInAccount(repoStore, defaultAccount, legacyKey, repo);
                 continue;
             }
             String[] parts = registryRepositoryName.split("/", 3);
@@ -322,14 +326,14 @@ public class EcrService implements ResourceProvider, Resettable {
             String region = namespaced ? parts[1] : defaultRegion;
             String repoName = namespaced ? parts[2] : registryRepositoryName;
             String key = key(region, account, repoName);
-            Optional<Repository> existing = repoStore.get(key);
+            Optional<Repository> existing = repositoryInAccount(account, key);
             if (existing.isPresent()) {
                 Repository repo = existing.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));
                 if (!namespaced) {
                     repo.setRegistryRepositoryName(registryRepositoryName);
                 }
-                repoStore.put(key, repo);
+                AccountAwareStorageBackend.putInAccount(repoStore, account, key, repo);
                 continue;
             }
             Repository repo = new Repository();
@@ -341,12 +345,24 @@ public class EcrService implements ResourceProvider, Resettable {
                 repo.setRegistryRepositoryName(registryRepositoryName);
             }
             repo.setCreatedAt(Instant.now());
-            repoStore.put(key, repo);
+            AccountAwareStorageBackend.putInAccount(repoStore, account, key, repo);
             recreated++;
         }
         if (recreated > 0) {
             LOG.infov("Reconciled {0} ECR repository metadata entries from registry catalog", recreated);
         }
+    }
+
+    /**
+     * The repository stored under {@code key} in {@code account}. An entry from before the store was kept by account
+     * is the default account's, as the store reads it, and moves into that account when it asks.
+     */
+    private Optional<Repository> repositoryInAccount(String account, String key) {
+        if (repoStore instanceof AccountAwareStorageBackend<Repository> aware) {
+            boolean ownsLegacyEntries = account.equals(regionResolver.getDefaultAccountId());
+            return aware.getForAccountMigratingLegacy(account, key, repo -> ownsLegacyEntries);
+        }
+        return repoStore.get(key);
     }
 
     // ============================================================
@@ -1715,21 +1731,42 @@ public class EcrService implements ResourceProvider, Resettable {
         return repo;
     }
 
-    /** Returns whether the repository rejects a second manifest write for an existing tag. */
+    /**
+     * Returns whether the repository rejects a second manifest write for an existing tag. The registry data plane
+     * asks outside any request, so the repository is read in the account its registry host names.
+     */
     public boolean isImageTagImmutable(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
-        return repoStore.get(key(region, account, repositoryName))
+        return dataPlaneRepository(repositoryName, account, region)
                 .map(Repository::getImageTagMutability)
                 .filter("IMMUTABLE"::equals)
                 .isPresent();
     }
 
-    /** Returns the physical registry namespace selected for an ECR repository. */
+    /**
+     * Returns the physical registry namespace of an ECR repository, for the registry data plane, which asks outside
+     * any request: the repository is read in the account its registry host names. A name with no repository is
+     * refused as ECR refuses it, with {@code RepositoryNotFoundException} the data plane answers as
+     * {@code NAME_UNKNOWN}, once the registry's catalog has been read into the metadata. Before that, a repository
+     * whose images the registry holds may have no metadata yet, so the name is refused as unavailable rather than
+     * as missing.
+     */
     public String registryRepositoryName(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
-        return repoStore.get(key(region, account, repositoryName))
+        return dataPlaneRepository(repositoryName, account, region)
                 .map(repo -> registryRepositoryName(repo, region))
-                .orElseGet(() -> registryManager.internalRepoName(account, region, repositoryName));
+                .orElseThrow(() -> {
+                    if (!registryManager.isCatalogReconciled()) {
+                        return new IllegalStateException("The ECR registry catalog has not been read yet, so "
+                                + "repository '" + repositoryName + "' in registry " + account
+                                + " cannot be told from a missing one.");
+                    }
+                    return notFound(repositoryName, account);
+                });
+    }
+
+    private Optional<Repository> dataPlaneRepository(String repositoryName, String account, String region) {
+        return AccountAwareStorageBackend.readInAccount(repoStore, account, key(region, account, repositoryName));
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {
