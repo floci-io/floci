@@ -2770,6 +2770,23 @@ class IamServiceTest {
     }
 
     @Test
+    void anExecutionRoleSessionWithAnInlinePolicyIsScopedByItAsAnAssumedRolesIs() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIAEXECUTIONSCOPED";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerLambdaExecutionRoleSession(accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/JobRole", "run-1", null, policy);
+
+        assertEquals(policy, sessions.getForAccount(accountId, accessKeyId).orElseThrow().getSessionPolicyDocument());
+        assertEquals(policy, service.resolveCallerContext(accessKeyId).sessionPolicyDocument());
+    }
+
+    @Test
     void temporarySessionUsesExplicitAccountNamespace() {
         String accountId = "222233334444";
         String accessKeyId = "ASIASIGNINEXPLICIT";

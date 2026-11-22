@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
 import static io.floci.aws.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
@@ -25,8 +26,6 @@ import static org.hamcrest.Matchers.hasSize;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesContactListV2IntegrationTest {
 
-    private static final String SES_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String LIST = "my-newsletter";
 
     private static final String CREATE_BODY = "{"
@@ -44,7 +43,7 @@ class SesContactListV2IntegrationTest {
     void createContactList() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body(CREATE_BODY)
         .when()
                 .post("/v2/email/contact-lists")
@@ -57,7 +56,7 @@ class SesContactListV2IntegrationTest {
     void getContactList_returnsShape() {
         given()
                 .config(DECIMAL_NUMBERS)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + LIST)
         .then()
@@ -77,7 +76,7 @@ class SesContactListV2IntegrationTest {
     void listContactLists_containsList() {
         given()
                 .config(DECIMAL_NUMBERS)
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists")
         .then()
@@ -91,7 +90,7 @@ class SesContactListV2IntegrationTest {
     void createSecondContactList_rejectedByPerAccountLimit() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"ContactListName\":\"second-list\"}")
         .when()
                 .post("/v2/email/contact-lists")
@@ -108,7 +107,7 @@ class SesContactListV2IntegrationTest {
         // so AWS never returns AlreadyExistsException here.
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"ContactListName\":\"" + LIST + "\"}")
         .when()
                 .post("/v2/email/contact-lists")
@@ -123,7 +122,7 @@ class SesContactListV2IntegrationTest {
     void createContactList_invalidTopicStatus_returns400() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"ContactListName\":\"bad-list\",\"Topics\":["
                         + "{\"TopicName\":\"t\",\"DisplayName\":\"T\","
                         + "\"DefaultSubscriptionStatus\":\"MAYBE\"}]}")
@@ -142,7 +141,7 @@ class SesContactListV2IntegrationTest {
     void updateContactList_replacesTopicsAndDescription() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"Description\":\"updated\",\"Topics\":["
                         + "{\"TopicName\":\"monthly\",\"DisplayName\":\"Monthly\","
                         + "\"DefaultSubscriptionStatus\":\"OPT_IN\"}]}")
@@ -152,7 +151,7 @@ class SesContactListV2IntegrationTest {
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + LIST)
         .then()
@@ -164,7 +163,7 @@ class SesContactListV2IntegrationTest {
         // An explicit-null Topics is treated as "not provided" and preserves existing topics.
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"Topics\":null,\"Description\":\"kept-topics\"}")
         .when()
                 .put("/v2/email/contact-lists/" + LIST)
@@ -172,7 +171,7 @@ class SesContactListV2IntegrationTest {
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + LIST)
         .then()
@@ -184,7 +183,7 @@ class SesContactListV2IntegrationTest {
         // An empty body is accepted as a no-op update (200), matching real AWS.
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .put("/v2/email/contact-lists/" + LIST)
         .then()
@@ -195,7 +194,7 @@ class SesContactListV2IntegrationTest {
     @Order(8)
     void getContactList_unknown_returns404() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/does-not-exist")
         .then()
@@ -209,7 +208,7 @@ class SesContactListV2IntegrationTest {
     void updateContactList_unknown_returns404() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"Description\":\"x\"}")
         .when()
                 .put("/v2/email/contact-lists/does-not-exist")
@@ -222,21 +221,21 @@ class SesContactListV2IntegrationTest {
     @Order(10)
     void deleteContactList_thenGoneAndSlotFreed() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .delete("/v2/email/contact-lists/" + LIST)
         .then()
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + LIST)
         .then()
                 .statusCode(404);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists")
         .then()
@@ -246,7 +245,7 @@ class SesContactListV2IntegrationTest {
         // The single-list slot is freed, so a new list can be created.
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"ContactListName\":\"fresh-list\"}")
         .when()
                 .post("/v2/email/contact-lists")
@@ -254,7 +253,7 @@ class SesContactListV2IntegrationTest {
                 .statusCode(200);
 
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .delete("/v2/email/contact-lists/fresh-list")
         .then()
@@ -266,7 +265,7 @@ class SesContactListV2IntegrationTest {
     void createContactList_missingName_returnsSmithyValidationError() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{}")
         .when()
                 .post("/v2/email/contact-lists")
@@ -282,7 +281,7 @@ class SesContactListV2IntegrationTest {
     void createContactList_topicMissingTopicName_returnsSmithyValidationError() {
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"ContactListName\":\"x\",\"Topics\":["
                         + "{\"DisplayName\":\"T\",\"DefaultSubscriptionStatus\":\"OPT_IN\"}]}")
         .when()
@@ -369,7 +368,7 @@ class SesContactListV2IntegrationTest {
     @Order(20)
     void getContactList_invalidName_returns400NotNotFound() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + "a".repeat(65))
         .then()
@@ -383,7 +382,7 @@ class SesContactListV2IntegrationTest {
     @Order(21)
     void deleteContactList_invalidName_returns400NotNotFound() {
         given()
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
         .when()
                 .delete("/v2/email/contact-lists/" + "a".repeat(65))
         .then()
@@ -423,7 +422,7 @@ class SesContactListV2IntegrationTest {
         // Same two-phase order on update: the Smithy enum error wins over the invalid path name.
         given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body("{\"Topics\":[{\"TopicName\":\"t\",\"DisplayName\":\"T\","
                         + "\"DefaultSubscriptionStatus\":\"MAYBE\"}]}")
         .when()
@@ -449,7 +448,7 @@ class SesContactListV2IntegrationTest {
     private static Response post(String body) {
         return given()
                 .contentType("application/json")
-                .header("Authorization", SES_AUTH)
+                .header("Authorization", AUTH)
                 .body(body)
         .when()
                 .post("/v2/email/contact-lists");

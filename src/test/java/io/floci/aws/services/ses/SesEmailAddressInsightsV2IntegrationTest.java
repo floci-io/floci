@@ -14,8 +14,7 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesEmailAddressInsightsV2IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ca-west-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ca-west-1");
     private static final String PATH = "/v2/email/email-address-insights/";
 
     @Test

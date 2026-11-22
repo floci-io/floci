@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -20,8 +21,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesTemplateTagOrderIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
     private static final String SUBJECT_ONLY = "{\"Subject\": \"S\"}";
     private static final String VALID = "{\"Subject\": \"S\", \"Text\": \"t\"}";
     private static final String CHARSET = "Tags can only contain letters, numbers, spaces, and the following "

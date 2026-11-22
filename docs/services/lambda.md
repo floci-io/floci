@@ -667,8 +667,8 @@ unsupported weighted routing.
 This implementation supports the non-ephemeral Docker executor with immutable published
 versions and simple aliases. It refuses `$LATEST`, weighted aliases, hot reload, durable
 functions and other executors. Allocations share the configured `warm-pool-max-per-function`
-ceiling across a function's qualifiers, and the optional `warm-pool-max-total` ceiling across
-provisioned allocations. A function's reserved concurrency is also a ceiling. These local
+ceiling across a function's qualifiers; `warm-pool-max-total`, which bounds idle warm
+containers, does not apply to them. A function's reserved concurrency is also a ceiling. These local
 resource bounds do not implement AWS's complete regional provisioned-concurrency quota
 accounting, automatic scaling, or weighted-alias allocation. Provisioned runtimes receive
 their numeric `AWS_LAMBDA_FUNCTION_VERSION` and
@@ -742,7 +742,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Time a newly started runtime has to finish its init and request its first invocation (seconds). A function whose `Timeout` plus 2 seconds is longer waits that long instead. See [Slow cold starts](#slow-cold-starts) |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
-| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `128` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
@@ -817,15 +817,16 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
     reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
-    `warm-pool-max-per-function` idle containers, but nothing limits the sum: a stack of many
-    functions that fan out through streams and triggers can accumulate one warm container per
-    function touched, and each runtime container holds its own memory. On a Docker Desktop with
-    a modest memory allocation that is enough to have Floci OOM-killed. `ephemeral: true` avoids
-    it by cold-starting every invocation, at a large latency cost.
+    `warm-pool-max-per-function` idle containers, and a stack of many functions that fan out
+    through streams and triggers can accumulate one warm container per function touched, each
+    holding its own memory. On a Docker Desktop with a modest memory allocation that is enough to
+    have Floci OOM-killed. `ephemeral: true` avoids it by cold-starting every invocation, at a
+    large latency cost.
 
-    `warm-pool-max-total` bounds the idle containers across all functions. When a release
-    would exceed it, the least-recently-used idle container of any function is stopped first,
-    so the function that just ran (the most likely to run again) keeps its container:
+    `warm-pool-max-total` bounds the idle containers across all functions, 128 by default. When a
+    release would exceed it, the least-recently-used idle container of any function is stopped
+    first, so the function that just ran (the most likely to run again) keeps its container. Lower
+    it on a small Docker host:
 
     ```bash
     FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL=24
@@ -836,7 +837,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
     peak container count is `warm-pool-max-total` plus the in-flight invocations across every
     active region. A cap that is smaller than the number of functions invoked in a tight loop
     trades some warm hits for the memory bound. A negative value is ignored with a warning and
-    leaves the total unbounded, like `0`.
+    leaves the total unbounded, like `0`, which turns the bound off.
 
 ### Slow cold starts
 

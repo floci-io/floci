@@ -23,10 +23,8 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesContactPagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-northeast-2/ses/aws4_request";
-    private static final String OTHER_REGION_AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("ap-northeast-2");
+    private static final String OTHER_REGION_AUTH = SesV2Requests.authFor("eu-north-1");
     private static final String LIST = "page-list";
     private static final String CONTACTS = "/v2/email/contact-lists/" + LIST + "/contacts";
 

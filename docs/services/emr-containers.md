@@ -7,14 +7,19 @@
 Floci implements the Amazon EMR on EKS (`emr-containers`) API: virtual clusters, job runs, job
 templates, managed endpoints, security configurations and tags. It is the API Airflow's
 `EmrContainerOperator`, the `aws emr-containers` CLI and the SDKs call. Floci keeps the records and
-moves job runs through their states; it does not run Spark on Kubernetes.
+moves job runs through their states, and in the `docker` runner mode runs each job run's Spark job in a
+container (see [Running job runs](#running-job-runs)).
 
 ## Configuration
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `floci.services.emrcontainers.enabled` | Whether the EMR on EKS API is enabled | `true` |
-| `floci.services.emrcontainers.job-run-duration-seconds` | How long a job run stays `RUNNING` before it is `COMPLETED`; `0` completes it as soon as it is submitted | `0` |
+| `floci.services.emrcontainers.job-run-duration-seconds` | In the `immediate` runner mode, how long a job run stays `RUNNING` before it is `COMPLETED`; `0` completes it as soon as it is submitted | `0` |
+| `floci.services.emrcontainers.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run's Spark job in a container (see [Running job runs](#running-job-runs)) | `immediate` |
+| `floci.services.emrcontainers.docker-network` | Docker network for job run containers | the global default |
+| `floci.services.emrcontainers.image-template` | Image for a `docker` job run that names no custom image, `%s` standing for its release's container image tag, `emr-7.2.0:20240610` for `emr-7.2.0-20240610` | `public.ecr.aws/emr-on-eks/spark/%s` |
+| `floci.services.emrcontainers.reconcile-containers-on-startup` | Remove the drivers a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
 | `floci.storage.services.emrcontainers.mode` | Storage mode for EMR on EKS resources | the global storage mode |
 | `floci.storage.services.emrcontainers.flush-interval-ms` | Flush interval for persistent storage | `5000` |
 
@@ -71,10 +76,11 @@ not.
 AWS's "Common errors when running jobs" page gives them. When Floci's EKS has no cluster of the virtual
 cluster's container provider id in the request's account and Region, the run is `FAILED` with
 `stateDetails` "Cluster *id* does not exist." and `failureReason` `CLUSTER_UNAVAILABLE`, as that page
-gives it. Otherwise the run is `COMPLETED` at once, or `RUNNING` for
-`job-run-duration-seconds` and then `COMPLETED`. `CancelJobRun` moves a run that has not finished to
-`CANCELLED`. A run with a `retryPolicyConfiguration` reports `retryPolicyExecution` with one attempt.
-The release label is not checked against EMR on EKS's releases.
+gives it. Otherwise, in the `immediate` runner mode, the run is `COMPLETED` at once, or `RUNNING` for
+`job-run-duration-seconds` and then `COMPLETED`, and `CancelJobRun` moves a run that has not finished to
+`CANCELLED`; in the `docker` one it runs (see [Running job runs](#running-job-runs)). A run with a
+`retryPolicyConfiguration` reports `retryPolicyExecution` with one attempt. The release label is not
+checked against EMR on EKS's releases.
 
 **Concurrent job limits.** `StartJobRun` applies the virtual cluster's limits, as the development guide's
 "Concurrent job limits for virtual clusters" describes them. At most `maxConcurrentJobRuns` runs are
@@ -83,8 +89,11 @@ running slot frees up, the run first in the queue starts. Once `maxInQueueJobRun
 refuses another with `ValidationException`. A run still queued 30 minutes after it was submitted is `FAILED`,
 as the guide's "buffered jobs fail after 30 minutes if no slot frees up" has it. A higher limit, a cleared
 one, or a cancelled run starts queued runs at once. The guide gives neither message, so the refusal's and
-the timed-out run's `stateDetails` are Floci's wording. A run takes its slot only while it is `RUNNING`, so
-with the default `job-run-duration-seconds` of `0` no run waits.
+the timed-out run's `stateDetails` are Floci's wording. In the `immediate` runner mode a run takes its slot
+only while it is `RUNNING`, so with the default `job-run-duration-seconds` of `0` no run waits. In the
+`docker` one a run takes its slot as it is submitted, while its container starts, and keeps it until its
+driver ends: a `SUBMITTED` or `CANCEL_PENDING` run whose container runs counts in `currentConcurrentJobRuns`, not
+in `currentInQueueJobRuns`, and only the runs that wait for a slot count toward `maxInQueueJobRuns`.
 
 **Job templates.** `StartJobRun` with a `jobTemplateId` takes `executionRoleArn`, `releaseLabel`,
 `jobDriver` and `configurationOverrides` from the template where the request leaves them out, and the
@@ -121,3 +130,45 @@ are Floci's own.
 
 Resources are scoped to the request's account and Region, and IDs follow AWS's lengths: 25 characters for
 a virtual cluster, 13 for a managed endpoint and 19 for the others.
+
+## Running job runs
+
+With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE=docker`), a job run executes.
+Floci starts one container per run from its custom image, if it names one, or else from its release's base
+image, the one AWS publishes for customizing EMR on EKS images on Amazon ECR Public ("For Amazon EMR 6.9.0
+and higher, you can get the base images from the Amazon ECR Public Gallery"): the release label names the
+image's repository and tag, so `emr-7.2.0-20240610` runs `public.ecr.aws/emr-on-eks/spark/emr-7.2.0:20240610`,
+`emr-7.2.0-latest` its `latest`, and `emr-7.2.0-java11-latest` `emr-7.2.0-java11:latest`. The driver runs
+in that container in Spark's client mode, its executors with it in Spark's local mode, where EMR on EKS runs
+each in a pod of its own on the cluster. The first run of a release pulls its image, about 5 GB. The mode needs a
+Docker daemon: explicitly mount `/var/run/docker.sock` when running Floci in a container or a Testcontainers
+wrapper with `FLOCI_SERVICES_EMRCONTAINERS_RUNNER_MODE=docker` (see [Docker](../configuration/docker.md)).
+
+* **What runs**: a `sparkSubmitJobDriver` runs `spark-submit` with its `sparkSubmitParameters`, its
+  `entryPoint` and its `entryPointArguments`; a `sparkSqlJobDriver` runs `spark-sql` with its
+  `sparkSqlParameters` and its `entryPoint` as the file it runs (`-f`). Both get the `spark-defaults`
+  properties of the run's `configurationOverrides.applicationConfiguration` before their own options, which
+  win; the run's other classifications are not applied. `s3://` and `s3a://` paths reach Floci's S3 through
+  S3A, so the entry point and its files can be read from there, and the Glue Data Catalog client is pointed at
+  Floci's Glue. The driver gets its execution role's credentials.
+* **Image**: `spark.kubernetes.driver.container.image`, or else `spark.kubernetes.container.image`, from the
+  `spark-defaults` or a `--conf` in the parameters, names the run's custom image, as the development guide's
+  "Customizing Docker images" has it. An image in Floci's ECR is pulled from Floci's registry.
+* **Driver environment and archives**: a `spark.kubernetes.driverEnv.<KEY>` property is an environment
+  variable of the container, and the run's `spark.archives`, or its `--archives`, are unpacked in its working
+  directory, a PySpark virtual environment among them.
+* **States**: a run is `SUBMITTED` while its image is pulled and its container starts, and `RUNNING` once its
+  Spark driver runs. It is `COMPLETED` when the driver exits with code 0, and `FAILED` otherwise, with
+  `failureReason` `USER_ERROR` and `stateDetails` "Jobrun failed. Main Spark container terminated with errors.
+  Please refer logs uploaded to S3/CloudWatch based on your monitoring configuration.", as AWS answers it. A run
+  whose container cannot start is `FAILED` with `failureReason` `INTERNAL_ERROR` and `stateDetails` "JobRun
+  submission failed due to an internal error.", the reason after it Floci's. `CancelJobRun` makes a run whose
+  container runs `CANCEL_PENDING` until its driver is stopped, then `CANCELLED`; a run still queued is
+  `CANCELLED` at once. A run Floci was running when it stopped is `FAILED` once it is read again, with
+  `failureReason` `INTERNAL_ERROR` and `stateDetails` "Trouble monitoring your JobRun due to an internal
+  error". Floci's shutdown and a state reset stop every driver, and a driver a hard stop left running is
+  removed when Floci starts again, unless `reconcile-containers-on-startup` is off.
+* **Not emulated yet**: the driver's output goes to Floci's log only, not to the run's
+  `monitoringConfiguration` destinations in S3 or CloudWatch Logs; a `retryPolicyConfiguration` does not
+  start the driver again; and a run waits for its container however long it takes, with no
+  `job-start-timeout`.

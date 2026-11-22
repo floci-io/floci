@@ -372,6 +372,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
+    monkeypatch.setattr(r, "PATH_SOURCES", {})
     return monkeypatch
 
 
@@ -874,12 +875,109 @@ def good_document() -> dict:
     return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
+            "pathFormats": {},
             "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "mintedSuffixes": {},
             "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
                 "svc:C": {"action": "svc:C", "types": [], "resources": []}}}
+
+
+GUIDE = {
+    "action": {"sentence": "The API-managing Action expression has the format svc:{action}, where {action} is one of "
+                           "the following actions: GET, POST, PUT, DELETE, PATCH, or *.",
+               "actions": ["GET", "POST", "PUT", "DELETE", "PATCH", "*"]},
+    "resource": {"sentence": "API Gateway resources have the following ARN format:",
+                 "format": "arn:aws:svc:{region}::{resource-path-specifier}"},
+    "tables": [
+        {"heading": "REST API resources",
+         "rows": [{"resource": "Stage", "arn": "arn:{partition}:svc:{region}::/restapis/{api-id}/stages/{stage-name}"},
+                  {"resource": "Associations", "arn": "arn:{partition}:svc:{region}:{account-id}:/associations"}]},
+        {"heading": "execute-api",
+         "rows": [{"resource": "endpoint",
+                   "arn": "arn:{partition}:execute-api:{region}:{account-id}:{api-id}/{stage}"}]}],
+}
+NO_ROUTE_ACTIONS = {"byMethod": {}, "byModel": {}}
+
+
+def routed_model(routes: dict[str, tuple[str, str, dict[str, str]]]) -> dict:
+    """A rest-json model: each operation its method, its path, and the member each label of its path carries."""
+    shapes = {"String": {"type": "string"}}
+    operations = {}
+    for name, (method, uri, labels) in routes.items():
+        shapes[name + "In"] = {"type": "structure", "members": {
+            member: {"shape": "String", "location": "uri", "locationName": label} for label, member in labels.items()}}
+        operations[name] = {"http": {"method": method, "requestUri": uri}, "input": {"shape": name + "In"}}
+    return {"metadata": {"protocol": "rest-json"}, "operations": operations, "shapes": shapes}
+
+
+def test_a_route_authorized_by_its_method_names_the_reference_type_of_its_own_path():
+    formats = {"Api": "arn:${Partition}:svc:${Region}::/apis/${ApiId}", "Apis": "arn:${Partition}:svc:${Region}::/apis"}
+    models = {"svc": routed_model({"GetApi": ("GET", "/apis/{api_id}", {"api_id": "restApiId"})}),
+              "svcv2": routed_model({"GetApi": ("GET", "/v2/apis/{apiId}", {"apiId": "ApiId"}),
+                                   "CreateApi": ("POST", "/v2/apis", {})})}
+    operations = {"svc:GetApi": {"action": "svc:GET", "types": ["Api"]},
+                  "svc:CreateApi": {"action": "svc:CreateApi", "types": []}}
+    # CreateApi is authorized as the method of its route, which the reference gives no single action.
+    resources, needed = r.routed_resources("svc", operations, formats, GUIDE, models,
+                                           {"byMethod": {"svc": {"CreateApi"}}, "byModel": {}})
+    assert resources == {
+        "svc:CreateApi": [{"type": "Apis", "fill": {}}],
+        "svc:GetApi": [{"type": "Api", "fill": {"ApiId": "restApiId"}}, {"type": "Api", "fill": {"ApiId": "ApiId"}}],
+    }
+    assert needed == {}
+
+
+def test_a_path_the_reference_does_not_give_takes_the_guides_row_and_else_the_guides_format():
+    models = {"svc": routed_model({
+        "GetStage": ("GET", "/restapis/{restapi_id}/stages/{stage_name}",
+                     {"restapi_id": "restApiId", "stage_name": "stageName"}),
+        "GetAssociations": ("GET", "/associations", {}),
+        "GetSdkType": ("GET", "/sdktypes/{sdktype_id}", {"sdktype_id": "id"})})}
+    operations = {f"svc:{name}": {"action": "svc:GET", "types": []}
+                  for name in ("GetStage", "GetAssociations", "GetSdkType")}
+    resources, needed = r.routed_resources("svc", operations, {}, GUIDE, models, NO_ROUTE_ACTIONS)
+    assert resources == {
+        "svc:GetAssociations": [{"type": "Associations (REST API resources)", "fill": {}}],
+        "svc:GetSdkType": [{"type": "/sdktypes/{sdktype_id} (resource-path-specifier)", "fill": {"SdktypeId": "id"}}],
+        "svc:GetStage": [{"type": "Stage (REST API resources)",
+                          "fill": {"ApiId": "restApiId", "StageName": "stageName"}}],
+    }
+    # The guide's row keeps the account it gives; its ARN format gives none.
+    assert needed == {
+        "/sdktypes/{sdktype_id} (resource-path-specifier)": "arn:${Partition}:svc:${Region}::/sdktypes/${SdktypeId}",
+        "Associations (REST API resources)": "arn:${Partition}:svc:${Region}:${Account}:/associations",
+        "Stage (REST API resources)": "arn:${Partition}:svc:${Region}::/restapis/${ApiId}/stages/${StageName}",
+    }
+
+
+def test_a_route_whose_label_holds_an_arn_or_checked_as_a_named_action_is_left_to_the_rules():
+    models = {"svc": routed_model({
+        "DeleteAssociation": ("DELETE", "/associations/{association_arn}", {"association_arn": "associationArn"}),
+        "DeletePortal": ("DELETE", "/portals/{portal_id}", {"portal_id": "PortalId"})})}
+    operations = {"svc:DeleteAssociation": {"action": "svc:DELETE", "types": []},
+                  "svc:DeletePortal": {"action": "svc:DeletePortal", "types": []}}
+    assert r.routed_resources("svc", operations, {}, GUIDE, models, NO_ROUTE_ACTIONS) == ({}, {})
+
+
+def test_published_paths_leaving_out_different_leading_segments_of_one_clients_routes_are_refused():
+    formats = {"Apis": "arn:${Partition}:svc:${Region}::/apis", "Things": "arn:${Partition}:svc:${Region}::/things"}
+    models = {"svcv2": routed_model({"GetApis": ("GET", "/v2/apis", {}), "GetThings": ("GET", "/v3/things", {})})}
+    operations = {f"svc:{name}": {"action": "svc:GET", "types": []} for name in ("GetApis", "GetThings")}
+    with pytest.raises(ValueError, match="different leading segments"):
+        r.routed_resources("svc", operations, formats, GUIDE, models, NO_ROUTE_ACTIONS)
+
+
+def test_route_types_are_read_only_for_a_namespace_with_a_path_source_and_never_named_as_a_reference_type(monkeypatch):
+    document = good_document()
+    document["pathFormats"] = {
+        "svc": {"/sdktypes (resource-path-specifier)": "arn:${Partition}:svc:${Region}::/sdktypes"}}
+    assert any("pathFormats" in problem for problem in r.validate(document))
+    monkeypatch.setattr(r, "PATH_SOURCES", {"svc": Path("svc.json")})
+    assert r.validate(document) == []
+    document["pathFormats"] = {"svc": {"thing": "arn:${Partition}:svc:${Region}::/things"}}
+    assert any("pathFormats" in problem for problem in r.validate(document))
 
 
 def test_a_well_formed_document_validates():
@@ -2160,6 +2258,10 @@ def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
     assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
         "bus-v2", "subscriber", "source-v2"}
     assert r.pattern_words("(arn:aws[\\w-]*:svc:[a-z]+:[0-9]{12}:bus\\/)?[A-Za-z]+") == {"bus"}
+    # An optional account gives each type word in an alternative of its own (Bedrock's taggable ARNs).
+    assert r.pattern_words("(^arn:aws:svc:[a-z0-9-]{1,20}:[0-9]{12}:model/(imported)/[a-z0-9]{12}$)|"
+                           "(^arn:aws:svc:[a-z0-9-]{1,20}:([0-9]{12}|)((:(job|model)/[a-z0-9]+$)|(:guardrail/[a-z0-9]+$)|"
+                           "(:(profile|app-profile)/[a-z0-9]+$)))") == {"model", "job", "guardrail", "profile", "app-profile"}
     formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}",
                "busv2": "arn:${Partition}:svc:${Region}:${Account}:busv2/${BusName}/${OpaqueId}"}
     model_ = documented("CreateBus", {"Name": ("String", "The name of the bus.")})

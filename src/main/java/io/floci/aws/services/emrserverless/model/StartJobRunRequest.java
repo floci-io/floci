@@ -6,7 +6,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.Map;
 
 /**
- * StartJobRun's body. configurationOverrides, executionIamPolicy and retryPolicy are kept as sent
+ * StartJobRun's body. configurationOverrides, executionIamPolicy, retryPolicy and flexExecution are kept as sent
  * and returned by GetJobRun unchanged.
  */
 @RegisterForReflection
@@ -22,6 +22,7 @@ public class StartJobRunRequest {
     private String name;
     private String mode;
     private Map<String, Object> retryPolicy;
+    private Map<String, Object> flexExecution;
 
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
@@ -43,4 +44,6 @@ public class StartJobRunRequest {
     public void setMode(String mode) { this.mode = mode; }
     public Map<String, Object> getRetryPolicy() { return retryPolicy; }
     public void setRetryPolicy(Map<String, Object> retryPolicy) { this.retryPolicy = retryPolicy; }
+    public Map<String, Object> getFlexExecution() { return flexExecution; }
+    public void setFlexExecution(Map<String, Object> flexExecution) { this.flexExecution = flexExecution; }
 }

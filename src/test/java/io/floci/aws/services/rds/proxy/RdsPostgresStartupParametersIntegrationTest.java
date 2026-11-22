@@ -1,7 +1,11 @@
 package io.floci.aws.services.rds.proxy;
 
+import com.github.dockerjava.api.DockerClient;
+import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -33,6 +37,12 @@ class RdsPostgresStartupParametersIntegrationTest {
 
     private static final String MASTER_USER = "master";
     private static final String MASTER_PASSWORD = "Master123!";
+
+    @Inject
+    RdsService rdsService;
+
+    @Inject
+    DockerClient dockerClient;
 
     @BeforeEach
     void checkDocker() throws InterruptedException {
@@ -79,7 +89,8 @@ class RdsPostgresStartupParametersIntegrationTest {
             asMaster(port,
                     "CREATE ROLE app_user LOGIN",
                     "GRANT rds_iam TO app_user",
-                    "CREATE SCHEMA floci_opts AUTHORIZATION app_user",
+                    "CREATE SCHEMA floci_opts",
+                    "GRANT USAGE ON SCHEMA floci_opts TO app_user",
                     // A database that refuses \' in string literals must still accept the parameters.
                     "ALTER DATABASE appdb SET backslash_quote = off");
 
@@ -133,12 +144,14 @@ class RdsPostgresStartupParametersIntegrationTest {
                     "ALTER ROLE app_user SET work_mem = '32MB'",
                     "ALTER ROLE app_user IN DATABASE appdb SET work_mem = '48MB'",
                     "ALTER ROLE app_user SET statement_timeout = '7s'",
-                    // Superuser-only: applies at login although app_user could not set it itself.
-                    "ALTER ROLE app_user SET log_min_duration_statement = '1s'",
                     "ALTER ROLE app_user SET role = 'reader'",
-                    // Read on a session whose encoding the master's default would otherwise set.
-                    "ALTER ROLE app_user SET floci.note = 'café'",
                     "ALTER ROLE " + MASTER_USER + " SET client_encoding = 'LATIN1'");
+            // Superuser-only, so set by the instance's superuser, which the master user is not: it applies at
+            // login although app_user could not set it itself.
+            asSuperuser(dbId, "ALTER ROLE app_user SET log_min_duration_statement = '1s'");
+            // Read on a session whose encoding the master's default would otherwise set. A placeholder
+            // parameter is the superuser's to store as a role default since PostgreSQL 15.
+            asSuperuser(dbId, "ALTER ROLE app_user SET floci.note = 'café'");
 
             Properties iam = iamLogin(port, "app_user");
             iam.setProperty("options", "-c statement_timeout=9s");
@@ -177,6 +190,14 @@ class RdsPostgresStartupParametersIntegrationTest {
                 statement.execute(sql);
             }
         }
+    }
+
+    /** Runs {@code sql} in the instance's database as rdsadmin, its superuser. */
+    private void asSuperuser(String dbId, String sql) {
+        String[] psql = {"psql", "-v", "ON_ERROR_STOP=1", "-U", "rdsadmin", "-d", "appdb", "-c", sql};
+        ContainerExec.Result result = ContainerExec.run(dockerClient,
+                rdsService.getDbInstance(dbId).getContainerId(), psql, 30);
+        assertThat(result.stderr(), result.exitCode(), equalTo(0L));
     }
 
     private static String jdbcUrl(int port) {

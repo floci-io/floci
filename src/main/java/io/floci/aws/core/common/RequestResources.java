@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.services.iam.IamActionRegistry;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -51,6 +52,8 @@ public final class RequestResources {
     /** An ARN without its leading {@code arn:<partition>:<service>:}, its Region optional: {@code 123456789012:function:f}. */
     private static final Pattern PARTIAL_ARN = Pattern.compile("(?:([a-z]{2}(?:-[a-z0-9]+)+-\\d+):)?(\\d{12}):(.+)");
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
+    /** A variable whose value the format holds URL-encoded: API Gateway's {@code /tags/${UrlEncodedResourceARN}}. */
+    private static final String URL_ENCODED = "UrlEncoded";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
     private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
@@ -1034,17 +1037,38 @@ public final class RequestResources {
     private static String render(String format, Map<String, String> filling, String partition, String region,
                                  String accountId) {
         Matcher variable = VARIABLE.matcher(format);
+        boolean path = isPath(format);
         StringBuilder arn = new StringBuilder();
         while (variable.find()) {
             String value = switch (variable.group(1)) {
                 case "Partition" -> partition;
                 case "Region" -> region;
                 case "Account" -> accountId;
-                default -> filling.getOrDefault(variable.group(1), "*");
+                default -> filling.containsKey(variable.group(1))
+                        ? spelled(variable.group(1), filling.get(variable.group(1)), path) : "*";
             };
             variable.appendReplacement(arn, Matcher.quoteReplacement(value));
         }
         return variable.appendTail(arn).toString();
+    }
+
+    /** Whether a format's resource is a path, as API Gateway's are: {@code ::/restapis/${RestApiId}}. */
+    private static boolean isPath(String format) {
+        String[] parts = format.split(":", 6);
+        return parts.length == 6 && parts[5].startsWith("/");
+    }
+
+    /**
+     * A value as its variable holds it: URL-encoded, in SigV4 canonical form, for a variable the format names
+     * {@code UrlEncoded...}, as AWS names a tagged API Gateway resource {@code /tags/<UrlEncodedResourceARN>}; with its
+     * {@code %} and {@code /} escaped in a path, so a value given as one segment of it cannot pass for more than one;
+     * as given otherwise.
+     */
+    private static String spelled(String variable, String value, boolean path) {
+        if (variable.startsWith(URL_ENCODED)) {
+            return SigV4Canonicalization.uriEncode(value);
+        }
+        return path ? value.replace("%", "%25").replace("/", "%2F") : value;
     }
 
     /**

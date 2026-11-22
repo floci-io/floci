@@ -445,6 +445,11 @@ floci:
     # Floci sees, at least 4. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.maxConcurrentLaunches: a value set here WINS over the annotation.
     max-concurrent-launches: 0
+    # FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS: milliseconds between the reads of a long-lived service
+    # container's log (databases, brokers, registries), read on a timer instead of a follow stream held
+    # for the container's life; at least 100. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.logPollIntervalMillis: a value set here WINS over the annotation.
+    log-poll-interval-millis: 1000
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -485,6 +490,8 @@ floci:
       stream-iterator-expiry-enabled: false   # FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED. 15-minute iterators.
       stream-retention-enabled: false      # FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED. 24-hour records and shards.
       stream-max-records: 1000             # FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS. Records kept per stream.
+      transaction-conflicts-enabled: false # FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED. Busy items cancel overlapping transactions (native engine).
+      randomize-attribute-order: true      # FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER. Shuffle attributes and map keys where AWS does (native engine).
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
@@ -518,7 +525,7 @@ floci:
       init-timeout-seconds: 10                # FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS - time a cold runtime has to request its first invocation; the function's Timeout wins when longer
       container-drain-timeout-seconds: 15      # FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS - shared shutdown budget for both Lambda pools
       # warm-pool-max-per-function:           # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION - idle containers kept per function (default max(4, cpus))
-      warm-pool-max-total: 0                  # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL - idle containers kept across all functions, LRU evicted beyond it; 0 = unbounded
+      warm-pool-max-total: 128                # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL - idle containers kept across all functions, LRU evicted beyond it; 0 = unbounded. Keep in step with the @WithDefault on EmulatorConfig.LambdaServiceConfig.warmPoolMaxTotal
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       accept-external-layer-arns: false       # FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS - accept a Layers ARN from another account (content is never mounted). AWS answers these through the layer resource policy, which Floci does not model, so the default refuses them like AWS refuses a non-public one. Turn on to attach public layers such as Powertools.
@@ -1143,6 +1150,12 @@ floci:
     emrcontainers:
       enabled: true
       job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
+      runner-mode: immediate        # docker = run each job run's Spark job in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-on-eks/spark/%s"   # %s = the container image tag, emr-7.2.0:20240610
+      # Remove the drivers a previous run of this deployment left on the daemon before the first job
+      # run starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true
     ssooidc:

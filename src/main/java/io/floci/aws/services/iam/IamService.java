@@ -5558,6 +5558,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
                                                    String secretAccessKey, String sessionToken, String roleArn,
                                                    String roleSessionName, String assumedRoleId) {
+        registerLambdaExecutionRoleSession(accountId, sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                roleSessionName, assumedRoleId, null);
+    }
+
+    /**
+     * Stores a non-expiring execution-role session with its session token, assumed role ID and an inline session
+     * policy, which scopes it as an assumed role's session policy does; null for none.
+     */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String sessionToken, String roleArn,
+                                                   String roleSessionName, String assumedRoleId,
+                                                   String sessionPolicyDocument) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Lambda function account ID must not be blank");
         }
@@ -5566,6 +5578,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         session.setLambdaExecutionRole(true);
         session.setRoleSessionName(roleSessionName);
         session.setAssumedRoleId(assumedRoleId);
+        session.setSessionPolicyDocument(sessionPolicyDocument);
         issuedNow(session);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);

@@ -190,7 +190,7 @@ public class MemoryDbContainerManager {
         String logName = isDefaultScope(accountId, region) ? logicalName : clusterName;
         String logGroup = "/aws/memorydb/cluster/" + logName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        Closeable logHandle = logStreamer.attach(
+        Closeable logHandle = logStreamer.attachPolled(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
         handle.setLogStream(logHandle);
 

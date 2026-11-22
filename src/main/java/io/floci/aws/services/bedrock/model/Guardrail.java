@@ -19,7 +19,7 @@ public class Guardrail {
     private String kmsKeyArn;
     private Instant createdAt;
     private Instant updatedAt;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private String accountId;
     private String resourcePolicy;
 

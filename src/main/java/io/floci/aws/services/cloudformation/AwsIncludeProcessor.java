@@ -9,6 +9,7 @@ import io.floci.aws.services.s3.S3Service;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Expands {@code Fn::Transform} nodes whose {@code Name} is {@code AWS::Include}: splices the
@@ -50,26 +51,45 @@ class AwsIncludeProcessor {
      * treat an untouched template as changed.
      */
     JsonNode mergeIncludes(JsonNode template) {
+        return mergeIncludes(template, CloudFormationService.resolveDefaultParameters(template, Map.of()),
+                "", "", "", "", name -> null);
+    }
+
+    JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
+                           String accountId, String stackName, String stackId) {
+        return mergeIncludes(template, parameters, region, accountId, stackName, stackId, name -> null);
+    }
+
+    JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
+                           String accountId, String stackName, String stackId,
+                           Function<String, String> importValueResolver) {
         if (!containsAwsInclude(template)) {
             return template;
         }
         JsonNode merged = template.deepCopy();
-        merge(merged);
+        merge(merged, merged, parameters, region, accountId, stackName, stackId, importValueResolver);
         return merged;
     }
 
-    private void merge(JsonNode node) {
+    private void merge(JsonNode node, JsonNode root, Map<String, String> parameters,
+                       String region, String accountId, String stackName, String stackId,
+                       Function<String, String> importValueResolver) {
         if (node.isObject()) {
-            mergeObject((ObjectNode) node);
+            mergeObject((ObjectNode) node, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         } else if (node.isArray()) {
-            node.forEach(this::merge);
+            node.forEach(item -> merge(item, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver));
         }
     }
 
-    private void mergeObject(ObjectNode obj) {
+    private void mergeObject(ObjectNode obj, JsonNode root, Map<String, String> parameters,
+                             String region, String accountId, String stackName, String stackId,
+                             Function<String, String> importValueResolver) {
         JsonNode transform = obj.get(FN_TRANSFORM);
         if (transform != null && AWS_INCLUDE.equals(transform.path("Name").asText(""))) {
-            spliceInclude(obj, transform);
+            spliceInclude(obj, transform, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         }
         // Walk every remaining field, including the snippet's own keys just merged in above:
         // spliceInclude already rejects a snippet carrying its own AWS::Include, so revisiting
@@ -77,12 +97,21 @@ class AwsIncludeProcessor {
         // elsewhere in the template.
         Iterator<Map.Entry<String, JsonNode>> fields = obj.fields();
         while (fields.hasNext()) {
-            merge(fields.next().getValue());
+            merge(fields.next().getValue(), root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         }
     }
 
-    private void spliceInclude(ObjectNode obj, JsonNode transform) {
-        String location = describeLocation(transform);
+    private void spliceInclude(ObjectNode obj, JsonNode transform, JsonNode root,
+                               Map<String, String> parameters, String region,
+                               String accountId, String stackName, String stackId,
+                               Function<String, String> importValueResolver) {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, stackName, stackId,
+                parameters,
+                Map.of(), Map.of(), Map.of(), CloudFormationService.templateMappings(root),
+                objectMapper, importValueResolver);
+        String location = describeLocation(transform, engine);
         S3Location s3Location = parseS3Location(location);
         JsonNode snippet = fetchSnippet(s3Location, location);
 
@@ -100,19 +129,18 @@ class AwsIncludeProcessor {
     }
 
     /**
-     * Renders {@code transform.Parameters.Location} for an error message. A well-formed
-     * {@code Location} is a plain string, but a node such as {@code {Ref: InputValue}}, the form
-     * AWS's own {@code Fn::Transform} documentation uses in its {@code AWS::Include} example, is a
-     * mapping. {@code Ref} resolution is not implemented here, so that mapping is serialized
-     * instead, and the rejection message names it. A {@code Parameters} that is not an object
-     * (missing, explicitly {@code null}, a scalar, or a list) names the whole {@code Fn::Transform}
-     * node instead, so the message never presents an unrelated value as the rejected
-     * {@code Location}. A {@code Location} missing from an object {@code Parameters} names the
-     * enclosing {@code Parameters} mapping. A {@code Location} present but blank, including
+     * Resolves or renders {@code transform.Parameters.Location}. A well-formed {@code Location} is
+     * a plain string, a {@code Ref}, or an {@code Fn::Sub} expression. An unresolvable mapping
+     * (such as a {@code Ref} or {@code Fn::Sub} naming an unknown parameter, or another intrinsic)
+     * is serialized instead, and the rejection message names it. A {@code Parameters} that
+     * is not an object (missing, explicitly {@code null}, a scalar, or a list) names the whole
+     * {@code Fn::Transform} node instead, so the message never presents an unrelated value as the
+     * rejected {@code Location}. A {@code Location} missing from an object {@code Parameters} names
+     * the enclosing {@code Parameters} mapping. A {@code Location} present but blank, including
      * whitespace only, is rendered as its quoted string, not elided, so the message never leaves an
      * empty tail.
      */
-    private String describeLocation(JsonNode transform) {
+    private String describeLocation(JsonNode transform, CloudFormationTemplateEngine engine) {
         JsonNode parameters = transform.path("Parameters");
         if (!parameters.isObject()) {
             return transform.toString();
@@ -121,8 +149,30 @@ class AwsIncludeProcessor {
         if (locationNode.isTextual() && !locationNode.asText().isBlank()) {
             return locationNode.asText();
         }
+        if (isResolvableLocation(locationNode)) {
+            String resolved = engine.resolve(locationNode);
+            if (!engine.hasUnresolvedIntrinsics() && !resolved.isBlank()) {
+                return resolved;
+            }
+        }
         JsonNode described = locationNode.isMissingNode() || locationNode.isNull() ? parameters : locationNode;
         return described.toString();
+    }
+
+    private static boolean isResolvableLocation(JsonNode locationNode) {
+        if (!locationNode.isObject() || locationNode.size() != 1) {
+            return false;
+        }
+        if (locationNode.has("Ref")) {
+            JsonNode ref = locationNode.get("Ref");
+            return ref.isTextual() && !ref.asText().isBlank();
+        }
+        if (!locationNode.has("Fn::Sub")) {
+            return false;
+        }
+        JsonNode sub = locationNode.get("Fn::Sub");
+        return sub.isTextual()
+                || (sub.isArray() && sub.size() == 2 && sub.get(0).isTextual() && sub.get(1).isObject());
     }
 
     /**

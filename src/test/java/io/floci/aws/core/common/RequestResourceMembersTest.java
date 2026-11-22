@@ -158,6 +158,38 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void aRouteTypeIsReadAsAReferenceTypeAndNeverUnderOneOfItsNames() throws Exception {
+        // API Gateway's developer guide gives the paths of resources the Service Reference gives no type, and an API
+        // Gateway v2 path label holds a hyphen.
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {
+                    "Tags": "arn:${Partition}:example:${Region}::/tags/${UrlEncodedResourceARN}"
+                  }},
+                  "pathFormats": {"example": {
+                    "/sdktypes (resource-path-specifier)": "arn:${Partition}:example:${Region}::/sdktypes"
+                  }},
+                  "operations": {
+                    "example:GetSdkTypes": {"resources": [{"type": "/sdktypes (resource-path-specifier)", "fill": {}}]},
+                    "example:GetTags": {
+                      "resources": [{"type": "Tags", "fill": {"UrlEncodedResourceARN": "ResourceArn"}}],
+                      "located": {"ResourceArn": "{resource-arn}"}
+                    }
+                  }
+                }
+                """);
+        RequestResourceMembers.Table table = parse(document.toString());
+        assertEquals(Set.of("Tags", "/sdktypes (resource-path-specifier)"), table.formats().get("example").keySet());
+        assertEquals(List.of("/sdktypes (resource-path-specifier)"),
+                table.operations().get("example:GetSdkTypes").getFirst().types());
+        ObjectNode clash = document.deepCopy();
+        ((ObjectNode) clash.path("pathFormats").path("example"))
+                .put("Tags", "arn:${Partition}:example:${Region}::/tags");
+        assertThrows(IllegalStateException.class, () -> parse(clash.toString()));
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));

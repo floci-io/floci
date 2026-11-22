@@ -215,6 +215,29 @@ class EmrCfnProvisionerTest {
     }
 
     @Test
+    void theClustersOwnSettingsReachRunJobFlowAsTheTemplateGivesThem() {
+        when(handler.clusterFrom(any(), any())).thenReturn(new EmrCluster());
+        when(emr.runJobFlow(any(), eq("us-east-1"))).thenReturn(emrCluster(CLUSTER_ID, "STARTING"));
+        when(emr.describeCluster(CLUSTER_ID)).thenReturn(emrCluster(CLUSTER_ID, "WAITING"));
+        String settings = """
+                , "KerberosAttributes": {"Realm": "EC2.INTERNAL", "KdcAdminPassword": "kdc-secret"},
+                "OSReleaseLabel": "2.0.20260727.0", "EbsRootVolumeIops": 4000, "EbsRootVolumeThroughput": 250,
+                "PlacementGroupConfigs": [{"InstanceRole": "MASTER", "PlacementStrategy": "SPREAD"}],
+                "LogEncryptionKmsKeyId": "key-logs",
+                "MonitoringConfiguration": {"CloudWatchLogConfiguration": {"Enabled": true}}""";
+        JsonNode template = json(clusterProps(2, "m5.xlarge", settings));
+        provisioner.provision(cluster(null), template, ctx(null, null));
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).clusterFrom(request.capture(), eq("us-east-1"));
+        for (String name : List.of("KerberosAttributes", "OSReleaseLabel", "EbsRootVolumeIops",
+                "EbsRootVolumeThroughput", "PlacementGroupConfigs", "LogEncryptionKmsKeyId",
+                "MonitoringConfiguration")) {
+            assertEquals(template.get(name), request.getValue().get(name), name);
+        }
+    }
+
+    @Test
     void aClusterThatTerminatesBeforeItIsReadyFailsTheCreateAndIsTerminatedAgain() {
         when(handler.clusterFrom(any(), any())).thenReturn(new EmrCluster());
         when(emr.runJobFlow(any(), eq("us-east-1"))).thenReturn(emrCluster(CLUSTER_ID, "STARTING"));

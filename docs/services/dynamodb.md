@@ -186,6 +186,41 @@ records behind, for example one that starts at `LATEST` before a large seed, rai
 the shard that replaced it has closed too, so a stream that rolls over lists at most two generations
 of shards while idle, and otherwise only the shards that still hold records.
 
+## Transaction conflicts
+
+By default, transactions that touch the same items wait for each other and then all go through,
+one at a time. On AWS, a `TransactWriteItems` keeps its items busy until it commits, and requests
+that reach a busy item are rejected instead:
+
+- a `PutItem`, `UpdateItem` or `DeleteItem`, or a PartiQL `ExecuteStatement` that writes one item,
+  fails with `TransactionConflictException`;
+- another `TransactWriteItems`, or a `TransactGetItems`, is cancelled with
+  `TransactionCanceledException`, and the item gets the reason `TransactionConflict`
+  ("Transaction is ongoing for the item"). Its other items get `None`;
+- a `GetItem`, `Query` or `Scan` is not affected.
+
+To exercise code that handles those failures, such as a retry loop, set
+`FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED=true`. A `TransactWriteItems` then keeps its
+items busy from the moment its conditions hold until 10 milliseconds after it commits, about as long
+as a write transaction takes on AWS, and answers when that time is up. A client that waits for one transaction before it sends
+the next never sees a conflict; requests that overlap a transaction on its items do. A cancelled or
+rejected request changes nothing, so it can be retried as it was sent.
+
+The busy time is fixed, so the share of transactions that conflict under a given load is not AWS's.
+A `BatchWriteItem`, or a write that is not part of a transaction, does not make other requests
+conflict. The setting works with the native backend only; with the `local` backend Floci does not
+start.
+
+## Attribute order
+
+AWS returns the top-level attributes and every map key in a new random order on some operations.
+Floci does the same on the `ReturnValues` of `PutItem`, `UpdateItem` and `DeleteItem`, on the
+`Item` of a failed condition check, on `TransactGetItems`, and on the `Item` of a
+`TransactWriteItems` cancellation reason. Each map is shuffled on its own. Lists and sets keep their order.
+
+`GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams return the same order on every call, as on AWS.
+Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to turn the shuffle off. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
+
 ## Time to Live
 
 With TTL enabled, a sweep runs every 60 seconds and deletes the items whose TTL attribute holds an
@@ -318,6 +353,8 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED` | `false` | Expire stream shard iterators 15 minutes after they are returned, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS` | `1000` | Most records each stream keeps across its shards; the oldest goes first. Must be at least `1` |
+| `FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED` | `false` | Reject requests that reach the items of a `TransactWriteItems` in flight, as AWS does, instead of making them wait. Native backend only. See [Transaction conflicts](#transaction-conflicts) |
+| `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER` | `true` | Return attributes and map keys in a random order where AWS does. Native backend only. See [Attribute order](#attribute-order) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
