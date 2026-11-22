@@ -3594,15 +3594,16 @@ public interface EmulatorConfig {
          * Maximum idle (warm) containers kept across all functions. When a release would push
          * the total past this, the least-recently-used idle container of any function is
          * stopped first, so the container that just ran (the most likely to run again) stays
-         * warm. {@code 0} disables the bound; a negative value is ignored with a warning and
-         * also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
+         * warm. The default, 128, keeps a stack of many functions from accumulating one warm
+         * container per function touched. {@code 0} disables the bound; a negative value is ignored
+         * with a warning and also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
          * containers are not counted: their ceiling is {@code region-concurrency-limit}, which
          * applies independently in each region, so peak container count is this cap plus the
          * in-flight invocations across every active region.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL
          */
-        @WithDefault("0")
+        @WithDefault("128")
         int warmPoolMaxTotal();
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
