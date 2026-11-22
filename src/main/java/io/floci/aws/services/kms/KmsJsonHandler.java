@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.JsonBooleanCoercion;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -393,12 +394,7 @@ public class KmsJsonHandler {
             return node.booleanValue();
         }
         if (node.isTextual()) {
-            return switch (node.textValue().toLowerCase(Locale.ROOT)) {
-                case "true", "yes", "y", "t", "1" -> true;
-                case "false", "no", "n", "f", "0" -> false;
-                default -> throw new AwsException("SerializationException",
-                        "STRING_VALUE can not be converted to an Boolean", 400);
-            };
+            return JsonBooleanCoercion.fromString(node.textValue());
         }
         String message = node.isIntegralNumber() ? "NUMBER_VALUE can not be converted to a Boolean"
                 : node.isNumber() ? "DECIMAL_VALUE cannot be converted to Boolean"
