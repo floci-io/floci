@@ -625,7 +625,9 @@ IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py tools/aws/sources/athena-glue-ddl-permissions.json \
 	tools/aws/fetch_athena_glue_ddl_permissions.py tools/aws/test_fetch_athena_glue_ddl_permissions.py \
-	tools/aws/regen_iam_authorized_actions.py tools/aws/sources/s3-required-actions.json
+	tools/aws/regen_iam_authorized_actions.py tools/aws/sources/s3-required-actions.json \
+	tools/aws/sources/apigateway-arn-formats.json tools/aws/fetch_apigateway_arn_formats.py \
+	tools/aws/test_fetch_apigateway_arn_formats.py src/main/resources/aws/iam-authorized-actions.json
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's

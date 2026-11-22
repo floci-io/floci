@@ -446,7 +446,8 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).resolveRoute("apigateway", containerRequest);
         verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
-        verify(arnBuilder).buildResources("apigateway", containerRequest, "us-east-1", "000000000000", "aws");
+        verify(arnBuilder).buildResources("apigateway", "apigateway:POST", containerRequest, "us-east-1",
+                "000000000000", "aws");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
     }
 
@@ -479,7 +480,8 @@ class IamEnforcementFilterTest {
 
     @Test
     void apiGatewayResourcesAreBuiltInTheRequestsPartition() {
-        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in.
+        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in, on the
+        // operation the request is dispatched as, which the table of request resources reads.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/apigateway/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -494,12 +496,13 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
                         Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
         when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:GET");
-        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
 
         newFilter(resourceInfo(ApiGatewayController.class)).filter(containerRequest);
 
-        verify(arnBuilder).buildResources("apigateway", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+        verify(arnBuilder).buildResources("apigateway", "apigateway:GET", containerRequest, "xx-local-1",
+                "000000000000", "aws-cn");
     }
 
     @Test
