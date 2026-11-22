@@ -42,6 +42,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -201,7 +202,7 @@ class EcrRegistryManagerTest {
         List<String> events = new ArrayList<>();
         RegistryHttpClient client = Mockito.mock(RegistryHttpClient.class);
         when(client.baseUrl()).thenReturn("http://localhost:" + BASE_PORT);
-        when(client.catalog()).thenAnswer(invocation -> {
+        when(client.catalogStrict()).thenAnswer(invocation -> {
             events.add("catalog");
             return List.of("repository");
         });
@@ -220,6 +221,92 @@ class EcrRegistryManagerTest {
         manager.ensureStarted();
 
         assertEquals(List.of("healthy", "catalog", "reconciled"), events);
+    }
+
+    @Test
+    void aCatalogTheRegistryFailedToGiveIsReadAgainRatherThanTakenAsEmpty() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict())
+                .thenThrow(new IOException("Registry catalog returned 500"))
+                .thenReturn(List.of("legacy/service"));
+        List<List<String>> reconciled = new ArrayList<>();
+        manager.setReconcileHook(reconciled::add);
+
+        manager.ensureStarted();
+
+        assertFalse(manager.isCatalogReconciled());
+        assertTrue(reconciled.isEmpty());
+
+        manager.ensureCatalogReconciled();
+        manager.ensureCatalogReconciled();
+
+        assertTrue(manager.isCatalogReconciled());
+        assertEquals(List.of(List.of("legacy/service")), reconciled);
+        verify(client, times(2)).catalogStrict();
+    }
+
+    @Test
+    void aFailedCatalogRetryWaitsBeforeTheNextRead() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        ManualClock clock = new ManualClock(Instant.parse("2026-11-21T00:00:00Z"));
+        manager.setClock(clock);
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict()).thenThrow(new IOException("Registry catalog returned 500"));
+        manager.setReconcileHook(repositories -> { });
+
+        manager.ensureStarted();
+        manager.ensureCatalogReconciled();
+        clock.advance(Duration.ofMillis(EcrRegistryManager.RECONCILE_RETRY_MILLIS - 1));
+        manager.ensureCatalogReconciled();
+
+        verify(client, times(2)).catalogStrict();
+
+        clock.advance(Duration.ofMillis(1));
+        manager.ensureCatalogReconciled();
+
+        verify(client, times(3)).catalogStrict();
+        assertFalse(manager.isCatalogReconciled());
+    }
+
+    @Test
+    void aCatalogRetryWaitsForTheRegistryToStart() throws Exception {
+        RegistryHttpClient client = registryClient();
+        manager.setReconcileHook(repositories -> { });
+
+        manager.ensureCatalogReconciled();
+
+        verify(client, never()).catalogStrict();
+        assertFalse(manager.isCatalogReconciled());
+    }
+
+    @Test
+    void aRecoveredRegistryHasItsCatalogReadAgain() throws Exception {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("first-container", Map.of()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("second-container", Map.of()));
+        RegistryHttpClient client = registryClient();
+        when(client.catalogStrict()).thenReturn(List.of()).thenReturn(List.of("restored/service"));
+        List<List<String>> reconciled = new ArrayList<>();
+        manager.setReconcileHook(reconciled::add);
+
+        manager.ensureStarted();
+        when(lifecycleManager.presenceOf("first-container")).thenReturn(ContainerPresence.ABSENT);
+        manager.ensureStarted();
+
+        assertTrue(manager.isCatalogReconciled());
+        assertEquals(List.of(List.of(), List.of("restored/service")), reconciled);
+    }
+
+    /** A registry client the manager uses in place of HTTP, answering the health check at once. */
+    private RegistryHttpClient registryClient() {
+        RegistryHttpClient client = Mockito.mock(RegistryHttpClient.class);
+        when(client.baseUrl()).thenReturn("http://localhost:" + BASE_PORT);
+        manager = Mockito.spy(manager);
+        Mockito.doReturn(client).when(manager).httpClient();
+        return client;
     }
 
     @Test
