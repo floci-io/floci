@@ -15,8 +15,29 @@ This resource matching was checked against live AWS with isolated role sessions.
 Pagination and ignored table selectors do not change the collection being authorized.
 Other DynamoDB operations retain their own authorization resources.
 The Service Reference lists no resource type for the action, so the collection comes from that
-measurement, the one thing the generated table of request resources states by hand. Other DynamoDB
-operations keep their existing resource builders, including batch, transaction and PartiQL table extraction.
+measurement, the one thing the generated table of request resources states by hand.
+
+## IAM enforcement
+
+With IAM enforcement enabled, every DynamoDB request is checked as AWS checks it, read from the generated
+tables like other services' requests. A request is checked on the table, index, stream, backup, export,
+import or global table it names, by name or ARN. A table ARN is checked as given and as the caller's own
+table of that name, the one DynamoDB acts on.
+
+- `BatchGetItem` and `BatchWriteItem` are checked on every table their `RequestItems` keys.
+- Each item of a `TransactWriteItems` or `TransactGetItems` is checked on its own table as the action the
+  developer guide's [transactions page](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html)
+  gives its kind: `Put` as `dynamodb:PutItem`, `Update` as `dynamodb:UpdateItem`, `Delete` as
+  `dynamodb:DeleteItem`, `Get` as `dynamodb:GetItem` and `ConditionCheck` as `dynamodb:ConditionCheckItem`, with
+  `dynamodb:EnclosingOperation` naming the transaction.
+- Each PartiQL statement of an `ExecuteStatement`, `BatchExecuteStatement` or `ExecuteTransaction` is checked as
+  the action the [PartiQL IAM page](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-iam.html)
+  gives its verb (`dynamodb:PartiQLSelect`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete`) on the table or
+  index it names, as DynamoDB parses it; a transaction's with `dynamodb:EnclosingOperation` `ExecuteTransaction`.
+  An `EXISTS` statement is checked as the
+  [SELECT statement it evaluates](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ql-functions.exists.html),
+  and the index of a statement with `?` placeholders is read before they are bound. A request naming nothing is
+  checked as its own operation on `*`; a state machine's task naming nothing is left to DynamoDB to answer.
 
 ## Supported Actions
 

@@ -44,11 +44,11 @@ final class RequestResourceMembers {
             "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?"
                     + "|[A-Za-z][A-Za-z0-9_]*\\{\\}(\\.[A-Za-z][A-Za-z0-9_]*){1,2}");
     /**
-     * A member filling a variable may also be a field of a structure, or of each of a list's structures or of a map's
-     * structure values, one value for each.
+     * A member filling a variable may also be a field of a structure, or of each of a list's structures, or of a field
+     * of each of them, or of a map's structure values, one value for each, or a map's keys ({@code Name{}}).
      */
     private static final Pattern FILL_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*"
-            + "|\\{}\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
+            + "(\\.[A-Za-z][A-Za-z0-9_]*)?|\\{}|\\{}\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
     /** An ARN format's leading resource type word, and the rest of its resource. */
     private static final Pattern RESOURCE_PART = Pattern.compile(
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
@@ -78,6 +78,8 @@ final class RequestResourceMembers {
             "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
+    /** The keys of a resource a statement the request carries names, which its service parses. */
+    private static final Set<String> STATEMENT_KEYS = Set.of("types", "statement", "verb", "names");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
     private static final Set<String> DEFAULT_KEYS = Set.of("type", "fill", "when", "default", "endpoint");
 
@@ -100,9 +102,12 @@ final class RequestResourceMembers {
             return name + (map ? "{}" : list ? "[]" : "") + (field == null ? "" : "." + field.path());
         }
 
-        /** Whether it is a field of each of a list's structures, which gives one value for each of them. */
+        /**
+         * Whether it is a field of each of a list's structures, which gives one value for each of them; a field of a
+         * field of each ({@code TransactItems[].Put.TableName}) gives the values of those that have it.
+         */
         boolean eachElement() {
-            return list && field != null && !field.list();
+            return list && field != null && !field.list() && field.field() == null;
         }
     }
 
@@ -238,13 +243,25 @@ final class RequestResourceMembers {
      * service finds (ECS's {@code taskDefinitions[]}). A
      * {@code partialArn} type's members may give its ARN with the leading parts left out, its account and resource
      * ({@code 123456789012:function:my-function}) or its Region too, which the reader completes in the request's
-     * partition, and Region where the value leaves that out.
+     * partition, and Region where the value leaves that out. A resource a {@code statement} the request carries names
+     * is the one of its types whose every variable the service's parse of the statement names, by the word
+     * {@code names} gives each variable, when the statement's verb is {@code verb}.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
-                    Map<String, String> defaults, boolean partialArn) {
+                    Map<String, String> defaults, boolean partialArn, Member statement, String verb,
+                    Map<String, String> names) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults, boolean partialArn) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, partialArn, null, null, Map.of());
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -342,10 +359,10 @@ final class RequestResourceMembers {
      * client ({@code locatedApart}), whose vendored route tells a request's client. Each operation's {@code forwarded}
      * requests are those its service makes to another as the caller, and its {@code statements} those it makes as the
      * caller to run each statement its request may carry. An {@code unread} operation names what it acts on in a body
-     * the reader does not read. An operation AWS authorizes by several actions, none of its own name, has its
+     * the reader does not read. An operation AWS authorizes by actions its request's parts each take has its
      * resources under the one each is checked as ({@code checkedAs}, in the order the file gives the actions: KMS's
-     * ReEncrypt, {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key), and
-     * none in {@code operations}.
+     * ReEncrypt, {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key; a
+     * DynamoDB transaction's items and PartiQL statements), and none in {@code operations}.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
@@ -752,6 +769,9 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " serves a resource of " + operation
                     + " on no endpoint prefix");
         }
+        if (resource.has("statement")) {
+            return statementResource(operation, resource, formats);
+        }
         Set<String> keys = resource.has("through") ? THROUGH_KEYS : resource.has("arn") ? ARN_KEYS : FILL_KEYS;
         List<String> unknown = resource.properties().stream().map(Map.Entry::getKey)
                 .filter(key -> !keys.contains(key)).toList();
@@ -866,6 +886,31 @@ final class RequestResourceMembers {
     }
 
     /**
+     * A resource a statement the request carries names, of one of {@code types}: each variable of each type given the
+     * word the service's parse of the statement names it by, and the statement's verb.
+     */
+    private static Resource statementResource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
+        List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
+        Map<String, String> names = new LinkedHashMap<>();
+        resource.path("names").properties().forEach(name -> names.put(name.getKey(), name.getValue().asText("")));
+        Set<String> variables = types.stream().filter(formats::containsKey)
+                .flatMap(type -> VARIABLE.matcher(formats.get(type).format()).results().map(match -> match.group(1)))
+                .filter(variable -> !Set.of("Partition", "Region", "Account").contains(variable))
+                .collect(Collectors.toSet());
+        String verb = resource.path("verb").asText("");
+        if (types.isEmpty() || !formats.keySet().containsAll(types) || !names.keySet().equals(variables)
+                || names.containsValue("") || verb.isEmpty() || resource.properties().stream()
+                        .map(Map.Entry::getKey).anyMatch(key -> !STATEMENT_KEYS.contains(key))) {
+            throw new IllegalStateException(RESOURCE_NAME + " names a resource of " + operation + " by the statement "
+                    + resource.path("statement") + ", no member, verb and types with a format whose every variable "
+                    + "it names");
+        }
+        return new Resource(types, null, Map.of(), Map.of(), Map.of(), Map.of(), null, Map.of(), false, List.of(),
+                null, null, false, Map.of(), Map.of(), Map.of(), false,
+                fillMember(operation, resource.path("statement").asText("")), verb, Map.copyOf(names));
+    }
+
+    /**
      * The {@code defaults} of a resource: each member filling a variable mapped to the type whose format is that
      * variable alone, whose default the member names when a request leaves it out; empty when it has none.
      */
@@ -967,13 +1012,19 @@ final class RequestResourceMembers {
 
     /**
      * A member filling a variable: {@code Name}, {@code Name[]}, or a field of a structure, {@code Name.Field}, of
-     * each of a list's structures, {@code Name[].Field}, or of each of a map's structure values, {@code Name{}.Field}.
+     * each of a list's structures, {@code Name[].Field}, or of a field of each of them, {@code Name[].Item.Field}, or
+     * of each of a map's structure values, {@code Name{}.Field}, or a map's keys, {@code Name{}}.
      */
     private static Member fillMember(String operation, String path) {
         if (!FILL_MEMBER.matcher(path).matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
         }
-        return arnMember(operation, path);
+        int dot = path.indexOf('.');
+        if (dot < 0) {
+            return member(operation, path);
+        }
+        Member outer = member(operation, path.substring(0, dot));
+        return new Member(outer.name(), outer.list(), fillMember(operation, path.substring(dot + 1)), outer.map());
     }
 
     /**

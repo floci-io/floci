@@ -280,7 +280,8 @@ class RequestResourcesTest {
     @Test
     void listTablesIsCheckedOnTheTableCollectionAwsWasMeasuredToCheck() {
         assertTrue(RequestResources.reads("dynamodb:ListTables"));
-        assertFalse(RequestResources.reads("dynamodb:DescribeLimits"));
+        assertEquals(List.of(), RequestResources.of("dynamodb:DescribeLimits", json("{}"), "aws-us-gov",
+                "us-gov-west-1", "111122223333"));
         for (String body : List.of("{}", "{\"TableName\":\"ignored\",\"ExclusiveStartTableName\":\"cursor\"}")) {
             assertEquals(List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:111122223333:table/*"),
                     RequestResources.of("dynamodb:ListTables", json(body), "aws-us-gov", "us-gov-west-1",

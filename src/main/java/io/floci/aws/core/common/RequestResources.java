@@ -9,7 +9,6 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -77,6 +76,15 @@ public final class RequestResources {
      */
     public static boolean reads(String operation) {
         return readable(RequestResourceMembers.table(), operation);
+    }
+
+    /**
+     * Whether the table checks the operation as actions its request's parts each take ({@link #targets}) instead of
+     * its own action.
+     */
+    public static boolean checkedByParts(String operation) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        return readable(table, operation) && table.checkedAs().containsKey(operation);
     }
 
     /** Whether {@code table} reads the operation's requests: it has an entry for it, and not an unread one. */
@@ -203,32 +211,107 @@ public final class RequestResources {
     }
 
     /**
-     * The actions an operation AWS authorizes by several actions, none of its own name, is checked as instead of its
-     * own, each with the ARNs of the resources the request names that it is checked on, as {@link #of} reads them:
-     * KMS's ReEncrypt, {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key.
-     * An action the request names no resource of is checked on {@code *}. Empty for every other operation, which is
-     * checked as its own action on what {@link #of} gives.
+     * One check of an operation AWS authorizes by actions its request's parts each take: {@code action} on
+     * {@code resources}, which {@code element} names, the part of the request they come from (a transaction's item, a
+     * batch's statement), or null for the request itself.
      */
-    public static Map<String, List<String>> checkedAs(String operation, ContainerRequestContext ctx, String partition,
-                                                     String region, String accountId, StoredResourceArns stored,
-                                                     Map<String, String> labels) {
+    public record Target(String action, List<String> resources, JsonNode element) {
+    }
+
+    /**
+     * The checks an operation AWS authorizes by actions its request's parts each take is checked as instead of its
+     * own action, as the table's {@code checkedAs} gives them, read as {@link #of} reads the rest: KMS's ReEncrypt,
+     * {@code kms:ReEncryptFrom} on its source key and {@code kms:ReEncryptTo} on its destination key; each of a
+     * DynamoDB transaction's items, as the action of its kind on its table, and each PartiQL statement, as the action
+     * of its verb on what it names. A resource read from each element of a list is checked apart for each element, with
+     * that element. An action the table gives no resource of is checked on {@code *}, and one whose resources the
+     * request names none of is not checked. Empty for every other operation, which is checked as its own action on
+     * what {@link #of} gives, and for one whose request names nothing of any of its actions.
+     */
+    public static List<Target> targets(String operation, ContainerRequestContext ctx, String partition, String region,
+                                       String accountId, StoredResourceArns stored, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         Map<String, List<RequestResourceMembers.Resource>> actions = !readable(table, operation) ? null
                 : table.checkedAs().get(operation);
         if (actions == null) {
-            return Map.of();
+            return List.of();
         }
         Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
-        Map<String, List<String>> checked = new LinkedHashMap<>();
+        Map<String, List<RequestResourceMembers.Resource>> served = new LinkedHashMap<>();
+        actions.forEach((action, resources) -> served.put(action, served(resources, ctx)));
+        return targets(operation, served, formats(table, operation), form, body, partition, region, accountId, stored);
+    }
+
+    /**
+     * The checks a JSON request body is made of, as {@link #targets} reads the same request, for a call that is not an
+     * HTTP request of its own, as a state machine's task to its integrated service.
+     */
+    public static List<Target> targetsOfBody(String operation, JsonNode body, String partition, String region,
+                                             String accountId, StoredResourceArns stored) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        Map<String, List<RequestResourceMembers.Resource>> actions = !readable(table, operation) ? null
+                : table.checkedAs().get(operation);
+        return actions == null ? List.of()
+                : targets(operation, actions, formats(table, operation), Map.of(), body, partition, region, accountId,
+                        stored);
+    }
+
+    private static List<Target> targets(String operation, Map<String, List<RequestResourceMembers.Resource>> actions,
+                                        Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                                        JsonNode body, String partition, String region, String accountId,
+                                        StoredResourceArns stored) {
+        List<Target> found = new ArrayList<>();
         actions.forEach((action, resources) -> {
-            List<RequestResourceMembers.Resource> read = served(resources, ctx);
-            List<String> arns = read.isEmpty() ? List.of() : named(operation, read, formats(table, operation), form,
-                    body, partition, region, accountId, stored);
-            checked.put(action, arns.isEmpty() ? List.of("*") : arns);
+            if (resources.isEmpty()) {
+                found.add(new Target(action, List.of("*"), null));
+                return;
+            }
+            for (RequestResourceMembers.Resource resource : resources) {
+                RequestResourceMembers.Member each = eachElementRead(resource);
+                if (each == null || body == null || !body.path(each.name()).isArray()) {
+                    List<String> arns = named(operation, List.of(resource), formats, form, body, partition, region,
+                            accountId, stored);
+                    if (!arns.isEmpty()) {
+                        found.add(new Target(action, arns, null));
+                    }
+                    continue;
+                }
+                for (JsonNode element : body.path(each.name())) {
+                    // The request with this element alone in its list, sharing the body's other members: nothing is
+                    // copied but the body's top level.
+                    ObjectNode alone = JsonNodeFactory.instance.objectNode();
+                    alone.setAll((ObjectNode) body);
+                    alone.putArray(each.name()).add(element);
+                    List<String> arns = named(operation, List.of(resource), formats, form, alone, partition, region,
+                            accountId, stored);
+                    if (!arns.isEmpty()) {
+                        found.add(new Target(action, arns, partOf(element, each.field())));
+                    }
+                }
+            }
         });
-        return Collections.unmodifiableMap(checked);
+        return List.copyOf(found);
+    }
+
+    /**
+     * The list a resource is read from a field of each element of, its statement's or its one variable's member;
+     * null for any other.
+     */
+    private static RequestResourceMembers.Member eachElementRead(RequestResourceMembers.Resource resource) {
+        RequestResourceMembers.Member member = resource.statement() != null ? resource.statement()
+                : resource.fill().size() == 1 ? resource.fill().values().iterator().next() : null;
+        return member != null && member.list() && member.field() != null ? member : null;
+    }
+
+    /** The structure of an element a field path ends in: {@code Put} of {@code Put.TableName}, the element itself. */
+    private static JsonNode partOf(JsonNode element, RequestResourceMembers.Member field) {
+        JsonNode part = element;
+        for (RequestResourceMembers.Member step = field; step.field() != null; step = step.field()) {
+            part = part.path(step.name());
+        }
+        return part;
     }
 
     /**
@@ -406,6 +489,8 @@ public final class RequestResources {
                             .ifPresent(format -> addNamed(arns, format.checked(named), format.awsOwned(),
                                     partition, region, accountId, stored));
                 }
+            } else if (resource.statement() != null) {
+                statement(arns, resource, formats, form, body, partition, region, accountId, stored);
             } else if (resource.through() != null) {
                 through(arns, resource, formats, form, body, region, stored);
             } else if (!resource.find().isEmpty()) {
@@ -1019,6 +1104,43 @@ public final class RequestResources {
     }
 
     /**
+     * The resources the statements a {@code statement} resource reads name, as the service parses each: for one of
+     * the resource's verb, the first of its types, most variables first, whose every variable the parse names by the
+     * word the table gives it (a DynamoDB index's {@code TableName} and {@code IndexName} by its {@code table} and
+     * {@code index}, else its table); none for another verb, a statement the service cannot parse, or no service.
+     */
+    private static void statement(Set<String> arns, RequestResourceMembers.Resource resource,
+                                  Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                                  JsonNode body, String partition, String region, String accountId,
+                                  StoredResourceArns stored) {
+        if (stored == null) {
+            return;
+        }
+        List<String> types = resource.types().stream()
+                .sorted(Comparator.comparingLong((String type) -> VARIABLE.matcher(formats.get(type).format())
+                        .results().count()).reversed()).toList();
+        for (String value : values(form, body, resource.statement())) {
+            Optional<StoredResourceArns.Statement> parsed = stored.statement(value);
+            if (parsed.isEmpty() || !resource.verb().equals(parsed.get().verb())) {
+                continue;
+            }
+            for (String type : types) {
+                Map<String, String> filling = new LinkedHashMap<>();
+                VARIABLE.matcher(formats.get(type).format()).results().map(match -> match.group(1))
+                        .filter(resource.names()::containsKey)
+                        .forEach(variable -> Optional.ofNullable(parsed.get().names()
+                                .get(resource.names().get(variable))).ifPresent(name -> filling.put(variable, name)));
+                if (filling.keySet().containsAll(resource.names().keySet().stream().filter(variable ->
+                        formats.get(type).format().contains("${" + variable + "}")).toList())) {
+                    arns.add(formats.get(type).checked(render(formats.get(type).format(), filling, partition, region,
+                            accountId)));
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
      * The ARN of a resource the namespace's service stores under the name the request gives: the one {@code stored}
      * finds the caller's resource of that name under in the Region.
      *
@@ -1254,7 +1376,11 @@ public final class RequestResources {
             return;
         }
         if (member.map()) {
-            if (value.isObject()) {
+            // A map's keys name what its values describe (DynamoDB's RequestItems, keyed by table); a field of its
+            // values, what each names.
+            if (value.isObject() && member.field() == null) {
+                value.fieldNames().forEachRemaining(key -> add(values, key));
+            } else if (value.isObject()) {
                 for (JsonNode element : value) {
                     addElement(values, element, member.field());
                 }

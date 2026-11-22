@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -205,7 +206,32 @@ class DynamoDbPartiQLParserTest {
         assertEquals(2, update.sets().size());
         assertEquals("b", update.removes().getFirst().root());
         assertEquals(DynamoDbPartiQLParser.Returning.ALL_NEW, update.returning());
-        assertEquals("dynamodb:PartiQLUpdate", DynamoDbPartiQLParser.iamAction("FROM \"t\" WHERE pk = 'p' SET c = 1"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("UPDATE", "t", null)),
+                DynamoDbPartiQLParser.target("FROM \"t\" WHERE pk = 'p' SET c = 1"));
+    }
+
+    /**
+     * A statement's verb and the table and index it names, as IAM checks it, an EXISTS statement's those of the SELECT
+     * it evaluates; none for a statement of another verb.
+     */
+    @Test
+    void aStatementsTargetIsItsVerbTableAndIndex() {
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("SELECT", "t", "byName")),
+                DynamoDbPartiQLParser.target("SELECT * FROM \"t\".\"byName\" WHERE pk = 'p'"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("SELECT", "t", "byName")),
+                DynamoDbPartiQLParser.target("SELECT * FROM \"t\".\"byName\" WHERE pk = ?"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("DELETE", "t", null)),
+                DynamoDbPartiQLParser.target("DELETE FROM \"t\" WHERE pk = ? AND sk = ?"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("SELECT", "t", null)),
+                DynamoDbPartiQLParser.target("EXISTS(SELECT * FROM \"t\" WHERE pk = 'p' AND v = 1)"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("SELECT", "t", null)),
+                DynamoDbPartiQLParser.target("SELECT * FROM \"t\" WHERE pk = 'p'"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("INSERT", "t", null)),
+                DynamoDbPartiQLParser.target("INSERT INTO \"t\" VALUE {'pk': 'p'}"));
+        assertEquals(Optional.of(new DynamoDbPartiQLParser.StatementTarget("DELETE", "t", null)),
+                DynamoDbPartiQLParser.target("DELETE FROM \"t\" WHERE pk = 'p'"));
+        assertEquals(Optional.empty(), DynamoDbPartiQLParser.target("not a statement \""));
+        assertEquals(Optional.empty(), DynamoDbPartiQLParser.target(null));
     }
 
     @Test

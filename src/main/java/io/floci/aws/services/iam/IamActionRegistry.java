@@ -1,6 +1,5 @@
 package io.floci.aws.services.iam;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
 import io.floci.aws.core.common.IamOperation;
@@ -9,7 +8,6 @@ import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
-import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
 import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
@@ -44,7 +42,6 @@ import java.util.regex.Pattern;
 public class IamActionRegistry {
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final IamRestRoutes restRoutes;
 
@@ -576,15 +573,11 @@ public class IamActionRegistry {
         return target != null && target.contains(".") ? target.substring(target.lastIndexOf('.') + 1) : null;
     }
 
-    /** The action for a dispatched operation, including statement-dependent JSON and CBOR calls. */
+    /**
+     * The action for a dispatched operation. One AWS authorizes by what its request's parts each do (a DynamoDB
+     * PartiQL statement by its verb) is checked as the actions the request-resources table gives those parts.
+     */
     public String resolveOperation(String credentialScope, String operationName, ContainerRequestContext ctx) {
-        if ("dynamodb".equals(credentialScope) && "ExecuteStatement".equals(operationName)) {
-            String statement = RequestBodyReader.documentField(ctx, MAPPER, "Statement");
-            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
-            if (statementAction != null) {
-                return statementAction;
-            }
-        }
         return IamAuthorizedActions.actionFor(credentialScope, operationName);
     }
 

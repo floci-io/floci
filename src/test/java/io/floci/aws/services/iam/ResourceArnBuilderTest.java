@@ -8,6 +8,7 @@ import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestPathLabels;
+import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -15,6 +16,8 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
+import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.EksStoredResourceArns;
 import io.floci.aws.services.iam.model.AccessKey;
@@ -55,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1135,183 +1139,148 @@ class ResourceArnBuilderTest {
                         ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    private static final String DDB = "arn:aws:dynamodb:us-east-1:000000000000:table/";
+
+    /** The resources a DynamoDB request is checked on, as the table reads {@code operation}. */
+    private List<String> dynamoDb(String operation) {
+        return builder.buildResources("dynamodb", "dynamodb:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /** The checks of a DynamoDB request checked by its parts, each statement parsed as DynamoDB parses it. */
+    private List<RequestResources.Target> dynamoDbTargets(String operation) {
+        return reading(new DynamoDbStoredResourceArns(mock(DynamoDbTableAccess.class)))
+                .targets("dynamodb", "dynamodb:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
     @Test
-    void dynamoDbBuildsArnFromShortTableName() {
+    void dynamoDbChecksTheTableItsRequestNames() {
         setJsonBody("{\"TableName\":\"FgacTable\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable", arn);
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("GetItem"));
+        // A bare name that merely looks ARN-ish is still a name, not an ARN.
+        setJsonBody("{\"TableName\":\"arn:aws:dynamodb:us-east-1\"}");
+        assertEquals(List.of(DDB + "arn:aws:dynamodb:us-east-1"), dynamoDb("GetItem"));
+        setJsonBody("{\"TableName\":\"" + DDB + "FgacTable\"}");
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("GetItem"));
+        setJsonBody("{\"TableCreationParameters\":{\"TableName\":\"ImportTarget\"},\"InputFormat\":\"DYNAMODB_JSON\"}");
+        assertEquals(List.of(DDB + "ImportTarget"), dynamoDb("ImportTable"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"), dynamoDb("GetItem"));
     }
 
     /**
-     * Pass-through used to be a {@code startsWith("arn:aws:dynamodb:")} probe, so a table ARN from
-     * any other partition was not recognised as an ARN at all and got rebuilt as
-     * {@code table/arn:aws-cn:dynamodb:...}, a resource name that matches no policy.
+     * A table ARN of any partition is checked as given, and as the caller's table of that name, which DynamoDB acts on:
+     * a {@code startsWith("arn:aws:dynamodb:")} probe once rebuilt another partition's ARN as {@code table/arn:...}.
      */
     @Test
-    void dynamoDbReturnsExactArnForAnyPartition() {
-        for (String fullArn : List.of(
-                "arn:aws-us-gov:dynamodb:us-gov-west-1:000000000000:table/FgacTable",
+    void dynamoDbChecksATableArnOfAnyPartitionAsGiven() {
+        for (String fullArn : List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:000000000000:table/FgacTable",
                 "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/FgacTable")) {
             setJsonBody("{\"TableName\":\"" + fullArn + "\"}");
-            assertEquals(fullArn, builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+            List<String> checked = dynamoDb("GetItem");
+            assertEquals(fullArn, checked.getFirst());
+            assertTrue(checked.contains(DDB + "FgacTable"), checked.toString());
         }
     }
 
-    /** A bare name that merely looks ARN-ish is still a name, not an ARN. */
     @Test
-    void dynamoDbTreatsAnIncompleteArnAsATableName() {
-        setJsonBody("{\"TableName\":\"arn:aws:dynamodb:us-east-1\"}");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/arn:aws:dynamodb:us-east-1",
-                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    void dynamoDbChecksTheResourceAnArnMemberHolds() {
+        setJsonBody("{\"ResourceArn\":\"" + DDB + "FgacTable\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"dev\"}]}");
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("TagResource"));
+        setJsonBody("{\"TableArn\":\"" + DDB + "ExportTable\",\"S3Bucket\":\"my-bucket\"}");
+        assertEquals(List.of(DDB + "ExportTable"), dynamoDb("ExportTableToPointInTime"));
+        String stream = DDB + "FgacTable/stream/2026-09-01T00:00:00.000";
+        setJsonBody("{\"StreamArn\":\"" + stream + "\"}");
+        assertEquals(List.of(stream), dynamoDb("DescribeStream"));
+        String export = DDB + "FgacTable/export/01693526400000-abcd";
+        setJsonBody("{\"ExportArn\":\"" + export + "\"}");
+        assertEquals(List.of(export), dynamoDb("DescribeExport"));
     }
 
     @Test
-    void dynamoDbReturnsExactArnIfTableNameIsAlreadyArn() {
-        String fullArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
-        setJsonBody("{\"TableName\":\"" + fullArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(fullArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromResourceArn() {
-        String tagArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
-        setJsonBody("{\"ResourceArn\":\"" + tagArn + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"dev\"}]}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(tagArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTableArn() {
-        String exportArn = "arn:aws:dynamodb:us-east-1:000000000000:table/ExportTable";
-        setJsonBody("{\"TableArn\":\"" + exportArn + "\",\"S3Bucket\":\"my-bucket\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(exportArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromStreamArn() {
-        String streamArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable/stream/2026-09-01T00:00:00.000";
-        setJsonBody("{\"StreamArn\":\"" + streamArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(streamArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromExportArn() {
-        String exportArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable/export/01693526400000-abcd";
-        setJsonBody("{\"ExportArn\":\"" + exportArn + "\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(exportArn, arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTheSourceOfAPointInTimeRestore() {
+    void dynamoDbChecksThePointInTimeRestoreOnItsSourceTable() {
         setJsonBody("{\"SourceTableName\":\"Music\",\"TargetTableName\":\"MusicCopy\"}");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/Music",
-                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
-        String sourceArn = "arn:aws:dynamodb:eu-west-2:000000000000:table/Music";
-        setJsonBody("{\"SourceTableArn\":\"" + sourceArn + "\",\"TargetTableName\":\"MusicCopy\"}");
-        assertEquals(sourceArn, builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of(DDB + "Music"), dynamoDb("RestoreTableToPointInTime"));
+        String source = "arn:aws:dynamodb:eu-west-2:000000000000:table/Music";
+        setJsonBody("{\"SourceTableArn\":\"" + source + "\",\"TargetTableName\":\"MusicCopy\"}");
+        assertEquals(source, dynamoDb("RestoreTableToPointInTime").getFirst());
     }
 
+    /** A batch's tables are the keys of its RequestItems, which botocore keys by the shape a table's name has. */
     @Test
-    void dynamoDbBuildsArnFromSingleTableBatchRequest() {
+    void dynamoDbChecksABatchOnEveryTableItsRequestItemsKey() {
         setJsonBody("{\"RequestItems\":{\"MyTable\":{\"Keys\":[]}}}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/MyTable", arn);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromMultiTableBatchRequest() {
+        assertEquals(List.of(DDB + "MyTable"), dynamoDb("BatchGetItem"));
         setJsonBody("{\"RequestItems\":{\"TableA\":{\"Keys\":[]},\"TableB\":{\"Keys\":[]}}}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
+        assertEquals(List.of(DDB + "TableA", DDB + "TableB"), dynamoDb("BatchGetItem"));
+        assertEquals(List.of(DDB + "TableA", DDB + "TableB"), dynamoDb("BatchWriteItem"));
     }
 
+    /**
+     * Each of a transaction's items is checked as the action the developer guide gives its kind, on its own table,
+     * with the item it comes from: {@code Put} as {@code dynamodb:PutItem}, {@code ConditionCheck} as
+     * {@code dynamodb:ConditionCheckItem}, {@code Get} as {@code dynamodb:GetItem}; the transaction's own action never.
+     */
     @Test
-    void dynamoDbBuildsArnFromSingleTableTransactRequest() {
-        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"MyTable\"}},{\"Delete\":{\"TableName\":\"MyTable\"}}]}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/MyTable", arn);
+    void dynamoDbChecksEachTransactionItemAsItsKindsAction() {
+        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},"
+                + "{\"ConditionCheck\":{\"TableName\":\"TableB\"}},{\"Delete\":{\"TableName\":\"TableA\"}}]}");
+        assertTrue(RequestResources.checkedByParts("dynamodb:TransactWriteItems"));
+        List<RequestResources.Target> targets = dynamoDbTargets("TransactWriteItems");
+        assertEquals(List.of("dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:DeleteItem"),
+                targets.stream().map(RequestResources.Target::action).toList());
+        assertEquals(List.of(List.of(DDB + "TableB"), List.of(DDB + "TableA"), List.of(DDB + "TableA")),
+                targets.stream().map(RequestResources.Target::resources).toList());
+        assertEquals("TableB", targets.getFirst().element().path("TableName").asText());
+        setJsonBody("{\"TransactItems\":[{\"Get\":{\"TableName\":\"MyTable\"}}]}");
+        assertEquals(List.of(new RequestResources.Target("dynamodb:GetItem", List.of(DDB + "MyTable"),
+                        dynamoDbTargets("TransactGetItems").getFirst().element())),
+                dynamoDbTargets("TransactGetItems"));
+        assertEquals(List.of(), dynamoDbTargets("GetItem"));
     }
 
+    /**
+     * A PartiQL statement is checked as the action the developer guide gives its verb, on the table or index it names,
+     * as DynamoDB parses it, a quoted keyword or name included; each statement of a batch or transaction apart.
+     */
     @Test
-    void dynamoDbBuildsArnsFromMultiTableTransactRequest() {
-        setJsonBody("{\"TransactItems\":[{\"Put\":{\"TableName\":\"TableA\"}},{\"Delete\":{\"TableName\":\"TableB\"}},{\"Get\":{\"TableName\":\"TableA\"}}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromPartiQLStatement() {
-        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"UsersTable\\\" WHERE id = '1'\"}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/UsersTable"), arns);
-
-        setJsonBody("{\"Statement\":\"INSERT INTO OrdersTable VALUE {'id': '1'}\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/OrdersTable"), arns);
-
-        setJsonBody("{\"Statement\":\"UPDATE \\\"ProductsTable\\\" SET price=10 WHERE id='1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/ProductsTable"), arns);
-
-        setJsonBody("{\"Statement\":\"DELETE FROM \\\"LogsTable\\\" WHERE id='1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/LogsTable"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"Table With Spaces & Special:Chars\\\" WHERE id = '1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table With Spaces & Special:Chars"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT * FROM 'Table.With.Single.Quotes#1' WHERE id = '1'\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Table.With.Single.Quotes#1"), arns);
-
-        setJsonBody("{\"Statement\":\"SELECT \\\"FROM TableEvil\\\" FROM \\\"TableA\\\" WHERE pk = 1\"}");
-        arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromPartiQLBatchStatements() {
-        setJsonBody("{\"Statements\":[{\"Statement\":\"SELECT * FROM \\\"TableA\\\" WHERE id = '1'\"},{\"Statement\":\"SELECT * FROM TableB WHERE id = '2'\"}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnsFromPartiQLTransactStatements() {
-        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},{\"Statement\":\"UPDATE \\\"TableB\\\" SET x=1 WHERE id='2'\"}]}");
-        List<String> arns = builder.buildResources("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals(List.of(
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
-                "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
-        ), arns);
-    }
-
-    @Test
-    void dynamoDbBuildsArnFromTableCreationParameters() {
-        setJsonBody("{\"TableCreationParameters\":{\"TableName\":\"ImportTarget\"},\"InputFormat\":\"DYNAMODB_JSON\"}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/ImportTarget", arn);
-    }
-
-    @Test
-    void dynamoDbReturnsWildcardWhenNoTableSpecified() {
-        setJsonBody("{}");
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("*", arn);
+    void dynamoDbChecksEachPartiQLStatementAsItsVerbsAction() {
+        Map<String, String> statements = new LinkedHashMap<>();
+        statements.put("SELECT * FROM \\\"UsersTable\\\" WHERE id = '1'", "dynamodb:PartiQLSelect UsersTable");
+        statements.put("INSERT INTO OrdersTable VALUE {'id': '1'}", "dynamodb:PartiQLInsert OrdersTable");
+        statements.put("UPDATE \\\"ProductsTable\\\" SET price=10 WHERE id='1'",
+                "dynamodb:PartiQLUpdate ProductsTable");
+        statements.put("DELETE FROM \\\"LogsTable\\\" WHERE id='1'", "dynamodb:PartiQLDelete LogsTable");
+        statements.put("SELECT * FROM \\\"Table With Spaces & Special:Chars\\\" WHERE id = '1'",
+                "dynamodb:PartiQLSelect Table With Spaces & Special:Chars");
+        statements.put("SELECT \\\"FROM TableEvil\\\" FROM \\\"TableA\\\" WHERE pk = 1",
+                "dynamodb:PartiQLSelect TableA");
+        statements.forEach((statement, expected) -> {
+            setJsonBody("{\"Statement\":\"" + statement + "\"}");
+            List<RequestResources.Target> targets = dynamoDbTargets("ExecuteStatement");
+            String[] parts = expected.split(" ", 2);
+            assertEquals(List.of(new RequestResources.Target(parts[0], List.of(DDB + parts[1]), null)), targets,
+                    statement);
+        });
+        setJsonBody("{\"Statement\":\"SELECT * FROM \\\"Music\\\".\\\"byArtist\\\" WHERE a = 'x'\"}");
+        assertEquals(List.of(new RequestResources.Target("dynamodb:PartiQLSelect",
+                List.of(DDB + "Music/index/byArtist"), null)), dynamoDbTargets("ExecuteStatement"));
+        setJsonBody("{\"Statements\":[{\"Statement\":\"SELECT * FROM \\\"TableA\\\" WHERE id = '1'\"},"
+                + "{\"Statement\":\"DELETE FROM TableB WHERE id = '2'\"}]}");
+        List<RequestResources.Target> batch = dynamoDbTargets("BatchExecuteStatement");
+        assertEquals(List.of("dynamodb:PartiQLSelect TableA", "dynamodb:PartiQLDelete TableB"), batch.stream()
+                .map(target -> target.action() + " " + target.resources().getFirst().substring(DDB.length())).toList());
+        assertTrue(batch.getFirst().element().path("Statement").asText().contains("TableA"));
+        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},"
+                + "{\"Statement\":\"UPDATE \\\"TableB\\\" SET x=1 WHERE id='2'\"}]}");
+        assertEquals(List.of("dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate"),
+                dynamoDbTargets("ExecuteTransaction").stream().map(RequestResources.Target::action).sorted().toList());
+        setJsonBody("{\"TransactStatements\":[{\"Statement\":\"INSERT INTO \\\"TableA\\\" VALUE {'id': '1'}\"},"
+                + "{\"Statement\":\"EXISTS(SELECT * FROM \\\"TableB\\\" WHERE id = ? AND x = 1)\"}]}");
+        assertEquals(List.of("dynamodb:PartiQLSelect TableB", "dynamodb:PartiQLInsert TableA"),
+                dynamoDbTargets("ExecuteTransaction").stream().map(target -> target.action() + " "
+                        + target.resources().getFirst().substring(DDB.length())).toList());
+        setJsonBody("{\"Statements\":[{\"Statement\":\"-- nothing\"}]}");
+        assertEquals(List.of(), dynamoDbTargets("BatchExecuteStatement"));
     }
 
     @Test
@@ -1319,8 +1288,7 @@ class ResourceArnBuilderTest {
         String json = "{\"TableName\":\"FgacTable\",\"Item\":{\"PK\":{\"S\":\"USER_1\"}}}";
         setJsonBody(json);
 
-        String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable", arn);
+        assertEquals(List.of(DDB + "FgacTable"), dynamoDb("PutItem"));
 
         InputStream entityStream = ctx.getEntityStream();
         assertNotNull(entityStream);
@@ -1611,14 +1579,20 @@ class ResourceArnBuilderTest {
         ResourceArnBuilder backed = backedBy(kms);
 
         setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"DestinationKeyId\":\"alias/destination\"}");
-        assertEquals(Map.of("kms:ReEncryptFrom", List.of(KMS_OTHER_KEY_ARN), "kms:ReEncryptTo", List.of(KMS_KEY_ARN)),
-                backed.checkedAs("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptFrom", List.of(KMS_OTHER_KEY_ARN), null),
+                        new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
         setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"SourceKeyId\":\"alias/source\","
                 + "\"DestinationKeyId\":\"alias/destination\"}");
-        assertEquals(List.of("kms:ReEncryptFrom", "kms:ReEncryptTo"),
-                List.copyOf(backed.checkedAs("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws").keySet()));
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptFrom", List.of(KMS_OTHER_KEY_ARN), null),
+                        new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        // A source no member names, nor the ciphertext, is not checked; the destination is.
+        setJsonBody("{\"CiphertextBlob\":\"not base64!\",\"DestinationKeyId\":\"alias/destination\"}");
+        assertEquals(List.of(new RequestResources.Target("kms:ReEncryptTo", List.of(KMS_KEY_ARN), null)),
+                backed.targets("kms", "kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
         assertEquals(List.of("*"), kms(backed, "ReEncrypt"));
-        assertEquals(Map.of(), backed.checkedAs("kms", "kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(), backed.targets("kms", "kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
@@ -1630,8 +1604,9 @@ class ResourceArnBuilderTest {
         KmsService kms = mock(KmsService.class);
         when(kms.findKeyArnOfAccount(KMS_KEY_ID, ACCOUNT, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
         setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"ReplicaRegion\":\"us-west-2\"}");
-        assertEquals(Map.of("kms:ReplicateKey", List.of(KMS_KEY_ARN), "kms:CreateKey", List.of("*")),
-                backedBy(kms).checkedAs("kms", "kms:ReplicateKey", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(new RequestResources.Target("kms:ReplicateKey", List.of(KMS_KEY_ARN), null),
+                        new RequestResources.Target("kms:CreateKey", List.of("*"), null)),
+                backedBy(kms).targets("kms", "kms:ReplicateKey", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
