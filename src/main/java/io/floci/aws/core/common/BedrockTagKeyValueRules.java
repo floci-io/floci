@@ -21,22 +21,24 @@ public final class BedrockTagKeyValueRules {
     }
 
     public static String keyViolation(String key) {
-        return stringViolation("tags.key", key, 1, KEY_MAX);
+        return stringViolation("tags.key", "Map keys", key, 1, KEY_MAX);
     }
 
     public static String valueViolation(String value) {
-        return stringViolation("tags.value", value, 0, VALUE_MAX);
+        return stringViolation("tags.value", "Map value", value, 0, VALUE_MAX);
     }
 
-    private static String stringViolation(String path, String value, int minLength, int maxLength) {
+    private static String stringViolation(String path, String mapConstraint, String value,
+                                          int minLength, int maxLength) {
         if (value == null) {
             return SmithyValidationErrors.notNull(path);
         }
-        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(path, value, minLength, maxLength);
-        if (lengthViolation != null) {
-            return lengthViolation;
+        if (SmithyValidationErrors.lengthOutOfRange(path, value, minLength, maxLength) == null
+                && TAG_PATTERN.matcher(value).matches()) {
+            return null;
         }
-        return TAG_PATTERN.matcher(value).matches() ? null
-                : SmithyValidationErrors.pattern(path, value, TAG_PATTERN.pattern());
+        return SmithyValidationErrors.Violations.WITHOUT_VALUES.constraint("tags", value,
+                mapConstraint + " must satisfy constraint: "
+                        + SmithyValidationErrors.constraintSet(minLength, maxLength, TAG_PATTERN.pattern(), null));
     }
 }

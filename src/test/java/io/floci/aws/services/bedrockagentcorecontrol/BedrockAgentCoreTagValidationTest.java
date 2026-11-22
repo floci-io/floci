@@ -75,24 +75,25 @@ class BedrockAgentCoreTagValidationTest {
 
     private static Stream<Arguments> modeledTagFailures() {
         String prefix = "1 validation error detected: ";
-        String keyPattern = "Member must satisfy regular expression pattern: " + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN;
+        String keyRules = "Value at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: ["
+                + "Member must have length less than or equal to 128, "
+                + "Member must have length greater than or equal to 1, "
+                + "Member must satisfy regular expression pattern: "
+                + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN + "]";
+        String valueRules = "Value at 'tags' failed to satisfy constraint: Map value must satisfy constraint: ["
+                + "Member must have length less than or equal to 256, "
+                + "Member must satisfy regular expression pattern: "
+                + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN + "]";
         Map<String, String> tooMany = new LinkedHashMap<>();
         for (int i = 0; i < 51; i++) {
             tooMany.put("key-" + i, "value");
         }
         return Stream.of(
-                Arguments.of(Map.of("", "value"), prefix + "Value '' at 'tags.key' failed to satisfy constraint: "
-                        + "Member must have length greater than or equal to 1"),
-                Arguments.of(Map.of("k".repeat(129), "value"), prefix + "Value '" + "k".repeat(129)
-                        + "' at 'tags.key' failed to satisfy constraint: "
-                        + "Member must have length less than or equal to 128"),
-                Arguments.of(Map.of("bad?key", "value"), prefix
-                        + "Value 'bad?key' at 'tags.key' failed to satisfy constraint: " + keyPattern),
-                Arguments.of(Map.of("key", "v".repeat(257)), prefix + "Value '" + "v".repeat(257)
-                        + "' at 'tags.value' failed to satisfy constraint: "
-                        + "Member must have length less than or equal to 256"),
-                Arguments.of(Map.of("key", "bad?value"), prefix
-                        + "Value 'bad?value' at 'tags.value' failed to satisfy constraint: " + keyPattern),
+                Arguments.of(Map.of("", "value"), prefix + keyRules),
+                Arguments.of(Map.of("k".repeat(129), "value"), prefix + keyRules),
+                Arguments.of(Map.of("bad?key", "value"), prefix + keyRules),
+                Arguments.of(Map.of("key", "v".repeat(257)), prefix + valueRules),
+                Arguments.of(Map.of("key", "bad?value"), prefix + valueRules),
                 Arguments.of(tooMany, prefix + "Value at 'tags' failed to satisfy constraint: "
                         + "Member must have length less than or equal to 50"));
     }

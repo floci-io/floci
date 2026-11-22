@@ -906,9 +906,11 @@ class BedrockAgentCoreToolsIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"))
-                .body("message", equalTo("1 validation error detected: Value 'has*star' at 'tags.value' "
-                        + "failed to satisfy constraint: Member must satisfy regular expression pattern: "
-                        + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN));
+                .body("message", equalTo("1 validation error detected: Value at 'tags' "
+                        + "failed to satisfy constraint: Map value must satisfy constraint: ["
+                        + "Member must have length less than or equal to 256, "
+                        + "Member must satisfy regular expression pattern: "
+                        + BedrockAgentCoreTagFixtures.EXPECTED_TAG_PATTERN + "]"));
 
         given()
                 .contentType("application/json")
