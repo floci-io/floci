@@ -8,7 +8,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -81,7 +80,7 @@ class SesTemplateNameIntegrationTest {
     void v2_everyOperationRefusesTheName(String name, String message) {
         given()
             .contentType("application/json; charset=UTF-8")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"" + name + "\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -92,7 +91,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .put("/v2/email/templates/{name}", name)
@@ -102,7 +101,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -111,7 +110,7 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(message));
 
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()
@@ -121,7 +120,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateData\": \"{}\"}")
         .when()
             .post("/v2/email/templates/{name}/render", name)
@@ -148,7 +147,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"name probe\", \"TemplateContent\": {\"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -173,7 +172,7 @@ class SesTemplateNameIntegrationTest {
 
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"TemplateName\": \"name\\tprobe\", \"TemplateContent\": {\"Subject\": \"S\", \"Text\": \"t\"}}")
         .when()
             .post("/v2/email/templates")
@@ -198,7 +197,7 @@ class SesTemplateNameIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/templates/{name}", name)
         .then()
@@ -217,7 +216,7 @@ class SesTemplateNameIntegrationTest {
             .body(containsString("<TemplateName>" + name + "</TemplateName>"));
 
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/templates/{name}", name)
         .then()

@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -129,11 +128,11 @@ class SesIdentityCertificateV2IntegrationTest {
     void deleteEmailIdentityIsRefusedWhileACertificateIsAssociated() {
         String identity = "smime-delete@floci.test";
         createIdentity(identity);
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + identity + "\",\"CertificateArn\":\"" + MISSING_CERT_ARN + "\"}")
         .when().post("/v2/email/identity/certificates").then().statusCode(200);
 
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().delete("/v2/email/identities/" + identity).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("Cannot delete <arn:aws:ses:us-east-1:000000000000:identity/" + identity
@@ -141,7 +140,7 @@ class SesIdentityCertificateV2IntegrationTest {
                         + "Disassociate all certificates and try again."));
 
         disassociate("{\"EmailIdentity\":\"" + identity + "\"}").then().statusCode(200);
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().delete("/v2/email/identities/" + identity).then().statusCode(200);
     }
 
@@ -171,26 +170,26 @@ class SesIdentityCertificateV2IntegrationTest {
     }
 
     private static void createIdentity(String identity) {
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + identity + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
 
     private static Response associate(String identity, String fromAddress, String certificateArn) {
         String from = fromAddress == null ? "" : ",\"FromAddress\":\"" + fromAddress + "\"";
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + identity + "\"" + from
                         + ",\"CertificateArn\":\"" + certificateArn + "\"}")
                 .when().post("/v2/email/identity/certificates");
     }
 
     private static Response disassociate(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body(body).when().post("/v2/email/identity/certificates/delete");
     }
 
     private static Response list(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body(body).when().post("/v2/email/identity/certificates/list");
     }
 

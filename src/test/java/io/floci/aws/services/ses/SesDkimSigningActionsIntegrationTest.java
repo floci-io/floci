@@ -12,7 +12,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.EXPECTED_NULL;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.LIST;
 import static io.floci.aws.services.ses.SesV2SerializationErrors.NUMBER;
@@ -87,13 +86,13 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putDkimSigningAttributes_awsSes_regeneratesTokensOnKeyLengthChange() {
         String domain = "dkim-signing.floci.test";
-        List<String> before = given().contentType("application/json").header("Authorization", AUTH)
+        List<String> before = given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200)
                 .extract().path("DkimAttributes.Tokens");
 
         // Change the key length (default is RSA_2048_BIT) -> tokens regenerate.
-        Response resp = given().contentType("application/json").header("Authorization", AUTH)
+        Response resp = given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\","
                         + "\"SigningAttributes\":{\"NextSigningKeyLength\":\"RSA_1024_BIT\"}}")
         .when().put("/v2/email/identities/" + domain + "/dkim/signing").then().statusCode(200)
@@ -103,7 +102,7 @@ class SesDkimSigningActionsIntegrationTest {
         List<String> after = resp.path("DkimTokens");
         assertNotEquals(before, after, "changing the key length must regenerate the tokens");
 
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/" + domain).then().statusCode(200)
                 .body("DkimAttributes.CurrentSigningKeyLength", equalTo("RSA_1024_BIT"))
                 .body("DkimAttributes.SigningHostedZone", equalTo("dkim.amazonses.com"))
@@ -113,7 +112,7 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putDkimSigningAttributes_emailIdentity_returns400() {
         // DKIM signing attributes are domain-level; an email-shaped identity is rejected.
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
         .when().put("/v2/email/identities/bob@dkim-emailsigning.floci.test/dkim/signing")
         .then().statusCode(400).body("__type", equalTo("BadRequestException"))
@@ -124,7 +123,7 @@ class SesDkimSigningActionsIntegrationTest {
     void putDkimSigningAttributes_blankIdentity_returns400() {
         // A blank/whitespace identity is rejected with the same 400 "must be a valid domain" as an
         // email-shaped one (verified against AWS), rather than falling through to a 404.
-        given().urlEncodingEnabled(false).contentType("application/json").header("Authorization", AUTH)
+        given().urlEncodingEnabled(false).contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
         .when().put("/v2/email/identities/%20/dkim/signing")
         .then().statusCode(400).body("__type", equalTo("BadRequestException"))
@@ -133,7 +132,7 @@ class SesDkimSigningActionsIntegrationTest {
 
     @Test
     void putDkimSigningAttributes_unknownIdentity_returns404() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\"}")
         .when().put("/v2/email/identities/ghost-signing.floci.test/dkim/signing")
         .then().statusCode(404).body("__type", equalTo("NotFoundException"))
@@ -144,11 +143,11 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putDkimSigningAttributes_externalWithBlankPrivateKey_returns400() {
         String domain = "dkim-external.floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"EXTERNAL\",\"SigningAttributes\":"
                         + "{\"DomainSigningSelector\":\"sel\",\"DomainSigningPrivateKey\":\"\"}}")
         .when().put("/v2/email/identities/" + domain + "/dkim/signing")
@@ -181,11 +180,11 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putDkimSigningAttributes_invalidKeyLength_returns400() {
         String domain = "dkim-badkeylen.floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"AWS_SES\","
                         + "\"SigningAttributes\":{\"NextSigningKeyLength\":\"RSA_4096_BIT\"}}")
         .when().put("/v2/email/identities/" + domain + "/dkim/signing")
@@ -195,18 +194,18 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putDkimSigningAttributes_external_clearsTokensAndResetsStatusToPending() {
         String domain = "dkim-byodkim.floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningAttributesOrigin\":\"EXTERNAL\",\"SigningAttributes\":"
                         + "{\"DomainSigningSelector\":\"sel\",\"DomainSigningPrivateKey\":\"key\"}}")
         .when().put("/v2/email/identities/" + domain + "/dkim/signing").then().statusCode(200)
                 .body("DkimStatus", equalTo("PENDING"))
                 .body("DkimTokens", hasSize(0));
 
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/" + domain).then().statusCode(200)
                 .body("DkimAttributes.Status", equalTo("PENDING"))
                 .body("DkimAttributes.SigningAttributesOrigin", equalTo("EXTERNAL"))
@@ -216,7 +215,7 @@ class SesDkimSigningActionsIntegrationTest {
 
     @Test
     void putDkimSigningAttributes_nonObjectBody_returns400() {
-        given().contentType("application/json").header("Authorization", AUTH).body("[]")
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH).body("[]")
         .when().put("/v2/email/identities/dkim-nonobj.floci.test/dkim/signing")
         .then().statusCode(400).body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("Start of list found where not expected"));
@@ -251,23 +250,23 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void putEmailIdentityDkimAttributes_existingEmailWithRegisteredDomain_isNoOp() {
         String domain = "dkim-emailtoggle.floci.test";
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"bob@" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
         // Toggling DKIM on the email is a no-op (DKIM is domain-controlled) — 200, nothing changes.
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"SigningEnabled\": false}")
         .when().put("/v2/email/identities/bob@" + domain + "/dkim").then().statusCode(200);
 
         // The email still reports the domain's DKIM (enabled), and the domain is untouched.
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/bob@" + domain).then().statusCode(200)
                 .body("DkimAttributes.SigningEnabled", equalTo(true));
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/" + domain).then().statusCode(200)
                 .body("DkimAttributes.SigningEnabled", equalTo(true));
     }
@@ -275,17 +274,17 @@ class SesDkimSigningActionsIntegrationTest {
     @Test
     void emailIdentity_inheritsParentDomainDkim() {
         String domain = "dkim-inherit.floci.test";
-        List<String> domainTokens = given().contentType("application/json").header("Authorization", AUTH)
+        List<String> domainTokens = given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200)
                 .extract().path("DkimAttributes.Tokens");
 
         // An email under that domain inherits the domain's DKIM (tokens, enabled, pending status).
-        given().contentType("application/json").header("Authorization", AUTH)
+        given().contentType("application/json").header("Authorization", SesV2Requests.AUTH)
                 .body("{\"EmailIdentity\":\"bob@" + domain + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
 
-        given().header("Authorization", AUTH)
+        given().header("Authorization", SesV2Requests.AUTH)
         .when().get("/v2/email/identities/bob@" + domain).then().statusCode(200)
                 .body("DkimAttributes.SigningEnabled", equalTo(true))
                 .body("DkimAttributes.Status", equalTo("PENDING"))

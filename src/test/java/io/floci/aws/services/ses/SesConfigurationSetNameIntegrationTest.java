@@ -3,7 +3,6 @@ package io.floci.aws.services.ses;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import static io.floci.aws.services.ses.SesV2Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -22,7 +21,7 @@ class SesConfigurationSetNameIntegrationTest {
     @Test
     void v2_invalidCharacters_nameTheOffendingValue() {
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .get("/v2/email/configuration-sets/a.b")
         .then()
@@ -35,7 +34,7 @@ class SesConfigurationSetNameIntegrationTest {
     @Test
     void v2_lengthIsCheckedBeforeCharacters() {
         given()
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
         .when()
             .delete("/v2/email/configuration-sets/b." + SIXTY_FIVE)
         .then()
@@ -48,7 +47,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v2_createWithEmptyName_mustBeSpecified() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"ConfigurationSetName\": \"\"}")
         .when()
             .post("/v2/email/configuration-sets")
@@ -62,7 +61,7 @@ class SesConfigurationSetNameIntegrationTest {
     void v2_createWithInvalidName_rejectsBeforeStoring() {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", SesV2Requests.AUTH)
             .body("{\"ConfigurationSetName\": \"bad name\"}")
         .when()
             .post("/v2/email/configuration-sets")
