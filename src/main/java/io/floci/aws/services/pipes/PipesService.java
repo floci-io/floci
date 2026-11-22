@@ -2,7 +2,10 @@ package io.floci.aws.services.pipes;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -23,11 +26,13 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -40,6 +45,9 @@ public class PipesService implements TagHandler, ResourceProvider {
     private static final int MIN_REDSHIFT_SQLS = 1;
     private static final int MAX_REDSHIFT_SQLS = 40;
     private static final int MAX_REDSHIFT_SQL_LENGTH = 100_000;
+
+    // CreatePipe refuses a target parameter that starts with $. and does not match this.
+    private static final Pattern TARGET_PARAMETER_PATH = Pattern.compile("\\$(?:\\.[\\w/-]+|\\[(?:\\d+|\\*)])+");
 
     private final StorageBackend<String, Pipe> storage;
     private final RegionResolver regionResolver;
@@ -354,15 +362,20 @@ public class PipesService implements TagHandler, ResourceProvider {
                         "Resource " + arn + " does not exist.", 404));
     }
 
+    private void validateTargetConfiguration(String target, JsonNode targetParameters) {
+        if (AwsArnUtils.isArnFor(target, "sqs")) {
+            validateSqsTarget(target, targetParameters);
+        } else if (PipesTargetInvoker.isRedshiftTarget(target)) {
+            validateRedshiftTarget(targetParameters);
+        }
+    }
+
     /**
      * A Redshift target runs its {@code Sqls} as one BatchExecuteStatement, which the PipeTargetRedshiftDataParameters
      * reference makes required together with {@code Database}, with 1 to 40 statements of at most 100,000
      * characters each.
      */
-    private void validateTargetConfiguration(String target, JsonNode targetParameters) {
-        if (!PipesTargetInvoker.isRedshiftTarget(target)) {
-            return;
-        }
+    private void validateRedshiftTarget(JsonNode targetParameters) {
         JsonNode parameters = targetParameters == null
                 ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters");
         if (!parameters.path("Database").isTextual() || parameters.path("Database").asText().isBlank()) {
@@ -383,6 +396,64 @@ public class PipesService implements TagHandler, ResourceProvider {
             }
         }
     }
+
+    private void validateSqsTarget(String target, JsonNode targetParameters) {
+        boolean fifo = AwsArnUtils.resourceIfArnFor(target, "sqs").orElse("").endsWith(".fifo");
+        JsonNode sqsParameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("SqsQueueParameters");
+        if (sqsParameters.isMissingNode() || sqsParameters.isNull()) {
+            if (fifo) {
+                throw validationFields(List.of(new ValidationField(
+                        "TargetParameters.SqsQueueParameters", "Missing required target parameter.")));
+            }
+            return;
+        }
+        String groupId = PipesTargetInvoker.text(sqsParameters, "MessageGroupId");
+        String dedupId = PipesTargetInvoker.text(sqsParameters, "MessageDeduplicationId");
+        List<ValidationField> errors = new ArrayList<>();
+        if (groupId != null && isInvalidDynamicPath(groupId)) {
+            errors.add(new ValidationField("MessageGroupId", invalidPathMessage(groupId)));
+        }
+        if (dedupId != null && isInvalidDynamicPath(dedupId)) {
+            errors.add(new ValidationField("MessageDeduplicationId", invalidPathMessage(dedupId)));
+        }
+        if (dedupId != null && !fifo) {
+            errors.add(new ValidationField("MessageDeduplicationId",
+                    "Parameter only applies to FIFO (first-in-first-out) queues."));
+        }
+        if (fifo && groupId == null) {
+            errors.add(new ValidationField("MessageGroupId",
+                    "MessageGroupId is required for FIFO (first-in-first-out) queues."));
+        }
+        if (!errors.isEmpty()) {
+            throw validationFields(errors);
+        }
+    }
+
+    private static boolean isInvalidDynamicPath(String value) {
+        return value.startsWith("$.") && !TARGET_PARAMETER_PATH.matcher(value).matches();
+    }
+
+    private static String invalidPathMessage(String value) {
+        return "Invalid JSON path " + value + " provided in the service target parameters.";
+    }
+
+    private static AwsException validationFields(List<ValidationField> errors) {
+        ArrayNode validationErrorFields = JsonNodeFactory.instance.arrayNode();
+        List<Map<String, String>> fieldList = new ArrayList<>();
+        for (ValidationField error : errors) {
+            validationErrorFields.addObject().put("Name", error.name()).put("Message", error.message());
+            Map<String, String> field = new LinkedHashMap<>();
+            field.put("name", error.name());
+            field.put("message", error.message());
+            fieldList.add(field);
+        }
+        ObjectNode message = JsonNodeFactory.instance.objectNode();
+        message.set("ValidationErrorFields", validationErrorFields);
+        return new AwsException("ValidationException", message.toString(), 400, Map.of("fieldList", fieldList));
+    }
+
+    private record ValidationField(String name, String message) {}
 
     private void validateSourceConfiguration(String source, JsonNode sourceParameters) {
         if (source == null) {

@@ -2,6 +2,8 @@ package io.floci.aws.services.pipes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -12,8 +14,12 @@ import io.floci.aws.services.pipes.model.Pipe;
 import io.floci.aws.services.pipes.model.PipeState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -24,6 +30,10 @@ import static org.mockito.Mockito.when;
 class PipesServiceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String SQS_SOURCE = "arn:aws:sqs:us-east-1:000000000000:source";
+    private static final String STANDARD_TARGET = "arn:aws:sqs:us-east-1:000000000000:target";
+    private static final String FIFO_TARGET = "arn:aws:sqs:us-east-1:000000000000:target.fifo";
+    private static final String PIPE_ROLE = "arn:aws:iam::000000000000:role/role";
 
     private AccountAwareStorageBackend<Pipe> storage;
     private PipesService pipesService;
@@ -39,6 +49,127 @@ class PipesServiceTest {
 
         PipesPoller poller = Mockito.mock(PipesPoller.class);
         pipesService = new PipesService(storageFactory, regionResolver, poller);
+    }
+
+    private static JsonNode sqsParameters(String groupId, String dedupId) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        ObjectNode sqs = tp.putObject("SqsQueueParameters");
+        if (groupId != null) {
+            sqs.put("MessageGroupId", groupId);
+        }
+        if (dedupId != null) {
+            sqs.put("MessageDeduplicationId", dedupId);
+        }
+        return tp;
+    }
+
+    private Pipe createSqsPipe(String target, JsonNode targetParameters) {
+        return pipesService.createPipe("sqs-pipe", SQS_SOURCE, target, PIPE_ROLE,
+                null, null, null, null, targetParameters, null, null, "us-east-1");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void assertFields(AwsException ex, String... namesAndMessages) throws Exception {
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        ArrayNode expectedFields = MAPPER.createArrayNode();
+        List<Map<String, String>> expectedList = new ArrayList<>();
+        for (int i = 0; i < namesAndMessages.length; i += 2) {
+            expectedFields.addObject().put("Name", namesAndMessages[i]).put("Message", namesAndMessages[i + 1]);
+            Map<String, String> field = new LinkedHashMap<>();
+            field.put("name", namesAndMessages[i]);
+            field.put("message", namesAndMessages[i + 1]);
+            expectedList.add(field);
+        }
+        ObjectNode expected = MAPPER.createObjectNode();
+        expected.set("ValidationErrorFields", expectedFields);
+        assertEquals(expected.toString(), ex.getMessage());
+        assertEquals(expectedList, ex.getExtendedData().get("fieldList"));
+    }
+
+    @Test
+    void sqsFifoTargetWithoutSqsQueueParametersIsRefused() throws Exception {
+        AwsException ex = assertThrows(AwsException.class, () -> createSqsPipe(FIFO_TARGET, null));
+        assertFields(ex, "TargetParameters.SqsQueueParameters", "Missing required target parameter.");
+
+        ex = assertThrows(AwsException.class,
+                () -> createSqsPipe(FIFO_TARGET, MAPPER.createObjectNode().put("InputTemplate", "x")));
+        assertFields(ex, "TargetParameters.SqsQueueParameters", "Missing required target parameter.");
+    }
+
+    @Test
+    void sqsFifoTargetWithoutMessageGroupIdIsRefused() throws Exception {
+        AwsException ex = assertThrows(AwsException.class, () -> createSqsPipe(FIFO_TARGET, sqsParameters(null, null)));
+        assertFields(ex, "MessageGroupId", "MessageGroupId is required for FIFO (first-in-first-out) queues.");
+    }
+
+    @Test
+    void sqsFifoTargetWithOnlyAnInvalidDeduplicationPathReportsBoth() throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> createSqsPipe(FIFO_TARGET, sqsParameters(null, "$.x[")));
+        assertFields(ex,
+                "MessageDeduplicationId", "Invalid JSON path $.x[ provided in the service target parameters.",
+                "MessageGroupId", "MessageGroupId is required for FIFO (first-in-first-out) queues.");
+    }
+
+    @Test
+    void sqsStandardTargetWithInvalidPathsReportsGroupDeduplicationAndFifoOnly() throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> createSqsPipe(STANDARD_TARGET, sqsParameters("$.g[", "$.x[")));
+        assertFields(ex,
+                "MessageGroupId", "Invalid JSON path $.g[ provided in the service target parameters.",
+                "MessageDeduplicationId", "Invalid JSON path $.x[ provided in the service target parameters.",
+                "MessageDeduplicationId", "Parameter only applies to FIFO (first-in-first-out) queues.");
+    }
+
+    @Test
+    void sqsStandardTargetWithDeduplicationIdIsRefused() throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> createSqsPipe(STANDARD_TARGET, sqsParameters("g", "d")));
+        assertFields(ex, "MessageDeduplicationId", "Parameter only applies to FIFO (first-in-first-out) queues.");
+    }
+
+    @Test
+    void sqsTargetsAreAcceptedWhenTheirParametersFitTheQueueKind() {
+        assertNotNull(createSqsPipe(STANDARD_TARGET, null));
+        pipesService.deletePipe("sqs-pipe", "us-east-1");
+        assertNotNull(createSqsPipe(STANDARD_TARGET, sqsParameters("g", null)));
+        pipesService.deletePipe("sqs-pipe", "us-east-1");
+        assertNotNull(createSqsPipe(FIFO_TARGET, sqsParameters("", null)));
+        pipesService.deletePipe("sqs-pipe", "us-east-1");
+        assertNotNull(createSqsPipe(FIFO_TARGET, sqsParameters("$.g", "$.d")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$.body[", "$.a b", "$.", "$..a", "$.a.*", "$.a[-1]"})
+    void sqsMessageGroupIdThatStartsWithADollarDotButIsNotAPathIsRefused(String value) throws Exception {
+        AwsException ex = assertThrows(AwsException.class, () -> createSqsPipe(FIFO_TARGET, sqsParameters(value, null)));
+        assertFields(ex, "MessageGroupId",
+                "Invalid JSON path " + value + " provided in the service target parameters.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$.a[0]", "$.a[*]", "$.a-b", "$.a/b", "$", "$x", "$[0]", "$['a']", "a$.b"})
+    void sqsMessageGroupIdThatIsAPathOrNotPathLikeIsAccepted(String value) {
+        assertNotNull(createSqsPipe(FIFO_TARGET, sqsParameters(value, null)));
+    }
+
+    @Test
+    void sqsUpdateWithOnlyTargetParametersIsCheckedAgainstTheStoredTarget() throws Exception {
+        createSqsPipe(FIFO_TARGET, sqsParameters("g", null));
+
+        AwsException ex = assertThrows(AwsException.class, () -> pipesService.updatePipe("sqs-pipe", null, null,
+                null, null, null, null, sqsParameters(null, null), null, "us-east-1"));
+        assertFields(ex, "MessageGroupId", "MessageGroupId is required for FIFO (first-in-first-out) queues.");
+    }
+
+    @Test
+    void sqsUpdateWithANewTargetIsCheckedAgainstTheStoredParameters() throws Exception {
+        createSqsPipe(STANDARD_TARGET, null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> pipesService.updatePipe("sqs-pipe", FIFO_TARGET,
+                null, null, null, null, null, null, null, "us-east-1"));
+        assertFields(ex, "TargetParameters.SqsQueueParameters", "Missing required target parameter.");
     }
 
     @Test
