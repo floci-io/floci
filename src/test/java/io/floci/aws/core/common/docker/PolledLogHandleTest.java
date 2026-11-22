@@ -72,9 +72,11 @@ class PolledLogHandleTest {
     @Test
     void aRecordCutAnywhereByTheTransportIsForwardedOnceWithoutItsTimestamp() {
         byte[] stream = (String.join("", "2026-11-19T10:00:00.100000000Z first\n",
-                "2026-11-19T10:00:00.200000000Z second line\n", "2026-11-19T10:00:01.000000000Z third\n"))
+                "2026-11-19T10:00:00.200000000Z second line\n", "2026-11-19T10:00:01.000000000Z third\n",
+                "2026-11-19T10:00:01.500000000Z 2026-11-19T10:00:00.099999Z 0 [System] ready\n"))
                 .getBytes(StandardCharsets.UTF_8);
-        List<String> expected = List.of("STDOUT:first", "STDOUT:second line", "STDOUT:third");
+        List<String> expected = List.of("STDOUT:first", "STDOUT:second line", "STDOUT:third",
+                "STDOUT:2026-11-19T10:00:00.099999Z 0 [System] ready");
 
         for (int cut = 1; cut < stream.length; cut++) {
             lines.clear();

@@ -14,6 +14,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.EnumMap;
@@ -48,6 +50,10 @@ final class PolledLogHandle implements Closeable {
     private static final Logger LOG = Logger.getLogger(PolledLogHandle.class);
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(2);
     private static final int TIMESTAMP_MAX_BYTES = 40;
+    // Docker and Podman both stamp a record with exactly nine fractional digits; a log line's own text that
+    // starts with an instant (MySQL's error log writes six) does not match, so it stays text.
+    private static final DateTimeFormatter RECORD_STAMP =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSSSSSSSXXX");
     static final int TAIL_LINES = 1000;
 
     // Idle threads time out, as the close-drain scheduler's do, so the poller pins no classloader.
@@ -281,7 +287,8 @@ final class PolledLogHandle implements Closeable {
         Instant timestamp = null;
         if (space > start) {
             try {
-                timestamp = Instant.parse(new String(payload, start, space - start, StandardCharsets.US_ASCII));
+                timestamp = OffsetDateTime.parse(new String(payload, start, space - start, StandardCharsets.US_ASCII),
+                        RECORD_STAMP).toInstant();
             } catch (DateTimeParseException expected) {
                 // A record can continue without a timestamp of its own; it shares the previous one's fate.
             }
