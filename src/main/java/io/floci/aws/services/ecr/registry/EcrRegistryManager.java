@@ -597,8 +597,8 @@ public class EcrRegistryManager {
         String region = regionResolver.getDefaultRegion();
 
         this.logStream = adopted
-                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
-                : logStreamer.attach(containerId, logGroup, logStreamName, region, "ecr:registry");
+                ? logStreamer.attachPolledFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
+                : logStreamer.attachPolled(containerId, logGroup, logStreamName, region, "ecr:registry");
     }
 
     private void closeLogStream() {

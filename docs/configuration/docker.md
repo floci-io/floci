@@ -64,7 +64,7 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; other containers' log streams use it too, and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
+Streams that stay open for as long as a container or a command runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension; short-lived containers' log streams use it too (a long-lived service container's log is read on a timer instead, see [Container Log Settings](#container-log-settings)), and so does the output of each long-running command: CodeBuild build phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions. The default of 3072 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each (2000 connections), and leaves about 1000 for every other stream. Raise it if you widen that range, or run many builds, sessions or other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
@@ -215,6 +215,17 @@ The `server` field must match the registry hostname exactly as it appears in the
 Explicit credentials take precedence for registries they cover. For everything else, Floci falls back to the Docker config file (if `docker-config-path` is set) and then to an anonymous pull.
 
 ## Container Log Settings
+
+Floci forwards each container's output to the console and to CloudWatch Logs. A container that runs for one job or invocation (a Lambda function, a build, an ECS task) has its log followed as it is written. A long-lived service container (a database, cache or broker, the ECR registry, the EKS API server) instead has its log read every `log-poll-interval-millis` (1000 by default) with one short call, so it holds no Docker connection between reads. Its lines reach the console and CloudWatch Logs up to one interval later, and its last lines are read between its stop and its removal:
+
+```yaml
+floci:
+  docker:
+    log-poll-interval-millis: 1000
+```
+
+Environment variable: `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` (at least 100)
+
 
 Configure log rotation for all containers spawned by Floci:
 
@@ -402,6 +413,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |
+| `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log (databases, caches, brokers, the ECR registry, the EKS API server), read on a timer instead of followed; at least 100 |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Max container log file size before rotation |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to retain |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(unset)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |

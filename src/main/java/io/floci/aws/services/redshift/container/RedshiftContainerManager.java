@@ -220,7 +220,7 @@ public class RedshiftContainerManager {
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
 
         try {
-            Closeable stream = logStreamer.attach(
+            Closeable stream = logStreamer.attachPolled(
                     info.containerId(),
                     "/floci/redshift",
                     clusterIdentifier,
@@ -250,6 +250,9 @@ public class RedshiftContainerManager {
         String adoptedId = adoptedContainers.get(key);
         String containerId = handle == null
                 ? adoptedContainers.getOrDefault(key, containerName(accountId, clusterIdentifier)) : handle.getContainerId();
+        if (handle != null) {
+            lifecycleManager.readLogBeforeRemoval(handle.getLogStream());
+        }
         lifecycleManager.removeIfExistsStrict(containerId, true);
         releaseHandle(key, handle);
         if (containerId.equals(adoptedId)) {

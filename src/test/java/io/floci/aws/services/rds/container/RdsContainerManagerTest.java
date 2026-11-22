@@ -638,7 +638,7 @@ class RdsContainerManagerTest {
         verify(lifecycleManager).create(spec.capture());
         assertEquals(dbPath.toString(), spec.getValue().binds().getFirst().getPath());
         assertEquals("floci-aws-rds-db1", spec.getValue().name());
-        verify(logStreamer).attachForAccount(
+        verify(logStreamer).attachPolledForAccount(
                 "222222222222", "container-id", "/aws/rds/instance/db1/error",
                 "log-stream", "us-west-2", "rds:" + runtimeId);
     }
@@ -1185,7 +1185,7 @@ class RdsContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("db1", 3307))));
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
-        when(logStreamer.attachForAccount(any(), any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolledForAccount(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed"))
                 .thenReturn(null);
         RdsContainerManager manager = new RdsContainerManager(
@@ -1221,7 +1221,7 @@ class RdsContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
-        when(logStreamer.attachForAccount(any(), any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolledForAccount(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed"));
         doThrow(new IllegalStateException("Docker cleanup failed"))
                 .doNothing()

@@ -445,6 +445,11 @@ floci:
     # Floci sees, at least 4. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.maxConcurrentLaunches: a value set here WINS over the annotation.
     max-concurrent-launches: 0
+    # FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS: milliseconds between the reads of a long-lived service
+    # container's log (databases, brokers, registries), read on a timer instead of a follow stream held
+    # for the container's life; at least 100. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.logPollIntervalMillis: a value set here WINS over the annotation.
+    log-poll-interval-millis: 1000
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
