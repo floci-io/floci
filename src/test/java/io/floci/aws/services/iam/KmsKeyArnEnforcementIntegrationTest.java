@@ -281,7 +281,7 @@ class KmsKeyArnEnforcementIntegrationTest {
 
     /** {@code body} with {@code "DryRun": true} added. */
     private static String dryRun(String body) {
-        return body.substring(0, body.lastIndexOf('}')) + ", \"DryRun\": true}";
+        return RestAssuredJsonUtils.withMember(body, "DryRun", "true");
     }
 
     private static String decryptOn(String keyArn) {

@@ -195,9 +195,9 @@ class KmsDryRunIntegrationTest {
         return call(action, body).statusCode(200).extract().path(path);
     }
 
-    /** {@code body} with a DryRun member holding {@code value}, both written with single quotes for double ones. */
+    /** {@code body} with a DryRun member holding {@code value}, written with single quotes for double ones. */
     private static String withDryRun(String body, String value) {
-        return body.substring(0, body.lastIndexOf('}')) + ", 'DryRun': " + value + "}";
+        return RestAssuredJsonUtils.withMember(body, "DryRun", value);
     }
 
     /**
