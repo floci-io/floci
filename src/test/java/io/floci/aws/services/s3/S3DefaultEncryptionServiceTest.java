@@ -30,6 +30,7 @@ class S3DefaultEncryptionServiceTest {
     private static final String BUCKET = "default-encryption-bucket";
     private static final String SOURCE = "copy-source-bucket";
     private static final String KMS_KEY = "arn:aws:kms:us-east-1:000000000000:key/11111111-2222-3333-4444-555555555555";
+    private static final String OTHER_KMS_KEY = "arn:aws:kms:us-east-1:000000000000:key/99999999-8888-7777-6666-555555555555";
     private static final byte[] DATA = "data".getBytes(StandardCharsets.UTF_8);
 
     @TempDir
@@ -186,6 +187,67 @@ class S3DefaultEncryptionServiceTest {
             assertEquals(KMS_KEY, copy.getSseKmsKeyId());
             assertNull(copy.getSseCustomerAlgorithm());
         }
+    }
+
+    @Test
+    void aCopyTakesTheDestinationBucketsDefaultNotTheSourcesEncryption() {
+        s3Service.putBucketEncryption(SOURCE, configuration("aws:kms", KMS_KEY));
+        s3Service.putObject(SOURCE, "kms.txt", DATA, "text/plain", null, new PutObjectOptions());
+        put("sse-s3.txt", new PutObjectOptions());
+
+        S3Object intoPlainBucket = s3Service.copyObject(SOURCE, "kms.txt", BUCKET, "plain-copy.txt");
+
+        assertEquals("AES256", intoPlainBucket.getServerSideEncryption());
+        assertNull(intoPlainBucket.getSseKmsKeyId());
+
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", OTHER_KMS_KEY));
+        S3Object fromKmsSource = s3Service.copyObject(SOURCE, "kms.txt", BUCKET, "kms-copy.txt");
+        S3Object fromSseS3Source = s3Service.copyObject(BUCKET, "sse-s3.txt", BUCKET, "sse-s3-copy.txt");
+
+        for (S3Object copy : List.of(fromKmsSource, fromSseS3Source)) {
+            assertEquals("aws:kms", copy.getServerSideEncryption());
+            assertEquals(OTHER_KMS_KEY, copy.getSseKmsKeyId());
+        }
+        assertEquals(OTHER_KMS_KEY, s3Service.getObject(BUCKET, "kms-copy.txt").getSseKmsKeyId());
+    }
+
+    @Test
+    void aCopyWithAnExplicitHeaderKeepsIt() {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        put("source.txt", new PutObjectOptions());
+
+        S3Object aes = s3Service.copyObject(BUCKET, "source.txt", BUCKET, "aes-copy.txt", null,
+                new CopyObjectOptions().withServerSideEncryption("AES256"));
+        S3Object kms = s3Service.copyObject(BUCKET, "source.txt", BUCKET, "kms-copy.txt", null,
+                new CopyObjectOptions().withServerSideEncryption("aws:kms").withSseKmsKeyId(OTHER_KMS_KEY));
+        S3Object kmsWithoutKey = s3Service.copyObject(BUCKET, "source.txt", BUCKET, "kms-no-key-copy.txt", null,
+                new CopyObjectOptions().withServerSideEncryption("aws:kms"));
+
+        assertEquals("AES256", aes.getServerSideEncryption());
+        assertNull(aes.getSseKmsKeyId());
+        assertEquals("aws:kms", kms.getServerSideEncryption());
+        assertEquals(OTHER_KMS_KEY, kms.getSseKmsKeyId());
+        assertEquals("aws:kms", kmsWithoutKey.getServerSideEncryption());
+        assertNotEquals(KMS_KEY, kmsWithoutKey.getSseKmsKeyId());
+        S3Object dsse = s3Service.copyObject(BUCKET, "source.txt", BUCKET, "dsse-copy.txt", null,
+                new CopyObjectOptions().withServerSideEncryption("aws:kms:dsse").withSseKmsKeyId(OTHER_KMS_KEY));
+        assertEquals(OTHER_KMS_KEY, dsse.getSseKmsKeyId());
+    }
+
+    @Test
+    void aCopyEncryptedWithACustomerKeyGetsNoDefault() throws Exception {
+        s3Service.putBucketEncryption(BUCKET, configuration("aws:kms", KMS_KEY));
+        put("source.txt", new PutObjectOptions());
+        PutObjectOptions sseC = customerKey(new PutObjectOptions());
+
+        S3Object copy = s3Service.copyObject(BUCKET, "source.txt", BUCKET, "sse-c-copy.txt", null,
+                new CopyObjectOptions()
+                        .withSseCustomerAlgorithm(sseC.getSseCustomerAlgorithm())
+                        .withSseCustomerKey(sseC.getSseCustomerKey())
+                        .withSseCustomerKeyMd5(sseC.getSseCustomerKeyMd5()));
+
+        assertNull(copy.getServerSideEncryption());
+        assertEquals("AES256", copy.getSseCustomerAlgorithm());
     }
 
     private S3Object put(String key, PutObjectOptions options) {
