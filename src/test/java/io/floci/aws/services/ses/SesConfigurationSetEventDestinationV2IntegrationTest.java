@@ -497,8 +497,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Order(19)
     void createEventDestination_eventBridgeDefaultBusNonCommercialPartitionSucceeds() {
         String cs = "v2-cs-ed-ebus";
-        String cnAuthHeader =
-                "AWS4-HMAC-SHA256 Credential=AKID/20260101/cn-north-1/ses/aws4_request";
+        String cnAuthHeader = SesV2Requests.authFor("cn-north-1");
         String cnDefaultBusArn =
                 "arn:aws-cn:events:cn-north-1:000000000000:event-bus/default";
         given()

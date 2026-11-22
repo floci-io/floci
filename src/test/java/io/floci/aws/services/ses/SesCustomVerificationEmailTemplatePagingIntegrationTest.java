@@ -28,8 +28,7 @@ import static org.hamcrest.Matchers.nullValue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesCustomVerificationEmailTemplatePagingIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-south-1/ses/aws4_request";
+    private static final String AUTH = SesV2Requests.authFor("eu-south-1");
     private static final String BASE = "/v2/email/custom-verification-email-templates";
     private static final String FROM = "cvet-page-sender@floci.test";
     private static final String V1_ROOT =
