@@ -190,6 +190,44 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void anOperationCheckedAsSeveralActionsHasEachResourceUnderItsAction() throws Exception {
+        // KMS's ReEncrypt is authorized by kms:ReEncryptFrom on its source key and kms:ReEncryptTo on its destination.
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {"key": "arn:${Partition}:example:${Region}:${Account}:key/${KeyId}"}},
+                  "operations": {
+                    "example:ReEncrypt": {
+                      "actions": {"example:ReEncryptFrom": ["key"], "example:ReEncryptTo": ["key"]},
+                      "resources": [
+                        {"type": "key", "fill": {"KeyId": "SourceKeyId"}, "action": "example:ReEncryptFrom"},
+                        {"types": ["key"], "through": "CiphertextBlob", "when": {"SourceKeyId": [null]},
+                         "action": "example:ReEncryptFrom"},
+                        {"type": "key", "fill": {"KeyId": "DestinationKeyId"}, "action": "example:ReEncryptTo"}
+                      ]
+                    }
+                  }
+                }
+                """);
+        RequestResourceMembers.Table table = parse(document.toString());
+        assertEquals(List.of(), table.operations().get("example:ReEncrypt"));
+        Map<String, List<Resource>> checkedAs = table.checkedAs().get("example:ReEncrypt");
+        assertEquals(List.of("example:ReEncryptFrom", "example:ReEncryptTo"), List.copyOf(checkedAs.keySet()));
+        assertEquals(2, checkedAs.get("example:ReEncryptFrom").size());
+        assertEquals(new Member("CiphertextBlob", false), checkedAs.get("example:ReEncryptFrom").get(1).through());
+        assertEquals(Map.of("KeyId", new Member("DestinationKeyId", false)),
+                checkedAs.get("example:ReEncryptTo").getFirst().fill());
+        ObjectNode unrecorded = document.deepCopy();
+        ((ObjectNode) unrecorded.path("operations").path("example:ReEncrypt").path("resources").path(0))
+                .put("action", "example:ReEncrypt");
+        assertThrows(IllegalStateException.class, () -> parse(unrecorded.toString()));
+        ObjectNode unchecked = document.deepCopy();
+        ((ObjectNode) unchecked.path("operations").path("example:ReEncrypt").path("resources").path(2))
+                .remove("action");
+        assertThrows(IllegalStateException.class, () -> parse(unchecked.toString()));
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
