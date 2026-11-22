@@ -231,7 +231,8 @@ public class GlueCrawlerRunService {
     }
 
     /** A crawl of a workflow run as the workflow graph reports it: the {@code Crawl} structure. */
-    public record WorkflowCrawl(String crawlerName, String state, Instant startedOn, Instant completedOn) {}
+    public record WorkflowCrawl(String crawlerName, String state, Instant startedOn, Instant completedOn,
+                                String errorMessage) {}
 
     /** The crawls, settled, that belong to a workflow run: finished ones and a crawl still running. */
     public synchronized List<WorkflowCrawl> crawlsInWorkflowRun(String workflowRunId) {
@@ -239,13 +240,14 @@ public class GlueCrawlerRunService {
         for (CrawlerRunRecord stored : recordStore.scan(key -> true)) {
             CrawlerRunRecord record = settledRecord(stored.getCrawlerName());
             if (record.getCurrentStart() != null && workflowRunId.equals(record.getCurrentWorkflowRunId())) {
-                running.add(new WorkflowCrawl(record.getCrawlerName(), STATE_RUNNING, record.getCurrentStart(), null));
+                running.add(new WorkflowCrawl(record.getCrawlerName(), STATE_RUNNING, record.getCurrentStart(), null,
+                        null));
             }
         }
         List<WorkflowCrawl> crawls = new ArrayList<>();
         for (FinishedCrawl crawl : workflowCrawlStore.get(workflowRunId).orElse(List.of())) {
             crawls.add(new WorkflowCrawl(crawl.getCrawlerName(), crawl.getStatus(), crawl.getStartedAt(),
-                    crawl.getFinishedAt()));
+                    crawl.getFinishedAt(), crawl.getErrorMessage()));
         }
         crawls.addAll(running);
         crawls.sort(Comparator.comparing(WorkflowCrawl::startedOn));
