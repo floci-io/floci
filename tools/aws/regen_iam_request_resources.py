@@ -207,6 +207,18 @@ same policy statement whose type the Service Reference gives the action, the typ
 matches, its variables filled from what the page says the example's names stand for (`database`, `table`) and
 open where the example has a wildcard. `statementActions` records the types the reference gives each such action,
 which `--verify` checks against AWS, as it checks the vendored page against the live one.
+An operation AWS authorizes as the HTTP method of its request, on the resource its path names, is checked so. API
+Gateway's developer guide says it of its management API ("The API-managing Action expression has the format
+apigateway:action, where action is one of the following API Gateway actions: GET, POST, PUT, DELETE, PATCH", and "API
+Gateway resources have the following ARN format: arn:aws:apigateway:region::resource-path-specifier") and lists each
+resource's ARN in its ARN reference. Neither botocore nor the Service Reference says which resource a route acts on,
+and the reference gives an HTTP API's `Stage` where a REST API's differs, so they come from another source, granted for
+that namespace alone: those pages, which their own script vendors as they stand (`PATH_SOURCES`). A route checked as
+its method acts on the resource whose format, of the reference's types or the guide's rows, is its own path, its labels
+filling its variables, and on the guide's ARN format with that path where no published path is (`routed_resources`):
+every published path a route matches is that route's own, the `/v2` of an HTTP or WebSocket API's left out.
+`pathFormats` records the formats of those the reference gives no type, which `--check` derives again from the vendored
+pages and botocore, and `--verify` checks the vendored pages against the live ones.
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -272,6 +284,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fetch_apigateway_arn_formats
 import fetch_athena_glue_ddl_permissions
 from regen_iam_authorized_actions import (ROUTES as ROUTES_FILE, authorized_actions, fetch_references,
                                           load_s3_required, s3_query_parameters, s3_version_choices,
@@ -304,10 +317,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs",
-              "ec2-instance-connect", "s3", "bedrock")
+              "ec2-instance-connect", "s3", "bedrock", "apigateway")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "dynamodb", "iam", "kms")
+HAND_BUILT = ("dynamodb", "iam", "kms")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -397,8 +410,9 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
 # STATEMENT_SOURCES: the statements an operation's request carries that its service runs against another service as
 # the caller, and the vendored page each one's permissions come from.
 #
-# This is the file's one source besides botocore and the Service Reference, granted for Athena's DDL statements alone:
-# it is not a place for any other table. Its file is written by its own script from AWS's documentation, unchanged
+# This is one of the file's two sources besides botocore and the Service Reference (`PATH_SOURCES` is the other),
+# granted for Athena's DDL statements alone: it is not a place for any other table. Its file is written by its own
+# script from AWS's documentation, unchanged
 # (tools/aws/fetch_athena_glue_ddl_permissions.py, with a prompt beside the file for rebuilding it when the page's
 # layout changes), and the generator only reads it (`statement_requests`): nothing about a statement is stated here.
 # ---------------------------------------------------------------------------------------------------------------------
@@ -407,6 +421,33 @@ STATEMENT_SOURCES: dict[str, Path] = {
 }
 # What a row's sentence says when its policy names partition actions a table without partitions does not need.
 UNPARTITIONED_RE = re.compile(r"does not have partitions, do not include partition actions", re.I)
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PATH_SOURCES: the namespaces whose management calls AWS authorizes as the HTTP method of the request, on the resource
+# its path names, and the vendored pages that say so.
+#
+# Granted for API Gateway alone, whose developer guide says it ("The API-managing Action expression has the format
+# apigateway:action, where action is one of the following API Gateway actions: GET, POST, PUT, DELETE, PATCH", and
+# "API Gateway resources have the following ARN format: arn:aws:apigateway:region::resource-path-specifier") and lists
+# each resource's ARN in its ARN reference. Its file is written by its own script from those pages, unchanged
+# (tools/aws/fetch_apigateway_arn_formats.py), and the generator only reads it (`routed_resources`): nothing about a
+# route is stated here.
+# ---------------------------------------------------------------------------------------------------------------------
+PATH_SOURCES: dict[str, Path] = {
+    "apigateway": REPO_ROOT / "tools/aws/sources/apigateway-arn-formats.json",
+}
+# What the route of an operation is checked as, where it is not the operation's own name: the authorized-actions file
+# `regen_iam_authorized_actions.py` writes, whose `authorizedByMethod` and `authorizedByModel` IamAuthorizedActions
+# reads.
+AUTHORIZED_ACTIONS = REPO_ROOT / "src/main/resources/aws/iam-authorized-actions.json"
+# The ARN format the guide gives a namespace's resources, the path naming one after its empty account.
+RESOURCE_PATH_FORMAT_RE = re.compile(r"arn:aws:(?P<namespace>[a-z0-9-]+):\{region}::\{resource-path-specifier}")
+# A label of a route's path, `{restapi_id}`, or one taking the rest of it, `{resource_arn+}`.
+ROUTE_LABEL_RE = re.compile(r"\{(?P<label>[^{}+]+)\+?}")
+# A segment of an ARN format's resource path that is one variable and nothing else.
+ONE_VARIABLE_SEGMENT_RE = re.compile(r"\$\{(?P<variable>\w+)}")
+# The guide's variables for the partition, Region and account, which the Service Reference writes as its own.
+GUIDE_VARIABLES = {"partition": "Partition", "region": "Region", "account-id": "Account"}
 
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
@@ -546,8 +587,8 @@ READ_PROTOCOLS = {"json", "query", "ec2", "smithy-rpc-v2-cbor", "rest-json"}
 LOCATED_ONLY_PROTOCOLS = {"rest-xml"}
 BODY_LOCATIONS = (None, "")
 # Where a REST request carries a member outside its body, as the file writes it: a label of its path, `{Name}`, or a
-# parameter of its query, `?name`.
-LOCATED_RE = re.compile(r"^(\{[A-Za-z0-9_]+\}|\?[A-Za-z0-9_.-]+)$")
+# parameter of its query, `?name`. A label may hold a hyphen, as API Gateway v2's `/v2/tags/{resource-arn}` does.
+LOCATED_RE = re.compile(r"^(\{[A-Za-z0-9_-]+\}|\?[A-Za-z0-9_.-]+)$")
 
 
 def stem(name: str) -> str:
@@ -2325,9 +2366,11 @@ def ec2_query_members(operation: str, models: dict[str, dict], named: set[str]) 
 
 
 def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict],
-              known: dict[str, str] | None = None, forwarded: dict[str, dict] | None = None) -> dict:
+              known: dict[str, str] | None = None, forwarded: dict[str, dict] | None = None,
+              routed: list[dict] | None = None) -> dict:
     """What the file says for one operation, `forwarded` being what the file records of each action a `MEASURED` entry
-    names."""
+    names, and `routed` the resources its routes name where AWS authorizes them as their method (`routed_resources`),
+    which are then its resources."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
     patterns = string_patterns(models, operation.split(":", 1)[1])
@@ -2339,9 +2382,12 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     targets = id_targets(operation, types, formats, models, known) if namespace_of(operation) in ID_TARGETS else None
     if targets is not None:
         return {"action": upstream["action"], "types": types, "resources": [], "targets": targets}
-    resources = by_client(operation, models, lambda read: read_resources(operation, types, formats, read), formats)
-    resources = with_documented_creation(resources, operation, types, formats, models)
-    resources = with_made(resources, operation, formats)
+    if routed is not None:
+        resources = routed
+    else:
+        resources = by_client(operation, models, lambda read: read_resources(operation, types, formats, read), formats)
+        resources = with_documented_creation(resources, operation, types, formats, models)
+        resources = with_made(resources, operation, formats)
     uses = MEASURED.get(operation, (None, ""))[0]
     # An entry naming only another action AWS checks gives the operation no resources of its own.
     if uses is not None and not (uses and all("action" in use for use in uses)):
@@ -2616,6 +2662,194 @@ def statements_for(sources: dict[str, dict], actions: dict[str, list[str]],
                    formats: dict[str, dict[str, str]]) -> dict[str, dict[str, list[dict]]]:
     """Each operation's statements and the requests each makes (`statements`)."""
     return {operation: statement_requests(source, actions, formats) for operation, source in sorted(sources.items())}
+
+
+def load_path_sources() -> dict[str, dict]:
+    """Each namespace's vendored path source (`PATH_SOURCES`)."""
+    return {namespace: json.loads(path.read_text(encoding="utf-8")) for namespace, path in PATH_SOURCES.items()}
+
+
+def load_route_actions(source: Path = AUTHORIZED_ACTIONS) -> dict[str, dict]:
+    """What the authorized-actions file checks a route of an operation as, beside the operation's own action: each
+    namespace's operations authorized by method (`byMethod`), and its actions by namespace and client (`byModel`)."""
+    document = json.loads(source.read_text(encoding="utf-8"))
+    return {"byMethod": {namespace: set(names) for namespace, names in document.get("authorizedByMethod", {}).items()},
+            "byModel": document.get("authorizedByModel", {})}
+
+
+def guide_formats(namespace: str, source: dict) -> dict[str, str]:
+    """Each row of the vendored ARN reference naming a resource of the namespace, as `<resource> (<heading>)`, its ARN
+    spelled as the Service Reference spells a format: the reference gives a REST API's `Stage` and an HTTP API's under
+    two headings, and execute-api's ARNs beside API Gateway's."""
+    formats: dict[str, str] = {}
+    for table in source["tables"]:
+        for row in table["rows"]:
+            parts = row["arn"].split(":", 5)
+            if len(parts) == 6 and parts[2] == namespace:
+                formats[f"{row['resource']} ({table['heading']})"] = re.sub(
+                    r"\{([^{}]+)}",
+                    lambda match: "${" + GUIDE_VARIABLES.get(match.group(1), _words(match.group(1))) + "}", row["arn"])
+    return dict(sorted(formats.items()))
+
+
+def _words(name: str) -> str:
+    """A label's or a variable's words run together, each capitalized: `stage-name` and `stage_name` are `StageName`."""
+    return "".join(word[:1].upper() + word[1:] for word in re.split(r"[-_]", name) if word)
+
+
+def _route_label(segment: str) -> str | None:
+    match = ROUTE_LABEL_RE.fullmatch(segment)
+    return match.group("label") if match else None
+
+
+def _format_path(arn: str) -> list[str] | None:
+    """The segments of an ARN format's resource when it is a path; None for another."""
+    parts = arn.split(":", 5)
+    return [segment for segment in parts[5].split("/") if segment] if len(parts) == 6 and parts[5].startswith("/") \
+        else None
+
+
+def _dropped(segments: list[str], arn: str) -> int | None:
+    """How many leading segments of a route's path a format's resource path leaves out, the rest being that path: a
+    literal for each literal and one variable for each label. None when it is not, or a segment it leaves out is a
+    label."""
+    template = _format_path(arn)
+    if not template:
+        return None
+    dropped = len(segments) - len(template)
+    if dropped < 0 or any(_route_label(segment) for segment in segments[:dropped]):
+        return None
+    for segment, part in zip(segments[dropped:], template):
+        if _route_label(segment) is not None:
+            if not ONE_VARIABLE_SEGMENT_RE.fullmatch(part):
+                return None
+        elif segment != part:
+            return None
+    return dropped
+
+
+def routed_resources(namespace: str, operations: dict[str, dict], formats: dict[str, str], source: dict,
+                     models: dict[str, dict], actions: dict[str, dict]) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """The resource each route of the namespace's operations names where AWS authorizes it as its HTTP method
+    (`PATH_SOURCES`), by operation, and the ARN formats of those the Service Reference gives no type, by name.
+
+    A route is authorized as its method when it is checked as `<namespace>:<METHOD>`: as its client's action
+    (`authorizedByModel`), as an operation authorized by method (`authorizedByMethod`), or as the action the reference
+    gives the operation. It acts on the resource whose format, of the reference's types or the guide's rows, is its own
+    path: a literal for each literal, one variable for each label, each label's member filling its variable, the
+    leading segments every published path of its client leaves out (API Gateway v2's `/v2`) left out. A reference type
+    comes before a guide row of the same path, whose name is `<resource> (<heading>)`. A route no published path
+    matches acts on the guide's ARN format with its own path as the resource path (named `<path>
+    (resource-path-specifier)`), unless a label's member holds the ARN of what it acts on (`...Arn`), which the rules
+    read then, as for an operation whose routes are not authorized by method."""
+    verbs = set(source["action"]["actions"])
+    guide = guide_formats(namespace, source)
+    published = sorted(formats.items()) + sorted(guide.items())
+    routes = []
+    for operation, upstream in sorted(operations.items()):
+        name = operation.split(":", 1)[1]
+        by_method = set()
+        for client, model in sorted(models.items()):
+            spec = model["operations"].get(name)
+            if spec is None or "http" not in spec:
+                continue
+            method = spec["http"]["method"].upper()
+            action = actions["byModel"].get(namespace, {}).get(client, {}).get(name) or (
+                f"{namespace}:{method}" if name in actions["byMethod"].get(namespace, set()) else upstream["action"])
+            routed = method in verbs and action == f"{namespace}:{method}"
+            by_method.add(routed)
+            if not routed:
+                continue
+            members = {member.get("locationName", member_name): member_name for member_name, member in
+                       (model["shapes"][spec["input"]["shape"]].get("members", {}) if "input" in spec else {}).items()
+                       if member.get("location") == "uri"}
+            path = [segment for segment in spec["http"]["requestUri"].split("?", 1)[0].split("/") if segment]
+            routes.append((operation, client, path, members))
+        if len(by_method) > 1:
+            raise ValueError(f"{operation} is authorized as its method on one client's route and not another's")
+    matched: dict[int, tuple[int, str, str]] = {}
+    prefixes: dict[str, set[tuple[str, ...]]] = {}
+    for index, (operation, client, path, _) in enumerate(routes):
+        found = [(dropped, kind, arn) for kind, arn in published if (dropped := _dropped(path, arn)) is not None]
+        if not found:
+            continue
+        least = min(dropped for dropped, _, _ in found)
+        best = [(kind, arn) for dropped, kind, arn in found if dropped == least]
+        if len({"${Account}" in arn for _, arn in best}) > 1:
+            raise ValueError(f"{operation}'s route {'/'.join(path)} is a path the reference and the guide give with an "
+                             f"account and without one: {sorted(kind for kind, _ in best)}")
+        chosen = [entry for entry in best if entry[0] in formats] or best
+        if len({arn for _, arn in chosen}) > 1:
+            raise ValueError(f"{operation}'s route {'/'.join(path)} is the path of several formats: "
+                             f"{sorted(kind for kind, _ in chosen)}")
+        matched[index] = (least, *chosen[0])
+        prefixes.setdefault(client, set()).add(tuple(path[:least]))
+    for client, left in sorted(prefixes.items()):
+        if len(left) > 1:
+            raise ValueError(f"{namespace}'s published paths leave out different leading segments of {client}'s "
+                             f"routes: {sorted(left)}")
+    resources: dict[str, list[dict]] = {}
+    arns: dict[str, str] = {}
+    unrouted: set[str] = set()
+    for index, (operation, client, path, members) in enumerate(routes):
+        if index in matched:
+            least, kind, arn = matched[index]
+            template = _format_path(arn)
+        else:
+            left = next(iter(prefixes.get(client, {()})))
+            least = len(left) if tuple(path[:len(left)]) == left else 0
+            labels = [label for segment in path[least:] if (label := _route_label(segment))]
+            if any(re.search(r"Arns?$", members.get(label, "")) for label in labels):
+                unrouted.add(operation)
+                continue
+            match = RESOURCE_PATH_FORMAT_RE.fullmatch(source["resource"]["format"])
+            if match is None or match.group("namespace") != namespace:
+                raise ValueError(f"the guide gives {namespace}'s resources no ARN format of a resource path: "
+                                 f"{source['resource']['format']}")
+            template = [("${" + _words(label) + "}") if (label := _route_label(segment)) else segment
+                        for segment in path[least:]]
+            kind = "/" + "/".join(path[least:]) + " (resource-path-specifier)"
+            arn = f"arn:${{Partition}}:{namespace}:${{Region}}::/" + "/".join(template)
+            if len(set(template)) != len(template):
+                raise ValueError(f"{operation}'s route {'/'.join(path)} gives two labels one variable")
+        fill: dict[str, str] = {}
+        for segment, part in zip(path[least:], template):
+            label = _route_label(segment)
+            if label is None:
+                continue
+            if label not in members:
+                raise ValueError(f"{operation}'s route {'/'.join(path)} has a label {label} no member is carried in")
+            fill[ONE_VARIABLE_SEGMENT_RE.fullmatch(part).group("variable")] = members[label]
+        arns[kind] = arn
+        resource = {"type": kind, "fill": fill}
+        if resource not in resources.setdefault(operation, []):
+            resources[operation].append(resource)
+    for operation in unrouted:
+        resources.pop(operation, None)
+    used = {resource["type"] for named in resources.values() for resource in named}
+    needed = {kind: arns[kind] for kind in sorted(used) if kind not in formats}
+    return dict(sorted(resources.items())), needed
+
+
+def namespace_routed(operations: dict[str, dict], formats: dict[str, dict[str, str]], namespaces: dict[str, list[str]],
+                     data: Path) -> tuple[dict[str, list[dict]], dict[str, dict[str, str]]]:
+    """`routed_resources` for each namespace with a path source the file reads: the resources by operation, and the
+    formats they need beside the reference's, by namespace."""
+    resources: dict[str, list[dict]] = {}
+    needed: dict[str, dict[str, str]] = {}
+    sources = load_path_sources()
+    actions = load_route_actions() if sources else {}
+    for namespace, source in sorted(sources.items()):
+        if namespace not in namespaces:
+            continue
+        found, kinds = routed_resources(namespace, {operation: value for operation, value in operations.items()
+                                                    if namespace_of(operation) == namespace},
+                                        formats.get(namespace, {}), source,
+                                        load_models(data, set(namespaces[namespace])), actions)
+        resources.update(found)
+        if kinds:
+            needed[namespace] = kinds
+    return resources, needed
 
 
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
@@ -3408,14 +3642,16 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     forwarded = forwarded_actions(documents)
     sources = load_statement_sources()
     statement_types = statement_actions(documents, sources)
+    routed, path_formats = namespace_routed(covered, formats, namespaces, data)
     operations = {}
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(namespaces[namespace])),
                                                  load_examples(data, set(namespaces[namespace])))
                 for namespace in ID_TARGETS if namespace in namespaces}
     for operation, value in sorted(covered.items()):
         models = load_models(data, set(namespaces[namespace_of(operation)]))
-        operations[operation] = entry_for(operation, value, formats.get(namespace_of(operation), {}), models,
-                                          prefixes.get(namespace_of(operation)), forwarded)
+        operations[operation] = entry_for(operation, value, {**formats.get(namespace_of(operation), {}),
+                                                             **path_formats.get(namespace_of(operation), {})}, models,
+                                          prefixes.get(namespace_of(operation)), forwarded, routed.get(operation))
     unqualified = unqualified_types(formats, operations, namespaces, data)
     return {
         "_source": {
@@ -3433,6 +3669,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                                   if namespace not in NAMESPACES and namespace not in HAND_BUILT
                                   and namespace not in NOT_COVERED),
         "arnFormats": formats,
+        "pathFormats": path_formats,
         "resourceTagKeys": resource_tag_keys(documents, formats),
         "resourceKeys": resource_keys(documents, data, namespaces),
         "unqualified": unqualified,
@@ -3597,7 +3834,8 @@ def _check_overrides(covered: dict[str, dict]) -> None:
 def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
-    for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
+    for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "pathFormats",
+                "resourceTagKeys",
                 "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions",
                 "statementActions", "statements"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
@@ -3643,6 +3881,17 @@ def validate(document: dict) -> list[str]:
             isinstance(types, dict) and all(isinstance(arn, str) and arn.startswith("arn:${Partition}:")
                                             for arn in types.values()) for types in formats.values()):
         return ["arnFormats is not an ARN format for each resource type of namespaces the file reads"]
+    path_formats = document.get("pathFormats")
+    if not isinstance(path_formats, dict) or set(path_formats) - (set(namespaces) & set(PATH_SOURCES)) or not all(
+            isinstance(kinds, dict) and kinds and all(
+                isinstance(kind, str) and kind not in formats.get(namespace, {}) and isinstance(arn, str)
+                and arn.startswith(f"arn:${{Partition}}:{namespace}:") for kind, arn in kinds.items())
+            for namespace, kinds in path_formats.items()):
+        return ["pathFormats is not an ARN format for each route type, of no reference type's name, of namespaces the "
+                "file reads routes of by their method"]
+    # A route type is a resource type as the reference's are, wherever the file names one.
+    formats = {namespace: {**formats.get(namespace, {}), **path_formats.get(namespace, {})}
+               for namespace in sorted(set(formats) | set(path_formats))}
     if list(operations) != sorted(operations):
         problems.append("operations is not sorted")
     integers = document.get("integerVariables", {})
@@ -3740,7 +3989,11 @@ def validate(document: dict) -> list[str]:
             # Only a measured entry names a type the reference omits for the action; MEASURED's admission checks
             # (see `measured_resources`) say when it may.
             measured = set(_kinds(resource)) if isinstance(resource, dict) and operation in MEASURED else set()
-            problems += _resource_problems(operation, resource, set(types) | measured, formats.get(namespace, {}))
+            # A route authorized by its method names the type of its path, which its action may not list (`--check`
+            # says whether it is the one its path is).
+            routed = set(formats.get(namespace, {})) if namespace in PATH_SOURCES else set()
+            problems += _resource_problems(operation, resource, set(types) | measured | routed,
+                                           formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
             problems += _created_problems(operation, created, set(types), formats.get(namespace, {}))
         for made in entry.get("makes", []) if isinstance(entry.get("makes", []), list) else [None]:
@@ -3991,6 +4244,16 @@ def derive(document: dict, data: Path) -> list[str]:
             if document["statements"] != statements:
                 problems.append(f"the file's statements differ from what its sources give: expected "
                                 f"{json.dumps(statements)}")
+    try:
+        routed, path_formats = namespace_routed(
+            {operation: {"action": entry["action"], "types": entry["types"]}
+             for operation, entry in document["operations"].items()},
+            document["arnFormats"], document["namespaces"], data)
+    except ValueError as e:
+        return problems + [str(e)]
+    if document.get("pathFormats", {}) != path_formats:
+        problems.append(f"the file gives {json.dumps(document.get('pathFormats', {}))} as route types, the path "
+                        f"sources and botocore give {json.dumps(path_formats)}")
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(document["namespaces"][namespace])),
                                                  load_examples(data, set(document["namespaces"][namespace])))
                 for namespace in ID_TARGETS if namespace in document["namespaces"]}
@@ -3998,8 +4261,8 @@ def derive(document: dict, data: Path) -> list[str]:
         namespace = namespace_of(operation)
         models = load_models(data, set(document["namespaces"][namespace]))
         expected = entry_for(operation, {"action": entry["action"], "types": entry["types"]},
-                             document["arnFormats"].get(namespace, {}), models, prefixes.get(namespace),
-                             document["forwardedActions"])
+                             {**document["arnFormats"].get(namespace, {}), **path_formats.get(namespace, {})}, models,
+                             prefixes.get(namespace), document["forwardedActions"], routed.get(operation))
         if expected != entry:
             problems.append(f"{operation}: the file has {json.dumps(entry)}, botocore gives {json.dumps(expected)}")
     return problems
@@ -4043,6 +4306,22 @@ def verify_statements(vendored: dict, documents: list[dict]) -> list[str]:
         if changed:
             untrue.append(f"{source['_source']['page']} no longer gives what {STATEMENT_SOURCES[operation].name} "
                           f"holds for {operation}: run {source['_source']['fetcher']}")
+    return untrue
+
+
+def verify_path_sources() -> list[str]:
+    """A vendored path source whose pages AWS has changed."""
+    untrue: list[str] = []
+    for namespace, source in sorted(load_path_sources().items()):
+        pages = source["_source"]["pages"]
+        try:
+            changed = fetch_apigateway_arn_formats.stale(
+                source, *(fetch_apigateway_arn_formats.fetch_url(page) for page in pages))
+        except (OSError, ValueError) as e:
+            raise OSError(f"could not read {' and '.join(pages)} ({e})") from e
+        if changed:
+            untrue.append(f"{' and '.join(pages)} no longer give what {PATH_SOURCES[namespace].name} holds for "
+                          f"{namespace}: run {source['_source']['fetcher']}")
     return untrue
 
 
@@ -4122,6 +4401,7 @@ def main(argv: list[str] | None = None) -> int:
         untrue += verify_forwarded(document, documents)
         try:
             untrue += verify_statements(document, documents)
+            untrue += verify_path_sources()
         except OSError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2

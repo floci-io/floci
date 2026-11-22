@@ -12,7 +12,6 @@ import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
-import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.services.kms.KmsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -22,8 +21,6 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -33,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.StringJoiner;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -53,12 +49,6 @@ public class ResourceArnBuilder {
 
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
-
-    /** The segment that starts an API Gateway v2 management path, and is not part of the resource it names. */
-    private static final String API_GATEWAY_V2_SEGMENT = "v2";
-
-    /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
-    private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
 
     private final ObjectMapper objectMapper;
@@ -127,9 +117,8 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. API Gateway ARNs are minted in {@code partition}, the request's, as
-     * that service mints its own, so a Region no partition publishes gets the deployment's partition rather than
-     * {@code aws}.
+     * The resources a request is checked against, minted in {@code partition}, the request's, as its service mints its
+     * own, so a Region no partition publishes gets the deployment's partition rather than {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
@@ -152,7 +141,6 @@ public class ResourceArnBuilder {
         return switch (credentialScope) {
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
-            case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -758,48 +746,6 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * API Gateway authorizes a management call as its HTTP method on the path it names, in the Region serving
-     * it and with no account: {@code GET /restapis/abc/stages} acts on
-     * {@code arn:<partition>:apigateway:<region>::/restapis/abc/stages}. The path is read as the router reads
-     * it: each segment decoded, then {@code .} dropped and {@code ..} resolved, then empty segments dropped, so
-     * {@code /restapis/%61bc}, {@code /restapis/x/%2E%2E/abc} and {@code /restapis//abc} all act on
-     * {@code ::/restapis/abc}, the API they reach, and a stage keeps
-     * its name as written, {@code ::/apis/<id>/stages/$default}. The {@code /v2} that starts an HTTP or
-     * WebSocket API path is not part of its resource, so {@code GET /v2/apis} acts on {@code ::/apis}. Only the
-     * ARN a tagging route names, everything after {@code /tags/}, is re-encoded, in SigV4 canonical form, as AWS
-     * names that resource {@code /tags/<UrlEncodedResourceARN>}; elsewhere a decoded {@code %} or {@code /}
-     * stays escaped, so a segment cannot pass for more than one.
-     */
-    private static String buildApiGatewayArn(ContainerRequestContext ctx, String region, String partition) {
-        String[] raw = IamActionRegistry.routedPath(ctx).split("/", -1);
-        List<String> segments = new ArrayList<>();
-        for (int i = 1; i < raw.length; i++) {
-            String segment = pathSegment(raw[i]);
-            if (segment.equals("..")) {
-                if (!segments.isEmpty()) {
-                    segments.removeLast();
-                }
-            } else if (!segment.equals(".")) {
-                segments.add(segment);
-            }
-        }
-        segments.removeIf(String::isEmpty);
-        if (!segments.isEmpty() && segments.getFirst().equals(API_GATEWAY_V2_SEGMENT)) {
-            segments.removeFirst();
-        }
-        if (segments.size() > 1 && segments.getFirst().equals(API_GATEWAY_TAGS_SEGMENT)) {
-            String tagged = String.join("/", segments.subList(1, segments.size()));
-            return new AwsArnUtils.Arn(partition, "apigateway", region, "",
-                    "/" + API_GATEWAY_TAGS_SEGMENT + "/" + SigV4Canonicalization.uriEncode(tagged)).toString();
-        }
-        StringJoiner resource = new StringJoiner("/", "/", "");
-        for (String segment : segments) {
-            resource.add(segment.replace("%", "%25").replace("/", "%2F"));
-        }
-        return new AwsArnUtils.Arn(partition, "apigateway", region, "", resource.toString()).toString();
-    }
-
-    /**
      * The ARN a shared tagging route acts on, read where its controller reads it: after {@code /tags/} or
      * {@code /v1/tags/} in the path; on {@code POST /tags}, the body's {@code resourceArn}; and on the other
      * bare routes, the {@code resourceArn} query parameter. Null for any other route, or when the request
@@ -820,18 +766,6 @@ public class ResourceArnBuilder {
             return ctx.getUriInfo().getQueryParameters().getFirst("resourceArn");
         }
         return null;
-    }
-
-    /**
-     * A path segment as sent, decoded as a path parameter is: a {@code +} stays a {@code +}. A malformed
-     * escape is kept as sent.
-     */
-    private static String pathSegment(String raw) {
-        try {
-            return URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            return raw;
-        }
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
