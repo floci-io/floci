@@ -485,6 +485,7 @@ floci:
       stream-iterator-expiry-enabled: false   # FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED. 15-minute iterators.
       stream-retention-enabled: false      # FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED. 24-hour records and shards.
       stream-max-records: 1000             # FLOCI_SERVICES_DYNAMODB_STREAM_MAX_RECORDS. Records kept per stream.
+      transaction-conflicts-enabled: false # FLOCI_SERVICES_DYNAMODB_TRANSACTION_CONFLICTS_ENABLED. Busy items cancel overlapping transactions (native engine).
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS

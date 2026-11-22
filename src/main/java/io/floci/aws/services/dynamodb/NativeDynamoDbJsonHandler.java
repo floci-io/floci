@@ -3365,7 +3365,7 @@ public class NativeDynamoDbJsonHandler {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
                 if (!reason.code().isEmpty()) {
-                    r.put("Message", "");
+                    r.put("Message", reason.message() != null ? reason.message() : "");
                 }
                 if (reason.item() != null) {
                     r.set("Item", reason.item());

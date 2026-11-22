@@ -32,6 +32,11 @@ public class DynamoDbBackendSelector {
             default -> throw new IllegalStateException(
                     "floci.services.dynamodb.backend must be 'native' or 'local', got '" + configured + "'");
         };
+        // DynamoDB Local applies its own transactions, so Floci has nothing to emulate the conflicts in.
+        if ("local".equals(selected) && config.services().dynamodb().transactionConflictsEnabled()) {
+            throw new IllegalStateException("floci.services.dynamodb.transaction-conflicts-enabled needs the native "
+                    + "backend; floci.services.dynamodb.backend is 'local'");
+        }
     }
 
     /** The selected engine name, {@code native} or {@code local}. */
