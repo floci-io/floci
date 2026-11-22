@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.floci.aws.testing.Ec2Requests.createDefaultVpcSecurityGroup;
 import static io.floci.aws.testing.Ec2Requests.ec2;
 import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
 import static io.floci.aws.testing.RdsRequests.rds;
@@ -65,15 +66,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
      * placed in: CreateDBCluster and ModifyDBCluster refuse a group EC2 does not know.
      */
     private String securityGroup(String name) {
-        String vpcId = ec2("DescribeVpcs", "test", "us-east-1")
-                .formParam("Filter.1.Name", "isDefault").formParam("Filter.1.Value.1", "true")
-                .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getString("DescribeVpcsResponse.vpcSet.item[0].vpcId");
-        String groupId = ec2("CreateSecurityGroup", "test", "us-east-1")
-                .formParam("GroupName", name + "-" + System.nanoTime()).formParam("GroupDescription", name)
-                .formParam("VpcId", vpcId)
-                .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getString("CreateSecurityGroupResponse.groupId");
+        String groupId = createDefaultVpcSecurityGroup("test", "us-east-1", name + "-" + System.nanoTime());
         createdGroups.add(groupId);
         return groupId;
     }

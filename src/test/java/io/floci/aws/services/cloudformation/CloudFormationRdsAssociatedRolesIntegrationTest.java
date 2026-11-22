@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
+import static io.floci.aws.testing.Ec2Requests.createDefaultVpcSecurityGroup;
 import static io.floci.aws.testing.Ec2Requests.ec2;
 import static io.floci.aws.testing.RdsRequests.auroraClusterWithMember;
 import static io.restassured.RestAssured.given;
@@ -306,7 +307,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         String stackName = "cfn-rds-sg-out-" + suffix;
         String clusterId = "cfn-sg-out-" + suffix;
         // ModifyDBCluster refuses a group EC2 does not know; the cluster is in the default VPC
-        String outside = defaultVpcGroup("cfn-sg-outside-" + suffix);
+        String outside = createDefaultVpcSecurityGroup("test", "us-east-1", "cfn-sg-outside-" + suffix);
         String cluster = """
                 {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
                   "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
@@ -337,18 +338,6 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             CfnStackWaits.awaitStackDeleted(stackName);
             ec2("DeleteSecurityGroup", "test", "us-east-1").formParam("GroupId", outside).when().post("/");
         }
-    }
-
-    /** A new security group {@code name} of the account's default VPC. */
-    private static String defaultVpcGroup(String name) {
-        String vpcId = ec2("DescribeVpcs", "test", "us-east-1")
-                .formParam("Filter.1.Name", "isDefault").formParam("Filter.1.Value.1", "true")
-                .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getString("DescribeVpcsResponse.vpcSet.item[0].vpcId");
-        return ec2("CreateSecurityGroup", "test", "us-east-1")
-                .formParam("GroupName", name).formParam("GroupDescription", name).formParam("VpcId", vpcId)
-                .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getString("CreateSecurityGroupResponse.groupId");
     }
 
     @Test

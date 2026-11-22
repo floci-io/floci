@@ -1498,16 +1498,20 @@ public class RdsQueryHandler {
             } else if (!tags.isEmpty()) {
                 cluster = service.getDbCluster(id, region);
             }
-            if (!associatedRoles.isEmpty()) {
-                try {
+            // Checks that need the stored cluster; a refusal deletes the cluster this request created.
+            try {
+                // the groups are checked against the VPC the new cluster was placed in
+                service.requireClusterSecurityGroups(region, id, securityGroupIds);
+                service.setClusterMonitoringSettings(region, id, monitoring, true);
+                if (!associatedRoles.isEmpty()) {
                     cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
-                } catch (AwsException e) {
-                    if (protectedCluster) {
-                        service.setDeletionProtection(region, id, false);
-                    }
-                    service.deleteDbCluster(id, region);
-                    throw e;
                 }
+            } catch (AwsException e) {
+                if (protectedCluster) {
+                    service.setDeletionProtection(region, id, false);
+                }
+                service.deleteDbCluster(id, region);
+                throw e;
             }
             if (enableHttpEndpoint) {
                 cluster = service.setHttpEndpoint(region, id, true);
@@ -1517,17 +1521,6 @@ public class RdsQueryHandler {
             }
             if (copyTagsToSnapshot != null || exports != null) {
                 cluster = service.setClusterSnapshotAndLogSettings(region, id, copyTagsToSnapshot, exports, null);
-            }
-            try {
-                // the groups are checked against the VPC the new cluster was placed in
-                service.requireClusterSecurityGroups(region, id, securityGroupIds);
-                service.setClusterMonitoringSettings(region, id, monitoring, true);
-            } catch (AwsException e) {
-                if (protectedCluster) {
-                    service.setDeletionProtection(region, id, false);
-                }
-                service.deleteDbCluster(id, region);
-                throw e;
             }
             cluster = service.setDbClusterRequestSettings(id, region, securityGroupIds, windows[0], windows[1]);
             String result = dbClusterXml(cluster);
