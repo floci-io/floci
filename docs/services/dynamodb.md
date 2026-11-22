@@ -219,6 +219,10 @@ Floci does the same on the `ReturnValues` of `PutItem`, `UpdateItem` and `Delete
 `TransactWriteItems` cancellation reason. Each map is shuffled on its own. Lists and sets keep their order.
 
 `GetItem`, `Query`, `Scan`, `BatchGetItem`, PartiQL and Streams return the same order on every call, as on AWS.
+As on AWS, a map written through `PutItem`, `BatchWriteItem`, `TransactWriteItems` or the values of `UpdateItem`
+is stored with its keys sorted by code point. A PartiQL literal keeps the order it is written in. An update sorts
+each map on its document path again and leaves the other maps as they are. A value copied from another attribute
+keeps the order of that attribute.
 Set `FLOCI_SERVICES_DYNAMODB_RANDOMIZE_ATTRIBUTE_ORDER=false` to turn the shuffle off. The setting works with the native backend only. With the `local` backend, responses keep the order DynamoDB Local returns.
 
 ## Time to Live
