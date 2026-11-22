@@ -85,7 +85,7 @@ NAMESPACES = (
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
     "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
-    "transcribe", "transfer", "translate",
+    "transcribe", "transfer", "translate", "wafv2",
 )
 
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
@@ -249,6 +249,10 @@ NO_SUCH_OPERATION = "botocore's model has no such operation"
 # For an operation the reference lists that no model of the pinned botocore has, one AWS has shipped since the
 # pin. It lasts until a bump brings the operation in, when entry_for reads the role its request names.
 NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
+# For an operation the pinned botocore has without the member that names its role, one AWS has added to the request
+# since the pin. NOT_READ wins over what the request names, so take the entry out with the bump that brings the
+# member in, and entry_for reads it.
+MEMBER_NOT_IN_BOTOCORE = "the pinned botocore does not have the member naming the role yet, so it cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
 XML_BODY = "the request body is XML, which PassedRoles does not read"
 
@@ -258,7 +262,9 @@ NOT_READ = {
     "config:PutOrganizationConformancePack": NO_ROLE_MEMBER,
     "config:PutRemediationConfigurations": RUNBOOK_PARAMETER,
     "dms:CreateInstanceProfile": NO_ROLE_MEMBER,
+    "dms:CreateReplicationTask": NO_ROLE_MEMBER,
     "dms:ModifyInstanceProfile": NO_ROLE_MEMBER,
+    "dms:ModifyReplicationTask": NO_ROLE_MEMBER,
     "ec2:RequestSpotFleet": "the request names its roles in EC2's own protocol, one of them as an instance profile",
     "ecs:CreateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
     "ecs:UpdateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
@@ -266,6 +272,8 @@ NOT_READ = {
     "elasticmapreduce:RunJobFlow": "JobFlowRole names an instance profile, and the reference passes the roles "
                                    "to three services without saying which goes where",
     "elasticmapreduce:UpdateStudio": NO_ROLE_MEMBER,
+    "events:CreateEventSource": MEMBER_NOT_IN_BOTOCORE,
+    "events:UpdateEventSource": MEMBER_NOT_IN_BOTOCORE,
     "glue:GetJob": NO_ROLE_MEMBER,
     "glue:GetJobs": NO_ROLE_MEMBER,
     "lambda:AddEventSource": NO_SUCH_OPERATION,
@@ -285,6 +293,8 @@ NOT_READ = {
     "ssm:StartChangeRequestExecution": RUNBOOK_PARAMETER,
     "ssm:UpdateDocument": NO_ROLE_MEMBER,
     "ssm:UpdateServiceSetting": "a role is only ever a setting's value, which the request names by SettingId",
+    "wafv2:CreateWebACL": MEMBER_NOT_IN_BOTOCORE,
+    "wafv2:UpdateWebACL": MEMBER_NOT_IN_BOTOCORE,
 }
 
 # A member the rule reads that passes no role, by operation, or by namespace for all its operations.
