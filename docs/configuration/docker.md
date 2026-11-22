@@ -147,6 +147,20 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES`
 
+### Per-service container budgets
+
+`service-max-containers` caps how many containers one service may run at once, keyed by the service's `io.floci.service` label, so one busy service cannot take every container the Docker host can hold. A request that would start one more fails at once with the capacity or limit error that service's API declares, so the SDK reports it the way it would on AWS: Lambda `Invoke` answers `TooManyRequestsException` (429, retried by the SDKs, and an asynchronous invocation is retried like a throttled one), RDS `InsufficientDBInstanceCapacity`, ElastiCache `InsufficientCacheClusterCapacity`, Redshift `InsufficientClusterCapacity`, MemoryDB `InsufficientClusterCapacityFault`, DocumentDB and Neptune `DBClusterQuotaExceededFault`, MSK `TooManyRequestsException`, OpenSearch `LimitExceededException`, CodeBuild `AccountLimitExceededException`, SageMaker `ResourceLimitExceeded` and Glue `ConcurrentRunsExceededException`; a service without such an error gets `ThrottlingException`. A job that starts its container after the request returns (a build, a training job, a Glue run, an ECS task) fails the job instead. No service is limited by default:
+
+```yaml
+floci:
+  docker:
+    service-max-containers:
+      lambda: 50
+      rds: 4
+```
+
+Environment variables: `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>`, with the label in upper case (`FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_LAMBDA=50`)
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
@@ -396,6 +410,7 @@ caller keeps its existing failure handling after retries are exhausted.
 | `FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD` | `3` | Docker call attempts in a row (each retry counts) that fail before the daemon answers, after which a failed ping makes every Docker call fail at once until the daemon answers again; `0` turns this off |
 | `FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS` | `5` | Seconds between the pings that check whether an unreachable Docker daemon is back |
 | `FLOCI_DOCKER_MAX_CONCURRENT_LAUNCHES` | `0` | Most container creates and starts sent to the daemon at once; `0` means twice the CPUs Floci sees, at least 4 |
+| `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>` | _(none)_ | Most containers one service runs at once, by its `io.floci.service` label; unset means unlimited |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `3072` | Connection pool size for streams that last a container's lifetime or a long command's run. Each live Lambda container holds two (log stream and exit watcher) plus one per extension, and each CodeBuild phase, SSM command, ECS Exec session, EKS audit follower, user data script and EMR bootstrap action one |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |

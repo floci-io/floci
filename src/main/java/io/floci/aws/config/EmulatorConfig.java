@@ -4527,6 +4527,14 @@ public interface EmulatorConfig {
         int maxConcurrentLaunches();
 
         /**
+         * Most containers a service may run at once, keyed by its {@code io.floci.service} label
+         * ({@code lambda}, {@code rds}, {@code elasticache}, ...). A create past it fails at once with the
+         * capacity or limit error that service's API declares (Lambda's {@code TooManyRequestsException},
+         * RDS's {@code InsufficientDBInstanceCapacity}). A service not listed is not limited; none is by default.
+         */
+        Map<String, Integer> serviceMaxContainers();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */
